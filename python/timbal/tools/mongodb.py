@@ -66,7 +66,7 @@ class MongoCreateDocument(Tool):
             import httpx
 
             body = {**_base_body(data_source, database, collection), "document": document}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "insertOne"),
                     headers={"api-key": api_key},
@@ -116,7 +116,7 @@ class MongoFindDocumentById(Tool):
             }
             if projection:
                 body["projection"] = projection
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "findOne"),
                     headers={"api-key": api_key},
@@ -161,7 +161,7 @@ class MongoFindDocument(Tool):
             }
             if projection:
                 body["projection"] = projection
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "findOne"),
                     headers={"api-key": api_key},
@@ -220,7 +220,7 @@ class MongoSearchDocuments(Tool):
                 body["projection"] = projection
             if sort:
                 body["sort"] = sort
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "find"),
                     headers={"api-key": api_key},
@@ -272,7 +272,7 @@ class MongoUpdateDocument(Tool):
                 "update": update,
                 "upsert": upsert,
             }
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "updateOne"),
                     headers={"api-key": api_key},
@@ -322,7 +322,7 @@ class MongoUpdateDocuments(Tool):
                 "update": update,
                 "upsert": upsert,
             }
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "updateMany"),
                     headers={"api-key": api_key},
@@ -367,7 +367,7 @@ class MongoDeleteDocument(Tool):
                 **_base_body(data_source, database, collection),
                 "filter": {"_id": {"$oid": document_id}},
             }
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "deleteOne"),
                     headers={"api-key": api_key},
@@ -418,7 +418,7 @@ class MongoExecuteAggregation(Tool):
                 **_base_body(data_source, database, collection),
                 "pipeline": pipeline,
             }
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _atlas_url(app_id, "aggregate"),
                     headers={"api-key": api_key},

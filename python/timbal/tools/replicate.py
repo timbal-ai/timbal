@@ -77,7 +77,7 @@ class ReplicateCreatePrediction(Tool):
                 w = max(1, min(60, prefer_wait_seconds))
                 headers["Prefer"] = f"wait={w}"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/predictions",
                     headers=headers,
@@ -110,7 +110,7 @@ class ReplicateGetPrediction(Tool):
             api_token = await _resolve_api_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/predictions/{prediction_id}",
                     headers=_replicate_headers(api_token),
@@ -142,7 +142,7 @@ class ReplicateCancelPrediction(Tool):
             api_token = await _resolve_api_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/predictions/{prediction_id}/cancel",
                     headers=_replicate_headers(api_token),
@@ -182,7 +182,7 @@ class ReplicateSearchModels(Tool):
             import httpx
 
             lim = max(1, min(50, limit))
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/search",
                     headers=_replicate_headers(api_token),

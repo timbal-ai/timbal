@@ -183,7 +183,7 @@ class ResendSendEmail(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/emails",
                     headers=_headers(key, idempotency_key=idempotency_key),
@@ -243,7 +243,7 @@ class ResendSendBatch(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/emails/batch",
                     headers=_headers(key, idempotency_key=idempotency_key),
@@ -278,7 +278,7 @@ class ResendListEmails(Tool):
             if after:
                 params["after"] = after
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails",
                     headers=_headers(key),
@@ -309,7 +309,7 @@ class ResendGetEmail(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails/{email_id}",
                     headers=_headers(key),
@@ -343,7 +343,7 @@ class ResendUpdateEmail(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_BASE_URL}/emails/{email_id}",
                     headers=_headers(key),
@@ -374,7 +374,7 @@ class ResendCancelEmail(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/emails/{email_id}/cancel",
                     headers=_headers(key),
@@ -404,7 +404,7 @@ class ResendListEmailAttachments(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails/{email_id}/attachments",
                     headers=_headers(key),
@@ -435,7 +435,7 @@ class ResendGetEmailAttachment(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails/{email_id}/attachments/{attachment_id}",
                     headers=_headers(key),
@@ -469,7 +469,7 @@ class ResendListReceivedEmails(Tool):
             if after:
                 params["after"] = after
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails/receiving",
                     headers=_headers(key),
@@ -500,7 +500,7 @@ class ResendGetReceivedEmail(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails/receiving/{email_id}",
                     headers=_headers(key),
@@ -530,7 +530,7 @@ class ResendListReceivedAttachments(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails/receiving/{email_id}/attachments",
                     headers=_headers(key),
@@ -561,7 +561,7 @@ class ResendGetReceivedAttachment(Tool):
             key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/emails/receiving/{email_id}/attachments/{attachment_id}",
                     headers=_headers(key),

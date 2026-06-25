@@ -62,7 +62,7 @@ class ListCharges(Tool):
             if created_lte:
                 params["created[lte]"] = created_lte
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/charges",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -111,7 +111,7 @@ class CreateCustomer(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/customers",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -149,7 +149,7 @@ class SearchCustomer(Tool):
             if page:
                 params["page"] = page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/customers/search",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -205,7 +205,7 @@ class CreatePayment(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payment_intents",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -254,7 +254,7 @@ class SendRefund(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/refunds",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -306,7 +306,7 @@ class UpdateCustomer(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/customers/{customer_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -338,7 +338,7 @@ class RetrieveCustomer(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/customers/{customer_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -394,7 +394,7 @@ class ListCustomers(Tool):
             if created_lte:
                 params["created[lte]"] = created_lte
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/customers",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -426,7 +426,7 @@ class DeleteCustomer(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_BASE_URL}/customers/{customer_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -478,7 +478,7 @@ class UpdatePaymentIntent(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payment_intents/{payment_intent_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -512,7 +512,7 @@ class RetrievePaymentIntent(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/payment_intents/{payment_intent_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -560,7 +560,7 @@ class ListPaymentIntents(Tool):
             if created_lte:
                 params["created[lte]"] = created_lte
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/payment_intents",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -600,7 +600,7 @@ class ConfirmPaymentIntent(Tool):
             if return_url:
                 data["return_url"] = return_url
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payment_intents/{payment_intent_id}/confirm",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -637,7 +637,7 @@ class CapturePaymentIntent(Tool):
             if amount_to_capture is not None:
                 data["amount_to_capture"] = amount_to_capture
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payment_intents/{payment_intent_id}/capture",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -674,7 +674,7 @@ class CancelPaymentIntent(Tool):
             if cancellation_reason:
                 data["cancellation_reason"] = cancellation_reason
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payment_intents/{payment_intent_id}/cancel",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -712,7 +712,7 @@ class UpdateRefund(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/refunds/{refund_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -744,7 +744,7 @@ class RetrieveRefund(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/refunds/{refund_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -789,7 +789,7 @@ class ListRefunds(Tool):
             if ending_before:
                 params["ending_before"] = ending_before
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/refunds",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -839,7 +839,7 @@ class CreateInvoice(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoices",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -889,7 +889,7 @@ class UpdateInvoice(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoices/{invoice_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -921,7 +921,7 @@ class RetrieveInvoice(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/invoices/{invoice_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -969,7 +969,7 @@ class ListInvoices(Tool):
             if ending_before:
                 params["ending_before"] = ending_before
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/invoices",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1001,7 +1001,7 @@ class SendInvoice(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoices/{invoice_id}/send",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1037,7 +1037,7 @@ class FinalizeInvoice(Tool):
             if auto_advance is not None:
                 data["auto_advance"] = str(auto_advance).lower()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoices/{invoice_id}/finalize",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1069,7 +1069,7 @@ class VoidInvoice(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoices/{invoice_id}/void",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1100,7 +1100,7 @@ class WriteOffInvoice(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoices/{invoice_id}/mark_uncollectible",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1131,7 +1131,7 @@ class DeleteOrVoidInvoice(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 headers = {"Authorization": f"Bearer {api_key}"}
                 get_response = await client.get(
                     f"{_BASE_URL}/invoices/{invoice_id}",
@@ -1200,7 +1200,7 @@ class CreateInvoiceLineItem(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoiceitems",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1247,7 +1247,7 @@ class UpdateInvoiceLineItem(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/invoiceitems/{invoice_item_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1279,7 +1279,7 @@ class RetrieveInvoiceLineItem(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/invoiceitems/{invoice_item_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1310,7 +1310,7 @@ class DeleteInvoiceLineItem(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_BASE_URL}/invoiceitems/{invoice_item_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1357,7 +1357,7 @@ class CreateSubscription(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/subscriptions",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1395,7 +1395,7 @@ class SearchSubscriptions(Tool):
             if page:
                 params["page"] = page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/subscriptions/search",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1429,7 +1429,7 @@ class CancelSubscription(Tool):
             import httpx
 
             if cancel_at_period_end:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                     response = await client.post(
                         f"{_BASE_URL}/subscriptions/{subscription_id}",
                         headers={"Authorization": f"Bearer {api_key}"},
@@ -1438,7 +1438,7 @@ class CancelSubscription(Tool):
                     response.raise_for_status()
                     return response.json()
             else:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                     response = await client.delete(
                         f"{_BASE_URL}/subscriptions/{subscription_id}",
                         headers={"Authorization": f"Bearer {api_key}"},
@@ -1482,7 +1482,7 @@ class CreateProduct(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/products",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1514,7 +1514,7 @@ class RetrieveProduct(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/products/{product_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1556,7 +1556,7 @@ class ListProducts(Tool):
             if ending_before:
                 params["ending_before"] = ending_before
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/products",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1606,7 +1606,7 @@ class CreatePrice(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/prices",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1638,7 +1638,7 @@ class RetrievePrice(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/prices/{price_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1685,7 +1685,7 @@ class CreatePayout(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payouts",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1723,7 +1723,7 @@ class UpdatePayout(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payouts/{payout_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1755,7 +1755,7 @@ class RetrievePayout(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/payouts/{payout_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1803,7 +1803,7 @@ class ListPayouts(Tool):
             if arrival_date_lte:
                 params["arrival_date[lte]"] = arrival_date_lte
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/payouts",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1842,7 +1842,7 @@ class CancelOrReversePayout(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/payouts/{payout_id}/{action}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1872,7 +1872,7 @@ class RetrieveBalance(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/balance",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1920,7 +1920,7 @@ class ListBalanceHistory(Tool):
             if created_lte:
                 params["created[lte]"] = created_lte
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/balance_transactions",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1952,7 +1952,7 @@ class RetrieveCheckoutSession(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/checkout/sessions/{session_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -1989,7 +1989,7 @@ class RetrieveCheckoutSessionLineItems(Tool):
             if starting_after:
                 params["starting_after"] = starting_after
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/checkout/sessions/{session_id}/line_items",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -2029,7 +2029,7 @@ class CreateBillingMeter(Tool):
                 "default_aggregation[formula]": aggregation_formula,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/billing/meters",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -2071,7 +2071,7 @@ class CreateUsageRecord(Tool):
             if timestamp is not None:
                 data["timestamp"] = timestamp
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/subscription_items/{subscription_item_id}/usage_records",
                     headers={"Authorization": f"Bearer {api_key}"},

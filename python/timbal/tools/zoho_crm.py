@@ -39,7 +39,7 @@ async def _get_access_token(client_id: str, client_secret: str, refresh_token: s
     accounts_domain = _ZOHO_ACCOUNTS_DOMAIN.get(data_center.lower(), _ZOHO_ACCOUNTS_DOMAIN["com"])
     token_url = f"{accounts_domain}/oauth/v2/token"
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         response = await client.post(
             token_url,
             data={
@@ -141,7 +141,7 @@ class ZohoCrmGetObject(Tool):
             if fields:
                 params["fields"] = fields
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
@@ -197,7 +197,7 @@ class ZohoCrmUpdateObject(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     url,
                     headers={
@@ -293,7 +293,7 @@ class ZohoCrmSearchObjects(Tool):
             if fields:
                 params["fields"] = fields
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
@@ -366,7 +366,7 @@ class ZohoCrmListObjects(Tool):
             if sort_order:
                 params["sort_order"] = sort_order
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
@@ -409,7 +409,7 @@ class ZohoCrmListModules(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
@@ -456,7 +456,7 @@ class ZohoCrmListFields(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
@@ -521,7 +521,7 @@ class ZohoCrmUploadAttachment(Tool):
 
             headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 if attachment_url:
                     response = await client.post(
                         url,
@@ -590,7 +590,7 @@ class ZohoCrmDownloadAttachment(Tool):
             access_token, api_base = await _resolve_credentials(self)
             url = f"{api_base}/{module}/{record_id}/Attachments/{attachment_id}"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
@@ -654,7 +654,7 @@ class ZohoCrmCreateObject(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={
@@ -748,7 +748,7 @@ class ZohoCrmConvertLead(Tool):
             if deals is not None:
                 payload["Deals"] = deals
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={

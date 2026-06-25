@@ -168,7 +168,7 @@ class NetSuiteCreateAccount(Tool):
                 data["description"] = description
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -224,7 +224,7 @@ class NetSuiteDeleteAccount(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "account", "record_id": record_id}
@@ -274,7 +274,7 @@ class NetSuiteGetAccount(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -329,7 +329,7 @@ class NetSuiteListAccounts(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -391,7 +391,7 @@ class NetSuiteCreateAssemblyBuild(Tool):
                 data["memo"] = memo
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 location = response.headers.get("Location", "")
@@ -443,7 +443,7 @@ class NetSuiteDeleteAssemblyBuild(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "assemblybuild", "record_id": record_id}
@@ -493,7 +493,7 @@ class NetSuiteGetAssemblyBuild(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -548,7 +548,7 @@ class NetSuiteListAssemblyBuilds(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -594,7 +594,7 @@ class NetSuiteUpdateAssemblyBuild(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"updated": True, "record_type": "assemblybuild", "record_id": record_id}
@@ -651,7 +651,7 @@ class NetSuiteTransformAssemblyItemToBuild(Tool):
                 data["memo"] = memo
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 location = response.headers.get("Location", "")
@@ -715,7 +715,7 @@ class NetSuiteTransformAssemblyItemToWorkOrder(Tool):
                 data["memo"] = memo
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 location = response.headers.get("Location", "")
@@ -776,7 +776,7 @@ class NetSuiteTransformAssemblyToUnbuild(Tool):
                 data["memo"] = memo
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 location = response.headers.get("Location", "")
@@ -851,7 +851,7 @@ class NetSuiteCreateAssemblyItem(Tool):
                 data["upcCode"] = upc_code
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 location = response.headers.get("Location", "")
@@ -903,7 +903,7 @@ class NetSuiteDeleteAssemblyItem(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "assemblyitem", "record_id": record_id}
@@ -953,7 +953,7 @@ class NetSuiteGetAssemblyItem(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1008,7 +1008,7 @@ class NetSuiteListAssemblyItems(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -1054,7 +1054,7 @@ class NetSuiteUpdateAssemblyItem(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"updated": True, "record_type": "assemblyitem", "record_id": record_id}
@@ -1110,7 +1110,7 @@ class NetSuiteSuiteQL(Tool):
             params = {"limit": min(limit, 1000), "offset": offset}
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json", "Prefer": "transient"},
@@ -1179,7 +1179,7 @@ class NetSuiteCreateBillingAccount(Tool):
                 data["memo"] = memo
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1235,7 +1235,7 @@ class NetSuiteDeleteBillingAccount(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "billingaccount", "record_id": record_id}
@@ -1285,7 +1285,7 @@ class NetSuiteGetBillingAccount(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1340,7 +1340,7 @@ class NetSuiteListBillingAccounts(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -1386,7 +1386,7 @@ class NetSuiteUpdateBillingAccount(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"updated": True, "record_type": "billingaccount", "record_id": record_id}
@@ -1447,7 +1447,7 @@ class NetSuiteCreateBillingSchedule(Tool):
                 data["memo"] = memo
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1503,7 +1503,7 @@ class NetSuiteDeleteBillingSchedule(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "billingschedule", "record_id": record_id}
@@ -1553,7 +1553,7 @@ class NetSuiteGetBillingSchedule(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1608,7 +1608,7 @@ class NetSuiteListBillingSchedules(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -1654,7 +1654,7 @@ class NetSuiteUpdateBillingSchedule(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"updated": True, "record_type": "billingschedule", "record_id": record_id}
@@ -1700,7 +1700,7 @@ class NetSuiteUpsertBillingAccount(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"upserted": True, "record_type": "billingaccount", "external_id": external_id}
@@ -1746,7 +1746,7 @@ class NetSuiteUpsertBillingSchedule(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"upserted": True, "record_type": "billingschedule", "external_id": external_id}
@@ -1811,7 +1811,7 @@ class NetSuiteCreateCalendarEvent(Tool):
                 data["allDayEvent"] = all_day_event
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1867,7 +1867,7 @@ class NetSuiteDeleteCalendarEvent(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "calendarevent", "record_id": record_id}
@@ -1917,7 +1917,7 @@ class NetSuiteGetCalendarEvent(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1972,7 +1972,7 @@ class NetSuiteListCalendarEvents(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -2018,7 +2018,7 @@ class NetSuiteUpdateCalendarEvent(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"updated": True, "record_type": "calendarevent", "record_id": record_id}
@@ -2064,7 +2064,7 @@ class NetSuiteUpsertCalendarEvent(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"upserted": True, "record_type": "calendarevent", "external_id": external_id}
@@ -2120,7 +2120,7 @@ class NetSuiteCustomSuiteQL(Tool):
             params = {"limit": min(limit, 1000), "offset": offset}
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json", "Prefer": "transient"},
@@ -2182,7 +2182,7 @@ class NetSuiteCreateIntercompanyJournalEntry(Tool):
                 data["line"] = {"items": lines}
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2238,7 +2238,7 @@ class NetSuiteDeleteIntercompanyJournalEntry(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "intercompanyjournalentry", "record_id": record_id}
@@ -2288,7 +2288,7 @@ class NetSuiteGetIntercompanyJournalEntry(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2343,7 +2343,7 @@ class NetSuiteListIntercompanyJournalEntries(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -2389,7 +2389,7 @@ class NetSuiteUpdateIntercompanyJournalEntry(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"updated": True, "record_type": "intercompanyjournalentry", "record_id": record_id}
@@ -2452,7 +2452,7 @@ class NetSuiteCreateBinTransfer(Tool):
                 data["inventory"] = {"items": inventory}
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2508,7 +2508,7 @@ class NetSuiteDeleteBinTransfer(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "bintransfer", "record_id": record_id}
@@ -2558,7 +2558,7 @@ class NetSuiteGetBinTransfer(Tool):
                 params["fields"] = fields
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2613,7 +2613,7 @@ class NetSuiteListBinTransfers(Tool):
                 params["q"] = query
 
             auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -2659,7 +2659,7 @@ class NetSuiteUpdateBinTransfer(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"updated": True, "record_type": "bintransfer", "record_id": record_id}
@@ -2705,7 +2705,7 @@ class NetSuiteUpsertBinTransfer(Tool):
             import httpx
 
             auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
                 response.raise_for_status()
                 return {"upserted": True, "record_type": "bintransfer", "external_id": external_id}
@@ -2772,7 +2772,7 @@ class NetSuiteCreateAccountingPeriod(Tool):
                 data["isYear"] = is_year
 
             auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2828,7 +2828,7 @@ class NetSuiteDeleteAccountingPeriod(Tool):
             import httpx
 
             auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
                 response.raise_for_status()
                 return {"deleted": True, "record_type": "accountingperiod", "record_id": record_id}

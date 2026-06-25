@@ -110,7 +110,7 @@ async def _resolve_token(tool: Any) -> str:
 async def _fetch_accessible_resources(token: str) -> list[dict[str, Any]]:
     import httpx
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         response = await client.get(
             _ACCESSIBLE_RESOURCES,
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -191,7 +191,7 @@ async def _jira_request(
     url = f"{base}{path}"
     if headers:
         hdrs = {**hdrs, **headers}
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         kwargs: dict[str, Any] = {"method": method, "url": url, "headers": hdrs, "params": params}
         if files is not None:
             kwargs["files"] = files
@@ -902,7 +902,7 @@ class JiraAddAttachment(Tool):
 
             ct = content_type or "application/octet-stream"
             files = {"file": (filename, raw, ct)}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers=headers, files=files)
                 response.raise_for_status()
                 return response.json()
@@ -993,7 +993,7 @@ class JiraAddUserToIssue(Tool):
                 headers = {**hdrs, "Content-Type": "application/json"}
                 import httpx
 
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                     response = await client.post(url, headers=headers, content=json.dumps(account_id))
                     response.raise_for_status()
                     if response.status_code == 204 or not response.content:

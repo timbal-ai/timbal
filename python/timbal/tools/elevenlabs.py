@@ -54,7 +54,7 @@ class ElevenLabsTextToSpeech(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/text-to-speech/{voice_id}",
                     headers={"xi-api-key": api_key},
@@ -102,7 +102,7 @@ class ElevenLabsListPhoneNumbers(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/convai/phone-numbers",
                     headers={"xi-api-key": api_key},
@@ -149,7 +149,7 @@ class ElevenLabsMakeOutboundCall(Tool):
                 "to_number": to_number,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/convai/twilio/outbound-call",
                     headers={"xi-api-key": api_key},
@@ -180,7 +180,7 @@ class ElevenLabsListAgents(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/convai/agents",
                     headers={"xi-api-key": api_key},
@@ -208,7 +208,7 @@ class ElevenLabsGetModels(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/models",
                     headers={"xi-api-key": api_key},
@@ -241,7 +241,7 @@ class ElevenLabsGetVoicesWithDescriptions(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/voices",
                     headers={"xi-api-key": api_key},
@@ -299,7 +299,7 @@ class ElevenLabsListHistory(Tool):
             if source:
                 params["source"] = source
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/history",
                     headers={"xi-api-key": api_key},
@@ -334,7 +334,7 @@ class ElevenLabsGetAudioFromHistoryItem(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/history/{history_item_id}/audio",
                     headers={"xi-api-key": api_key},
@@ -376,7 +376,7 @@ class ElevenLabsDownloadHistoryItems(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/history/download",
                     headers={"xi-api-key": api_key},
@@ -460,7 +460,7 @@ class ElevenLabsCreateAgent(Tool):
             if first_message:
                 payload["conversation_config"]["agent"]["first_message"] = first_message
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/convai/agents/create",
                     headers={"xi-api-key": api_key},
@@ -534,7 +534,7 @@ class ElevenLabsAddVoice(Tool):
                 import json
                 data["labels"] = json.dumps(labels)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/voices/add",
                     headers={"xi-api-key": api_key},

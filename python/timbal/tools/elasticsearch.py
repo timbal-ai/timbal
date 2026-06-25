@@ -64,7 +64,7 @@ class ElasticsearchIngestAttachment(Tool):
             if fields:
                 body.update(fields)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base}/{index}/_doc/{document_id}",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -110,7 +110,7 @@ class ElasticsearchBulkOperations(Tool):
 
             url = f"{base}/_bulk" if not index else f"{base}/{index}/_bulk"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={
@@ -151,7 +151,7 @@ class ElasticsearchDeleteDocument(Tool):
                 raise ValueError("host required. Set ELASTICSEARCH_HOST or pass host.")
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base}/{index}/_doc/{document_id}",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -195,7 +195,7 @@ class ElasticsearchGetDocument(Tool):
             if source_excludes:
                 params["_source_excludes"] = ",".join(source_excludes)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base}/{index}/_doc/{document_id}",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -233,7 +233,7 @@ class ElasticsearchIndexDocument(Tool):
                 raise ValueError("host required. Set ELASTICSEARCH_HOST or pass host.")
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 if document_id:
                     response = await client.put(
                         f"{base}/{index}/_doc/{document_id}",
@@ -290,7 +290,7 @@ class ElasticsearchUpdateDocument(Tool):
             if upsert is not None:
                 body["upsert"] = upsert
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base}/{index}/_update/{document_id}",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -337,7 +337,7 @@ class ElasticsearchCreateIndex(Tool):
             if aliases:
                 body["aliases"] = aliases
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base}/{index}",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -373,7 +373,7 @@ class ElasticsearchUpdateIndexSettings(Tool):
                 raise ValueError("host required. Set ELASTICSEARCH_HOST or pass host.")
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base}/{index}/_settings",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -409,7 +409,7 @@ class ElasticsearchListIndices(Tool):
             import httpx
 
             path = f"/_cat/indices/{index_pattern}" if index_pattern else "/_cat/indices"
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base.rstrip('/')}{path}",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -451,7 +451,7 @@ class ElasticsearchListDocuments(Tool):
             if source is not None:
                 body["_source"] = source
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base}/{index}/_search",
                     headers={"Authorization": f"ApiKey {api_key}"},
@@ -520,7 +520,7 @@ class ElasticsearchSearchDocuments(Tool):
             if knn:
                 body["knn"] = knn
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base}/{index}/_search",
                     headers={"Authorization": f"ApiKey {api_key}"},

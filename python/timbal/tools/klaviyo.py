@@ -102,7 +102,7 @@ class KlaviyoListProfiles(Tool):
             if additional_fields:
                 params["additional-fields[profile]"] = additional_fields
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/profiles",
                     headers=_headers(api_key),
@@ -144,7 +144,7 @@ class KlaviyoGetProfile(Tool):
             if additional_fields:
                 params["additional-fields[profile]"] = additional_fields
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/profiles/{profile_id}",
                     headers=_headers(api_key),
@@ -208,7 +208,7 @@ class KlaviyoCreateProfile(Tool):
 
             payload = {"data": {"type": "profile", "attributes": attributes}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/profiles",
                     headers=_headers(api_key),
@@ -273,7 +273,7 @@ class KlaviyoUpdateProfile(Tool):
 
             payload = {"data": {"type": "profile", "id": profile_id, "attributes": attributes}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/profiles/{profile_id}",
                     headers=_headers(api_key),
@@ -307,7 +307,7 @@ class KlaviyoGetProfileLists(Tool):
 
             params = _pagination_params(page_cursor) or None
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/profiles/{profile_id}/lists",
                     headers=_headers(api_key),
@@ -346,7 +346,7 @@ class KlaviyoListLists(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/lists",
                     headers=_headers(api_key),
@@ -375,7 +375,7 @@ class KlaviyoGetList(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/lists/{list_id}",
                     headers=_headers(api_key),
@@ -405,7 +405,7 @@ class KlaviyoCreateList(Tool):
 
             payload = {"data": {"type": "list", "attributes": {"name": name}}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/lists",
                     headers=_headers(api_key),
@@ -441,7 +441,7 @@ class KlaviyoAddProfilesToList(Tool):
                 "data": [{"type": "profile", "id": profile_id} for profile_id in profile_ids],
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/lists/{list_id}/relationships/profiles",
                     headers=_headers(api_key),
@@ -477,7 +477,7 @@ class KlaviyoRemoveProfilesFromList(Tool):
                 "data": [{"type": "profile", "id": profile_id} for profile_id in profile_ids],
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.request(
                     "DELETE",
                     f"{_API_BASE}/lists/{list_id}/relationships/profiles",
@@ -521,7 +521,7 @@ class KlaviyoGetListProfiles(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/lists/{list_id}/profiles",
                     headers=_headers(api_key),
@@ -560,7 +560,7 @@ class KlaviyoListSegments(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/segments",
                     headers=_headers(api_key),
@@ -589,7 +589,7 @@ class KlaviyoGetSegment(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/segments/{segment_id}",
                     headers=_headers(api_key),
@@ -635,7 +635,7 @@ class KlaviyoListEvents(Tool):
             if include:
                 params["include"] = include
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/events",
                     headers=_headers(api_key),
@@ -708,7 +708,7 @@ class KlaviyoCreateEvent(Tool):
 
             payload = {"data": {"type": "event", "attributes": event_attrs}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/events",
                     headers=_headers(api_key),
@@ -757,7 +757,7 @@ class KlaviyoListCampaigns(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/campaigns",
                     headers=_headers(api_key),
@@ -786,7 +786,7 @@ class KlaviyoGetCampaign(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/campaigns/{campaign_id}",
                     headers=_headers(api_key),
@@ -824,7 +824,7 @@ class KlaviyoListMetrics(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/metrics",
                     headers=_headers(api_key),
@@ -863,7 +863,7 @@ class KlaviyoListFlows(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/flows",
                     headers=_headers(api_key),
@@ -892,7 +892,7 @@ class KlaviyoGetFlow(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/flows/{flow_id}",
                     headers=_headers(api_key),
@@ -964,7 +964,7 @@ class KlaviyoSubscribeProfiles(Tool):
 
             payload = {"data": job_data}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/profile-subscription-bulk-create-jobs",
                     headers=_headers(api_key),
@@ -1024,7 +1024,7 @@ class KlaviyoUnsubscribeProfiles(Tool):
 
             payload = {"data": job_data}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/profile-subscription-bulk-delete-jobs",
                     headers=_headers(api_key),
@@ -1055,7 +1055,7 @@ class KlaviyoGetProfileSubscriptions(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/profiles/{profile_id}",
                     headers=_headers(api_key),
@@ -1094,7 +1094,7 @@ class KlaviyoListCatalogItems(Tool):
             if filter:
                 params["filter"] = filter
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/catalog-items",
                     headers=_headers(api_key),
@@ -1150,7 +1150,7 @@ class KlaviyoCreateCatalogItem(Tool):
 
             payload = {"data": {"type": "catalog-item", "attributes": attributes}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/catalog-items",
                     headers=_headers(api_key),
@@ -1186,7 +1186,7 @@ class KlaviyoGetCatalogItem(Tool):
 
             catalog_id = item_id if item_id.startswith("$custom:::") else _catalog_item_id(item_id)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/catalog-items/{catalog_id}",
                     headers=_headers(api_key),
@@ -1254,7 +1254,7 @@ class KlaviyoCreatePlacedOrderEvent(Tool):
 
             payload = {"data": {"type": "event", "attributes": event_attrs}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/events",
                     headers=_headers(api_key),
@@ -1285,7 +1285,7 @@ class KlaviyoGetProfilePredictiveAnalytics(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/profiles/{profile_id}",
                     headers=_headers(api_key),
@@ -1355,7 +1355,7 @@ class KlaviyoCreateCampaign(Tool):
                 },
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/campaigns",
                     headers=_headers(api_key),
@@ -1408,7 +1408,7 @@ class KlaviyoUpdateCampaign(Tool):
                 },
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/campaigns/{campaign_id}",
                     headers=_headers(api_key),
@@ -1443,7 +1443,7 @@ class KlaviyoSendCampaign(Tool):
 
             payload = {"data": {"type": "campaign-send-job", "id": campaign_id}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/campaign-send-jobs",
                     headers=_headers(api_key),
@@ -1509,7 +1509,7 @@ class KlaviyoQueryCampaignValues(Tool):
                 },
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/campaign-values-reports",
                     headers=_headers(api_key),
@@ -1553,7 +1553,7 @@ class KlaviyoUpdateFlowStatus(Tool):
                 },
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/flows/{flow_id}",
                     headers=_headers(api_key),
@@ -1587,7 +1587,7 @@ class KlaviyoListFlowActions(Tool):
 
             params = _pagination_params(page_cursor) or None
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/flows/{flow_id}/flow-actions",
                     headers=_headers(api_key),
@@ -1642,7 +1642,7 @@ class KlaviyoTriggerFlowViaEvent(Tool):
 
             payload = {"data": {"type": "event", "attributes": event_attrs}}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/events",
                     headers=_headers(api_key),

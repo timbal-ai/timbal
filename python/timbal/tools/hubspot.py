@@ -52,7 +52,7 @@ class HubSpotListContacts(Tool):
             if properties:
                 params["properties"] = ",".join(properties)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/contacts",
                     headers={"Authorization": f"Bearer {token}"},
@@ -91,7 +91,7 @@ class HubSpotGetContact(Tool):
             if associations:
                 params["associations"] = ",".join(associations)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/contacts/{contact_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -148,7 +148,7 @@ class HubSpotCreateContact(Tool):
             if hs_lead_status:
                 properties["hs_lead_status"] = hs_lead_status
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/contacts",
                     headers={"Authorization": f"Bearer {token}"},
@@ -208,7 +208,7 @@ class HubSpotUpdateContact(Tool):
             if hs_lead_status:
                 properties["hs_lead_status"] = hs_lead_status
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/crm/v3/objects/contacts/{contact_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -259,7 +259,7 @@ class HubSpotSearchContacts(Tool):
             if sorts:
                 body["sorts"] = sorts
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/contacts/search",
                     headers={"Authorization": f"Bearer {token}"},
@@ -291,7 +291,7 @@ class HubSpotMergeContacts(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/contacts/merge",
                     headers={"Authorization": f"Bearer {token}"},
@@ -332,7 +332,7 @@ class HubSpotGdprDeleteContact(Tool):
             if email:
                 body["email"] = email
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/contacts/gdpr-delete",
                     headers={"Authorization": f"Bearer {token}"},
@@ -372,7 +372,7 @@ class HubSpotListCompanies(Tool):
             if properties:
                 params["properties"] = ",".join(properties)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/companies",
                     headers={"Authorization": f"Bearer {token}"},
@@ -411,7 +411,7 @@ class HubSpotGetCompany(Tool):
             if associations:
                 params["associations"] = ",".join(associations)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/companies/{company_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -471,7 +471,7 @@ class HubSpotCreateCompany(Tool):
             if annualrevenue:
                 properties["annualrevenue"] = annualrevenue
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/companies",
                     headers={"Authorization": f"Bearer {token}"},
@@ -534,7 +534,7 @@ class HubSpotUpdateCompany(Tool):
             if annualrevenue:
                 properties["annualrevenue"] = annualrevenue
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/crm/v3/objects/companies/{company_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -588,7 +588,7 @@ class HubSpotSearchCompanies(Tool):
             if sorts:
                 body["sorts"] = sorts
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/companies/search",
                     headers={"Authorization": f"Bearer {token}"},
@@ -628,7 +628,7 @@ class HubSpotListDeals(Tool):
             if properties:
                 params["properties"] = ",".join(properties)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/deals",
                     headers={"Authorization": f"Bearer {token}"},
@@ -667,7 +667,7 @@ class HubSpotGetDeal(Tool):
             if associations:
                 params["associations"] = ",".join(associations)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/deals/{deal_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -718,7 +718,7 @@ class HubSpotCreateDeal(Tool):
             if description:
                 properties["description"] = description
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/deals",
                     headers={"Authorization": f"Bearer {token}"},
@@ -772,7 +772,7 @@ class HubSpotUpdateDeal(Tool):
             if description:
                 properties["description"] = description
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/crm/v3/objects/deals/{deal_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -801,7 +801,7 @@ class HubSpotGetDealPipelines(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/pipelines/deals",
                     headers={"Authorization": f"Bearer {token}"},
@@ -840,7 +840,7 @@ class HubSpotListTickets(Tool):
             if properties:
                 params["properties"] = ",".join(properties)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/tickets",
                     headers={"Authorization": f"Bearer {token}"},
@@ -879,7 +879,7 @@ class HubSpotGetTicket(Tool):
             if associations:
                 params["associations"] = ",".join(associations)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -927,7 +927,7 @@ class HubSpotCreateTicket(Tool):
             if hubspot_owner_id:
                 properties["hubspot_owner_id"] = hubspot_owner_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/tickets",
                     headers={"Authorization": f"Bearer {token}"},
@@ -978,7 +978,7 @@ class HubSpotUpdateTicket(Tool):
             if hubspot_owner_id:
                 properties["hubspot_owner_id"] = hubspot_owner_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1007,7 +1007,7 @@ class HubSpotDeleteTicket(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1038,7 +1038,7 @@ class HubSpotMergeTickets(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/tickets/merge",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1078,7 +1078,7 @@ class HubSpotListProducts(Tool):
             if properties:
                 params["properties"] = ",".join(properties)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/products",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1114,7 +1114,7 @@ class HubSpotGetProduct(Tool):
             if properties:
                 params["properties"] = ",".join(properties)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/products/{product_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1162,7 +1162,7 @@ class HubSpotCreateProduct(Tool):
             if hs_recurring_billing_period:
                 properties["hs_recurring_billing_period"] = hs_recurring_billing_period
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/crm/v3/objects/products",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1213,7 +1213,7 @@ class HubSpotUpdateProduct(Tool):
             if hs_recurring_billing_period:
                 properties["hs_recurring_billing_period"] = hs_recurring_billing_period
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/crm/v3/objects/products/{product_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1242,7 +1242,7 @@ class HubSpotDeleteProduct(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_API_BASE}/crm/v3/objects/products/{product_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1274,7 +1274,7 @@ class HubSpotGetEngagements(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/engagements/v1/engagements/associated/contact/{contact_id}/paged",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1303,7 +1303,7 @@ class HubSpotGetEngagement(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/engagements/v1/engagements/{engagement_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1334,7 +1334,7 @@ class HubSpotListEngagements(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/engagements/v1/engagements/paged",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1371,7 +1371,7 @@ class HubSpotGetRecentEngagements(Tool):
             if since:
                 params["since"] = since
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/engagements/v1/engagements/recent/modified",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1400,7 +1400,7 @@ class HubSpotGetCallDispositions(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/calling/v1/dispositions",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1445,7 +1445,7 @@ class HubSpotCreateEngagement(Tool):
             if associations:
                 body["associations"] = associations
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/engagements/v1/engagements",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1484,7 +1484,7 @@ class UpdateEngagement(Tool):
             if metadata:
                 body["metadata"] = metadata
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_API_BASE}/engagements/v1/engagements/{engagement_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1513,7 +1513,7 @@ class HubSpotDeleteEngagement(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_API_BASE}/engagements/v1/engagements/{engagement_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1559,7 +1559,7 @@ class HubSpotSendEmail(Tool):
                     {"name": k, "value": v} for k, v in custom_properties.items()
                 ]
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_API_BASE}/marketing/v3/transactional/single-email/send",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1598,7 +1598,7 @@ class HubSpotGetAssociations(Tool):
             if after:
                 params["after"] = after
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/objects/{from_object_type}/{object_id}/associations/{to_object_type}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1636,7 +1636,7 @@ class HubSpotCreateAssociation(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{_API_BASE}/crm/v3/objects/{from_object_type}/{from_object_id}"
                     f"/associations/{to_object_type}/{to_object_id}/{association_type}",
@@ -1671,7 +1671,7 @@ class HubSpotDeleteAssociation(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_API_BASE}/crm/v3/objects/{from_object_type}/{from_object_id}"
                     f"/associations/{to_object_type}/{to_object_id}/{association_type}",
@@ -1703,7 +1703,7 @@ class HubSpotGetAssociationTypes(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/associations/{from_object_type}/{to_object_type}/types",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1731,7 +1731,7 @@ class HubSpotGetUsers(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_API_BASE}/crm/v3/owners",
                     headers={"Authorization": f"Bearer {token}"},

@@ -47,7 +47,7 @@ class ShopifyGetShopDetails(Tool):
             token, shop_url = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_shopify_base(shop_url)}/shop.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -99,7 +99,7 @@ class ShopifyGetProducts(Tool):
             if ids:
                 params["ids"] = ",".join(ids)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_shopify_base(shop_url)}/products.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -130,7 +130,7 @@ class ShopifyGetProduct(Tool):
             token, shop_url = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_shopify_base(shop_url)}/products/{product_id}.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -186,7 +186,7 @@ class ShopifyCreateProduct(Tool):
             if images:
                 product["images"] = images
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_shopify_base(shop_url)}/products.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -217,7 +217,7 @@ class ShopifyDeleteProduct(Tool):
             token, shop_url = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_shopify_base(shop_url)}/products/{product_id}.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -256,7 +256,7 @@ class ShopifyGetInventoryLevel(Tool):
             if location_ids:
                 params["location_ids"] = ",".join(location_ids)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_shopify_base(shop_url)}/inventory_levels.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -291,7 +291,7 @@ class ShopifyAdjustInventory(Tool):
             token, shop_url = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_shopify_base(shop_url)}/inventory_levels/adjust.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -329,7 +329,7 @@ class ShopifyUpdateInventoryTracking(Tool):
             token, shop_url = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{_shopify_base(shop_url)}/inventory_items/{inventory_item_id}.json",
                     headers={"X-Shopify-Access-Token": token},
@@ -360,7 +360,7 @@ class ShopifyGetVariantInventoryItem(Tool):
             token, shop_url = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_shopify_base(shop_url)}/variants/{variant_id}.json",
                     headers={"X-Shopify-Access-Token": token},

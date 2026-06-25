@@ -98,7 +98,7 @@ class ZendeskCreateTicket(Tool):
             if tags:
                 ticket["tags"] = tags
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/tickets.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -142,7 +142,7 @@ class ZendeskListTickets(Tool):
 
             params = {"per_page": per_page, "page": page, "sort_by": sort_by, "sort_order": sort_order}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets.json",
                     headers={"Authorization": auth},
@@ -181,7 +181,7 @@ class ZendeskShowTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}.json",
                     headers={"Authorization": auth},
@@ -243,7 +243,7 @@ class ZendeskUpdateTicket(Tool):
             if not ticket:
                 return {"error": "No fields to update"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/{ticket_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -288,7 +288,7 @@ class ZendeskSearchTickets(Tool):
 
             params = {"query": query, "sort_by": sort_by, "sort_order": sort_order, "per_page": per_page, "page": page}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/search.json",
                     headers={"Authorization": auth},
@@ -332,7 +332,7 @@ class ZendeskShowManyTickets(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/show_many.json",
                     headers={"Authorization": auth},
@@ -371,7 +371,7 @@ class ZendeskUpdateManyTickets(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/update_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -408,7 +408,7 @@ class ZendeskCountTickets(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/count.json",
                     headers={"Authorization": auth},
@@ -446,7 +446,7 @@ class ZendeskCreateManyTickets(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/tickets/create_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -485,7 +485,7 @@ class ZendeskDeleteTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/tickets/{ticket_id}.json",
                     headers={"Authorization": auth},
@@ -524,7 +524,7 @@ class ZendeskBulkDeleteTickets(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/tickets/destroy_many.json",
                     headers={"Authorization": auth},
@@ -563,7 +563,7 @@ class ZendeskMarkTicketAsSpam(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/{ticket_id}/mark_as_spam.json",
                     headers={"Authorization": auth},
@@ -602,7 +602,7 @@ class ZendeskBulkMarkTicketsAsSpam(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/mark_many_as_spam.json",
                     headers={"Authorization": auth},
@@ -642,7 +642,7 @@ class ZendeskMergeTickets(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/tickets/{target_ticket_id}/merge.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -681,7 +681,7 @@ class ZendeskTicketRelatedInformation(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/related.json",
                     headers={"Authorization": auth},
@@ -719,7 +719,7 @@ class ZendeskListCollaborators(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/collaborators.json",
                     headers={"Authorization": auth},
@@ -757,7 +757,7 @@ class ZendeskListEmailCcs(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/email_ccs.json",
                     headers={"Authorization": auth},
@@ -795,7 +795,7 @@ class ZendeskListFollowers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/followers.json",
                     headers={"Authorization": auth},
@@ -835,7 +835,7 @@ class ZendeskListDeletedTickets(Tool):
             import httpx
 
             params = {"per_page": per_page, "page": page}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/deleted_tickets.json",
                     headers={"Authorization": auth},
@@ -874,7 +874,7 @@ class ZendeskRestoreDeletedTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/deleted_tickets/{ticket_id}/restore.json",
                     headers={"Authorization": auth},
@@ -913,7 +913,7 @@ class ZendeskRestoreMultipleDeletedTickets(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/deleted_tickets/restore_many.json",
                     headers={"Authorization": auth},
@@ -952,7 +952,7 @@ class ZendeskDeleteTicketPermanently(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/deleted_tickets/{ticket_id}.json",
                     headers={"Authorization": auth},
@@ -991,7 +991,7 @@ class ZendeskDeleteMultipleTicketsPermanently(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/deleted_tickets/destroy_many.json",
                     headers={"Authorization": auth},
@@ -1030,7 +1030,7 @@ class ZendeskListTicketIncidents(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/incidents.json",
                     headers={"Authorization": auth},
@@ -1070,7 +1070,7 @@ class ZendeskListProblems(Tool):
             import httpx
 
             params = {"per_page": per_page, "page": page}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/problems.json",
                     headers={"Authorization": auth},
@@ -1109,7 +1109,7 @@ class ZendeskAutocompleteProblems(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/problems/autocomplete.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1148,7 +1148,7 @@ class ZendeskCountOrganizationTickets(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations/{organization_id}/tickets/count.json",
                     headers={"Authorization": auth},
@@ -1195,7 +1195,7 @@ class ZendeskListUsers(Tool):
             if role:
                 params["role"] = role
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users.json",
                     headers={"Authorization": auth},
@@ -1234,7 +1234,7 @@ class ZendeskShowUser(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/{user_id}.json",
                     headers={"Authorization": auth},
@@ -1273,7 +1273,7 @@ class ZendeskListGroups(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups.json",
                     headers={"Authorization": auth},
@@ -1311,7 +1311,7 @@ class ZendeskShowGroup(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups/{group_id}.json",
                     headers={"Authorization": auth},
@@ -1347,7 +1347,7 @@ class ZendeskCountGroups(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups/count.json",
                     headers={"Authorization": auth},
@@ -1385,7 +1385,7 @@ class ZendeskCreateGroup(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/groups.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1425,7 +1425,7 @@ class ZendeskUpdateGroup(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/groups/{group_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1464,7 +1464,7 @@ class ZendeskDeleteGroup(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/groups/{group_id}.json",
                     headers={"Authorization": auth},
@@ -1500,7 +1500,7 @@ class ZendeskListAssignableGroups(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups/assignable.json",
                     headers={"Authorization": auth},
@@ -1541,7 +1541,7 @@ class ZendeskListComments(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/comments.json",
                     headers={"Authorization": auth},
@@ -1579,7 +1579,7 @@ class ZendeskCountTicketComments(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/comments/count.json",
                     headers={"Authorization": auth},
@@ -1618,7 +1618,7 @@ class ZendeskMakeCommentPrivate(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/{ticket_id}/comments/{ticket_comment_id}/make_private.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1668,7 +1668,7 @@ class ZendeskRedactTicketCommentInAgentWorkspace(Tool):
             if external_attachment_urls is not None:
                 body["external_attachment_urls"] = external_attachment_urls
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/comment_redactions/{ticket_comment_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1717,7 +1717,7 @@ class ZendeskRedactChatComment(Tool):
             if message_id is not None:
                 body["message_id"] = message_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/chat_redactions/{ticket_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1765,7 +1765,7 @@ class ZendeskRedactChatCommentAttachment(Tool):
             if message_ids is not None:
                 body["message_ids"] = message_ids
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/chat_file_redactions/{ticket_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1806,7 +1806,7 @@ class ZendeskRedactStringInComment(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/{ticket_id}/comments/{ticket_comment_id}/redact.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1846,7 +1846,7 @@ class ZendeskListBookmarks(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/bookmarks.json",
                     headers={"Authorization": auth},
@@ -1884,7 +1884,7 @@ class ZendeskCreateBookmark(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/bookmarks.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -1923,7 +1923,7 @@ class ZendeskDeleteBookmark(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/bookmarks/{bookmark_id}.json",
                     headers={"Authorization": auth},
@@ -1964,7 +1964,7 @@ class ZendeskListWorkspaces(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/workspaces.json",
                     headers={"Authorization": auth},
@@ -2003,7 +2003,7 @@ class ZendeskShowWorkspace(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/workspaces/{workspace_id}.json",
                     headers={"Authorization": auth},
@@ -2053,7 +2053,7 @@ class ZendeskCreateWorkspace(Tool):
             if conditions is not None:
                 workspace["conditions"] = conditions
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/workspaces.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2112,7 +2112,7 @@ class ZendeskUpdateWorkspace(Tool):
             if not workspace:
                 return {"error": "No fields to update"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/workspaces/{workspace_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2151,7 +2151,7 @@ class ZendeskDeleteWorkspace(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/workspaces/{workspace_id}.json",
                     headers={"Authorization": auth},
@@ -2190,7 +2190,7 @@ class ZendeskBulkDeleteWorkspaces(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/workspaces/destroy_many.json",
                     headers={"Authorization": auth},
@@ -2229,7 +2229,7 @@ class ZendeskReorderWorkspaces(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/workspaces/reorder.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2282,7 +2282,7 @@ class ZendeskListViews(Tool):
             if active is not None:
                 params["active"] = str(active).lower()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views.json",
                     headers={"Authorization": auth},
@@ -2319,7 +2319,7 @@ class ZendeskListViewsCompact(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/compact.json",
                     headers={"Authorization": auth},
@@ -2362,7 +2362,7 @@ class ZendeskListViewsById(Tool):
             if active is not None:
                 params["active"] = str(active).lower()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/show_many.json",
                     headers={"Authorization": auth},
@@ -2402,7 +2402,7 @@ class ZendeskListActiveViews(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/active.json",
                     headers={"Authorization": auth},
@@ -2439,7 +2439,7 @@ class ZendeskCountViews(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/count.json",
                     headers={"Authorization": auth},
@@ -2483,7 +2483,7 @@ class ZendeskSearchViews(Tool):
             if sort_by:
                 params["sort_by"] = sort_by
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/search.json",
                     headers={"Authorization": auth},
@@ -2522,7 +2522,7 @@ class ZendeskShowView(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/{view_id}.json",
                     headers={"Authorization": auth},
@@ -2579,7 +2579,7 @@ class ZendeskCreateView(Tool):
             if output:
                 view["output"] = output
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/views.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2638,7 +2638,7 @@ class ZendeskUpdateView(Tool):
             if not view:
                 return {"error": "No fields to update"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/views/{view_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2680,7 +2680,7 @@ class ZendeskUpdateManyViews(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/views/update_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2719,7 +2719,7 @@ class ZendeskDeleteView(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/views/{view_id}.json",
                     headers={"Authorization": auth},
@@ -2758,7 +2758,7 @@ class ZendeskBulkDeleteViews(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/views/destroy_many.json",
                     headers={"Authorization": auth},
@@ -2805,7 +2805,7 @@ class ZendeskExecuteView(Tool):
             if sort_by:
                 params["sort_by"] = sort_by
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/{view_id}/execute.json",
                     headers={"Authorization": auth},
@@ -2850,7 +2850,7 @@ class ZendeskListTicketsFromView(Tool):
             if sort_by:
                 params["sort_by"] = sort_by
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/{view_id}/tickets.json",
                     headers={"Authorization": auth},
@@ -2889,7 +2889,7 @@ class ZendeskCountTicketsInView(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/views/{view_id}/count.json",
                     headers={"Authorization": auth},
@@ -2932,7 +2932,7 @@ class ZendeskPreviewViews(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/views/preview.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -2975,7 +2975,7 @@ class ZendeskPreviewTicketCount(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/views/preview/count.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -3020,7 +3020,7 @@ class ZendeskCreateUser(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/users.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -3076,7 +3076,7 @@ class ZendeskUpdateUser(Tool):
             if not user:
                 return {"error": "No fields to update"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -3115,7 +3115,7 @@ class ZendeskDeleteUser(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/users/{user_id}.json",
                     headers={"Authorization": auth},
@@ -3155,7 +3155,7 @@ class ZendeskSearchUsers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/search.json",
                     headers={"Authorization": auth},
@@ -3192,7 +3192,7 @@ class ZendeskCountUsers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/count.json",
                     headers={"Authorization": auth},
@@ -3231,7 +3231,7 @@ class ZendeskShowManyUsers(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/show_many.json",
                     headers={"Authorization": auth},
@@ -3268,7 +3268,7 @@ class ZendeskShowSelf(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/me.json",
                     headers={"Authorization": auth},
@@ -3306,7 +3306,7 @@ class ZendeskShowUserRelatedInformation(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/{user_id}/related.json",
                     headers={"Authorization": auth},
@@ -3345,7 +3345,7 @@ class ZendeskListDeletedUsers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/deleted_users.json",
                     headers={"Authorization": auth},
@@ -3384,7 +3384,7 @@ class ZendeskShowDeletedUser(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/deleted_users/{deleted_user_id}.json",
                     headers={"Authorization": auth},
@@ -3420,7 +3420,7 @@ class ZendeskCountDeletedUsers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/deleted_users/count.json",
                     headers={"Authorization": auth},
@@ -3458,7 +3458,7 @@ class ZendeskAutocompleteUsers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/autocomplete.json",
                     headers={"Authorization": auth},
@@ -3498,7 +3498,7 @@ class ZendeskBulkDeleteUsers(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/users/destroy_many.json",
                     headers={"Authorization": auth},
@@ -3537,7 +3537,7 @@ class ZendeskPermanentlyDeleteUser(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/deleted_users/{deleted_user_id}.json",
                     headers={"Authorization": auth},
@@ -3585,7 +3585,7 @@ class ZendeskListTicketTriggerCategories(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/trigger_categories.json",
                     headers={"Authorization": auth},
@@ -3627,7 +3627,7 @@ class ZendeskCreateTicketTriggerCategory(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/trigger_categories.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -3669,7 +3669,7 @@ class ZendeskCreateBatchJobForTicketTriggerCategories(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/trigger_categories/jobs.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -3708,7 +3708,7 @@ class ZendeskShowTicketTriggerCategory(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/trigger_categories/{trigger_category_id}.json",
                     headers={"Authorization": auth},
@@ -3750,7 +3750,7 @@ class ZendeskUpdateTicketTriggerCategory(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{base_url}/trigger_categories/{trigger_category_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -3789,7 +3789,7 @@ class ZendeskDeleteTicketTriggerCategory(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/trigger_categories/{trigger_category_id}.json",
                     headers={"Authorization": auth},
@@ -3836,7 +3836,7 @@ class ZendeskListTicketTriggers(Tool):
             if active is not None:
                 params["active"] = str(active).lower()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/triggers.json",
                     headers={"Authorization": auth},
@@ -3873,7 +3873,7 @@ class ZendeskListActiveTicketTriggers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/triggers/active.json",
                     headers={"Authorization": auth},
@@ -3911,7 +3911,7 @@ class ZendeskSearchTicketTriggers(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/triggers/search.json",
                     headers={"Authorization": auth},
@@ -3950,7 +3950,7 @@ class ZendeskShowTicketTrigger(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/triggers/{trigger_id}.json",
                     headers={"Authorization": auth},
@@ -3986,7 +3986,7 @@ class ZendeskListTicketTriggerDefinitions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/triggers/definitions.json",
                     headers={"Authorization": auth},
@@ -4024,7 +4024,7 @@ class ZendeskListTicketTriggerRevisions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/triggers/{trigger_id}/revisions.json",
                     headers={"Authorization": auth},
@@ -4077,7 +4077,7 @@ class ZendeskCreateTicketTrigger(Tool):
                 "active": active,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/triggers.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -4133,7 +4133,7 @@ class ZendeskUpdateTicketTrigger(Tool):
             if not trigger:
                 return {"error": "No fields to update"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/triggers/{trigger_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -4172,7 +4172,7 @@ class ZendeskDeleteTicketTrigger(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/triggers/{trigger_id}.json",
                     headers={"Authorization": auth},
@@ -4211,7 +4211,7 @@ class ZendeskBulkDeleteTicketTriggers(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/triggers/destroy_many.json",
                     headers={"Authorization": auth},
@@ -4251,7 +4251,7 @@ class ZendeskListTargets(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/targets.json",
                     headers={"Authorization": auth},
@@ -4289,7 +4289,7 @@ class ZendeskShowTarget(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/targets/{target_id}.json",
                     headers={"Authorization": auth},
@@ -4327,7 +4327,7 @@ class ZendeskCreateTarget(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/targets.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -4367,7 +4367,7 @@ class ZendeskUpdateTarget(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/targets/{target_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -4406,7 +4406,7 @@ class ZendeskDeleteTarget(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/targets/{target_id}.json",
                     headers={"Authorization": auth},
@@ -4442,7 +4442,7 @@ class ZendeskListTargetFailures(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/target_failures.json",
                     headers={"Authorization": auth},
@@ -4480,7 +4480,7 @@ class ZendeskShowTargetFailure(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/target_failures/{target_failure_id}.json",
                     headers={"Authorization": auth},
@@ -4532,7 +4532,7 @@ class ZendeskListAutomations(Tool):
             if include:
                 params["include"] = include
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/automations.json",
                     headers={"Authorization": auth},
@@ -4569,7 +4569,7 @@ class ZendeskListActiveAutomations(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/automations/active.json",
                     headers={"Authorization": auth},
@@ -4618,7 +4618,7 @@ class ZendeskSearchAutomations(Tool):
             if sort_order:
                 params["sort_order"] = sort_order
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/automations/search.json",
                     headers={"Authorization": auth},
@@ -4657,7 +4657,7 @@ class ZendeskShowAutomation(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/automations/{automation_id}.json",
                     headers={"Authorization": auth},
@@ -4698,7 +4698,7 @@ class ZendeskCreateAutomation(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/automations.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -4738,7 +4738,7 @@ class ZendeskUpdateAutomation(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/automations/{automation_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -4780,7 +4780,7 @@ class ZendeskUpdateManyAutomations(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/automations/update_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -4819,7 +4819,7 @@ class ZendeskDeleteAutomation(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/automations/{automation_id}.json",
                     headers={"Authorization": auth},
@@ -4857,7 +4857,7 @@ class ZendeskBulkDeleteAutomations(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/automations/destroy_many.json",
                     headers={"Authorization": auth},
@@ -4899,7 +4899,7 @@ class ZendeskSearchTags(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/autocomplete/tags.json",
                     headers={"Authorization": auth},
@@ -4941,7 +4941,7 @@ class ZendeskListTags(Tool):
             import httpx
 
             params = {"per_page": per_page, "page": page, "sort": sort}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tags.json",
                     headers={"Authorization": auth},
@@ -4978,7 +4978,7 @@ class ZendeskCountTags(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tags/count.json",
                     headers={"Authorization": auth},
@@ -5016,7 +5016,7 @@ class ZendeskListResourceTags(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/tags.json",
                     headers={"Authorization": auth},
@@ -5055,7 +5055,7 @@ class ZendeskAddTags(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/{ticket_id}/tags.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5095,7 +5095,7 @@ class ZendeskSetTags(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/tickets/{ticket_id}/tags.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5135,7 +5135,7 @@ class ZendeskRemoveTags(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/tickets/{ticket_id}/tags.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5181,7 +5181,7 @@ class ZendeskListSuspendedTickets(Tool):
             import httpx
 
             params = {"per_page": per_page, "page": page, "sort_by": sort_by, "sort_order": sort_order}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/suspended_tickets.json",
                     headers={"Authorization": auth},
@@ -5220,7 +5220,7 @@ class ZendeskShowSuspendedTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/suspended_tickets/{suspended_ticket_id}.json",
                     headers={"Authorization": auth},
@@ -5258,7 +5258,7 @@ class ZendeskRecoverSuspendedTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/suspended_tickets/{suspended_ticket_id}/recover.json",
                     headers={"Authorization": auth},
@@ -5297,7 +5297,7 @@ class ZendeskRecoverMultipleSuspendedTickets(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/suspended_tickets/recover_many.json",
                     headers={"Authorization": auth},
@@ -5336,7 +5336,7 @@ class ZendeskDeleteSuspendedTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/suspended_tickets/{suspended_ticket_id}.json",
                     headers={"Authorization": auth},
@@ -5375,7 +5375,7 @@ class ZendeskDeleteMultipleSuspendedTickets(Tool):
             import httpx
 
             ids_param = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/suspended_tickets/destroy_many.json",
                     headers={"Authorization": auth},
@@ -5414,7 +5414,7 @@ class ZendeskSuspendedTicketAttachments(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/suspended_tickets/{suspended_ticket_id}/attachments.json",
                     headers={"Authorization": auth},
@@ -5450,7 +5450,7 @@ class ZendeskExportSuspendedTickets(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/suspended_tickets/export.json",
                     headers={"Authorization": auth},
@@ -5491,7 +5491,7 @@ class ZendeskShowOrganizationSubscription(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organization_subscriptions/{organization_subscription_id}.json",
                     headers={"Authorization": auth},
@@ -5541,7 +5541,7 @@ class ZendeskListCustomTicketStatuses(Tool):
                 params["default"] = default
             if status_categories:
                 params["status_categories"] = status_categories
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_statuses.json",
                     headers={"Authorization": auth},
@@ -5580,7 +5580,7 @@ class ZendeskShowCustomTicketStatus(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_statuses/{custom_status_id}.json",
                     headers={"Authorization": auth},
@@ -5618,7 +5618,7 @@ class ZendeskCreateCustomTicketStatus(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/custom_statuses.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5658,7 +5658,7 @@ class ZendeskUpdateCustomTicketStatus(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/custom_statuses/{custom_status_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5698,7 +5698,7 @@ class ZendeskBulkUpdateDefaultCustomTicketStatuses(Tool):
             import httpx
 
             ids_str = ",".join(str(i) for i in ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/custom_status/default.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5738,7 +5738,7 @@ class ZendeskCreateTicketFormStatusesForCustomStatus(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/custom_statuses/{custom_status_id}/ticket_form_statuses.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5778,7 +5778,7 @@ class ZendeskListJobStatuses(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/job_statuses.json",
                     headers={"Authorization": auth},
@@ -5816,7 +5816,7 @@ class ZendeskShowJobStatus(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/job_statuses/{job_status_id}.json",
                     headers={"Authorization": auth},
@@ -5855,7 +5855,7 @@ class ZendeskShowManyJobStatuses(Tool):
             import httpx
 
             ids_param = ",".join(ids)
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/job_statuses/show_many.json",
                     headers={"Authorization": auth},
@@ -5899,7 +5899,7 @@ class ZendeskListOrganizationSubscriptions(Tool):
             import httpx
 
             params = {"per_page": per_page, "page": page}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organization_subscriptions.json",
                     headers={"Authorization": auth},
@@ -5939,7 +5939,7 @@ class ZendeskCreateOrganizationSubscription(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organization_subscriptions.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -5978,7 +5978,7 @@ class ZendeskDeleteOrganizationSubscription(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/organization_subscriptions/{organization_subscription_id}.json",
                     headers={"Authorization": auth},
@@ -6017,7 +6017,7 @@ class ZendeskListSessions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/sessions.json",
                     headers={"Authorization": auth},
@@ -6056,7 +6056,7 @@ class ZendeskShowSession(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/{user_id}/sessions/{session_id}.json",
                     headers={"Authorization": auth},
@@ -6092,7 +6092,7 @@ class ZendeskShowCurrentSession(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/me/session.json",
                     headers={"Authorization": auth},
@@ -6128,7 +6128,7 @@ class ZendeskRenewCurrentSession(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/me/session/renew.json",
                     headers={"Authorization": auth},
@@ -6167,7 +6167,7 @@ class ZendeskDeleteSession(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/users/{user_id}/sessions/{session_id}.json",
                     headers={"Authorization": auth},
@@ -6203,7 +6203,7 @@ class ZendeskDeleteCurrentSession(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/users/me/logout.json",
                     headers={"Authorization": auth},
@@ -6242,7 +6242,7 @@ class ZendeskListSharingAgreements(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/sharing_agreements.json",
                     headers={"Authorization": auth},
@@ -6280,7 +6280,7 @@ class ZendeskShowSharingAgreement(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/sharing_agreements/{sharing_agreement_id}.json",
                     headers={"Authorization": auth},
@@ -6318,7 +6318,7 @@ class ZendeskCreateSharingAgreement(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/sharing_agreements.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6358,7 +6358,7 @@ class ZendeskUpdateSharingAgreement(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/sharing_agreements/{sharing_agreement_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6397,7 +6397,7 @@ class ZendeskDeleteSharingAgreement(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/sharing_agreements/{sharing_agreement_id}.json",
                     headers={"Authorization": auth},
@@ -6436,7 +6436,7 @@ class ZendeskListSlaPolicies(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/slas/policies.json",
                     headers={"Authorization": auth},
@@ -6474,7 +6474,7 @@ class ZendeskShowSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/slas/policies/{sla_policy_id}.json",
                     headers={"Authorization": auth},
@@ -6512,7 +6512,7 @@ class ZendeskCreateSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/slas/policies.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6552,7 +6552,7 @@ class ZendeskUpdateSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/slas/policies/{sla_policy_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6591,7 +6591,7 @@ class ZendeskDeleteSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/slas/policies/{sla_policy_id}.json",
                     headers={"Authorization": auth},
@@ -6629,7 +6629,7 @@ class ZendeskReorderSlaPolicies(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/slas/policies/reorder.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6666,7 +6666,7 @@ class ZendeskRetrieveSlaPolicyFilterDefinitions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/slas/policies/definitions.json",
                     headers={"Authorization": auth},
@@ -6707,7 +6707,7 @@ class ZendeskListGroupSlaPolicies(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups/{group_id}/slas/policies.json",
                     headers={"Authorization": auth},
@@ -6746,7 +6746,7 @@ class ZendeskShowGroupSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups/{group_id}/slas/policies/{sla_policy_id}.json",
                     headers={"Authorization": auth},
@@ -6785,7 +6785,7 @@ class ZendeskCreateGroupSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/groups/{group_id}/slas/policies.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6826,7 +6826,7 @@ class ZendeskUpdateGroupSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/groups/{group_id}/slas/policies/{sla_policy_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6866,7 +6866,7 @@ class ZendeskDeleteGroupSlaPolicy(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/groups/{group_id}/slas/policies/{sla_policy_id}.json",
                     headers={"Authorization": auth},
@@ -6905,7 +6905,7 @@ class ZendeskListDeletionSchedules(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/deletion_schedules.json",
                     headers={"Authorization": auth},
@@ -6943,7 +6943,7 @@ class ZendeskCreateDeletionSchedule(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/deletion_schedules.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -6982,7 +6982,7 @@ class ZendeskGetDeletionSchedule(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/deletion_schedules/{deletion_schedule_id}.json",
                     headers={"Authorization": auth},
@@ -7021,7 +7021,7 @@ class ZendeskUpdateDeletionSchedule(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/deletion_schedules/{deletion_schedule_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7060,7 +7060,7 @@ class ZendeskDeleteDeletionSchedule(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/deletion_schedules/{deletion_schedule_id}.json",
                     headers={"Authorization": auth},
@@ -7108,7 +7108,7 @@ class ZendeskListSearchResults(Tool):
             if include:
                 params["include"] = include
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/search.json",
                     headers={"Authorization": auth},
@@ -7147,7 +7147,7 @@ class ZendeskShowSearchResultsCount(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/search/count.json",
                     headers={"Authorization": auth},
@@ -7196,7 +7196,7 @@ class ZendeskExportSearchResults(Tool):
             if include:
                 params["include"] = include
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/search/export.json",
                     headers={"Authorization": auth},
@@ -7236,7 +7236,7 @@ class ZendeskListCustomRoles(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_roles.json",
                     headers={"Authorization": auth},
@@ -7274,7 +7274,7 @@ class ZendeskShowCustomRole(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_roles/{custom_role_id}.json",
                     headers={"Authorization": auth},
@@ -7312,7 +7312,7 @@ class ZendeskCreateCustomRole(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/custom_roles.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7352,7 +7352,7 @@ class ZendeskUpdateCustomRole(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/custom_roles/{custom_role_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7391,7 +7391,7 @@ class ZendeskDeleteCustomRole(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/custom_roles/{custom_role_id}.json",
                     headers={"Authorization": auth},
@@ -7436,7 +7436,7 @@ class ZendeskListAccountAttributes(Tool):
             if include:
                 params["include"] = include
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/attributes.json",
                     headers={"Authorization": auth},
@@ -7473,7 +7473,7 @@ class ZendeskListRoutingAttributeDefinitions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/attributes/definitions.json",
                     headers={"Authorization": auth},
@@ -7511,7 +7511,7 @@ class ZendeskShowRoutingAttribute(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/attributes/{attribute_id}.json",
                     headers={"Authorization": auth},
@@ -7549,7 +7549,7 @@ class ZendeskCreateRoutingAttribute(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/routing/attributes.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7589,7 +7589,7 @@ class ZendeskUpdateRoutingAttribute(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/routing/attributes/{attribute_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7628,7 +7628,7 @@ class ZendeskDeleteRoutingAttribute(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/routing/attributes/{attribute_id}.json",
                     headers={"Authorization": auth},
@@ -7666,7 +7666,7 @@ class ZendeskListAttributeValuesForAttribute(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/attributes/{attribute_id}/values.json",
                     headers={"Authorization": auth},
@@ -7705,7 +7705,7 @@ class ZendeskShowRoutingAttributeValue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/attributes/{attribute_id}/values/{attribute_value_id}.json",
                     headers={"Authorization": auth},
@@ -7744,7 +7744,7 @@ class ZendeskCreateRoutingAttributeValue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/routing/attributes/{attribute_id}/values.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7785,7 +7785,7 @@ class ZendeskUpdateRoutingAttributeValue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{base_url}/routing/attributes/{attribute_id}/values/{attribute_value_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7825,7 +7825,7 @@ class ZendeskDeleteRoutingAttributeValue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/routing/attributes/{attribute_id}/values/{attribute_value_id}.json",
                     headers={"Authorization": auth},
@@ -7863,7 +7863,7 @@ class ZendeskListAgentAttributeValues(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/agents/{user_id}/instance_values.json",
                     headers={"Authorization": auth},
@@ -7909,7 +7909,7 @@ class ZendeskListAttributeValuesForManyAgents(Tool):
             if page_after:
                 params["page[after]"] = page_after
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/agents/instance_values.json",
                     headers={"Authorization": auth},
@@ -7949,7 +7949,7 @@ class ZendeskSetAgentAttributeValues(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/routing/agents/{user_id}/instance_values.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -7989,7 +7989,7 @@ class ZendeskSetTicketAttributeValues(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/routing/tickets/{ticket_id}/instance_values.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -8031,7 +8031,7 @@ class ZendeskBulkSetAgentAttributeValuesJob(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/routing/agents/instance_values/jobs.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -8073,7 +8073,7 @@ class ZendeskListTicketsFulfilledByUser(Tool):
             ids = [x.strip() for x in ticket_ids.split(",")]
             params = [("ticket_ids[]", tid) for tid in ids]
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/requirements/fulfilled.json",
                     headers={"Authorization": auth},
@@ -8112,7 +8112,7 @@ class ZendeskListTicketAttributeValues(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/tickets/{ticket_id}/instance_values.json",
                     headers={"Authorization": auth},
@@ -8174,7 +8174,7 @@ class ZendeskCreateTrialAccount(Tool):
             if utc_offset is not None:
                 payload["utc_offset"] = utc_offset
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     "https://zendeskaccounts.zendesk.com/api/v2/accounts",
                     headers={
@@ -8215,7 +8215,7 @@ class ZendeskVerifySubdomainAvailability(Tool):
         ) -> Any:
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     "https://zendeskaccounts.zendesk.com/api/v2/accounts/available",
                     params={"subdomain": subdomain},
@@ -8256,7 +8256,7 @@ class ZendeskListResourceCollections(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/resource_collections.json",
                     headers={"Authorization": auth},
@@ -8295,7 +8295,7 @@ class ZendeskShowResourceCollection(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/resource_collections/{resource_collection_id}.json",
                     headers={"Authorization": auth},
@@ -8333,7 +8333,7 @@ class ZendeskCreateResourceCollection(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/resource_collections.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -8373,7 +8373,7 @@ class ZendeskUpdateResourceCollection(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/resource_collections/{resource_collection_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -8412,7 +8412,7 @@ class ZendeskDeleteResourceCollection(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/resource_collections/{resource_collection_id}.json",
                     headers={"Authorization": auth},
@@ -8458,7 +8458,7 @@ class ZendeskListRequests(Tool):
 
             params: dict[str, Any] = {"per_page": per_page, "page": page, "sort_by": sort_by, "sort_order": sort_order}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/requests.json",
                     headers={"Authorization": auth},
@@ -8508,7 +8508,7 @@ class ZendeskSearchRequests(Tool):
             if organization_id is not None:
                 params["organization_id"] = organization_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/requests/search.json",
                     headers={"Authorization": auth},
@@ -8547,7 +8547,7 @@ class ZendeskShowRequest(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/requests/{request_id}.json",
                     headers={"Authorization": auth},
@@ -8585,7 +8585,7 @@ class ZendeskCreateRequest(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/requests.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -8625,7 +8625,7 @@ class ZendeskUpdateRequest(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/requests/{request_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -8672,7 +8672,7 @@ class ZendeskListRequestComments(Tool):
             if since:
                 params["since"] = since
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/requests/{request_id}/comments.json",
                     headers={"Authorization": auth},
@@ -8712,7 +8712,7 @@ class ZendeskShowRequestComment(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/requests/{request_id}/comments/{ticket_comment_id}.json",
                     headers={"Authorization": auth},
@@ -8764,7 +8764,7 @@ class ZendeskListSatisfactionRatings(Tool):
             if end_time is not None:
                 params["end_time"] = end_time
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/satisfaction_ratings.json",
                     headers={"Authorization": auth},
@@ -8801,7 +8801,7 @@ class ZendeskCountSatisfactionRatings(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/satisfaction_ratings/count.json",
                     headers={"Authorization": auth},
@@ -8839,7 +8839,7 @@ class ZendeskShowSatisfactionRating(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/satisfaction_ratings/{satisfaction_rating_id}.json",
                     headers={"Authorization": auth},
@@ -8878,7 +8878,7 @@ class ZendeskCreateSatisfactionRating(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/tickets/{ticket_id}/satisfaction_rating.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -8915,7 +8915,7 @@ class ZendeskListSatisfactionReasons(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/satisfaction_reasons.json",
                     headers={"Authorization": auth},
@@ -8953,7 +8953,7 @@ class ZendeskShowSatisfactionReason(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/satisfaction_reasons/{satisfaction_reason_id}.json",
                     headers={"Authorization": auth},
@@ -8996,7 +8996,7 @@ class ZendeskChangePassword(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/password.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9036,7 +9036,7 @@ class ZendeskSetUserPassword(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/users/{user_id}/password.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9075,7 +9075,7 @@ class ZendeskListPasswordRequirements(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/{user_id}/password/requirements.json",
                     headers={"Authorization": auth},
@@ -9114,7 +9114,7 @@ class ZendeskListQueues(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/queues.json",
                     headers={"Authorization": auth},
@@ -9152,7 +9152,7 @@ class ZendeskShowQueue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/queues/{queue_id}.json",
                     headers={"Authorization": auth},
@@ -9190,7 +9190,7 @@ class ZendeskCreateQueue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/queues.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9230,7 +9230,7 @@ class ZendeskUpdateQueue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/queues/{queue_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9269,7 +9269,7 @@ class ZendeskDeleteQueue(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/queues/{queue_id}.json",
                     headers={"Authorization": auth},
@@ -9305,7 +9305,7 @@ class ZendeskListQueueDefinitions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/queues/definitions.json",
                     headers={"Authorization": auth},
@@ -9343,7 +9343,7 @@ class ZendeskReorderQueues(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{base_url}/queues/order",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9397,7 +9397,7 @@ class ZendeskGetSourcesByTarget(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/{target_type}/{target_id}/relationship_fields/{field_id}/{source_type}",
                     headers={"Authorization": auth},
@@ -9449,7 +9449,7 @@ class ZendeskListRelationshipFilterDefinitions(Tool):
             if source_type is not None:
                 params["source_type"] = source_type
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/relationships/definitions/{target_type}",
                     headers={"Authorization": auth},
@@ -9504,7 +9504,7 @@ class ZendeskListCustomObjectRecords(Tool):
             if page_after:
                 params["page[after]"] = page_after
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects/{custom_object_key}/records.json",
                     headers={"Authorization": auth},
@@ -9544,7 +9544,7 @@ class ZendeskShowCustomObjectRecord(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects/{custom_object_key}/records/{custom_object_record_id}.json",
                     headers={"Authorization": auth},
@@ -9583,7 +9583,7 @@ class ZendeskCreateCustomObjectRecord(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/custom_objects/{custom_object_key}/records.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9624,7 +9624,7 @@ class ZendeskUpdateCustomObjectRecord(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{base_url}/custom_objects/{custom_object_key}/records/{custom_object_record_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9664,7 +9664,7 @@ class ZendeskDeleteCustomObjectRecord(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/custom_objects/{custom_object_key}/records/{custom_object_record_id}.json",
                     headers={"Authorization": auth},
@@ -9704,7 +9704,7 @@ class ZendeskSetCustomObjectRecordByExternalId(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{base_url}/custom_objects/{custom_object_key}/records.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -9745,7 +9745,7 @@ class ZendeskDeleteCustomObjectRecordByExternalId(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/custom_objects/{custom_object_key}/records.json",
                     headers={"Authorization": auth},
@@ -9794,7 +9794,7 @@ class ZendeskSearchCustomObjectRecords(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects/{custom_object_key}/records/search.json",
                     headers={"Authorization": auth},
@@ -9833,7 +9833,7 @@ class ZendeskCountCustomObjectRecords(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects/{custom_object_key}/records/count.json",
                     headers={"Authorization": auth},
@@ -9878,7 +9878,7 @@ class ZendeskAutocompleteCustomObjectRecords(Tool):
             if page_after:
                 params["page[after]"] = page_after
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects/{custom_object_key}/records/autocomplete.json",
                     headers={"Authorization": auth},
@@ -9924,7 +9924,7 @@ class ZendeskListBrands(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/brands.json",
                     headers={"Authorization": auth},
@@ -9963,7 +9963,7 @@ class ZendeskShowBrand(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/brands/{brand_id}.json",
                     headers={"Authorization": auth},
@@ -10004,7 +10004,7 @@ class ZendeskCreateBrand(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/brands.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10044,7 +10044,7 @@ class ZendeskUpdateBrand(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/brands/{brand_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10083,7 +10083,7 @@ class ZendeskDeleteBrand(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/brands/{brand_id}.json",
                     headers={"Authorization": auth},
@@ -10122,7 +10122,7 @@ class ZendeskCheckHostMappingValidity(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/brands/check_host_mapping.json",
                     headers={"Authorization": auth},
@@ -10161,7 +10161,7 @@ class ZendeskCheckHostMappingValidityForExistingBrand(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/brands/{brand_id}/check_host_mapping.json",
                     headers={"Authorization": auth},
@@ -10209,7 +10209,7 @@ class ZendeskListOrganizations(Tool):
             if sort is not None:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations.json",
                     headers={"Authorization": auth},
@@ -10248,7 +10248,7 @@ class ZendeskShowOrganization(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations/{organization_id}.json",
                     headers={"Authorization": auth},
@@ -10293,7 +10293,7 @@ class ZendeskShowManyOrganizations(Tool):
             if external_ids is not None:
                 params["external_ids"] = external_ids
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations/show_many.json",
                     headers={"Authorization": auth},
@@ -10339,7 +10339,7 @@ class ZendeskSearchOrganizations(Tool):
             if external_id is not None:
                 params["external_id"] = external_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations/search.json",
                     headers={"Authorization": auth},
@@ -10378,7 +10378,7 @@ class ZendeskShowOrganizationRelatedInformation(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations/{organization_id}/related.json",
                     headers={"Authorization": auth},
@@ -10416,7 +10416,7 @@ class ZendeskCreateOrganization(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organizations.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10455,7 +10455,7 @@ class ZendeskCreateManyOrganizations(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organizations/create_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10497,7 +10497,7 @@ class ZendeskCreateOrUpdateOrganization(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organizations/create_or_update.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10537,7 +10537,7 @@ class ZendeskUpdateOrganization(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/organizations/{organization_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10591,7 +10591,7 @@ class ZendeskUpdateManyOrganizations(Tool):
             if organizations is not None:
                 payload["organizations"] = organizations
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/organizations/update_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10631,7 +10631,7 @@ class ZendeskDeleteOrganization(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/organizations/{organization_id}.json",
                     headers={"Authorization": auth},
@@ -10676,7 +10676,7 @@ class ZendeskBulkDeleteOrganizations(Tool):
             if external_ids is not None:
                 params["external_ids"] = external_ids
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/organizations/destroy_many.json",
                     headers={"Authorization": auth},
@@ -10713,7 +10713,7 @@ class ZendeskCountOrganizations(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations/count.json",
                     headers={"Authorization": auth},
@@ -10759,7 +10759,7 @@ class ZendeskAutocompleteOrganizations(Tool):
             if source is not None:
                 params["source"] = source
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organizations/autocomplete.json",
                     headers={"Authorization": auth},
@@ -10799,7 +10799,7 @@ class ZendeskMergeOrganizationWithAnotherOrganization(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organizations/{organization_id}/merge.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -10838,7 +10838,7 @@ class ZendeskShowOrganizationMerge(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organization_merges/{organization_merge_id}.json",
                     headers={"Authorization": auth},
@@ -10874,7 +10874,7 @@ class ZendeskListOrganizationMerges(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organization_merges.json",
                     headers={"Authorization": auth},
@@ -10913,7 +10913,7 @@ class ZendeskListCustomObjects(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects.json",
                     headers={"Authorization": auth},
@@ -10951,7 +10951,7 @@ class ZendeskShowCustomObject(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects/{custom_object_key}.json",
                     headers={"Authorization": auth},
@@ -10989,7 +10989,7 @@ class ZendeskCreateCustomObject(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/custom_objects.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -11029,7 +11029,7 @@ class ZendeskUpdateCustomObject(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/custom_objects/{custom_object_key}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -11068,7 +11068,7 @@ class ZendeskDeleteCustomObject(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/custom_objects/{custom_object_key}.json",
                     headers={"Authorization": auth},
@@ -11104,7 +11104,7 @@ class ZendeskCustomObjectsLimit(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/custom_objects/limit.json",
                     headers={"Authorization": auth},
@@ -11143,7 +11143,7 @@ class ZendeskListOauthClients(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/oauth/clients.json",
                     headers={"Authorization": auth},
@@ -11179,7 +11179,7 @@ class ZendeskListGlobalOauthClients(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/oauth/global_clients.json",
                     headers={"Authorization": auth},
@@ -11217,7 +11217,7 @@ class ZendeskShowOauthClient(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/oauth/clients/{oauth_client_id}.json",
                     headers={"Authorization": auth},
@@ -11258,7 +11258,7 @@ class ZendeskCreateOauthClient(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/oauth/clients.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -11298,7 +11298,7 @@ class ZendeskUpdateOauthClient(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/oauth/clients/{oauth_client_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -11337,7 +11337,7 @@ class ZendeskDeleteOauthClient(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/oauth/clients/{oauth_client_id}.json",
                     headers={"Authorization": auth},
@@ -11375,7 +11375,7 @@ class ZendeskGenerateOauthClientSecret(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/oauth/clients/{oauth_client_id}/generate_secret.json",
                     headers={"Authorization": auth},
@@ -11423,7 +11423,7 @@ class ZendeskListOauthTokens(Tool):
             if global_client_id is not None:
                 params["global_client_id"] = global_client_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/oauth/tokens.json",
                     headers={"Authorization": auth},
@@ -11462,7 +11462,7 @@ class ZendeskShowOauthToken(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/oauth/tokens/{oauth_token_id}.json",
                     headers={"Authorization": auth},
@@ -11503,7 +11503,7 @@ class ZendeskCreateOauthToken(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/oauth/tokens.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -11542,7 +11542,7 @@ class ZendeskRevokeOauthToken(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/oauth/tokens/{oauth_token_id}.json",
                     headers={"Authorization": auth},
@@ -11614,7 +11614,7 @@ class ZendeskCreateTokenForGrantType(Tool):
             if refresh_token_expires_in is not None:
                 payload["refresh_token_expires_in"] = refresh_token_expires_in
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{oauth_base}/oauth/tokens",
                     headers={"Content-Type": "application/json"},
@@ -11664,7 +11664,7 @@ class ZendeskShowTicketMetrics(Tool):
             else:
                 raise ValueError("Provide ticket_id or ticket_metric_id")
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth})
                 response.raise_for_status()
                 return response.json()
@@ -11696,7 +11696,7 @@ class ZendeskListTicketMetrics(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_metrics.json",
                     headers={"Authorization": auth},
@@ -11752,7 +11752,7 @@ class ZendeskListEmailNotifications(Tool):
             if per_page is not None:
                 params["per_page"] = per_page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/email_notifications.json",
                     headers={"Authorization": auth},
@@ -11791,7 +11791,7 @@ class ZendeskShowEmailNotification(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/email_notifications/{email_notification_id}.json",
                     headers={"Authorization": auth},
@@ -11829,7 +11829,7 @@ class ZendeskShowManyEmailNotifications(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/email_notifications/show_many.json",
                     headers={"Authorization": auth},
@@ -11887,7 +11887,7 @@ class ZendeskListMacros(Tool):
             if per_page is not None:
                 params["per_page"] = per_page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros.json",
                     headers={"Authorization": auth},
@@ -11924,7 +11924,7 @@ class ZendeskListActiveMacros(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/active.json",
                     headers={"Authorization": auth},
@@ -11962,7 +11962,7 @@ class ZendeskShowMacro(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/{macro_id}.json",
                     headers={"Authorization": auth},
@@ -12000,7 +12000,7 @@ class ZendeskCreateMacro(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/macros.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -12040,7 +12040,7 @@ class ZendeskUpdateMacro(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/macros/{macro_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -12079,7 +12079,7 @@ class ZendeskUpdateManyMacros(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/macros/update_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -12118,7 +12118,7 @@ class ZendeskDeleteMacro(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/macros/{macro_id}.json",
                     headers={"Authorization": auth},
@@ -12156,7 +12156,7 @@ class ZendeskBulkDeleteMacros(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/macros/destroy_many.json",
                     headers={"Authorization": auth},
@@ -12200,7 +12200,7 @@ class ZendeskSearchMacros(Tool):
             if active is not None:
                 params["active"] = str(active).lower()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/search.json",
                     headers={"Authorization": auth},
@@ -12237,7 +12237,7 @@ class ZendeskListMacroCategories(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/categories.json",
                     headers={"Authorization": auth},
@@ -12273,7 +12273,7 @@ class ZendeskListMacroActionDefinitions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/definitions.json",
                     headers={"Authorization": auth},
@@ -12309,7 +12309,7 @@ class ZendeskListSupportedActionsForMacros(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/actions.json",
                     headers={"Authorization": auth},
@@ -12347,7 +12347,7 @@ class ZendeskListMacroAttachments(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/{macro_id}/attachments.json",
                     headers={"Authorization": auth},
@@ -12385,7 +12385,7 @@ class ZendeskShowMacroAttachment(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/attachments/{attachment_id}.json",
                     headers={"Authorization": auth},
@@ -12432,7 +12432,7 @@ class ZendeskShowMacroReplica(Tool):
             if ticket_id is not None:
                 params["ticket_id"] = ticket_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/new.json",
                     headers={"Authorization": auth},
@@ -12471,7 +12471,7 @@ class ZendeskShowChangesToTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/macros/{macro_id}/apply.json",
                     headers={"Authorization": auth},
@@ -12510,7 +12510,7 @@ class ZendeskShowTicketAfterChanges(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/macros/{macro_id}/apply.json",
                     headers={"Authorization": auth},
@@ -12553,7 +12553,7 @@ class ZendeskListTicketMetricEvents(Tool):
             if include_changes:
                 params["include_changes"] = "true"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/ticket_metric_events.json",
                     headers={"Authorization": auth},
@@ -12600,7 +12600,7 @@ class ZendeskListGroupMemberships(Tool):
             else:
                 url = f"{base_url}/group_memberships.json"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth})
                 response.raise_for_status()
                 return response.json()
@@ -12634,7 +12634,7 @@ class ZendeskShowGroupMembership(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/group_memberships/{group_membership_id}.json",
                     headers={"Authorization": auth},
@@ -12674,7 +12674,7 @@ class ZendeskCreateGroupMembership(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/group_memberships.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -12713,7 +12713,7 @@ class ZendeskDeleteGroupMembership(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/group_memberships/{group_membership_id}.json",
                     headers={"Authorization": auth},
@@ -12749,7 +12749,7 @@ class ZendeskListAssignableMemberships(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/group_memberships/assignable.json",
                     headers={"Authorization": auth},
@@ -12788,7 +12788,7 @@ class ZendeskSetGroupMembershipAsDefault(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/group_memberships/{group_membership_id}/make_default.json",
                     headers={"Authorization": auth},
@@ -12837,7 +12837,7 @@ class ZendeskListOrganizationMemberships(Tool):
             else:
                 url = f"{base_url}/organization_memberships.json"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth})
                 response.raise_for_status()
                 return response.json()
@@ -12871,7 +12871,7 @@ class ZendeskShowOrganizationMembership(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organization_memberships/{organization_membership_id}.json",
                     headers={"Authorization": auth},
@@ -12910,7 +12910,7 @@ class ZendeskCreateOrganizationMembership(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organization_memberships.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -12952,7 +12952,7 @@ class ZendeskCreateManyMemberships(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organization_memberships/create_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -12991,7 +12991,7 @@ class ZendeskDeleteOrganizationMembership(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/organization_memberships/{organization_membership_id}.json",
                     headers={"Authorization": auth},
@@ -13030,7 +13030,7 @@ class ZendeskSetOrganizationMembershipAsDefault(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/organization_memberships/{organization_membership_id}/make_default.json",
                     headers={"Authorization": auth},
@@ -13069,7 +13069,7 @@ class ZendeskSetOrganizationAsDefault(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/organizations/{organization_id}/make_default.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13108,7 +13108,7 @@ class ZendeskBulkDeleteGroupMemberships(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/group_memberships/destroy_many.json",
                     headers={"Authorization": auth},
@@ -13150,7 +13150,7 @@ class ZendeskBulkCreateMemberships(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/group_memberships/create_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13189,7 +13189,7 @@ class ZendeskBulkDeleteOrganizationMemberships(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/organization_memberships/destroy_many.json",
                     headers={"Authorization": auth},
@@ -13228,7 +13228,7 @@ class ZendeskUnassignOrganization(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/organization_memberships/{organization_membership_id}.json",
                     headers={"Authorization": auth},
@@ -13269,7 +13269,7 @@ class ZendeskListIdentities(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/{user_id}/identities.json",
                     headers={"Authorization": auth},
@@ -13308,7 +13308,7 @@ class ZendeskShowIdentity(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/users/{user_id}/identities/{identity_id}.json",
                     headers={"Authorization": auth},
@@ -13356,7 +13356,7 @@ class ZendeskCreateIdentity(Tool):
             if skip_verify_email:
                 identity["skip_verify_email"] = True
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/users/{user_id}/identities.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13409,7 +13409,7 @@ class ZendeskUpdateIdentity(Tool):
             if not identity:
                 raise ValueError("At least one of value, verification_method, or verified must be provided")
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/identities/{identity_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13449,7 +13449,7 @@ class ZendeskMakeIdentityPrimary(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/identities/{identity_id}/make_primary",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13489,7 +13489,7 @@ class ZendeskRequestUserVerification(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/identities/{identity_id}/request_verification",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13529,7 +13529,7 @@ class ZendeskVerifyIdentity(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/users/{user_id}/identities/{identity_id}/verify",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13569,7 +13569,7 @@ class ZendeskDeleteIdentity(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/users/{user_id}/identities/{identity_id}.json",
                     headers={"Authorization": auth},
@@ -13615,7 +13615,7 @@ class ZendeskTicketImport(Tool):
             if archive_immediately:
                 params["archive_immediately"] = "true"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/imports/tickets.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13660,7 +13660,7 @@ class ZendeskTicketBulkImport(Tool):
             if archive_immediately:
                 params["archive_immediately"] = "true"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/imports/tickets/create_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13701,7 +13701,7 @@ class ZendeskListLocales(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/locales.json",
                     headers={"Authorization": auth},
@@ -13737,7 +13737,7 @@ class ZendeskListLocalesForAgent(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/locales/agent.json",
                     headers={"Authorization": auth},
@@ -13773,7 +13773,7 @@ class ZendeskListAvailablePublicLocales(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/locales/public.json",
                     headers={"Authorization": auth},
@@ -13809,7 +13809,7 @@ class ZendeskShowCurrentLocale(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/locales/current.json",
                     headers={"Authorization": auth},
@@ -13847,7 +13847,7 @@ class ZendeskShowLocale(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/locales/{locale_id}.json",
                     headers={"Authorization": auth},
@@ -13885,7 +13885,7 @@ class ZendeskDetectBestLanguageForUser(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/locales/detect_best_locale.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -13936,7 +13936,7 @@ class ZendeskIncrementalTicketExportCursor(Tool):
             else:
                 raise ValueError("Either start_time or cursor must be provided")
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/tickets/cursor.json",
                     headers={"Authorization": auth},
@@ -13980,7 +13980,7 @@ class ZendeskIncrementalTicketExportTimeBased(Tool):
             if per_page is not None:
                 params["per_page"] = per_page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/tickets.json",
                     headers={"Authorization": auth},
@@ -14027,7 +14027,7 @@ class ZendeskIncrementalTicketEventExport(Tool):
             if include:
                 params["include"] = include
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/ticket_events.json",
                     headers={"Authorization": auth},
@@ -14078,7 +14078,7 @@ class ZendeskIncrementalUserExportCursor(Tool):
             if per_page is not None:
                 params["per_page"] = per_page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/users/cursor.json",
                     headers={"Authorization": auth},
@@ -14122,7 +14122,7 @@ class ZendeskIncrementalUserExportTimeBased(Tool):
             if per_page is not None:
                 params["per_page"] = per_page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/users.json",
                     headers={"Authorization": auth},
@@ -14166,7 +14166,7 @@ class ZendeskIncrementalOrganizationExport(Tool):
             if per_page is not None:
                 params["per_page"] = per_page
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/organizations.json",
                     headers={"Authorization": auth},
@@ -14206,7 +14206,7 @@ class ZendeskIncrementalSampleExport(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/incremental/{resource}/sample.json",
                     headers={"Authorization": auth},
@@ -14246,7 +14246,7 @@ class ZendeskCountTicketFields(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_fields/count.json",
                     headers={"Authorization": auth},
@@ -14282,7 +14282,7 @@ class ZendeskListTicketFields(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_fields.json",
                     headers={"Authorization": auth},
@@ -14320,7 +14320,7 @@ class ZendeskShowTicketField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_fields/{ticket_field_id}.json",
                     headers={"Authorization": auth},
@@ -14358,7 +14358,7 @@ class ZendeskCreateTicketField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/ticket_fields.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14398,7 +14398,7 @@ class ZendeskUpdateTicketField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/ticket_fields/{ticket_field_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14437,7 +14437,7 @@ class ZendeskDeleteTicketField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/ticket_fields/{ticket_field_id}.json",
                     headers={"Authorization": auth},
@@ -14475,7 +14475,7 @@ class ZendeskReorderTicketFields(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/ticket_fields/reorder.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14514,7 +14514,7 @@ class ZendeskListTicketFieldOptions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_fields/{ticket_field_id}/options.json",
                     headers={"Authorization": auth},
@@ -14553,7 +14553,7 @@ class ZendeskShowTicketFieldOption(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_fields/{ticket_field_id}/options/{option_id}.json",
                     headers={"Authorization": auth},
@@ -14592,7 +14592,7 @@ class ZendeskCreateOrUpdateTicketFieldOption(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/ticket_fields/{ticket_field_id}/options.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14632,7 +14632,7 @@ class ZendeskDeleteTicketFieldOption(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/ticket_fields/{ticket_field_id}/options/{option_id}.json",
                     headers={"Authorization": auth},
@@ -14671,7 +14671,7 @@ class ZendeskListTicketForms(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_forms.json",
                     headers={"Authorization": auth},
@@ -14709,7 +14709,7 @@ class ZendeskShowTicketForm(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_forms/{ticket_form_id}.json",
                     headers={"Authorization": auth},
@@ -14747,7 +14747,7 @@ class ZendeskShowManyTicketForms(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_forms/show_many.json",
                     headers={"Authorization": auth},
@@ -14786,7 +14786,7 @@ class ZendeskCreateTicketForm(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/ticket_forms.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14826,7 +14826,7 @@ class ZendeskUpdateTicketForm(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/ticket_forms/{ticket_form_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14865,7 +14865,7 @@ class ZendeskDeleteTicketForm(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/ticket_forms/{ticket_form_id}.json",
                     headers={"Authorization": auth},
@@ -14904,7 +14904,7 @@ class ZendeskCloneTicketForm(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/ticket_forms/{ticket_form_id}/clone.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14943,7 +14943,7 @@ class ZendeskReorderTicketForms(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/ticket_forms/reorder.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -14982,7 +14982,7 @@ class ZendeskListTicketFormStatuses(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_forms/{ticket_form_id}/ticket_form_statuses.json",
                     headers={"Authorization": auth},
@@ -15021,7 +15021,7 @@ class ZendeskCreateTicketFormStatuses(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/ticket_forms/{ticket_form_id}/ticket_form_statuses.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15064,7 +15064,7 @@ class ZendeskBulkUpdateTicketFormStatuses(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/ticket_forms/{ticket_form_id}/ticket_form_statuses.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15104,7 +15104,7 @@ class ZendeskListUserFields(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/user_fields.json",
                     headers={"Authorization": auth},
@@ -15142,7 +15142,7 @@ class ZendeskShowUserField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/user_fields/{user_field_id}.json",
                     headers={"Authorization": auth},
@@ -15180,7 +15180,7 @@ class ZendeskCreateUserField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/user_fields.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15220,7 +15220,7 @@ class ZendeskUpdateUserField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/user_fields/{user_field_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15259,7 +15259,7 @@ class ZendeskDeleteUserField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/user_fields/{user_field_id}.json",
                     headers={"Authorization": auth},
@@ -15297,7 +15297,7 @@ class ZendeskReorderUserField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/user_fields/reorder.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15336,7 +15336,7 @@ class ZendeskListUserFieldOptions(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/user_fields/{user_field_id}/options.json",
                     headers={"Authorization": auth},
@@ -15375,7 +15375,7 @@ class ZendeskShowUserFieldOption(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/user_fields/{user_field_id}/options/{option_id}.json",
                     headers={"Authorization": auth},
@@ -15414,7 +15414,7 @@ class ZendeskCreateOrUpdateUserFieldOption(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/user_fields/{user_field_id}/options.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15454,7 +15454,7 @@ class ZendeskDeleteUserFieldOption(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/user_fields/{user_field_id}/options/{option_id}.json",
                     headers={"Authorization": auth},
@@ -15493,7 +15493,7 @@ class ZendeskListOrganizationFields(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organization_fields.json",
                     headers={"Authorization": auth},
@@ -15531,7 +15531,7 @@ class ZendeskShowOrganizationField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/organization_fields/{organization_field_id}.json",
                     headers={"Authorization": auth},
@@ -15569,7 +15569,7 @@ class ZendeskCreateOrganizationField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/organization_fields.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15609,7 +15609,7 @@ class ZendeskUpdateOrganizationField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/organization_fields/{organization_field_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15648,7 +15648,7 @@ class ZendeskDeleteOrganizationField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/organization_fields/{organization_field_id}.json",
                     headers={"Authorization": auth},
@@ -15686,7 +15686,7 @@ class ZendeskReorderOrganizationField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/organization_fields/reorder.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15733,7 +15733,7 @@ class ZendeskListDynamicContentItems(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/dynamic_content/items.json",
                     headers={"Authorization": auth},
@@ -15772,7 +15772,7 @@ class ZendeskShowDynamicContentItem(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}.json",
                     headers={"Authorization": auth},
@@ -15810,7 +15810,7 @@ class ZendeskShowManyDynamicContentItems(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/dynamic_content/items/show_many.json",
                     headers={"Authorization": auth},
@@ -15852,7 +15852,7 @@ class ZendeskCreateDynamicContentItem(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/dynamic_content/items.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15892,7 +15892,7 @@ class ZendeskUpdateDynamicContentItem(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -15931,7 +15931,7 @@ class ZendeskDeleteDynamicContentItem(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}.json",
                     headers={"Authorization": auth},
@@ -15975,7 +15975,7 @@ class ZendeskListDynamicContentVariants(Tool):
             if sort:
                 params["sort"] = sort
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}/variants.json",
                     headers={"Authorization": auth},
@@ -16015,7 +16015,7 @@ class ZendeskShowDynamicContentVariant(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}/variants/{dynamic_content_variant_id}.json",
                     headers={"Authorization": auth},
@@ -16057,7 +16057,7 @@ class ZendeskCreateDynamicContentVariant(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}/variants.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16100,7 +16100,7 @@ class ZendeskCreateManyDynamicContentVariants(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}/variants/create_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16141,7 +16141,7 @@ class ZendeskUpdateDynamicContentVariant(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}/variants/{dynamic_content_variant_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16184,7 +16184,7 @@ class ZendeskUpdateManyDynamicContentVariants(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}/variants/update_many.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16224,7 +16224,7 @@ class ZendeskDeleteDynamicContentVariant(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/dynamic_content/items/{dynamic_content_item_id}/variants/{dynamic_content_variant_id}.json",
                     headers={"Authorization": auth},
@@ -16273,7 +16273,7 @@ class ZendeskCreateTicketOrVoicemailTicket(Tool):
             if display_to_agent is not None:
                 body["display_to_agent"] = display_to_agent
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/channels/voice/tickets.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16313,7 +16313,7 @@ class ZendeskOpenUserProfileInAgentWorkspace(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/channels/voice/agents/{agent_id}/users/{user_id}/display.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16352,7 +16352,7 @@ class ZendeskOpenTicketInAgentBrowser(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/channels/voice/agents/{agent_id}/tickets/{ticket_id}/display.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16391,7 +16391,7 @@ class ZendeskListMonitoredXHandles(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/channels/twitter/monitored_twitter_handles.json",
                     headers={"Authorization": auth},
@@ -16429,7 +16429,7 @@ class ZendeskShowMonitoredXHandle(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/channels/twitter/monitored_twitter_handles/{monitored_twitter_handle_id}.json",
                     headers={"Authorization": auth},
@@ -16468,7 +16468,7 @@ class ZendeskCreateTicketFromTweet(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/channels/twitter/tickets.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16517,7 +16517,7 @@ class ZendeskListTicketStatuses(Tool):
             if ids:
                 params["ids"] = ids
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/channels/twitter/tickets/{comment_id}/statuses.json",
                     headers={"Authorization": auth},
@@ -16568,7 +16568,7 @@ class ZendeskPushContentToSupport(Tool):
             if request_id:
                 body["request_id"] = request_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/any_channel/push.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16612,7 +16612,7 @@ class ZendeskValidateToken(Tool):
             if request_id:
                 body["request_id"] = request_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/any_channel/validate_token.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16663,7 +16663,7 @@ class ZendeskReportChannelbackErrorToZendesk(Tool):
             if request_id:
                 body["request_id"] = request_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/any_channel/channelback/report_error.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16703,7 +16703,7 @@ class ZendeskReorderGroupSlaPolicies(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/groups/{group_id}/slas/policies/reorder.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16748,7 +16748,7 @@ class ZendeskChangeCommentFromPublicToPrivate(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/{ticket_id}/audits/{ticket_audit_id}/make_private",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16787,7 +16787,7 @@ class ZendeskCountAuditsForTicket(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/audits/count.json",
                     headers={"Authorization": auth},
@@ -16838,7 +16838,7 @@ class ZendeskExportAuditLogs(Tool):
             if filter_source_id is not None:
                 params["filter[source_id]"] = filter_source_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/audit_logs/export",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -16885,7 +16885,7 @@ class ZendeskListAllTicketAudits(Tool):
             elif page_before:
                 params["page[before]"] = page_before
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/ticket_audits",
                     headers={"Authorization": auth},
@@ -16941,7 +16941,7 @@ class ZendeskListAuditLogs(Tool):
             if filter_source_id is not None:
                 params["filter[source_id]"] = filter_source_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/audit_logs",
                     headers={"Authorization": auth},
@@ -16985,7 +16985,7 @@ class ZendeskListAuditsForTicket(Tool):
 
             params = {"per_page": per_page, "page": page, "sort_order": sort_order}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/audits.json",
                     headers={"Authorization": auth},
@@ -17025,7 +17025,7 @@ class ZendeskShowAudit(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/tickets/{ticket_id}/audits/{ticket_audit_id}.json",
                     headers={"Authorization": auth},
@@ -17063,7 +17063,7 @@ class ZendeskShowAuditLog(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/audit_logs/{audit_log_id}.json",
                     headers={"Authorization": auth},
@@ -17111,7 +17111,7 @@ class ZendeskSearchArticles(Tool):
             if locale:
                 params["locale"] = locale
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/help_center/articles/search.json",
                     headers={"Authorization": auth},
@@ -17153,7 +17153,7 @@ class ZendeskDeleteUpload(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/uploads/{token}",
                     headers={"Authorization": auth},
@@ -17193,7 +17193,7 @@ class ZendeskRedactCommentAttachment(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/tickets/{ticket_id}/comments/{ticket_comment_id}/redact.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -17232,7 +17232,7 @@ class ZendeskShowAttachment(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/attachments/{attachment_id}.json",
                     headers={"Authorization": auth},
@@ -17271,7 +17271,7 @@ class ZendeskUpdateAttachmentForMalware(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/attachments/{attachment_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -17315,7 +17315,7 @@ class ZendeskUploadFiles(Tool):
 
             content = b64.b64decode(file_content_base64)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/uploads.json",
                     headers={
@@ -17375,7 +17375,7 @@ class ZendeskCreateApprovalRequest(Tool):
             if message:
                 body_data["message"] = message
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/approval_requests",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -17415,7 +17415,7 @@ class ZendeskCreateApprovalWorkflowInstance(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/approval_workflow_instances.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -17459,7 +17459,7 @@ class ZendeskGetApprovalsByApprovalWorkflowId(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/approval_workflows/{approval_workflow_id}/approvals.json",
                     headers={"Authorization": auth},
@@ -17497,7 +17497,7 @@ class ZendeskShowApprovalRequest(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/approval_requests/{approval_request_id}.json",
                     headers={"Authorization": auth},
@@ -17536,7 +17536,7 @@ class ZendeskUpdateApprovalRequestStatus(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/approval_requests/{approval_request_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -17578,7 +17578,7 @@ class ZendeskListAssignableAgentsFromGroup(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups/{group_id}.json",
                     headers={"Authorization": auth},
@@ -17617,7 +17617,7 @@ class ZendeskListAssignableGroupsAndAgentsBasedOnSkill(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/routing/attributes/skills/{skill_id}/assignable_groups.json",
                     headers={"Authorization": auth},
@@ -17653,7 +17653,7 @@ class ZendeskListAssignableGroupsOnAssigneeField(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/groups/assignable.json",
                     headers={"Authorization": auth},
@@ -17695,7 +17695,7 @@ class ZendeskListBrandAgentMemberships(Tool):
 
             params = {"per_page": per_page, "page": page, "sort": sort}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/brand_agents.json",
                     headers={"Authorization": auth},
@@ -17734,7 +17734,7 @@ class ZendeskShowBrandAgentMembership(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/brand_agents/{brand_agent_id}.json",
                     headers={"Authorization": auth},
@@ -17782,7 +17782,7 @@ class ZendeskCreateSupportAddress(Tool):
             if brand_id is not None:
                 address_data["brand_id"] = brand_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base_url}/recipient_addresses.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -17821,7 +17821,7 @@ class ZendeskDeleteSupportAddress(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{base_url}/recipient_addresses/{support_address_id}.json",
                     headers={"Authorization": auth},
@@ -17863,7 +17863,7 @@ class ZendeskListSupportAddresses(Tool):
 
             params = {"per_page": per_page, "page": page, "sort": sort}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/recipient_addresses.json",
                     headers={"Authorization": auth},
@@ -17902,7 +17902,7 @@ class ZendeskShowSupportAddress(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/recipient_addresses/{support_address_id}.json",
                     headers={"Authorization": auth},
@@ -17951,7 +17951,7 @@ class ZendeskUpdateSupportAddress(Tool):
             if brand_id is not None:
                 address_data["brand_id"] = brand_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/recipient_addresses/{support_address_id}.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -17990,7 +17990,7 @@ class ZendeskVerifySupportAddressForwarding(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/recipient_addresses/{support_address_id}/verify_forwarding.json",
                     headers={"Authorization": auth},
@@ -18029,7 +18029,7 @@ class ZendeskShowSettings(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/account/settings.json",
                     headers={"Authorization": auth},
@@ -18067,7 +18067,7 @@ class ZendeskUpdateAccountSettings(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{base_url}/account/settings.json",
                     headers={"Authorization": auth, "Content-Type": "application/json"},
@@ -18107,7 +18107,7 @@ class ZendeskCountActivities(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/activities/count.json",
                     headers={"Authorization": auth},
@@ -18152,7 +18152,7 @@ class ZendeskListActivities(Tool):
             if since:
                 params["since"] = since
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/activities.json",
                     headers={"Authorization": auth},
@@ -18191,7 +18191,7 @@ class ZendeskShowActivity(Tool):
             base_url, auth = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{base_url}/activities/{activity_id}.json",
                     headers={"Authorization": auth},

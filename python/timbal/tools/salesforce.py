@@ -73,7 +73,7 @@ class SalesforceCreateCase(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Case/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -136,7 +136,7 @@ class SalesforceUpdateCase(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Case/{case_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -170,7 +170,7 @@ class SalesforceDeleteCase(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     _sf(instance_url, f"sobjects/Case/{case_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -205,7 +205,7 @@ class SalesforceCreateComment(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/CaseComment/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -247,7 +247,7 @@ class SalesforceUpdateComment(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/CaseComment/{comment_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -281,7 +281,7 @@ class SalesforceDeleteComment(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     _sf(instance_url, f"sobjects/CaseComment/{comment_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -340,7 +340,7 @@ class SalesforceCreateContact(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Contact/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -403,7 +403,7 @@ class SalesforceUpdateContact(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Contact/{contact_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -437,7 +437,7 @@ class SalesforceDeleteContact(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     _sf(instance_url, f"sobjects/Contact/{contact_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -505,7 +505,7 @@ class SalesforceCreateLead(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Lead/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -544,7 +544,7 @@ class SalesforceGetLead(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -609,7 +609,7 @@ class SalesforceUpdateLead(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Lead/{lead_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -643,7 +643,7 @@ class SalesforceDeleteLead(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     _sf(instance_url, f"sobjects/Lead/{lead_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -681,7 +681,7 @@ class SalesforceSearchLeads(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     _sf(instance_url, "search/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -741,7 +741,7 @@ class SalesforceCreateOpportunity(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Opportunity/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -801,7 +801,7 @@ class SalesforceUpdateOpportunity(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Opportunity/{opportunity_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -835,7 +835,7 @@ class SalesforceDeleteOpportunity(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     _sf(instance_url, f"sobjects/Opportunity/{opportunity_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -890,7 +890,7 @@ class SalesforceCreateTask(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Task/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -929,7 +929,7 @@ class SalesforceGetTask(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -982,7 +982,7 @@ class SalesforceUpdateTask(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Task/{task_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -1016,7 +1016,7 @@ class SalesforceDeleteTask(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     _sf(instance_url, f"sobjects/Task/{task_id}"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -1054,7 +1054,7 @@ class SalesforceSearchTasks(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     _sf(instance_url, "search/"),
                     headers={"Authorization": f"Bearer {token}"},
@@ -1091,7 +1091,7 @@ class SalesforceQuery(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     _sf(instance_url, endpoint),
                     headers={"Authorization": f"Bearer {token}"},
@@ -1126,7 +1126,7 @@ class SalesforceCreateRecord(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _sf(instance_url, f"sobjects/{object_type}/"),
                     headers={"Authorization": f"Bearer {token}"},

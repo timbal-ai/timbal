@@ -44,7 +44,7 @@ class GoogleSheetsCreateSheet(Tool):
             if sheet_names:
                 body["sheets"] = [{"properties": {"title": name}} for name in sheet_names]
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _SHEETS_BASE,
                     headers={"Authorization": f"Bearer {token}"},
@@ -73,7 +73,7 @@ class GoogleSheetsGetSpreadsheetInfo(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_SHEETS_BASE}/{spreadsheet_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -102,7 +102,7 @@ class GoogleSheetsGetSheetNames(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_SHEETS_BASE}/{spreadsheet_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -141,7 +141,7 @@ class GoogleSheetsBatchGet(Tool):
             query.append(("majorDimension", major_dimension))
             query.append(("valueRenderOption", value_render_option))
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_SHEETS_BASE}/{spreadsheet_id}/values:batchGet",
                     headers={"Authorization": f"Bearer {token}"},
@@ -176,7 +176,7 @@ class GoogleSheetsBatchUpdate(Tool):
 
             body = {"valueInputOption": value_input_option, "data": data}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_SHEETS_BASE}/{spreadsheet_id}/values:batchUpdate",
                     headers={"Authorization": f"Bearer {token}"},
@@ -213,7 +213,7 @@ class GoogleSheetsAppendValues(Tool):
 
             body = {"values": values}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_SHEETS_BASE}/{spreadsheet_id}/values/{range}:append",
                     headers={"Authorization": f"Bearer {token}"},
@@ -251,7 +251,7 @@ class GoogleSheetsLookupRow(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_SHEETS_BASE}/{spreadsheet_id}/values/{range}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -290,7 +290,7 @@ class GoogleSheetsClearValues(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_SHEETS_BASE}/{spreadsheet_id}/values/{range}:clear",
                     headers={"Authorization": f"Bearer {token}"},
@@ -324,7 +324,7 @@ class GoogleSheetsCopySheet(Tool):
 
             body = {"destinationSpreadsheetId": destination_spreadsheet_id}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_SHEETS_BASE}/{source_spreadsheet_id}/sheets/{sheet_id}:copyTo",
                     headers={"Authorization": f"Bearer {token}"},
@@ -368,7 +368,7 @@ class GoogleSheetsAddSheet(Tool):
 
             body = {"requests": [{"addSheet": {"properties": sheet_properties}}]}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_SHEETS_BASE}/{spreadsheet_id}:batchUpdate",
                     headers={"Authorization": f"Bearer {token}"},
@@ -415,7 +415,7 @@ class GoogleSheetsShareSpreadsheet(Tool):
             if email_message:
                 params["emailMessage"] = email_message
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DRIVE_BASE}/files/{spreadsheet_id}/permissions",
                     headers={"Authorization": f"Bearer {token}"},

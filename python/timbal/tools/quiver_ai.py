@@ -111,7 +111,7 @@ class QuiverAIGenerateSVG(Tool):
             if normalized_refs:
                 payload["references"] = normalized_refs
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/svgs/generations",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -178,7 +178,7 @@ class QuiverAIVectorizeSVG(Tool):
             if max_output_tokens is not None:
                 payload["max_output_tokens"] = max_output_tokens
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/svgs/vectorizations",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -212,7 +212,7 @@ class QuiverAIListModels(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/models",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -244,7 +244,7 @@ class QuiverAIGetModel(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/models/{model}",
                     headers={"Authorization": f"Bearer {api_key}"},

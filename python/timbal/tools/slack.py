@@ -77,7 +77,7 @@ class SlackReadMessages(Tool):
             if latest:
                 params["latest"] = latest
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/conversations.history",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -142,7 +142,7 @@ class SlackSendMessage(Tool):
             if icon_url:
                 body["icon_url"] = icon_url
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/chat.postMessage",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -188,7 +188,7 @@ class SlackSendEphemeralMessage(Tool):
             if thread_ts:
                 body["thread_ts"] = thread_ts
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/chat.postEphemeral",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -230,7 +230,7 @@ class SlackCreateCanvas(Tool):
             if channel_id:
                 body["channel_id"] = channel_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/canvases.create",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -266,7 +266,7 @@ class SlackDeleteMessage(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/chat.delete",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -307,7 +307,7 @@ class SlackGetMessageThread(Tool):
             if cursor:
                 params["cursor"] = cursor
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/conversations.replies",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -342,7 +342,7 @@ class SlackPinMessage(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/pins.add",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -377,7 +377,7 @@ class SlackUnpinMessage(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/pins.remove",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -409,7 +409,7 @@ class SlackListPinnedItems(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/pins.list",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -439,7 +439,7 @@ class SlackGetUserPresence(Tool):
             api_token = await _resolve_api_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/users.getPresence",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -478,7 +478,7 @@ class SlackSearchUsers(Tool):
             api_token = await _resolve_api_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 if email:
                     response = await client.get(
                         f"{_BASE_URL}/users.lookupByEmail",
@@ -531,7 +531,7 @@ class SlackAddUserToChannel(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/conversations.invite",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -566,7 +566,7 @@ class SlackRemoveFromChannel(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/conversations.kick",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -610,7 +610,7 @@ class SlackListUsersInChannel(Tool):
             if cursor:
                 params["cursor"] = cursor
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/conversations.members",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -645,7 +645,7 @@ class SlackUpdateChannelTopic(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/conversations.setTopic",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -680,7 +680,7 @@ class SlackUpdateChannelPurpose(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/conversations.setPurpose",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -712,7 +712,7 @@ class SlackArchiveChannel(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/conversations.archive",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -744,7 +744,7 @@ class SlackUnarchiveChannel(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/conversations.unarchive",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -780,7 +780,7 @@ class SlackGetConversationInfo(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/conversations.info",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -828,7 +828,7 @@ class SlackListChannels(Tool):
             if cursor:
                 params["cursor"] = cursor
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/conversations.list",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -869,7 +869,7 @@ class SlackAddReaction(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/reactions.add",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -905,7 +905,7 @@ class SlackRemoveReaction(Tool):
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/reactions.remove",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -962,7 +962,7 @@ class SlackListFiles(Tool):
             if ts_to:
                 params["ts_to"] = ts_to
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/files.list",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -992,7 +992,7 @@ class SlackGetFileInfo(Tool):
             api_token = await _resolve_api_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/files.info",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -1024,7 +1024,7 @@ class SlackDownloadFile(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url_private,
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -1058,7 +1058,7 @@ class SlackDeleteFile(Tool):
             api_token = await _resolve_api_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/files.delete",
                     headers={"Authorization": f"Bearer {api_token}"},
@@ -1105,7 +1105,7 @@ class SlackSendAndWaitForResponse(Tool):
 
             headers = {"Authorization": f"Bearer {api_token}"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 send_body: dict[str, Any] = {"channel": channel_id, "text": text}
                 if blocks:
                     send_body["blocks"] = blocks

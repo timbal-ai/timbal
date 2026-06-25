@@ -35,7 +35,7 @@ class SharePointSearchSites(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites",
                     params={"search": query},
@@ -75,7 +75,7 @@ class SharePointGetSite(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -106,7 +106,7 @@ class SharePointListDrives(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}/drives",
                     headers={"Authorization": f"Bearer {token}"},
@@ -148,7 +148,7 @@ class SharePointListFiles(Tool):
             if folder_id:
                 url = f"{_BASE_URL}/sites/{site_id}/drive/items/{folder_id}/children"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -180,7 +180,7 @@ class SharePointSearchFiles(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}/drive/root/search(q='{query}')",
                     headers={"Authorization": f"Bearer {token}"},
@@ -213,7 +213,7 @@ class SharePointGetFile(Tool):
             import base64
             import httpx
 
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 metadata_response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{file_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -273,7 +273,7 @@ class SharePointDownloadFile(Tool):
             import base64
             import httpx
 
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{file_id}/content",
                     headers={"Authorization": f"Bearer {token}"},
@@ -334,7 +334,7 @@ class SharePointMoveItem(Tool):
             if new_name:
                 payload["name"] = new_name
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{item_id}",
                     headers={
@@ -388,7 +388,7 @@ class SharePointCopyItem(Tool):
             if new_name:
                 payload["name"] = new_name
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{item_id}/copy",
                     headers={
@@ -430,7 +430,7 @@ class SharePointListPermissions(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{item_id}/permissions",
                     headers={"Authorization": f"Bearer {token}"},
@@ -481,7 +481,7 @@ class SharePointInvite(Tool):
             if message:
                 payload["message"] = message
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{item_id}/invite",
                     headers={
@@ -538,7 +538,7 @@ class SharePointCreateShareLink(Tool):
             if expiration_datetime:
                 payload["expirationDateTime"] = expiration_datetime
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{item_id}/createLink",
                     headers={
@@ -575,7 +575,7 @@ class SharePointDeletePermission(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{item_id}/permissions/{permission_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -620,7 +620,7 @@ class SharePointUploadFile(Tool):
             import httpx
 
             if url:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     response = await client.get(url, timeout=httpx.Timeout(30.0, read=None))
                     response.raise_for_status()
                     content = response.text
@@ -629,7 +629,7 @@ class SharePointUploadFile(Tool):
             if folder_id:
                 upload_url = f"{_BASE_URL}/sites/{site_id}/drive/items/{folder_id}:/{name}:/content"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.put(
                     upload_url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -662,7 +662,7 @@ class SharePointDeleteItem(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_BASE_URL}/sites/{site_id}/drive/items/{item_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -709,7 +709,7 @@ class SharePointCreateFolder(Tool):
                 "@microsoft.graph.conflictBehavior": "rename",
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers={
@@ -744,7 +744,7 @@ class SharePointListLists(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}/lists",
                     headers={"Authorization": f"Bearer {token}"},
@@ -784,7 +784,7 @@ class SharePointGetListItems(Tool):
             if top is not None:
                 params["$top"] = top
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/sites/{site_id}/lists/{list_id}/items",
                     params=params,
@@ -823,7 +823,7 @@ class SharePointCreateListItem(Tool):
 
             payload = {"fields": fields}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/sites/{site_id}/lists/{list_id}/items",
                     headers={
@@ -864,7 +864,7 @@ class SharePointUpdateListItem(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_BASE_URL}/sites/{site_id}/lists/{list_id}/items/{item_id}/fields",
                     headers={
@@ -901,7 +901,7 @@ class SharePointDeleteListItem(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_BASE_URL}/sites/{site_id}/lists/{list_id}/items/{item_id}",
                     headers={"Authorization": f"Bearer {token}"},

@@ -25,7 +25,7 @@ async def _get_token_from_client_credentials(
 
     scope = f"{resource.rstrip('/')}/.default"
     token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         response = await client.post(
             token_url,
             data={
@@ -149,7 +149,7 @@ class DynamicsSalesFindContact(Tool):
                 if select:
                     params["$select"] = select
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={
@@ -221,7 +221,7 @@ class DynamicsSalesCreateCustomEntity(Tool):
             if return_representation:
                 headers["Prefer"] = "return=representation"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers=headers, json=data)
                 response.raise_for_status()
                 if return_representation and response.content:
@@ -321,7 +321,7 @@ class DynamicsSalesCreateOpportunity(Tool):
             if return_representation:
                 headers["Prefer"] = "return=representation"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(url, headers=headers, json=data)
                 response.raise_for_status()
                 if return_representation and response.content:
