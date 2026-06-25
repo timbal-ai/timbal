@@ -489,6 +489,13 @@ if TYPE_CHECKING:
         QuiverAIListModels,
         QuiverAIVectorizeSVG,
     )
+    from .krea import (
+        KreaCancelJob,
+        KreaGenerateImage,
+        KreaGenerateVideo,
+        KreaGetJob,
+        KreaListJobs,
+    )
     from .read import Read
     from .replicate import (
         ReplicateCancelPrediction,
@@ -2019,6 +2026,11 @@ __all__ = [
     "PowerBIQueryDataset",
     "PowerBIListReports",
     "PowerBIGetReport",
+    "KreaCancelJob",
+    "KreaGenerateImage",
+    "KreaGenerateVideo",
+    "KreaGetJob",
+    "KreaListJobs",
     "ReplicateCreatePrediction",
     "ReplicateGetPrediction",
     "ReplicateCancelPrediction",
@@ -3059,6 +3071,11 @@ _LAZY_IMPORTS = {
     "PowerBIQueryDataset": ".powerbi",
     "PowerBIListReports": ".powerbi",
     "PowerBIGetReport": ".powerbi",
+    "KreaCancelJob": ".krea",
+    "KreaGenerateImage": ".krea",
+    "KreaGenerateVideo": ".krea",
+    "KreaGetJob": ".krea",
+    "KreaListJobs": ".krea",
     "ReplicateCreatePrediction": ".replicate",
     "ReplicateGetPrediction": ".replicate",
     "ReplicateCancelPrediction": ".replicate",
