@@ -235,6 +235,51 @@ async def test_tool_proxy_failure_surfaces_as_tool_error():
 
 
 @pytest.mark.asyncio
+async def test_tool_proxy_refreshes_stale_cached_none_config(monkeypatch):
+    """A default platform-config resolution that cached None earlier must not block
+    the proxy when TIMBAL_API_KEY / TIMBAL_ORG_ID are set later in the process."""
+    import timbal.state.config_loader as config_loader
+
+    # Poison the default-config cache with None (simulates an earlier resolution
+    # before env credentials were set).
+    monkeypatch.setattr(config_loader, "_cached_default_config", None)
+    monkeypatch.setattr(config_loader, "_default_config_resolved", True)
+
+    monkeypatch.setenv("TIMBAL_API_KEY", "sk-platform")
+    monkeypatch.setenv("TIMBAL_API_HOST", "api.example.com")
+    monkeypatch.setenv("TIMBAL_ORG_ID", "org-123")
+
+    run_context = RunContext(tracing_provider=None)
+    set_run_context(run_context)
+    assert run_context.platform_config is None
+
+    async def _handler(url: str) -> dict:
+        from timbal.tools._creds import resolve_api_key
+
+        await resolve_api_key(
+            provider_name="Firecrawl",
+            env_var="FIRECRAWL_API_KEY",
+            integration=None,
+            api_key=None,
+        )
+        return {"url": url}
+
+    tool = Tool(name="firecrawl_scrape", handler=_handler, tracing_provider=None)
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"proxied": True}
+
+    with patch("timbal.platform.tool_proxy._request", new_callable=AsyncMock) as mock_request:
+        mock_request.return_value = mock_response
+        result = await tool(url="https://example.com").collect()
+
+    assert result.status.code == "success"
+    assert result.output == {"proxied": True}
+    args, _ = mock_request.await_args
+    assert args[1] == "orgs/org-123/proxies/v1/tools/firecrawl_scrape"
+
+
+@pytest.mark.asyncio
 async def test_tool_missing_org_id_surfaces_tool_proxy_unavailable(monkeypatch):
     """Platform auth without org subject must not mask ToolProxyUnavailable as a
     provider credential error."""

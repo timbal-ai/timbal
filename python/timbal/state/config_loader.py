@@ -150,6 +150,7 @@ def resolve_platform_config(
     platform_config: PlatformConfig | None = None,
     profile: str | None = None,
     config_dir: Path | None = None,
+    force_refresh: bool = False,
 ) -> PlatformConfig | None:
     """Resolve platform configuration by merging sources with precedence.
 
@@ -170,11 +171,14 @@ def resolve_platform_config(
         platform_config: Existing config to fill in missing fields for.
         profile: Profile name for file config. Defaults to TIMBAL_PROFILE env var or "default".
         config_dir: Override the config directory (for testing).
+        force_refresh: Re-read env/file sources even on a default call, bypassing
+            (and refreshing) the cached default. Use when env credentials may have
+            been set after an earlier default resolution cached ``None``.
     """
     global _cached_default_config, _default_config_resolved
 
     is_default_call = platform_config is None and profile is None and config_dir is None
-    if is_default_call and _default_config_resolved:
+    if is_default_call and _default_config_resolved and not force_refresh:
         return _cached_default_config.model_copy() if _cached_default_config else None
 
     file_config = load_file_config(profile=profile, config_dir=config_dir)
