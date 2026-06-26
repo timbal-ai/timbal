@@ -4,7 +4,7 @@ RunPython tool for executing Python scripts in isolated environments.
 Supports:
 - Real CPython execution via uv (--with dependencies) with venv+pip fallback
 - Auto-detection of dependencies from import statements
-- Code mode: scripts can call back into other Timbal tools via a unix-socket RPC bridge
+- Code mode: scripts can call back into other Timbal tools via a localhost RPC bridge
 - Structured stdout/stderr/return_value/error capture
 """
 
@@ -248,7 +248,11 @@ async def _dispatch_exposed_tool(tool: Tool, args: list[Any], kwargs: dict[str, 
 
 
 class _ToolRpcServer:
-    """Async unix-socket RPC server dispatching tool calls from child process."""
+    """Async RPC server dispatching tool calls from the child process.
+
+    Uses a unix domain socket on POSIX and a localhost TCP socket on Windows
+    (``asyncio.start_unix_server`` is not available there).
+    """
 
     def __init__(self, tools: dict[str, Tool]) -> None:
         self._tools = tools
@@ -262,20 +266,27 @@ class _ToolRpcServer:
     async def start(self) -> None:
         if not self._tools:
             return
-        tmp = tempfile.NamedTemporaryFile(prefix="timbal-rpc-", suffix=".sock", delete=False)
-        tmp.close()
-        self._socket_path = tmp.name
-        Path(self._socket_path).unlink(missing_ok=True)
-        self._server = await asyncio.start_unix_server(self._handle_client, path=self._socket_path)
+        if hasattr(asyncio, "start_unix_server"):
+            tmp = tempfile.NamedTemporaryFile(prefix="timbal-rpc-", suffix=".sock", delete=False)
+            tmp.close()
+            self._socket_path = tmp.name
+            Path(self._socket_path).unlink(missing_ok=True)
+            self._server = await asyncio.start_unix_server(self._handle_client, path=self._socket_path)
+            return
+
+        self._server = await asyncio.start_server(self._handle_client, "127.0.0.1", 0)
+        sock = self._server.sockets[0]
+        host, port = sock.getsockname()[:2]
+        self._socket_path = f"tcp://{host}:{port}"
 
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        if self._socket_path:
+        if self._socket_path and not self._socket_path.startswith("tcp://"):
             Path(self._socket_path).unlink(missing_ok=True)
-            self._socket_path = None
+        self._socket_path = None
 
     async def _handle_client(
         self,

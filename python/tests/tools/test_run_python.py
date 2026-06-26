@@ -662,6 +662,21 @@ sum(range(4))
         assert calls == [("double", [21], {})]
 
 
+class TestRunPythonRpcTransport:
+    @pytest.mark.asyncio
+    async def test_code_mode_uses_tcp_when_unix_server_unavailable(self, monkeypatch):
+        """Regression: Windows lacks asyncio.start_unix_server."""
+        import asyncio
+
+        if not hasattr(asyncio, "start_unix_server"):
+            pytest.skip("platform already lacks unix server")
+
+        monkeypatch.delattr(asyncio, "start_unix_server", raising=False)
+        tool = RunPython(tools=[noop], executor=EXECUTOR)
+        out = await collect(tool, "noop()")
+        assert out["return_value"] == "called"
+
+
 class TestTimbalInTimbal:
     """Install timbal inside the sandbox and run an Agent within an Agent.
 

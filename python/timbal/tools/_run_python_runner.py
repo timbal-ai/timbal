@@ -25,14 +25,28 @@ _USER_CODE_PATH_ENV = "TIMBAL_USER_CODE_PATH"
 _EXPOSED_TOOLS_ENV = "TIMBAL_EXPOSED_TOOLS"
 
 
+def _open_rpc_connection(endpoint: str) -> socket.socket:
+    """Connect to the parent RPC server (unix path or ``tcp://host:port``)."""
+    if endpoint.startswith("tcp://"):
+        hostport = endpoint.removeprefix("tcp://")
+        host, port_str = hostport.rsplit(":", 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((host, int(port_str)))
+        return sock
+    if not hasattr(socket, "AF_UNIX"):
+        raise RuntimeError(f"Unsupported RPC endpoint on this platform: {endpoint!r}")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(endpoint)
+    return sock
+
+
 def call_tool(name: str, args: list[Any], kwargs: dict[str, Any]) -> Any:
     """Call an exposed Timbal tool via the parent RPC socket."""
     sock_path = os.environ.get(_RPC_ENV_VAR)
     if not sock_path:
         raise RuntimeError("Code mode is not available: RPC socket not configured")
     payload = json.dumps({"name": name, "args": args, "kwargs": kwargs}).encode()
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.connect(sock_path)
+    with _open_rpc_connection(sock_path) as sock:
         sock.sendall(payload + b"\n")
         chunks: list[bytes] = []
         while True:
