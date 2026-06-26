@@ -1,30 +1,14 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.pinecone.io"
 
 _INDEX_HOST_DESC = 'Index host, e.g. "my-index-xyz.svc.pinecone.io"'
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve Pinecone API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("PINECONE_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Pinecone API key not found. Set PINECONE_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 class PineconeListIndexes(Tool):
@@ -42,7 +26,7 @@ class PineconeListIndexes(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_indexes() -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Pinecone", env_var="PINECONE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -78,7 +62,7 @@ class PineconeCreateIndex(Tool):
             region: str = Field("us-east-1", description="Cloud region for the index"),
             deletion_protection: str = Field("disabled", description='"enabled" or "disabled"'),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Pinecone", env_var="PINECONE_API_KEY")
             import httpx
 
             body: dict[str, Any] = {
@@ -119,7 +103,7 @@ class PineconeIndexStats(Tool):
             index_host: str = Field(..., description=_INDEX_HOST_DESC),
             metadata_filter: dict[str, Any] | None = Field(None, description="Filter to count only matching vectors"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Pinecone", env_var="PINECONE_API_KEY")
             import httpx
 
             body: dict[str, Any] = {}
@@ -159,7 +143,7 @@ class PineconeUpsertVectors(Tool):
             ),
             namespace: str = Field("", description="Index partition"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Pinecone", env_var="PINECONE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -199,7 +183,7 @@ class PineconeQuery(Tool):
             include_values: bool = Field(False, description="Return vector values in results"),
             include_metadata: bool = Field(True, description="Return metadata in results"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Pinecone", env_var="PINECONE_API_KEY")
             import httpx
 
             body: dict[str, Any] = {
@@ -243,7 +227,7 @@ class PineconeFetchVectors(Tool):
             ids: list[str] = Field(..., description="Vector IDs to fetch"),
             namespace: str = Field("", description="Index partition to fetch from"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Pinecone", env_var="PINECONE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"ids": ids}
@@ -285,7 +269,7 @@ class PineconeDeleteVectors(Tool):
                 None, description="Metadata filter to select vectors for deletion"
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Pinecone", env_var="PINECONE_API_KEY")
             import httpx
 
             body: dict[str, Any] = {"namespace": namespace}

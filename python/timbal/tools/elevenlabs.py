@@ -5,22 +5,9 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("ELEVENLABS_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "ElevenLabs API key not found. Set ELEVENLABS_API_KEY, pass api_key, or configure an integration."
-    )
 
 
 class ElevenLabsTextToSpeech(Tool):
@@ -49,7 +36,7 @@ class ElevenLabsTextToSpeech(Tool):
             style: float = Field(0.0, description="Style exaggeration (0.0–1.0, only for v2 models)."),
             use_speaker_boost: bool = Field(True, description="Improve speaker clarity (slight latency increase)."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import base64
 
             import httpx
@@ -99,7 +86,7 @@ class ElevenLabsListPhoneNumbers(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_phone_numbers() -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -140,7 +127,7 @@ class ElevenLabsMakeOutboundCall(Tool):
                 description="Destination phone number in E.164 format, e.g. '+14155552671'.",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
             payload: dict[str, Any] = {
@@ -177,7 +164,7 @@ class ElevenLabsListAgents(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_agents() -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -205,7 +192,7 @@ class ElevenLabsGetModels(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_models() -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -238,7 +225,7 @@ class ElevenLabsGetVoicesWithDescriptions(Tool):
         async def _get_voices_with_descriptions(
             show_legacy: bool = Field(False, description="Include legacy pre-XTTS voices in the response."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -292,7 +279,7 @@ class ElevenLabsListHistory(Tool):
             page_size: int = Field(100, description="Max items to return (default 100)."),
             source: str | None = Field(None, description="Filter by source: 'TTS', 'STS', or 'ConvAI'."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"page_size": page_size}
@@ -329,7 +316,7 @@ class ElevenLabsGetAudioFromHistoryItem(Tool):
         async def _get_audio_from_history_item(
             history_item_id: str = Field(..., description="The ID of the history item to retrieve audio for."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import base64
 
             import httpx
@@ -369,7 +356,7 @@ class ElevenLabsDownloadHistoryItems(Tool):
         async def _download_history_items(
             history_item_ids: list[str] = Field(..., description="List of history item IDs to download. Single ID returns audio; multiple IDs return a .zip."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import base64
             import io
             import zipfile
@@ -435,7 +422,7 @@ class ElevenLabsCreateAgent(Tool):
             max_duration_seconds: int = Field(600, description="Maximum call/conversation length in seconds."),
             turn_timeout: int = Field(20, description="Seconds of silence before the agent ends its turn."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
             payload: dict[str, Any] = {
@@ -505,7 +492,7 @@ class ElevenLabsAddVoice(Tool):
                 description="Optional metadata. Keys: language (BCP-47: 'ca', 'es', 'en', 'fr'), accent, gender, age. E.g. {'language': 'ca', 'accent': 'British'}.",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import base64
 
             import httpx

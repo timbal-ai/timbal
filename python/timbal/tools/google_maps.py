@@ -1,10 +1,10 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _PLACES_BASE_URL = "https://places.googleapis.com/v1"
 _ADDRESS_VALIDATION_URL = "https://addressvalidation.googleapis.com/v1:validateAddress"
@@ -22,21 +22,6 @@ _PLACE_DETAILS_FIELDS = (
     "websiteUri,adrFormatAddress,businessStatus,displayName,"
     "primaryType,shortFormattedAddress,postalAddress,reviews"
 )
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("GOOGLE_MAPS_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Google Maps API key not found. Set GOOGLE_MAPS_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 class GoogleMapsTextSearch(Tool):
@@ -67,7 +52,7 @@ class GoogleMapsTextSearch(Tool):
             location_bias_lng: float | None = Field(None, description="Longitude to bias results toward"),
             location_bias_radius: float = Field(5000.0, description="Radius in meters for location bias"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Google Maps", env_var="GOOGLE_MAPS_API_KEY")
             import httpx
 
             body: dict[str, Any] = {
@@ -124,7 +109,7 @@ class GoogleMapsPlaceDetails(Tool):
             place_id: str = Field(..., description="Google Maps place ID, e.g. 'ChIJN1t_tDeuEmsRUsoyG83frY4'"),
             language_code: str = Field("en", description="BCP-47 language code for results"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Google Maps", env_var="GOOGLE_MAPS_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -169,7 +154,7 @@ class GoogleMapsNearbySearch(Tool):
             max_results: int = Field(5, description="Max number of results (1-20)"),
             language_code: str = Field("en", description="BCP-47 language code for results"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Google Maps", env_var="GOOGLE_MAPS_API_KEY")
             import httpx
 
             body: dict[str, Any] = {
@@ -227,7 +212,7 @@ class GoogleMapsValidateAddress(Tool):
             administrative_area: str | None = Field(None, description="State, province, or region"),
             postal_code: str | None = Field(None, description="Postal/ZIP code"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Google Maps", env_var="GOOGLE_MAPS_API_KEY")
             import httpx
 
             address: dict[str, Any] = {

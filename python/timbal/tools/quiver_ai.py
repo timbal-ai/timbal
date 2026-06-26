@@ -1,29 +1,13 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.quiver.ai/v1"
 _DEFAULT_MODEL = "arrow-1.1"
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve QuiverAI API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("QUIVERAI_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "QuiverAI API key not found. Set QUIVERAI_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 def _normalize_references(references: list[str | dict[str, str]] | None) -> list[dict[str, str]] | None:
@@ -88,7 +72,7 @@ class QuiverAIGenerateSVG(Tool):
             presence_penalty: float | None = Field(None, description="Penalty for tokens already present (-2 to 2)."),
             max_output_tokens: int | None = Field(None, description="Upper bound for output token count (1-131072)."),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="QuiverAI", env_var="QUIVERAI_API_KEY")
             import httpx
 
             payload: dict[str, Any] = {
@@ -158,7 +142,7 @@ class QuiverAIVectorizeSVG(Tool):
             presence_penalty: float | None = Field(None, description="Penalty for tokens already present (-2 to 2)."),
             max_output_tokens: int | None = Field(None, description="Upper bound for output token count (1-131072)."),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="QuiverAI", env_var="QUIVERAI_API_KEY")
             import httpx
 
             payload: dict[str, Any] = {
@@ -209,7 +193,7 @@ class QuiverAIListModels(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _quiver_ai_list_models() -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="QuiverAI", env_var="QUIVERAI_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -241,7 +225,7 @@ class QuiverAIGetModel(Tool):
         async def _quiver_ai_get_model(
             model: str = Field(..., description='Model id, e.g. "arrow-1.1".'),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="QuiverAI", env_var="QUIVERAI_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:

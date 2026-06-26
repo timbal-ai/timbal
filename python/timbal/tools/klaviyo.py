@@ -1,29 +1,13 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _API_BASE = "https://a.klaviyo.com/api"
 _API_REVISION = "2026-04-15"
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve Klaviyo private API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("KLAVIYO_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Klaviyo API key not found. Set KLAVIYO_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -89,7 +73,7 @@ class KlaviyoListProfiles(Tool):
                 description="Extra profile fields: 'subscriptions' and/or 'predictive_analytics' (comma-separated)",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -135,7 +119,7 @@ class KlaviyoGetProfile(Tool):
                 description="Extra fields: 'subscriptions' and/or 'predictive_analytics' (comma-separated)",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, str] = {}
@@ -181,7 +165,7 @@ class KlaviyoCreateProfile(Tool):
             location: dict[str, Any] | None = Field(None, description="Location object (address, city, country, etc.)"),
             properties: dict[str, Any] | None = Field(None, description="Custom profile properties key/value map"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             attributes: dict[str, Any] = {}
@@ -246,7 +230,7 @@ class KlaviyoUpdateProfile(Tool):
             location: dict[str, Any] | None = Field(None, description="Location object"),
             properties: dict[str, Any] | None = Field(None, description="Custom profile properties to set"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             attributes: dict[str, Any] = {}
@@ -302,7 +286,7 @@ class KlaviyoGetProfileLists(Tool):
             profile_id: str = Field(..., description="Klaviyo profile ID"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params = _pagination_params(page_cursor) or None
@@ -337,7 +321,7 @@ class KlaviyoListLists(Tool):
             sort: str | None = Field(None, description="Sort field (prefix with '-' for descending)"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -372,7 +356,7 @@ class KlaviyoGetList(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_list(list_id: str = Field(..., description="Klaviyo list ID")) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -400,7 +384,7 @@ class KlaviyoCreateList(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_list(name: str = Field(..., description="List name")) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             payload = {"data": {"type": "list", "attributes": {"name": name}}}
@@ -434,7 +418,7 @@ class KlaviyoAddProfilesToList(Tool):
             list_id: str = Field(..., description="Klaviyo list ID"),
             profile_ids: list[str] = Field(..., description="Profile IDs to add (max 1000)"),
         ) -> dict[str, str]:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             payload = {
@@ -470,7 +454,7 @@ class KlaviyoRemoveProfilesFromList(Tool):
             list_id: str = Field(..., description="Klaviyo list ID"),
             profile_ids: list[str] = Field(..., description="Profile IDs to remove"),
         ) -> dict[str, str]:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             payload = {
@@ -512,7 +496,7 @@ class KlaviyoGetListProfiles(Tool):
             sort: str | None = Field(None, description="Sort field (prefix with '-' for descending)"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -551,7 +535,7 @@ class KlaviyoListSegments(Tool):
             sort: str | None = Field(None, description="Sort field (prefix with '-' for descending)"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -586,7 +570,7 @@ class KlaviyoGetSegment(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_segment(segment_id: str = Field(..., description="Klaviyo segment ID")) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -624,7 +608,7 @@ class KlaviyoListEvents(Tool):
             include: str | None = Field(None, description="Related resources to include, e.g. 'profile,metric'"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -677,7 +661,7 @@ class KlaviyoCreateEvent(Tool):
             value_currency: str | None = Field(None, description="ISO 4217 currency code for value, e.g. 'USD'"),
             unique_id: str | None = Field(None, description="Unique ID to deduplicate events"),
         ) -> dict[str, str]:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             profile_attrs: dict[str, Any] = {}
@@ -747,7 +731,7 @@ class KlaviyoListCampaigns(Tool):
             sort: str | None = Field(None, description="Sort field (prefix with '-' for descending)"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = {
@@ -783,7 +767,7 @@ class KlaviyoGetCampaign(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_campaign(campaign_id: str = Field(..., description="Klaviyo campaign ID")) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -815,7 +799,7 @@ class KlaviyoListMetrics(Tool):
             sort: str | None = Field(None, description="Sort field (prefix with '-' for descending)"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -854,7 +838,7 @@ class KlaviyoListFlows(Tool):
             sort: str | None = Field(None, description="Sort field (prefix with '-' for descending)"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -889,7 +873,7 @@ class KlaviyoGetFlow(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_flow(flow_id: str = Field(..., description="Klaviyo flow ID")) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -932,7 +916,7 @@ class KlaviyoSubscribeProfiles(Tool):
                 description="Historical import; requires consented_at on each profile when true",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             profile_entries: list[dict[str, Any]] = []
@@ -999,7 +983,7 @@ class KlaviyoUnsubscribeProfiles(Tool):
                 description="List scope for unsubscribe (strongly recommended to avoid global unsubscribe)",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             profile_entries: list[dict[str, Any]] = [
@@ -1052,7 +1036,7 @@ class KlaviyoGetProfileSubscriptions(Tool):
         async def _get_profile_subscriptions(
             profile_id: str = Field(..., description="Klaviyo profile ID"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1087,7 +1071,7 @@ class KlaviyoListCatalogItems(Tool):
             ),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params: dict[str, Any] = _pagination_params(page_cursor)
@@ -1129,7 +1113,7 @@ class KlaviyoCreateCatalogItem(Tool):
             published: bool = Field(True, description="Whether the item is published"),
             custom_metadata: dict[str, Any] | None = Field(None, description="Custom metadata JSON blob"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             attributes: dict[str, Any] = {
@@ -1181,7 +1165,7 @@ class KlaviyoGetCatalogItem(Tool):
                 description='Catalog item ID or external_id (external_id is prefixed as $custom:::$default:::{id})',
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             catalog_id = item_id if item_id.startswith("$custom:::") else _catalog_item_id(item_id)
@@ -1225,7 +1209,7 @@ class KlaviyoCreatePlacedOrderEvent(Tool):
             time: str | None = Field(None, description="ISO 8601 datetime when the order was placed"),
             unique_id: str | None = Field(None, description="Unique ID to deduplicate the order event"),
         ) -> dict[str, str]:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             event_properties = dict(properties)
@@ -1282,7 +1266,7 @@ class KlaviyoGetProfilePredictiveAnalytics(Tool):
         async def _get_profile_predictive_analytics(
             profile_id: str = Field(..., description="Klaviyo profile ID"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1319,7 +1303,7 @@ class KlaviyoCreateCampaign(Tool):
             preview_text: str | None = Field(None, description="Email preview text"),
             excluded_list_ids: list[str] | None = Field(None, description="List IDs to exclude from the audience"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             audiences: dict[str, Any] = {"included": audience_list_ids}
@@ -1386,7 +1370,7 @@ class KlaviyoUpdateCampaign(Tool):
             audience_list_ids: list[str] | None = Field(None, description="List IDs to include in the audience"),
             excluded_list_ids: list[str] | None = Field(None, description="List IDs to exclude from the audience"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             attributes: dict[str, Any] = {}
@@ -1438,7 +1422,7 @@ class KlaviyoSendCampaign(Tool):
         async def _send_campaign(
             campaign_id: str = Field(..., description="Klaviyo campaign ID to send"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             payload = {"data": {"type": "campaign-send-job", "id": campaign_id}}
@@ -1488,7 +1472,7 @@ class KlaviyoQueryCampaignValues(Tool):
             group_by: list[str] | None = Field(None, description="Group-by attributes (campaign_id, send_channel, etc.)"),
             page_cursor: str | None = Field(None, description="Pagination cursor for large result sets"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             attributes: dict[str, Any] = {
@@ -1542,7 +1526,7 @@ class KlaviyoUpdateFlowStatus(Tool):
                 description="New flow status: 'draft', 'manual', or 'live'",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             payload = {
@@ -1582,7 +1566,7 @@ class KlaviyoListFlowActions(Tool):
             flow_id: str = Field(..., description="Klaviyo flow ID"),
             page_cursor: str | None = Field(None, description="Pagination cursor"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             params = _pagination_params(page_cursor) or None
@@ -1622,7 +1606,7 @@ class KlaviyoTriggerFlowViaEvent(Tool):
             properties: dict[str, Any] = Field(default_factory=dict, description="Event properties"),
             unique_id: str | None = Field(None, description="Unique ID to deduplicate events"),
         ) -> dict[str, str]:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Klaviyo", env_var="KLAVIYO_API_KEY")
             import httpx
 
             profile_attrs: dict[str, Any] = {}
