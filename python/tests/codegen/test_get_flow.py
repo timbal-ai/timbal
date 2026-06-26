@@ -1108,3 +1108,41 @@ class TestErrors:
         (tmp_path / "timbal.yaml").write_text('fqn: "nonexistent.py::agent"\n')
         with pytest.raises(FileNotFoundError):
             get_flow(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Model-enum heuristic (x-timbal-ref="models")
+# ---------------------------------------------------------------------------
+
+
+class TestModelEnumHeuristic:
+    """_is_model_enum matches the canonical LLM model set, not any provider/name enum."""
+
+    def test_llm_models_are_refd(self):
+        import typing
+
+        from timbal.codegen.flow import _is_model_enum
+        from timbal.core.models import Model
+
+        assert _is_model_enum(list(typing.get_args(Model))) is True
+
+    def test_krea_models_stay_inline(self):
+        import typing
+
+        from timbal.codegen.flow import _is_model_enum
+        from timbal.tools.krea import KreaImageModel, KreaVideoModel
+
+        # Krea IDs share the provider/name shape but are not LLM models.
+        assert _is_model_enum(list(typing.get_args(KreaImageModel))) is False
+        assert _is_model_enum(list(typing.get_args(KreaVideoModel))) is False
+
+    def test_krea_tool_field_keeps_enum(self):
+        """A Krea generate tool's model field must keep its enum, not become a models ref."""
+        from timbal.codegen.flow import _compact_field
+        from timbal.tools.krea import KreaGenerateImage
+
+        tool = KreaGenerateImage(tracing_provider=None)
+        model_field = tool.params_model_schema["properties"]["model"]
+        compacted = _compact_field(model_field)
+        assert compacted.get("x-timbal-ref") != "models"
+        assert "bfl/flux-1-dev" in compacted["enum"]
