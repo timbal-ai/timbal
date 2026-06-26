@@ -1,4 +1,3 @@
-import os
 from typing import Annotated, Any
 from urllib.parse import quote, urlparse
 
@@ -6,26 +5,9 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _QUEUE_BASE = "https://queue.fal.run"
-
-
-async def _resolve_fal_key(tool: Any) -> str:
-    """Resolve fal API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        key = credentials.get("api_key")
-        if key:
-            return str(key)
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("FAL_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "fal API key not found. Set FAL_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 def _fal_auth_headers(api_key: str) -> dict[str, str]:
@@ -91,7 +73,7 @@ class FalQueueSubmit(Tool):
                 description="If set, fal POSTs the result to this URL when the job completes.",
             ),
         ) -> dict[str, Any]:
-            api_key = await _resolve_fal_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="fal", env_var="FAL_KEY")
             import httpx
 
             path = _encode_model_path(model_id)
@@ -149,7 +131,7 @@ class FalQueueStatus(Tool):
             request_id: str = Field(..., description="request_id returned by fal_queue_submit."),
             include_logs: bool = Field(False, description="If True, append ?logs=1 for runner log lines."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_fal_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="fal", env_var="FAL_KEY")
             import httpx
 
             path = _encode_model_path(model_id)
@@ -197,7 +179,7 @@ class FalQueueResult(Tool):
             ),
             request_id: str = Field(..., description="request_id returned by fal_queue_submit."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_fal_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="fal", env_var="FAL_KEY")
             import httpx
 
             path = _encode_model_path(model_id)
@@ -242,7 +224,7 @@ class FalQueueCancel(Tool):
             ),
             request_id: str = Field(..., description="request_id returned by fal_queue_submit."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_fal_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="fal", env_var="FAL_KEY")
             import httpx
 
             path = _encode_model_path(model_id)

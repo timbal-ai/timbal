@@ -134,7 +134,8 @@ async def _request(
                     f"\n"
                     f"  URL: {exc.request.url}\n"
                     f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
-                    f"  Response body: {error_body or None}"
+                    f"  Response body: {error_body or None}",
+                    status_code=exc.response.status_code,
                 ) from exc
             # Retry on 429, 5xx, or other errors
             if attempt == max_retries:
@@ -142,7 +143,8 @@ async def _request(
                     f"\n"
                     f"  URL: {exc.request.url}\n"
                     f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
-                    f"  Response body: {error_body or None}"
+                    f"  Response body: {error_body or None}",
+                    status_code=exc.response.status_code,
                 ) from exc
             wait_time = 0.1 * (2**attempt)  # Exponential backoff: 100ms, 200ms, 400ms
             if exc.response.status_code == 429:
@@ -236,7 +238,8 @@ async def _stream(
                     f"\n"
                     f"  URL: {exc.request.url}\n"
                     f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
-                    f"  Response body: {error_body or None}"
+                    f"  Response body: {error_body or None}",
+                    status_code=exc.response.status_code,
                 ) from exc
             # Retry on 429, 5xx, or other errors
             if attempt == max_retries:
@@ -244,7 +247,8 @@ async def _stream(
                     f"\n"
                     f"  URL: {exc.request.url}\n"
                     f"  Status: {exc.response.status_code} {exc.response.reason_phrase}\n"
-                    f"  Response body: {error_body or None}"
+                    f"  Response body: {error_body or None}",
+                    status_code=exc.response.status_code,
                 ) from exc
             wait_time = 0.1 * (2**attempt)
             if exc.response.status_code == 429:

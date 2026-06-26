@@ -1,28 +1,12 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.powerbi.com/v1.0/myorg"
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve PowerBI API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("POWERBI_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "PowerBI API key not found. Set POWERBI_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 def _datasets_url(workspace_id: str | None, suffix: str = "") -> str:
@@ -56,7 +40,7 @@ class PowerBIListWorkspaces(Tool):
             skip: int = Field(0, description="Number of workspaces to skip for pagination."),
             filter: str | None = Field(None, description="OData $filter expression, e.g. 'type eq 'Workspace''."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="PowerBI", env_var="POWERBI_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"$top": top, "$skip": skip}
@@ -92,7 +76,7 @@ class PowerBIListDatasets(Tool):
         async def _list_datasets(
             workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, lists datasets in My Workspace.")
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="PowerBI", env_var="POWERBI_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -124,7 +108,7 @@ class PowerBIGetDataset(Tool):
             dataset_id: str = Field(..., description="Power BI dataset ID"),
             workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, lists datasets in My Workspace."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="PowerBI", env_var="POWERBI_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -158,7 +142,7 @@ class PowerBIQueryDataset(Tool):
             workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, uses My Workspace."),
             impersonated_user_name: str | None = Field(None, description="UPN of a user to impersonate for row-level security (RLS)."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="PowerBI", env_var="POWERBI_API_KEY")
             import httpx
 
             body: dict[str, Any] = {"queries": [{"query": query}]}
@@ -192,7 +176,7 @@ class PowerBIListReports(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_reports(workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, lists reports in My Workspace.")) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="PowerBI", env_var="POWERBI_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -224,7 +208,7 @@ class PowerBIGetReport(Tool):
             report_id: str = Field(..., description="Power BI report ID"),
             workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, uses My Workspace."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="PowerBI", env_var="POWERBI_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:

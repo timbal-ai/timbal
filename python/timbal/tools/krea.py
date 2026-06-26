@@ -8,7 +8,6 @@ Docs: https://docs.krea.ai/
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import Annotated, Any, Literal
 
@@ -17,6 +16,7 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 logger = structlog.get_logger("timbal.tools.krea")
 
@@ -25,23 +25,6 @@ _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _FAILED_STATUSES = frozenset({"failed", "cancelled"})
 
 MediaKind = Literal["video", "image"]
-
-
-async def _resolve_krea_api_key(tool: Any) -> str:
-    """Resolve Krea API key from integration, explicit field, or env var."""
-    if getattr(tool, "integration", None) is not None and isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        key = credentials.get("api_key")
-        if key:
-            return str(key)
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("KREA_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Krea API key not found. Set KREA_API_KEY, pass api_key, or configure a krea integration."
-    )
 
 
 def _krea_headers(api_key: str, *, webhook_url: str | None = None) -> dict[str, str]:
@@ -157,7 +140,7 @@ class KreaListJobs(Tool):
             ),
             status: str | None = Field(None, description="Filter by job status."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_krea_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": max(1, min(limit, 1000))}
@@ -198,7 +181,7 @@ class KreaGetJob(Tool):
         async def _krea_get_job(
             job_id: str = Field(..., description="Job UUID returned by a Krea generate call."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_krea_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
@@ -228,7 +211,7 @@ class KreaCancelJob(Tool):
         async def _krea_cancel_job(
             job_id: str = Field(..., description="Job UUID to delete/cancel."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_krea_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None)) as client:
@@ -321,7 +304,7 @@ class KreaGenerateVideo(Tool):
                             payload[key] = value
 
                 path = _build_generate_path("video", resolved_model)
-                api_key = await _resolve_krea_api_key(self)
+                api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
                 import httpx
 
                 async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
@@ -443,7 +426,7 @@ class KreaGenerateImage(Tool):
                             payload[key] = value
 
                 path = _build_generate_path("image", resolved_model)
-                api_key = await _resolve_krea_api_key(self)
+                api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
                 import httpx
 
                 async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:

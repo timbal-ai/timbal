@@ -3,7 +3,8 @@
 from pathlib import Path
 
 import pytest
-from timbal.state.config_loader import load_file_config, resolve_platform_config
+import timbal.state.config_loader as config_loader
+from timbal.state.config_loader import FileConfig, load_file_config, resolve_platform_config
 
 
 def _write_minimal_config(tmp_path: Path, sync_traces_line: str) -> None:
@@ -59,3 +60,32 @@ def test_resolve_sync_traces_defaults_to_true(
     pc = resolve_platform_config(profile="default", config_dir=tmp_path)
     assert pc is not None
     assert pc.sync_traces_enabled is True
+
+
+def test_force_refresh_bypasses_stale_cached_none(monkeypatch) -> None:
+    """A default call that cached None must not short-circuit env credentials set
+    later in the process when force_refresh=True."""
+    monkeypatch.setattr(config_loader, "load_file_config", lambda *_a, **_k: FileConfig(None, None, None, None))
+    monkeypatch.setattr(config_loader, "_cached_default_config", None)
+    monkeypatch.setattr(config_loader, "_default_config_resolved", False)
+    for var in ("TIMBAL_API_KEY", "TIMBAL_API_HOST", "TIMBAL_API_TOKEN", "TIMBAL_ORG_ID"):
+        monkeypatch.delenv(var, raising=False)
+
+    # First default call with no creds caches None.
+    assert resolve_platform_config() is None
+    assert config_loader._default_config_resolved is True
+
+    # Credentials appear after the cache was poisoned.
+    monkeypatch.setenv("TIMBAL_API_KEY", "sk-platform")
+    monkeypatch.setenv("TIMBAL_API_HOST", "api.example.com")
+    monkeypatch.setenv("TIMBAL_ORG_ID", "org-123")
+
+    # Without force_refresh, the stale cached None is returned.
+    assert resolve_platform_config() is None
+
+    # force_refresh re-reads env and refreshes the cache.
+    pc = resolve_platform_config(force_refresh=True)
+    assert pc is not None
+    assert pc.subject is not None
+    assert pc.subject.org_id == "org-123"
+    assert resolve_platform_config() is not None

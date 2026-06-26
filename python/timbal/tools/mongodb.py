@@ -1,10 +1,10 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 
 def _atlas_url(app_id: str, action: str) -> str:
@@ -13,27 +13,6 @@ def _atlas_url(app_id: str, action: str) -> str:
 
 def _base_body(data_source: str, database: str, collection: str) -> dict[str, Any]:
     return {"dataSource": data_source, "database": database, "collection": collection}
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve MongoDB Data API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        if isinstance(credentials, dict):
-            key = credentials.get("api_key") or credentials.get("token")
-        else:
-            key = getattr(credentials, "api_key", None) or getattr(credentials, "token", None)
-        if key:
-            return str(key)
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("MONGODB_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "MongoDB API key not found. Set MONGODB_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +41,12 @@ class MongoCreateDocument(Tool):
             collection: str = Field(..., description="Collection name"),
             document: dict[str, Any] = Field(..., description="Document to insert as a JSON object"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body = {**_base_body(data_source, database, collection), "document": document}
@@ -107,7 +91,12 @@ class MongoFindDocumentById(Tool):
                 None, description="Optional fields to include/exclude, e.g. {'name': 1, 'email': 1, '_id': 0}"
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body: dict[str, Any] = {
@@ -152,7 +141,12 @@ class MongoFindDocument(Tool):
             ),
             projection: dict[str, Any] | None = Field(None, description="Optional fields to include/exclude"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body: dict[str, Any] = {
@@ -207,7 +201,12 @@ class MongoSearchDocuments(Tool):
             limit: int = Field(100, description="Max number of documents to return"),
             skip: int = Field(0, description="Number of documents to skip for pagination"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body: dict[str, Any] = {
@@ -263,7 +262,12 @@ class MongoUpdateDocument(Tool):
             ),
             upsert: bool = Field(False, description="If True, creates the document if it does not exist"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body: dict[str, Any] = {
@@ -313,7 +317,12 @@ class MongoUpdateDocuments(Tool):
             ),
             upsert: bool = Field(False, description="If True, creates a document if none matched the filter"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body: dict[str, Any] = {
@@ -360,7 +369,12 @@ class MongoDeleteDocument(Tool):
             collection: str = Field(..., description="Collection name"),
             document_id: str = Field(..., description="String value of the document's _id field to delete"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body: dict[str, Any] = {
@@ -411,7 +425,12 @@ class MongoExecuteAggregation(Tool):
                 description="List of aggregation stage documents, e.g. [{'$group': {'_id': '$status', 'count': {'$sum': 1}}}]",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(
+                tool=self,
+                provider_name="MongoDB",
+                env_var="MONGODB_API_KEY",
+                integration_keys=("api_key", "token"),
+            )
             import httpx
 
             body: dict[str, Any] = {

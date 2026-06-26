@@ -1,31 +1,16 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 _DEFAULT_EDIT_MODEL = "gemini-3.1-flash-image-preview"
 _DEFAULT_GENERATE_MODEL = "gemini-3.1-flash-image-preview"
 _DEFAULT_ANALYZE_MODEL = "gemini-3.1-flash-image-preview"
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("GEMINI_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Gemini API key not found. Set GEMINI_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 def _parse_gemini_response(data: dict[str, Any]) -> dict[str, Any]:
@@ -66,7 +51,7 @@ class GeminiImagesEditImage(Tool):
             image_mime_type: str = Field("image/png", description="MIME type of the input image, e.g. 'image/png', 'image/jpeg'."),
             model: str = Field(_DEFAULT_EDIT_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Gemini", env_var="GEMINI_API_KEY")
             import httpx
 
             payload = {
@@ -119,7 +104,7 @@ class GeminiImagesGenerateImage(Tool):
             negative_prompt: str | None = Field(None, description="Optional description of what to avoid in the image."),
             model: str = Field(_DEFAULT_GENERATE_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Gemini", env_var="GEMINI_API_KEY")
             import httpx
 
             text = prompt
@@ -169,7 +154,7 @@ class GeminiImagesAnalyzeImage(Tool):
             image_mime_type: str = Field("image/png", description="MIME type of the image, e.g. 'image/png', 'image/jpeg'."),
             model: str = Field(_DEFAULT_ANALYZE_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Gemini", env_var="GEMINI_API_KEY")
             import httpx
 
             payload = {
@@ -228,7 +213,7 @@ class GeminiImagesGenerateImageWithReference(Tool):
             reference_mime_types: list[str] | None = Field(None, description="MIME type per reference image. Defaults to 'image/png' for all."),
             model: str = Field(_DEFAULT_GENERATE_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Gemini", env_var="GEMINI_API_KEY")
             import httpx
 
             resolved_mime = reference_mime_types or ["image/png"] * len(reference_images_base64)

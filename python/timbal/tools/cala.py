@@ -4,22 +4,11 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _DEFAULT_BASE_URL = "https://api.cala.ai/v1"
 # Back-compat alias for web_search imports
 _BASE_URL = _DEFAULT_BASE_URL
-
-
-async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
-    """Resolve Cala API key from integration, explicit field, or env var."""
-    from ._creds import resolve_api_key
-
-    return await resolve_api_key(
-        env_var="CALA_API_KEY",
-        provider_name="Cala",
-        integration=integration,
-        api_key=api_key,
-    )
 
 
 def _normalize_base_url(base_url: str | None) -> str:
@@ -106,7 +95,12 @@ class CalaSearch(_CalaKnowledgeTool):
             explainability: bool = True,
             return_entities: bool = True,
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="CALA_API_KEY",
+                provider_name="Cala",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             return await _post_cala(
                 path="/knowledge/search",
                 api_key=api_key,
@@ -137,7 +131,12 @@ class CalaQuery(_CalaKnowledgeTool):
             ),
             return_entities: bool = True,
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="CALA_API_KEY",
+                provider_name="Cala",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             return await _post_cala(
                 path="/knowledge/query",
                 api_key=api_key,

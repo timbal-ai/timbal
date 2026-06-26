@@ -1,28 +1,12 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.stripe.com/v1"
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve Stripe API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("STRIPE_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Stripe API key not found. Set STRIPE_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 class ListCharges(Tool):
@@ -47,7 +31,7 @@ class ListCharges(Tool):
             created_gte: int | None = Field(None, description="Unix timestamp to filter charges created after this time"),
             created_lte: int | None = Field(None, description="Unix timestamp to filter charges created before this time"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -95,7 +79,7 @@ class CreateCustomer(Tool):
             description: str | None = Field(None, description="Customer description or notes"),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the customer object (max 50 keys)"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -142,7 +126,7 @@ class SearchCustomer(Tool):
             limit: int = Field(10, description="Maximum number of customers to return"),
             page: str | None = Field(None, description="Cursor for the next page, from a previous response's next_page field"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"query": query, "limit": limit}
@@ -185,7 +169,7 @@ class CreatePayment(Tool):
             automatic_payment_methods: bool = Field(True, description="Whether to use automatic payment methods"),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the payment object"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
@@ -238,7 +222,7 @@ class SendRefund(Tool):
             reason: str | None = Field(None, description="Refund reason: 'duplicate', 'fraudulent', or 'requested_by_customer'"),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the refund object"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -290,7 +274,7 @@ class UpdateCustomer(Tool):
                 None, description="Key-value pairs to attach to the customer object (max 50 keys)"
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -335,7 +319,7 @@ class RetrieveCustomer(Tool):
         async def _retrieve_customer(
             customer_id: str = Field(..., description="Stripe customer ID to retrieve (e.g. 'cus_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -379,7 +363,7 @@ class ListCustomers(Tool):
                 None, description="Unix timestamp to filter customers created before this time"
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -423,7 +407,7 @@ class DeleteCustomer(Tool):
         async def _delete_customer(
             customer_id: str = Field(..., description="Stripe customer ID to delete (e.g. 'cus_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -460,7 +444,7 @@ class UpdatePaymentIntent(Tool):
             payment_method: str | None = Field(None, description="Stripe payment method ID to attach."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the payment intent."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -509,7 +493,7 @@ class RetrievePaymentIntent(Tool):
                 ..., description="Stripe PaymentIntent ID to retrieve (e.g. 'pi_xxx')."
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -545,7 +529,7 @@ class ListPaymentIntents(Tool):
             created_gte: int | None = Field(None, description="Unix timestamp to filter payment intents created after this time."),
             created_lte: int | None = Field(None, description="Unix timestamp to filter payment intents created before this time."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -591,7 +575,7 @@ class ConfirmPaymentIntent(Tool):
             payment_method: str | None = Field(None, description="Payment method ID to attach and confirm with."),
             return_url: str | None = Field(None, description="URL to redirect to after confirmation for redirect-based payment methods."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -630,7 +614,7 @@ class CapturePaymentIntent(Tool):
             payment_intent_id: str = Field(..., description="Stripe PaymentIntent ID (e.g. 'pi_xxx')."),
             amount_to_capture: int | None = Field(None, description="Amount to capture in the smallest currency unit. Defaults to full amount."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -667,7 +651,7 @@ class CancelPaymentIntent(Tool):
             payment_intent_id: str = Field(..., description="Stripe PaymentIntent ID (e.g. 'pi_xxx')."),
             cancellation_reason: str | None = Field(None, description="Reason: 'duplicate', 'fraudulent', 'requested_by_customer', or 'abandoned'."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -704,7 +688,7 @@ class UpdateRefund(Tool):
             refund_id: str = Field(..., description="Stripe refund ID (e.g. 're_xxx')."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to update on the refund object."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -741,7 +725,7 @@ class RetrieveRefund(Tool):
         async def _retrieve_refund(
             refund_id: str = Field(..., description="Stripe refund ID (e.g. 're_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -776,7 +760,7 @@ class ListRefunds(Tool):
             starting_after: str | None = Field(None, description="Refund ID cursor for pagination (start after this)."),
             ending_before: str | None = Field(None, description="Refund ID cursor for pagination (end before this)."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -823,7 +807,7 @@ class CreateInvoice(Tool):
             auto_advance: bool = Field(True, description="If True, Stripe will automatically finalize and send the invoice."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the invoice."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
@@ -873,7 +857,7 @@ class UpdateInvoice(Tool):
             auto_advance: bool | None = Field(None, description="Whether Stripe automatically advances the invoice status."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to update on the invoice."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -918,7 +902,7 @@ class RetrieveInvoice(Tool):
         async def _retrieve_invoice(
             invoice_id: str = Field(..., description="Stripe invoice ID (e.g. 'in_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -954,7 +938,7 @@ class ListInvoices(Tool):
             starting_after: str | None = Field(None, description="Invoice ID cursor for pagination (start after this)."),
             ending_before: str | None = Field(None, description="Invoice ID cursor for pagination (end before this)."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -998,7 +982,7 @@ class SendInvoice(Tool):
         async def _send_invoice(
             invoice_id: str = Field(..., description="Stripe invoice ID to send (e.g. 'in_xxx'). Invoice must be finalized first. No emails sent in test mode."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1030,7 +1014,7 @@ class FinalizeInvoice(Tool):
             invoice_id: str = Field(..., description="Stripe draft invoice ID to finalize (e.g. 'in_xxx')."),
             auto_advance: bool | None = Field(None, description="Whether Stripe continues to automatically advance the invoice's status."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -1066,7 +1050,7 @@ class VoidInvoice(Tool):
         async def _void_invoice(
             invoice_id: str = Field(..., description="Stripe invoice ID to void (e.g. 'in_xxx'). Must be an open invoice."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1097,7 +1081,7 @@ class WriteOffInvoice(Tool):
         async def _write_off_invoice(
             invoice_id: str = Field(..., description="Stripe invoice ID to mark as uncollectible (e.g. 'in_xxx'). Must be an open invoice."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1128,7 +1112,7 @@ class DeleteOrVoidInvoice(Tool):
         async def _delete_or_void_invoice(
             invoice_id: str = Field(..., description="Stripe invoice ID (e.g. 'in_xxx'). Draft invoices are deleted; others are voided."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1180,7 +1164,7 @@ class CreateInvoiceLineItem(Tool):
             description: str | None = Field(None, description="Line item description."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the invoice item."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {"customer": customer}
@@ -1233,7 +1217,7 @@ class UpdateInvoiceLineItem(Tool):
             quantity: int | None = Field(None, description="Updated quantity."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to update on the invoice item."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -1276,7 +1260,7 @@ class RetrieveInvoiceLineItem(Tool):
         async def _retrieve_invoice_line_item(
             invoice_item_id: str = Field(..., description="Stripe invoice item ID (e.g. 'ii_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1307,7 +1291,7 @@ class DeleteInvoiceLineItem(Tool):
         async def _delete_invoice_line_item(
             invoice_item_id: str = Field(..., description="Stripe invoice item ID to delete (e.g. 'ii_xxx'). Must not be attached to a finalized invoice."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1342,7 +1326,7 @@ class CreateSubscription(Tool):
             cancel_at_period_end: bool = Field(False, description="If True, cancels the subscription at the end of the current period."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the subscription."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
@@ -1388,7 +1372,7 @@ class SearchSubscriptions(Tool):
             limit: int = Field(10, description="Maximum number of subscriptions to return."),
             page: str | None = Field(None, description="Cursor for the next page, from a previous response's next_page field."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"query": query, "limit": limit}
@@ -1425,7 +1409,7 @@ class CancelSubscription(Tool):
             subscription_id: str = Field(..., description="Stripe subscription ID (e.g. 'sub_xxx')."),
             cancel_at_period_end: bool = Field(False, description="If True, remains active until period end then cancels. If False, cancels immediately."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             if cancel_at_period_end:
@@ -1469,7 +1453,7 @@ class CreateProduct(Tool):
             active: bool = Field(True, description="Whether the product is available for purchase."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the product."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
@@ -1511,7 +1495,7 @@ class RetrieveProduct(Tool):
         async def _retrieve_product(
             product_id: str = Field(..., description="Stripe product ID (e.g. 'prod_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1545,7 +1529,7 @@ class ListProducts(Tool):
             starting_after: str | None = Field(None, description="Product ID cursor for pagination (return results after this product)."),
             ending_before: str | None = Field(None, description="Product ID cursor for pagination (return results before this product)."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -1590,7 +1574,7 @@ class CreatePrice(Tool):
             recurring_interval_count: int | None = Field(None, description="Number of intervals between each billing cycle (default 1)."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the price."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
@@ -1635,7 +1619,7 @@ class RetrievePrice(Tool):
         async def _retrieve_price(
             price_id: str = Field(..., description="Stripe price ID (e.g. 'price_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1670,7 +1654,7 @@ class CreatePayout(Tool):
             statement_descriptor: str | None = Field(None, description="Text on recipient's bank statement (max 22 chars)."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the payout."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
@@ -1715,7 +1699,7 @@ class UpdatePayout(Tool):
             payout_id: str = Field(..., description="Stripe payout ID (e.g. 'po_xxx')."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to update on the payout."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -1752,7 +1736,7 @@ class RetrievePayout(Tool):
         async def _retrieve_payout(
             payout_id: str = Field(..., description="Stripe payout ID (e.g. 'po_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1788,7 +1772,7 @@ class ListPayouts(Tool):
             arrival_date_gte: int | None = Field(None, description="Unix timestamp to filter payouts arriving after this date."),
             arrival_date_lte: int | None = Field(None, description="Unix timestamp to filter payouts arriving before this date."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -1834,7 +1818,7 @@ class CancelOrReversePayout(Tool):
             action: str = Field("cancel", description="'cancel' for pending payouts, or 'reverse' for paid payouts."),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach (only used for reverse action)."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {}
@@ -1869,7 +1853,7 @@ class RetrieveBalance(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _retrieve_balance() -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1905,7 +1889,7 @@ class ListBalanceHistory(Tool):
             created_gte: int | None = Field(None, description="Unix timestamp to filter transactions created after this time."),
             created_lte: int | None = Field(None, description="Unix timestamp to filter transactions created before this time."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -1949,7 +1933,7 @@ class RetrieveCheckoutSession(Tool):
         async def _retrieve_checkout_session(
             session_id: str = Field(..., description="Stripe Checkout Session ID (e.g. 'cs_xxx')."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1982,7 +1966,7 @@ class RetrieveCheckoutSessionLineItems(Tool):
             limit: int = Field(10, description="Maximum number of line items to return."),
             starting_after: str | None = Field(None, description="Line item ID cursor for pagination."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -2020,7 +2004,7 @@ class CreateBillingMeter(Tool):
             event_name: str = Field(..., description="Name of the billing meter event to record usage against."),
             aggregation_formula: str = Field("sum", description="How to aggregate usage events: 'sum' (default) or 'count'."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
@@ -2061,7 +2045,7 @@ class CreateUsageRecord(Tool):
             timestamp: int | None = Field(None, description="Unix timestamp for when the usage occurred. Defaults to current time."),
             action: str = Field("increment", description="'increment' (default) to add to existing usage, or 'set' to overwrite."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Stripe", env_var="STRIPE_API_KEY")
             import httpx
 
             data: dict[str, Any] = {
