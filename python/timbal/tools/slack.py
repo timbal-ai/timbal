@@ -5,24 +5,9 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://slack.com/api"
-
-
-async def _resolve_api_token(tool: Any) -> str:
-    """Resolve Slack API token from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_token"]
-    if tool.api_token is not None:
-        return tool.api_token.get_secret_value()
-    env_token = os.getenv("SLACK_API_TOKEN")
-    if env_token:
-        return env_token
-    raise ValueError(
-        "Slack API token not found. Set SLACK_API_TOKEN environment variable, "
-        "pass api_token in config, or configure an integration."
-    )
 
 
 async def _resolve_channel_id(tool: Any, channel: str | None = None) -> str:
@@ -65,7 +50,13 @@ class SlackReadMessages(Tool):
             latest: str | None = Field(None, description="Timestamp of latest message to include"),
             inclusive: bool = Field(False, description="Include messages with timestamps exactly matching oldest/latest"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -119,7 +110,13 @@ class SlackSendMessage(Tool):
             icon_emoji: str | None = Field(None, description="Custom emoji icon for the bot (e.g., ':robot_face:')"),
             icon_url: str | None = Field(None, description="Custom icon URL for the bot"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -176,7 +173,13 @@ class SlackSendEphemeralMessage(Tool):
             blocks: list[dict[str, Any]] | None = Field(None, description="Slack Block Kit blocks for rich formatting"),
             thread_ts: str | None = Field(None, description="Thread timestamp to reply to a specific message"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -220,7 +223,13 @@ class SlackCreateCanvas(Tool):
             document_content: dict[str, Any] | None = Field(None, description="Canvas document content, e.g. {'type': 'markdown', 'markdown': '## Hello\nThis is a canvas.'}"),
             channel_id: str | None = Field(None, description="Channel ID to associate the canvas with. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel_id)
             import httpx
 
@@ -261,7 +270,13 @@ class SlackDeleteMessage(Tool):
             ts: str = Field(..., description="Timestamp of the message to delete (the message's unique ID)"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
 
             import httpx
@@ -299,7 +314,13 @@ class SlackGetMessageThread(Tool):
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
             cursor: str | None = Field(None, description="Pagination cursor for next page"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -338,7 +359,13 @@ class SlackPinMessage(Tool):
             timestamp: str = Field(..., description="Timestamp of the message to pin"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -373,7 +400,13 @@ class SlackUnpinMessage(Tool):
             timestamp: str = Field(..., description="Timestamp of the message to unpin"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -405,7 +438,13 @@ class SlackListPinnedItems(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pinned_items(channel: str | None = Field(None, description="Channel ID to list pinned items from. If not provided, uses channel_id from integration")) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -436,7 +475,13 @@ class SlackGetUserPresence(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_user_presence(user: str = Field(..., description="Slack user ID to get presence for (e.g. 'U1234567890')")) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -475,7 +520,13 @@ class SlackSearchUsers(Tool):
             limit: int = Field(20, description="Maximum number of users to return"),
             cursor: str | None = Field(None, description="Pagination cursor for next page"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -527,7 +578,13 @@ class SlackAddUserToChannel(Tool):
             users: list[str] = Field(..., description="List of user IDs to invite to channel (up to 1000)."),
             channel: str | None = Field(None, description="Channel ID to add users to. If no channel is specified, uses the integration's default channel.")
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -562,7 +619,13 @@ class SlackRemoveFromChannel(Tool):
             user: str = Field(..., description="User ID to remove from channel"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -602,7 +665,13 @@ class SlackListUsersInChannel(Tool):
             channel: str | None = Field(None, description="Channel ID to list users from. If not provided, uses channel_id from integration"),
             cursor: str | None = Field(None, description="Pagination cursor for next page"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -641,7 +710,13 @@ class SlackUpdateChannelTopic(Tool):
             topic: str = Field(..., description="New channel topic"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -676,7 +751,13 @@ class SlackUpdateChannelPurpose(Tool):
             purpose: str = Field(..., description="New channel purpose"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -708,7 +789,13 @@ class SlackArchiveChannel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _archive_channel(channel: str | None = Field(None, description="Channel ID to archive. If not provided, uses channel_id from integration")) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -740,7 +827,13 @@ class SlackUnarchiveChannel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _unarchive_channel(channel: str | None = Field(None, description="Channel ID to unarchive. If not provided, uses channel_id from integration")) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -776,7 +869,13 @@ class SlackGetConversationInfo(Tool):
             include_num_members: bool = Field(True, description="Whether to include member count"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -817,7 +916,13 @@ class SlackListChannels(Tool):
             cursor: str | None = Field(None, description="Pagination cursor for next page"),
             exclude_archived: bool = Field(True, description="Whether to exclude archived channels"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             params: dict[str, Any] = {
@@ -865,7 +970,13 @@ class SlackAddReaction(Tool):
             name: str = Field(..., description="Emoji name without colons, e.g. 'thumbsup', 'white_check_mark'"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -901,7 +1012,13 @@ class SlackRemoveReaction(Tool):
             name: str = Field(..., description="Emoji name without colons, e.g. 'thumbsup', 'white_check_mark'"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -946,7 +1063,13 @@ class SlackListFiles(Tool):
             ts_from: str | None = Field(None, description="Unix timestamp to filter files uploaded after this time"),
             ts_to: str | None = Field(None, description="Unix timestamp to filter files uploaded before this time"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import httpx
 
@@ -989,7 +1112,13 @@ class SlackGetFileInfo(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_file_info(file: str = Field(..., description="File ID to get info for (e.g. 'F1234567890')")) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1019,7 +1148,13 @@ class SlackDownloadFile(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _download_file(url_private: str = Field(..., description="Private URL of file to download. (file.url_private or file.url_private_download). Returns the file content as a base64-encoded string alongside the content-type header so callers can reconstruct the file.")) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import base64
 
             import httpx
@@ -1055,7 +1190,13 @@ class SlackDeleteFile(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_file(file: str = Field(..., description="File ID to delete (e.g. 'F1234567890')")) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1097,7 +1238,13 @@ class SlackSendAndWaitForResponse(Tool):
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
             blocks: list[dict[str, Any]] | None = Field(None, description="Slack Block Kit blocks for rich formatting"),
         ) -> Any:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Slack",
+                env_var="SLACK_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             channel_id = await _resolve_channel_id(self, channel)
             import asyncio
 

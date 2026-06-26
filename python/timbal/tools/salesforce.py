@@ -1,28 +1,12 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _API_VERSION = "v60.0"
-
-
-async def _resolve_token(tool: Any) -> str:
-    """Resolve Salesforce security token from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["security_token"]
-    if tool.security_token is not None:
-        return tool.security_token.get_secret_value()
-    env_key = os.getenv("SALESFORCE_SECURITY_TOKEN")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Salesforce security token not found. Set SALESFORCE_SECURITY_TOKEN environment variable, "
-        "pass security_token in config, or configure an integration."
-    )
 
 
 def _sf(instance_url: str, path: str) -> str:
@@ -55,7 +39,13 @@ class SalesforceCreateCase(Tool):
             case_type: str | None = Field(None, description="Case type: e.g. 'Problem', 'Feature Request', 'Question'"),
             reason: str | None = Field(None, description="Case reason: e.g. 'Equipment failure', 'User error'"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {"Subject": subject, "Status": status, "Priority": priority}
             if origin:
@@ -112,7 +102,13 @@ class SalesforceUpdateCase(Tool):
             case_type: str | None = Field(None, description="Case type: e.g. 'Problem', 'Feature Request'"),
             reason: str | None = Field(None, description="Case reason: e.g. 'Equipment failure', 'User error'"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {}
             if subject:
@@ -166,7 +162,13 @@ class SalesforceDeleteCase(Tool):
             instance_url: str = Field(..., description="Salesforce org URL"),
             case_id: str = Field(..., description="Salesforce case ID")
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 
@@ -201,7 +203,13 @@ class SalesforceCreateComment(Tool):
             comment_body: str = Field(..., description="Comment content/body text"),
             is_published: bool = Field(True, description="If True, the comment is visible to the customer portal"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 
@@ -237,7 +245,13 @@ class SalesforceUpdateComment(Tool):
             comment_body: str | None = Field(None, description="Updated comment content/body text"),
             is_published: bool | None = Field(None, description="Updated visibility status: True if visible to customer portal"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {}
             if comment_body:
@@ -277,7 +291,13 @@ class SalesforceDeleteComment(Tool):
             instance_url: str = Field(..., description="Salesforce org URL"),
             comment_id: str = Field(..., description="Salesforce comment ID")
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 
@@ -318,7 +338,13 @@ class SalesforceCreateContact(Tool):
             mailing_city: str | None = Field(None, description="Contact mailing city"),
             mailing_country: str | None = Field(None, description="Contact mailing country"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {"LastName": last_name}
             if first_name:
@@ -379,7 +405,13 @@ class SalesforceUpdateContact(Tool):
             mailing_city: str | None = Field(None, description="Updated contact mailing city"),
             mailing_country: str | None = Field(None, description="Updated contact mailing country"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {}
             if last_name:
@@ -433,7 +465,13 @@ class SalesforceDeleteContact(Tool):
             instance_url: str = Field(..., description="Salesforce org URL"),
             contact_id: str = Field(..., description="Salesforce contact ID")
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 
@@ -477,7 +515,13 @@ class SalesforceCreateLead(Tool):
             country: str | None = Field(None, description="Lead country"),
             description: str | None = Field(None, description="Lead description or notes"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {
                 "LastName": last_name,
@@ -536,7 +580,13 @@ class SalesforceGetLead(Tool):
             lead_id: str = Field(..., description="Salesforce Lead ID to retrieve"),
             fields: list[str] | None = Field(None, description="List of API field names to return. Returns all fields if omitted"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             url = _sf(instance_url, f"sobjects/Lead/{lead_id}")
             if fields:
@@ -583,7 +633,13 @@ class SalesforceUpdateLead(Tool):
             industry: str | None = Field(None, description="Lead industry"),
             description: str | None = Field(None, description="Lead description"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {}
             if last_name:
@@ -639,7 +695,13 @@ class SalesforceDeleteLead(Tool):
             instance_url: str = Field(..., description="Salesforce org URL"),
             lead_id: str = Field(..., description="Salesforce lead ID")
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 
@@ -674,7 +736,13 @@ class SalesforceSearchLeads(Tool):
             fields: list[str] | None = Field(None, description="list of Lead fields to return, e.g. ['Id', 'FirstName', 'LastName', 'Email', 'Status']."),
             limit: int = Field(20, description="Maximum number of leads to return"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             returning_fields = ", ".join(fields) if fields else "Id, FirstName, LastName, Email, Company, Status, Phone"
             sosl = f"FIND {{{search_term}}} IN ALL FIELDS RETURNING Lead({returning_fields} LIMIT {limit})"
@@ -719,7 +787,13 @@ class SalesforceCreateOpportunity(Tool):
             description: str | None = Field(None, description="Opportunity description or notes"),
             owner_id: str | None = Field(None, description="Salesforce User ID for opportunity owner"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {
                 "Name": name,
@@ -779,7 +853,13 @@ class SalesforceUpdateOpportunity(Tool):
             lead_source: str | None = Field(None, description="Lead source: e.g. 'Web', 'Phone', 'Referral'"),
             description: str | None = Field(None, description="Opportunity description or notes"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {}
             if name:
@@ -831,7 +911,13 @@ class SalesforceDeleteOpportunity(Tool):
             instance_url: str = Field(..., description="Salesforce org URL"),
             opportunity_id: str = Field(..., description="Salesforce opportunity ID")
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 
@@ -872,7 +958,13 @@ class SalesforceCreateTask(Tool):
             owner_id: str | None = Field(None, description="Owner ID"),
             task_type: str | None = Field(None, description="Task type (e.g. Call, Email, Meeting)"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {"Subject": subject, "Status": status, "Priority": priority}
             if what_id:
@@ -921,7 +1013,13 @@ class SalesforceGetTask(Tool):
             task_id: str = Field(..., description="Salesforce Task ID to retrieve"),
             fields: list[str] | None = Field(None, description="List of API field names to return. Returns all fields if omitted"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             url = _sf(instance_url, f"sobjects/Task/{task_id}")
             if fields:
@@ -964,7 +1062,13 @@ class SalesforceUpdateTask(Tool):
             description: str | None = Field(None, description="Updated task description or notes"),
             owner_id: str | None = Field(None, description="Updated Salesforce User ID for task owner"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             payload: dict[str, Any] = {}
             if subject:
@@ -1012,7 +1116,13 @@ class SalesforceDeleteTask(Tool):
             instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
             task_id: str = Field(..., description="Salesforce Task ID to delete"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 
@@ -1047,7 +1157,13 @@ class SalesforceSearchTasks(Tool):
             fields: list[str] | None = Field(None, description="List of Task fields to return, e.g. ['Id', 'Subject', 'Status', 'Priority', 'ActivityDate']"),
             limit: int = Field(20, description="Maximum number of tasks to return"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             returning_fields = ", ".join(fields) if fields else "Id, Subject, Status, Priority, ActivityDate, OwnerId"
             sosl = f"FIND {{{search_term}}} IN ALL FIELDS RETURNING Task({returning_fields} LIMIT {limit})"
@@ -1085,7 +1201,13 @@ class SalesforceQuery(Tool):
             soql: str = Field(..., description="SOQL query string. Example: 'SELECT Id, Name, Email FROM Contact WHERE CreatedDate = TODAY'"),
             all_rows: bool = Field(False, description="If True, includes deleted and archived records in results"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             endpoint = "queryAll/" if all_rows else "query/"
 
@@ -1122,7 +1244,13 @@ class SalesforceCreateRecord(Tool):
             object_type: str = Field(..., description="Salesforce API object name, e.g. 'Account', 'CustomObject__c'"),
             fields: dict[str, Any] = Field(..., description="Dict of Salesforce API field names to values. Example: {'Name': 'Acme Corp', 'BillingCity': 'San Francisco'}"),
         ) -> Any:
-            token = await _resolve_token(self)
+            token = await resolve_api_key(
+                tool=self,
+                provider_name="Salesforce",
+                env_var="SALESFORCE_SECURITY_TOKEN",
+                explicit_attr="security_token",
+                integration_keys=("security_token",),
+            )
 
             import httpx
 

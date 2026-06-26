@@ -1,30 +1,12 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.replicate.com/v1"
-
-
-async def _resolve_api_token(tool: Any) -> str:
-    """Resolve Replicate API token from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        token = credentials.get("api_token")
-        if token:
-            return str(token)
-    if tool.api_token is not None:
-        return tool.api_token.get_secret_value()
-    env_token = os.getenv("REPLICATE_API_TOKEN")
-    if env_token:
-        return env_token
-    raise ValueError(
-        "Replicate API token not found. Set REPLICATE_API_TOKEN environment variable, "
-        "pass api_token in config, or configure an integration."
-    )
 
 
 def _replicate_headers(api_token: str, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -69,7 +51,13 @@ class ReplicateCreatePrediction(Tool):
                 description="If set (1-60), sends Prefer: wait=n so the HTTP call may block until done or timeout.",
             ),
         ) -> dict[str, Any]:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Replicate",
+                env_var="REPLICATE_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             headers = _replicate_headers(api_token)
@@ -107,7 +95,13 @@ class ReplicateGetPrediction(Tool):
         async def _replicate_get_prediction(
             prediction_id: str = Field(..., description="Prediction id from replicate_create_prediction (often a UUID)."),
         ) -> dict[str, Any]:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Replicate",
+                env_var="REPLICATE_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -139,7 +133,13 @@ class ReplicateCancelPrediction(Tool):
         async def _replicate_cancel_prediction(
             prediction_id: str = Field(..., description="Prediction id to cancel."),
         ) -> dict[str, Any]:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Replicate",
+                env_var="REPLICATE_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
@@ -178,7 +178,13 @@ class ReplicateSearchModels(Tool):
             query: str = Field(..., description="Search query string."),
             limit: int = Field(20, description="Max model results (1-50)."),
         ) -> dict[str, Any]:
-            api_token = await _resolve_api_token(self)
+            api_token = await resolve_api_key(
+                tool=self,
+                provider_name="Replicate",
+                env_var="REPLICATE_API_TOKEN",
+                explicit_attr="api_token",
+                integration_keys=("api_token",),
+            )
             import httpx
 
             lim = max(1, min(50, limit))
