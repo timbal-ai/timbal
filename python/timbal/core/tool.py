@@ -136,6 +136,11 @@ class Tool(Runnable):
         (e.g. running locally) — re-raise the original ``CredentialNotAvailable``
         so the user gets the actionable "configure credentials locally" message
         instead of an opaque platform error.
+
+        When platform auth is configured but org/subject is missing (e.g.
+        ``TIMBAL_API_KEY`` without ``TIMBAL_ORG_ID``), propagate
+        ``ToolProxyUnavailable`` so the user fixes platform setup rather than
+        local provider credentials.
         """
         try:
             async for event, final_output, collector in super()._execute_handler(
@@ -146,8 +151,10 @@ class Tool(Runnable):
             try:
                 output = await execute_tool_proxy(self.name, validated_input)
             except ToolProxyUnavailable:
-                # No proxy reachable (e.g. local run without platform config).
-                raise cred_error from None
+                if run_context.platform_config is None:
+                    # Local run without platform config — fall back to credential error.
+                    raise cred_error from None
+                raise
             except PlatformError as proxy_error:
                 # 403 is what the platform returns when no proxy is available for this
                 # tool (no service-account credentials configured). 404/501 are kept as

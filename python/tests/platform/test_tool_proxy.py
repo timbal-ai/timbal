@@ -234,6 +234,38 @@ async def test_tool_proxy_failure_surfaces_as_tool_error():
     assert "upstream proxy error" in result.error["message"]
 
 
+@pytest.mark.asyncio
+async def test_tool_missing_org_id_surfaces_tool_proxy_unavailable(monkeypatch):
+    """Platform auth without org subject must not mask ToolProxyUnavailable as a
+    provider credential error."""
+    monkeypatch.setenv("TIMBAL_API_KEY", "sk-platform")
+    monkeypatch.setenv("TIMBAL_API_HOST", "api.example.com")
+    monkeypatch.delenv("TIMBAL_ORG_ID", raising=False)
+
+    run_context = RunContext(tracing_provider=None)
+    set_run_context(run_context)
+
+    async def _handler(url: str) -> dict:
+        from timbal.tools._creds import resolve_api_key
+
+        await resolve_api_key(
+            provider_name="Firecrawl",
+            env_var="FIRECRAWL_API_KEY",
+            integration=None,
+            api_key=None,
+        )
+        return {"url": url}
+
+    tool = Tool(name="firecrawl_scrape", handler=_handler, tracing_provider=None)
+    result = await tool(url="https://example.com").collect()
+
+    assert result.status.code == "error"
+    assert result.error is not None
+    assert result.error["type"] == "ToolProxyUnavailable"
+    assert "TIMBAL_ORG_ID" in result.error["message"]
+    assert "Firecrawl credentials not found" not in result.error["message"]
+
+
 @pytest.mark.parametrize("status_code", [403, 404, 501])
 @pytest.mark.asyncio
 async def test_tool_proxy_not_implemented_reraises_credential_error(status_code):
