@@ -14,7 +14,6 @@ from ..errors import CredentialNotAvailable
 from ..platform.integrations import Integration
 
 __all__ = [
-    "CredentialNotAvailable",
     "resolve_api_key",
 ]
 

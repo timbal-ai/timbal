@@ -233,10 +233,12 @@ class TestRequest:
 
         with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
             with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()) as mock_sleep:
-                with pytest.raises(PlatformError):
+                with pytest.raises(PlatformError) as ei:
                     await _request("GET", "health", service="api", max_retries=3)
         # No sleep means no retry was attempted
         mock_sleep.assert_not_called()
+        # status_code is captured so callers can branch (e.g. proxy-not-implemented)
+        assert ei.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_429_retries_then_succeeds(self):

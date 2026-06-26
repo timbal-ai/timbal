@@ -241,17 +241,27 @@ def resolve_platform_config(
     if not app_id:
         app_id = os.getenv("TIMBAL_APP_ID")
 
+    project_id = None
+    if existing_subject:
+        project_id = existing_subject.project_id
+    if not project_id:
+        project_id = os.getenv("TIMBAL_PROJECT_ID")
+
     rev = existing_subject.rev if existing_subject else None
+    if not rev:
+        rev = os.getenv("TIMBAL_REV")
 
     platform_config.subject = PlatformSubject(
         org_id=org_id,
         app_id=app_id,
+        project_id=project_id,
         rev=rev,
     )
     logger.debug(
         "Resolved platform subject.",
         org_id=org_id,
         app_id=app_id,
+        project_id=project_id,
         rev=rev,
     )
 

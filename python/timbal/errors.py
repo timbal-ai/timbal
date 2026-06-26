@@ -165,7 +165,16 @@ class PDFProcessingError(TimbalError):
 
 
 class PlatformError(TimbalError):
-    """Error raised when a platform API call fails."""
+    """Error raised when a platform API call fails.
+
+    Carries the HTTP ``status_code`` (when the failure came from an HTTP
+    response) so callers can branch on it — e.g. treat 404/501 as "endpoint
+    not implemented" rather than a hard failure.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class FallbackExhausted(TimbalError):
