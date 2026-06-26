@@ -7,6 +7,7 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://www.happyscribe.com/api/v1"
 _USER_AGENT = "timbal-happy-scribe-tools/1.0"
@@ -36,17 +37,6 @@ ExportFormat = Literal[
 ]
 
 OrderService = Literal["auto", "pro"]
-
-
-async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
-    from ._creds import resolve_api_key
-
-    return await resolve_api_key(
-        env_var="HAPPYSCRIBE_API_KEY",
-        provider_name="Happy Scribe",
-        integration=integration,
-        api_key=api_key,
-    )
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -103,7 +93,12 @@ async def _request(
     json_body: Any = None,
     timeout: float = 60.0,
 ) -> Any:
-    api_key = await _resolve_api_key(integration=tool.integration, api_key=tool.api_key)
+    api_key = await resolve_api_key(
+        env_var="HAPPYSCRIBE_API_KEY",
+        provider_name="Happy Scribe",
+        integration=tool.integration,
+        api_key=tool.api_key,
+    )
     import httpx
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:

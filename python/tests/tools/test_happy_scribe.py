@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import SecretStr
 from timbal.platform.integrations import Integration
+from timbal.tools._creds import resolve_api_key
 from timbal.tools.happy_scribe import (
     HappyScribeListTranscriptions,
     _headers,
-    _resolve_api_key,
     _resolve_organization_id,
 )
 
@@ -22,7 +22,12 @@ def test_headers():
 
 @pytest.mark.asyncio
 async def test_resolve_api_key_from_tool():
-    key = await _resolve_api_key(integration=None, api_key=SecretStr("local-key"))
+    key = await resolve_api_key(
+        env_var="HAPPYSCRIBE_API_KEY",
+        provider_name="Happy Scribe",
+        integration=None,
+        api_key=SecretStr("local-key"),
+    )
     assert key == "local-key"
 
 
@@ -30,7 +35,12 @@ async def test_resolve_api_key_from_tool():
 async def test_resolve_api_key_from_integration():
     integration = MagicMock(spec=Integration)
     integration.resolve = AsyncMock(return_value={"api_key": "platform-key"})
-    key = await _resolve_api_key(integration=integration, api_key=None)
+    key = await resolve_api_key(
+        env_var="HAPPYSCRIBE_API_KEY",
+        provider_name="Happy Scribe",
+        integration=integration,
+        api_key=None,
+    )
     assert key == "platform-key"
 
 

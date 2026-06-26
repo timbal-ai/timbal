@@ -9,6 +9,38 @@ class APIKeyNotFoundError(TimbalError):
     """Error raised when an API key is not found."""
 
 
+class CredentialNotAvailable(APIKeyNotFoundError, ValueError):
+    """Raised when a tool credential can't be resolved from any source.
+
+    Subclasses ValueError for backward compat with tool code/tests. Carries
+    structured fields (provider_name, missing, env_vars) so callers (e.g. a
+    remote service-account executor) can react without parsing the message.
+    """
+
+    def __init__(
+        self,
+        provider_name: str,
+        *,
+        missing: list[str] | None = None,
+        env_vars: list[str] | None = None,
+        message: str | None = None,
+    ) -> None:
+        self.provider_name = provider_name
+        self.missing = list(missing or [])
+        self.env_vars = list(env_vars or [])
+        super().__init__(message or self._default_message())
+
+    def _default_message(self) -> str:
+        parts = [f"{self.provider_name} credentials not found."]
+        if self.missing:
+            parts.append(f"Missing: {', '.join(self.missing)}.")
+        hints = ["pass them on the tool", "configure an Integration"]
+        if self.env_vars:
+            hints.append(f"set the {', '.join(self.env_vars)} environment variable(s)")
+        parts.append("To fix: " + ", or ".join(hints) + ".")
+        return " ".join(parts)
+
+
 class EarlyExit(TimbalError):
     """Error raised when an early exit is requested.
 

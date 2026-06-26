@@ -4,19 +4,9 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.firecrawl.dev/v2"
-
-
-async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
-    """Resolve Firecrawl API key from integration, explicit field, or env var."""
-    from ._creds import resolve_api_key
-    return await resolve_api_key(
-        env_var="FIRECRAWL_API_KEY",
-        provider_name="Firecrawl",
-        integration=integration,
-        api_key=api_key,
-    )
 
 
 class FirecrawlScrape(Tool):
@@ -82,7 +72,12 @@ class FirecrawlScrape(Tool):
             ),
             timeout: int = Field(30000, description="Request timeout in milliseconds (1000-300000)"),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="FIRECRAWL_API_KEY",
+                provider_name="Firecrawl",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             payload: dict[str, Any] = {
@@ -175,7 +170,12 @@ class FirecrawlSearch(Tool):
             ),
             timeout: int = Field(60000, description="Request timeout in milliseconds"),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="FIRECRAWL_API_KEY",
+                provider_name="Firecrawl",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             payload: dict[str, Any] = {
@@ -257,7 +257,12 @@ class FirecrawlCrawl(Tool):
             ),
             block_ads: bool = Field(True, description="Block ads and cookie popups during scraping"),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="FIRECRAWL_API_KEY",
+                provider_name="Firecrawl",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import asyncio
 
             import httpx
@@ -338,7 +343,12 @@ class FirecrawlMap(Tool):
                 None, description="Filter and rank URLs by relevance to this search term"
             ),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="FIRECRAWL_API_KEY",
+                provider_name="Firecrawl",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             payload: dict[str, Any] = {"url": url}
@@ -392,7 +402,12 @@ class FirecrawlExtract(Tool):
                 False, description="Search related pages beyond the specified URLs for additional information"
             ),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="FIRECRAWL_API_KEY",
+                provider_name="Firecrawl",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             if not prompt and not schema:
