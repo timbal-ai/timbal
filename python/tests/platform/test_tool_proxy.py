@@ -5,12 +5,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from pydantic import SecretStr
+from timbal.core.agent import Agent
+from timbal.core.test_model import TestModel
 from timbal.core.tool import Tool
-from timbal.errors import PlatformError
+from timbal.core.workflow import Workflow
+from timbal.errors import PlatformError, ToolProxyUnavailable
 from timbal.platform.tool_proxy import build_tool_proxy_headers, execute_tool_proxy
 from timbal.state import RunContext, get_run_context, set_call_id, set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.config_loader import FileConfig
+from timbal.types.content import ToolUseContent
+from timbal.types.message import Message
 
 
 def _platform_config() -> PlatformConfig:
@@ -147,7 +152,7 @@ async def test_execute_tool_proxy_requires_platform_auth(monkeypatch):
     run_context = RunContext(tracing_provider=None)
     set_run_context(run_context)
 
-    with pytest.raises(ValueError, match="Tool proxy requires platform_config"):
+    with pytest.raises(ToolProxyUnavailable, match="Tool proxy requires platform_config"):
         await execute_tool_proxy("firecrawl_scrape", {"url": "https://example.com"})
 
 
@@ -354,3 +359,184 @@ async def test_firecrawl_scrape_uses_proxy_without_local_credentials(monkeypatch
     assert args[1] == "orgs/org-fc/proxies/v1/tools/firecrawl_scrape"
     assert kwargs["json"]["url"] == "https://example.com"
     assert kwargs["json"]["formats"] == ["markdown"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_plain_step_unaffected_by_proxy():
+    """A normal function step (no credentials) never touches the proxy."""
+    run_context = RunContext(tracing_provider=None)
+    set_run_context(run_context)
+
+    def add(x: int, y: int) -> int:
+        return x + y
+
+    workflow = Workflow(name="math", tracing_provider=None).step(add)
+
+    with patch("timbal.core.tool.execute_tool_proxy", new_callable=AsyncMock) as mock_proxy:
+        result = await workflow(x=2, y=3).collect()
+
+    mock_proxy.assert_not_awaited()
+    assert result.status.code == "success"
+    assert result.output == 5
+
+
+@pytest.mark.asyncio
+async def test_workflow_credential_step_proxies_when_configured():
+    """A credential tool step with no local creds proxies through the platform."""
+    run_context = RunContext(platform_config=_platform_config(), tracing_provider=None)
+    set_run_context(run_context)
+
+    async def firecrawl_scrape(url: str) -> dict:
+        from timbal.tools._creds import resolve_api_key
+
+        await resolve_api_key(
+            provider_name="Firecrawl",
+            env_var="FIRECRAWL_API_KEY",
+            integration=None,
+            api_key=None,
+        )
+        return {"url": url}
+
+    workflow = Workflow(name="scraper", tracing_provider=None).step(firecrawl_scrape)
+
+    with patch(
+        "timbal.core.tool.execute_tool_proxy",
+        new_callable=AsyncMock,
+        return_value={"proxied": True},
+    ) as mock_proxy:
+        result = await workflow(url="https://example.com").collect()
+
+    mock_proxy.assert_awaited_once_with("firecrawl_scrape", {"url": "https://example.com"})
+    assert result.status.code == "success"
+    assert result.output == {"proxied": True}
+
+
+@pytest.mark.asyncio
+async def test_workflow_credential_step_no_platform_config_surfaces_credential_error(monkeypatch):
+    """Running locally (no platform config), a credential step must surface the
+    actionable CredentialNotAvailable, not an opaque proxy error."""
+    monkeypatch.delenv("TIMBAL_API_KEY", raising=False)
+    monkeypatch.delenv("TIMBAL_ORG_ID", raising=False)
+
+    run_context = RunContext(tracing_provider=None)
+    set_run_context(run_context)
+    assert run_context.platform_config is None
+
+    async def firecrawl_scrape(url: str) -> dict:
+        from timbal.tools._creds import resolve_api_key
+
+        await resolve_api_key(
+            provider_name="Firecrawl",
+            env_var="FIRECRAWL_API_KEY",
+            integration=None,
+            api_key=None,
+        )
+        return {"url": url}
+
+    workflow = Workflow(name="scraper", tracing_provider=None).step(firecrawl_scrape)
+
+    result = await workflow(url="https://example.com").collect()
+
+    assert result.status.code == "error"
+    # The workflow surfaces the step's credential error, not a proxy/config error.
+    assert "Firecrawl credentials not found" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_call_proxies_when_configured():
+    """An agent tool with no local creds is proxied through the platform when the
+    LLM calls it."""
+    run_context = RunContext(platform_config=_platform_config(), tracing_provider=None)
+    set_run_context(run_context)
+
+    async def firecrawl_scrape(url: str) -> dict:
+        from timbal.tools._creds import resolve_api_key
+
+        await resolve_api_key(
+            provider_name="Firecrawl",
+            env_var="FIRECRAWL_API_KEY",
+            integration=None,
+            api_key=None,
+        )
+        return {"url": url}
+
+    agent = Agent(
+        name="scraper_agent",
+        model=TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="firecrawl_scrape", input={"url": "https://example.com"})],
+                stop_reason="tool_use",
+            ),
+            "Scraped successfully.",
+        ]),
+        tools=[firecrawl_scrape],
+        tracing_provider=None,
+    )
+
+    with patch(
+        "timbal.core.tool.execute_tool_proxy",
+        new_callable=AsyncMock,
+        return_value={"markdown": "# Example"},
+    ) as mock_proxy:
+        result = await agent(prompt="Scrape example.com").collect()
+
+    mock_proxy.assert_awaited_once_with("firecrawl_scrape", {"url": "https://example.com"})
+    assert result.status.code == "success"
+    assert isinstance(result.output, Message)
+    assert "Scraped successfully." in result.output.collect_text()
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_call_no_platform_config_surfaces_credential_error(monkeypatch):
+    """Running locally (no platform config), an agent tool with no creds surfaces
+    the actionable credential error to the model instead of an opaque proxy error."""
+    monkeypatch.delenv("TIMBAL_API_KEY", raising=False)
+    monkeypatch.delenv("TIMBAL_ORG_ID", raising=False)
+
+    run_context = RunContext(tracing_provider=None)
+    set_run_context(run_context)
+    assert run_context.platform_config is None
+
+    async def firecrawl_scrape(url: str) -> dict:
+        from timbal.tools._creds import resolve_api_key
+
+        await resolve_api_key(
+            provider_name="Firecrawl",
+            env_var="FIRECRAWL_API_KEY",
+            integration=None,
+            api_key=None,
+        )
+        return {"url": url}
+
+    agent = Agent(
+        name="scraper_agent",
+        model=TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="firecrawl_scrape", input={"url": "https://example.com"})],
+                stop_reason="tool_use",
+            ),
+            "I could not scrape the page.",
+        ]),
+        tools=[firecrawl_scrape],
+        tracing_provider=None,
+    )
+
+    # Agent catches the tool error, feeds it back to the model, and keeps going.
+    result = await agent(prompt="Scrape example.com").collect()
+
+    assert result.status.code == "success"
+    assert "I could not scrape the page." in result.output.collect_text()
+
+    # The tool span must carry the actionable credential error (not a proxy/config error).
+    tool_spans = [
+        span
+        for span in run_context._trace.values()
+        if getattr(span, "path", "").endswith("firecrawl_scrape")
+    ]
+    assert tool_spans, "expected a firecrawl_scrape tool span in the trace"
+    tool_error = tool_spans[0].error
+    assert tool_error is not None
+    assert tool_error["type"] == "CredentialNotAvailable"
+    assert "Firecrawl credentials not found" in tool_error["message"]

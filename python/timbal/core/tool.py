@@ -11,7 +11,7 @@ except ImportError:
 
 from pydantic import BaseModel, Field, SkipValidation, computed_field, model_validator
 
-from ..errors import CredentialNotAvailable, PlatformError
+from ..errors import CredentialNotAvailable, PlatformError, ToolProxyUnavailable
 from ..platform.tool_proxy import execute_tool_proxy
 from ..utils import create_model_from_handler
 from .runnable import Runnable
@@ -131,10 +131,11 @@ class Tool(Runnable):
     ):
         """Execute handler locally; on missing credentials, run via platform tool proxy.
 
-        If the platform has no proxy for this tool (HTTP 403, or 404/501 as
-        fallbacks), re-raise the original ``CredentialNotAvailable`` so the user
-        gets the actionable "configure credentials locally" message instead of an
-        opaque platform error.
+        If no proxy is reachable for this tool — the platform has no proxy for it
+        (HTTP 403, or 404/501 fallbacks), or there's no platform config at all
+        (e.g. running locally) — re-raise the original ``CredentialNotAvailable``
+        so the user gets the actionable "configure credentials locally" message
+        instead of an opaque platform error.
         """
         try:
             async for event, final_output, collector in super()._execute_handler(
@@ -144,6 +145,9 @@ class Tool(Runnable):
         except CredentialNotAvailable as cred_error:
             try:
                 output = await execute_tool_proxy(self.name, validated_input)
+            except ToolProxyUnavailable:
+                # No proxy reachable (e.g. local run without platform config).
+                raise cred_error from None
             except PlatformError as proxy_error:
                 # 403 is what the platform returns when no proxy is available for this
                 # tool (no service-account credentials configured). 404/501 are kept as

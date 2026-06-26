@@ -6,6 +6,7 @@ from typing import Any
 import structlog
 
 from .. import __version__
+from ..errors import ToolProxyUnavailable
 from ..state import get_call_id, get_or_create_run_context
 from .utils import _request
 
@@ -76,7 +77,7 @@ async def execute_tool_proxy(tool_name: str, params: dict[str, Any]) -> Any:
         run_context.platform_config = platform_config
 
     if platform_config is None or platform_config.subject is None:
-        raise ValueError(
+        raise ToolProxyUnavailable(
             "Tool proxy requires platform_config with org subject. Set TIMBAL_API_KEY and TIMBAL_ORG_ID."
         )
 

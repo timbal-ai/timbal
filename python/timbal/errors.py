@@ -177,6 +177,15 @@ class PlatformError(TimbalError):
         self.status_code = status_code
 
 
+class ToolProxyUnavailable(TimbalError):
+    """Raised when the platform tool proxy can't be used for a tool execution.
+
+    Signals that no proxy is reachable for this run — e.g. no platform config
+    (running locally without TIMBAL_API_KEY / TIMBAL_ORG_ID). Callers fall back
+    to the original credential error so the user gets an actionable message.
+    """
+
+
 class FallbackExhausted(TimbalError):
     """Error raised when all models in a fallback chain fail."""
 
