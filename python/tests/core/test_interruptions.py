@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from collections.abc import AsyncGenerator, Generator
 from unittest.mock import patch
@@ -170,13 +171,25 @@ class TestToolInterruption:
         assert result.output is None
 
     @pytest.mark.asyncio
-    async def test_sync_generator_interruption(self, sync_gen_tool):
+    async def test_sync_generator_interruption(self):
         """Test that synchronous generator tool can be interrupted while yielding."""
-        # Start generator tool execution
-        task = asyncio.create_task(sync_gen_tool(count=100, delay=0.01).collect())
+        started = threading.Event()
 
-        # Wait for some chunks to be yielded
-        await asyncio.sleep(0.1)
+        def handler(count: int = 100, delay: float = 0.01) -> Generator[str, None, None]:
+            for i in range(count):
+                time.sleep(delay)
+                if i == 0:
+                    started.set()
+                yield f"sync_chunk_{i}"
+
+        tool = Tool(name="sync_gen", handler=handler)
+        task = asyncio.create_task(tool(count=100, delay=0.01).collect())
+
+        # Wait until the sync generator has yielded at least once. On macOS CI
+        # (py3.13) run_in_executor cold-start can exceed a fixed sleep, so cancel
+        # would fire before any chunk reached the collector.
+        await asyncio.to_thread(started.wait, 2.0)
+        assert started.is_set(), "sync generator did not yield before timeout"
 
         # Cancel while still yielding
         task.cancel()
@@ -186,15 +199,24 @@ class TestToolInterruption:
         assert isinstance(result, OutputEvent)
         assert result.status.code == "cancelled"
         assert result.output is not None  # Should have partial output
+        assert "sync_chunk_" in result.output
 
     @pytest.mark.asyncio
-    async def test_async_generator_interruption(self, async_gen_tool):
+    async def test_async_generator_interruption(self):
         """Test that asynchronous generator tool can be interrupted while yielding."""
-        # Start generator tool execution
-        task = asyncio.create_task(async_gen_tool(count=100, delay=0.01).collect())
+        started = asyncio.Event()
 
-        # Wait for some chunks to be yielded
-        await asyncio.sleep(0.1)
+        async def handler(count: int = 100, delay: float = 0.01) -> AsyncGenerator[str, None]:
+            for i in range(count):
+                await asyncio.sleep(delay)
+                if i == 0:
+                    started.set()
+                yield f"async_chunk_{i}"
+
+        tool = Tool(name="async_gen", handler=handler)
+        task = asyncio.create_task(tool(count=100, delay=0.01).collect())
+
+        await asyncio.wait_for(started.wait(), timeout=2.0)
 
         # Cancel while still yielding
         task.cancel()
@@ -204,6 +226,7 @@ class TestToolInterruption:
         assert isinstance(result, OutputEvent)
         assert result.status.code == "cancelled"
         assert result.output is not None  # Should have partial output
+        assert "async_chunk_" in result.output
 
     @pytest.mark.asyncio
     async def test_tool_reusability_after_interruption(self, long_running_async_tool):
