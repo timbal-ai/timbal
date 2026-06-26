@@ -150,23 +150,22 @@ async def test_krea_generate_video_submit_and_poll():
 @pytest.mark.asyncio
 async def test_krea_generate_video_empty_prompt():
     tool = KreaGenerateVideo(api_key=SecretStr("krea-test"))
-    out = await tool.handler(
-        prompt="   ",
-        model="google/veo-3.1-fast",
-        aspect_ratio="16:9",
-        duration=4,
-        resolution="720p",
-        generate_audio=False,
-        start_image=None,
-        end_image=None,
-        reference_images=None,
-        provider_params=None,
-        webhook_url=None,
-        poll_interval=0,
-        timeout=30,
-    )
-    assert out["success"] is False
-    assert "prompt" in out["error"].lower()
+    with pytest.raises(ValueError, match="prompt is required"):
+        await tool.handler(
+            prompt="   ",
+            model="google/veo-3.1-fast",
+            aspect_ratio="16:9",
+            duration=4,
+            resolution="720p",
+            generate_audio=False,
+            start_image=None,
+            end_image=None,
+            reference_images=None,
+            provider_params=None,
+            webhook_url=None,
+            poll_interval=0,
+            timeout=30,
+        )
 
 
 @pytest.mark.asyncio
@@ -229,24 +228,26 @@ async def test_krea_generate_video_live_or_balance_error():
     if not os.getenv("KREA_API_KEY"):
         pytest.skip("Set KREA_API_KEY for Krea integration test")
     tool = KreaGenerateVideo()
-    out = await tool.handler(
-        prompt="A paper boat on calm water, macro cinematic.",
-        model="google/veo-3.1-fast",
-        aspect_ratio="16:9",
-        duration=4,
-        resolution="720p",
-        generate_audio=False,
-        start_image=None,
-        end_image=None,
-        reference_images=None,
-        provider_params=None,
-        webhook_url=None,
-        poll_interval=5,
-        timeout=600,
-    )
-    if out["success"]:
+    try:
+        out = await tool.handler(
+            prompt="A paper boat on calm water, macro cinematic.",
+            model="google/veo-3.1-fast",
+            aspect_ratio="16:9",
+            duration=4,
+            resolution="720p",
+            generate_audio=False,
+            start_image=None,
+            end_image=None,
+            reference_images=None,
+            provider_params=None,
+            webhook_url=None,
+            poll_interval=5,
+            timeout=600,
+        )
+    except (RuntimeError, TimeoutError) as exc:
+        # API errors (e.g. insufficient balance) now propagate instead of being swallowed.
+        assert str(exc)
+    else:
+        assert out["success"] is True
         assert out["video_url"]
         assert out["job_id"]
-    else:
-        assert out["error_type"] in ("RuntimeError", "TimeoutError")
-        assert out["error"]
