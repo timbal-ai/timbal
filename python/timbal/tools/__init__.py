@@ -253,8 +253,6 @@ if TYPE_CHECKING:
         HiggsfieldTextToImage,
         HiggsfieldTextToVideo,
         HiggsfieldUploadFile,
-        HiggsfieldUpscaleImage,
-        HiggsfieldUpscaleVideo,
     )
     from .hubspot import (
         HubSpotCreateAssociation,
@@ -2001,8 +1999,6 @@ __all__ = [
     "HiggsfieldTextToImage",
     "HiggsfieldTextToVideo",
     "HiggsfieldUploadFile",
-    "HiggsfieldUpscaleImage",
-    "HiggsfieldUpscaleVideo",
     "ElasticsearchIngestAttachment",
     "ElasticsearchBulkOperations",
     "ElasticsearchDeleteDocument",
@@ -3062,8 +3058,6 @@ _LAZY_IMPORTS = {
     "HiggsfieldTextToImage": ".higgsfield",
     "HiggsfieldTextToVideo": ".higgsfield",
     "HiggsfieldUploadFile": ".higgsfield",
-    "HiggsfieldUpscaleImage": ".higgsfield",
-    "HiggsfieldUpscaleVideo": ".higgsfield",
     "ElasticsearchIngestAttachment": ".elasticsearch",
     "ElasticsearchBulkOperations": ".elasticsearch",
     "ElasticsearchDeleteDocument": ".elasticsearch",

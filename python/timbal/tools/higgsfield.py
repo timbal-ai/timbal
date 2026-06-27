@@ -38,8 +38,6 @@ _HF_TERMINAL_STATUSES = frozenset({"completed", "failed", "nsfw", "canceled", "c
 DEFAULT_TEXT_TO_IMAGE_MODEL = "bytedance/seedream/v4/text-to-image"
 # ComfyUI-Higgsfield-Direct (higgsfield-client)
 DEFAULT_IMAGE_TO_IMAGE_MODEL = "bytedance/seedream/v4/edit"
-# No dedicated upscale route in official SDK/CLI docs; Seedream Edit is the documented image-enhancement path.
-DEFAULT_UPSCALE_IMAGE_MODEL = "bytedance/seedream/v4/edit"
 # higgsfield-ai/cli MODELS.md job_set_type
 DEFAULT_REMOVE_BACKGROUND_MODEL = "image_background_remover"
 # higgsfield-ai/cli MODELS.md job_set_type
@@ -48,14 +46,12 @@ DEFAULT_EXPAND_IMAGE_MODEL = "outpaint"
 DEFAULT_TEXT_TO_VIDEO_MODEL = "bytedance/seedance/v1/pro/text-to-video"
 # ComfyUI-Higgsfield-Direct
 DEFAULT_IMAGE_TO_VIDEO_MODEL = "bytedance/seedance/v1/pro/image-to-video"
-# No dedicated video-upscale route in official docs; same Seedance family as I2V — override for your plan.
-DEFAULT_UPSCALE_VIDEO_MODEL = "bytedance/seedance/v1/pro/image-to-video"
 # higgsfield-js Speak v2 endpoint
 DEFAULT_LIPSYNC_MODEL = "/v1/speak/higgsfield"
 # higgsfield-js createSoulId endpoint
 DEFAULT_SOUL_TRAIN_MODEL = "/v1/custom-references"
-# ComfyUI-Higgsfield-Direct / higgsfield-js Soul generation
-DEFAULT_SOUL_GENERATE_MODEL = "higgsfield-ai/soul/standard"
+# platform.higgsfield.ai Soul character generation (custom_reference_id consumer)
+DEFAULT_SOUL_GENERATE_MODEL = "higgsfield-ai/soul/character"
 
 _HF_CREDENTIAL_KEYS = ("api_key", "hf_key", "credential_key")
 
@@ -460,34 +456,6 @@ class HiggsfieldImageToImage(_HiggsfieldTool):
         super().__init__(handler=_image_to_image, **kwargs)
 
 
-class HiggsfieldUpscaleImage(_HiggsfieldTool):
-    name: str = "higgsfield_upscale_image"
-    description: str | None = "Upscale an image to higher resolution."
-
-    def __init__(self, **kwargs: Any) -> None:
-        async def _upscale_image(
-            image_url: str = Field(..., description="Image URL to upscale."),
-            scale_factor: float | None = Field(None, description="Upscale factor when supported."),
-            model: str = Field(DEFAULT_UPSCALE_IMAGE_MODEL, description="Higgsfield application route."),
-            wait: bool = True,
-            webhook_url: str | None = None,
-            poll_interval: float = 2.0,
-            timeout: float = 600.0,
-        ) -> dict[str, Any]:
-            arguments = _clean_arguments(image_url=image_url, scale_factor=scale_factor)
-            return await _run_generation(
-                self,
-                model=model,
-                arguments=arguments,
-                wait=wait,
-                webhook_url=webhook_url,
-                poll_interval=poll_interval,
-                timeout=timeout,
-            )
-
-        super().__init__(handler=_upscale_image, **kwargs)
-
-
 class HiggsfieldRemoveBackground(_HiggsfieldTool):
     name: str = "higgsfield_remove_background"
     description: str | None = "Remove the background from an image."
@@ -622,34 +590,6 @@ class HiggsfieldImageToVideo(_HiggsfieldTool):
         super().__init__(handler=_image_to_video, **kwargs)
 
 
-class HiggsfieldUpscaleVideo(_HiggsfieldTool):
-    name: str = "higgsfield_upscale_video"
-    description: str | None = "Upscale a video to higher resolution."
-
-    def __init__(self, **kwargs: Any) -> None:
-        async def _upscale_video(
-            video_url: str = Field(..., description="Video URL to upscale."),
-            scale_factor: float | None = Field(None, description="Upscale factor when supported."),
-            model: str = Field(DEFAULT_UPSCALE_VIDEO_MODEL, description="Higgsfield application route."),
-            wait: bool = True,
-            webhook_url: str | None = None,
-            poll_interval: float = 2.0,
-            timeout: float = 900.0,
-        ) -> dict[str, Any]:
-            arguments = _clean_arguments(video_url=video_url, scale_factor=scale_factor)
-            return await _run_generation(
-                self,
-                model=model,
-                arguments=arguments,
-                wait=wait,
-                webhook_url=webhook_url,
-                poll_interval=poll_interval,
-                timeout=timeout,
-            )
-
-        super().__init__(handler=_upscale_video, **kwargs)
-
-
 class HiggsfieldLipsync(_HiggsfieldTool):
     name: str = "higgsfield_lipsync"
     description: str | None = "Talking avatar / lipsync — sync face to audio or TTS text."
@@ -717,24 +657,31 @@ class HiggsfieldSoulGenerate(_HiggsfieldTool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _soul_generate(
-            soul_id: str = Field(..., description="Soul / reference_id from higgsfield_soul_train."),
+            soul_id: str = Field(..., description="reference_id from higgsfield_soul_train (sent as custom_reference_id)."),
             prompt: str = Field(..., description="Generation prompt."),
-            output_type: str = Field("image", description='Output type: "image" or "video".'),
+            reference_strength: float = Field(
+                1.0, description="Custom reference strength (0-1). Defaults to 1.", ge=0.0, le=1.0
+            ),
             model: str = Field(DEFAULT_SOUL_GENERATE_MODEL, description="Higgsfield Soul generation route."),
-            aspect_ratio: str | None = Field(None, description='e.g. "16:9".'),
-            duration: int | None = Field(None, description="Duration for video output."),
+            aspect_ratio: str | None = Field(None, description='One of "9:16", "16:9", "4:3", "3:4", "1:1", "2:3", "3:2".'),
+            resolution: str | None = Field(None, description='"720p" or "1080p".'),
+            batch_size: int | None = Field(None, description="1 or 4."),
+            seed: int | None = Field(None, description="Optional seed (1-1000000)."),
+            enhance_prompt: bool | None = Field(None, description="Let Higgsfield expand the prompt."),
             wait: bool = True,
             webhook_url: str | None = None,
             poll_interval: float = 2.0,
             timeout: float = 900.0,
         ) -> dict[str, Any]:
             arguments = _clean_arguments(
-                soul_id=soul_id,
-                reference_id=soul_id,
                 prompt=prompt,
-                output_type=output_type,
+                custom_reference_id=soul_id,
+                custom_reference_strength=reference_strength,
                 aspect_ratio=aspect_ratio,
-                duration=duration,
+                resolution=resolution,
+                batch_size=batch_size,
+                seed=seed,
+                enhance_prompt=enhance_prompt,
             )
             return await _run_generation(
                 self,
