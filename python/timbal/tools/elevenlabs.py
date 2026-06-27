@@ -1013,9 +1013,12 @@ class ElevenLabsCreateDubbing(Tool):
             if sources_given > 1:
                 raise ValueError("Provide exactly one of source_url, audio_file_path, or audio_file_base64.")
 
-            files = None
+            # The dubbing endpoint expects multipart/form-data. httpx only encodes
+            # multipart when `files` is non-empty, so for the URL case we pass
+            # source_url as a multipart form field (filename=None) instead of via
+            # `data`, which would otherwise force application/x-www-form-urlencoded.
             if source_url:
-                data["source_url"] = source_url
+                files = {"source_url": (None, source_url)}
             elif audio_file_path:
                 with open(audio_file_path, "rb") as f:
                     audio_bytes = f.read()
