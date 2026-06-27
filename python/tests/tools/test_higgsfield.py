@@ -1,6 +1,6 @@
 """Tests for Higgsfield AI platform tools.
 
-Unit tests mock httpx. Integration tests require ``HF_KEY`` or ``HF_API_KEY`` + ``HF_API_SECRET``.
+Unit tests mock httpx. Integration tests require ``HF_KEY`` (``key_id:secret``).
 
 Run integration tests explicitly::
 
@@ -16,6 +16,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import SecretStr
 from timbal.core.tool import Tool
+from timbal.errors import CredentialNotAvailable
+from timbal.platform.integrations import Integration
+from timbal.tools._creds import resolve_api_key
 from timbal.tools.higgsfield import (
     DEFAULT_TEXT_TO_IMAGE_MODEL,
     HiggsfieldCancelRequest,
@@ -24,16 +27,67 @@ from timbal.tools.higgsfield import (
     HiggsfieldSubmit,
     HiggsfieldTextToImage,
     HiggsfieldUploadFile,
-    _resolve_higgsfield_credential_key,
 )
 
 _TEST_KEY = "test-key-id:test-secret"
+_HF_INTEGRATION_KEYS = ("api_key", "hf_key", "credential_key")
 
 
 def _skip_if_higgsfield_not_configured() -> None:
-    if os.getenv("HF_KEY") or (os.getenv("HF_API_KEY") and os.getenv("HF_API_SECRET")):
+    if os.getenv("HF_KEY"):
         return
-    pytest.skip("Higgsfield integration: set HF_KEY or HF_API_KEY + HF_API_SECRET")
+    pytest.skip("Higgsfield integration: set HF_KEY (key_id:secret)")
+
+
+@pytest.mark.asyncio
+async def test_resolve_api_key_from_tool():
+    key = await resolve_api_key(
+        provider_name="Higgsfield",
+        env_var="HF_KEY",
+        integration=None,
+        api_key=SecretStr(_TEST_KEY),
+        integration_keys=_HF_INTEGRATION_KEYS,
+    )
+    assert key == _TEST_KEY
+
+
+@pytest.mark.asyncio
+async def test_resolve_api_key_from_integration():
+    integration = MagicMock(spec=Integration)
+    integration.resolve = AsyncMock(return_value={"credential_key": _TEST_KEY})
+    key = await resolve_api_key(
+        provider_name="Higgsfield",
+        env_var="HF_KEY",
+        integration=integration,
+        api_key=None,
+        integration_keys=_HF_INTEGRATION_KEYS,
+    )
+    assert key == _TEST_KEY
+    integration.resolve.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resolve_api_key_from_env(monkeypatch):
+    monkeypatch.setenv("HF_KEY", _TEST_KEY)
+    key = await resolve_api_key(
+        provider_name="Higgsfield",
+        env_var="HF_KEY",
+        integration_keys=_HF_INTEGRATION_KEYS,
+    )
+    assert key == _TEST_KEY
+
+
+@pytest.mark.asyncio
+async def test_credential_not_available():
+    with pytest.raises(CredentialNotAvailable) as exc_info:
+        await resolve_api_key(
+            provider_name="Higgsfield",
+            env_var="HF_KEY",
+            integration_keys=_HF_INTEGRATION_KEYS,
+        )
+    err = exc_info.value
+    assert err.provider_name == "Higgsfield"
+    assert err.env_vars == ["HF_KEY"]
 
 
 async def _invoke(tool: Tool, **kwargs: Any):
@@ -69,18 +123,6 @@ def _mock_async_client(*, get_side_effect=None, post_side_effect=None, put_side_
 
 
 @pytest.mark.asyncio
-async def test_resolve_credentials_from_hf_key_field():
-    tool = HiggsfieldSubmit(hf_key=SecretStr(_TEST_KEY))
-    assert await _resolve_higgsfield_credential_key(tool) == _TEST_KEY
-
-
-@pytest.mark.asyncio
-async def test_resolve_credentials_from_api_key_and_secret_fields():
-    tool = HiggsfieldSubmit(api_key=SecretStr("kid"), api_secret=SecretStr("sec"))
-    assert await _resolve_higgsfield_credential_key(tool) == "kid:sec"
-
-
-@pytest.mark.asyncio
 async def test_submit_posts_model_and_arguments():
     submit_response = MagicMock()
     submit_response.raise_for_status = MagicMock()
@@ -93,7 +135,7 @@ async def test_submit_posts_model_and_arguments():
     cm, client = _mock_async_client(post_side_effect=[submit_response])
 
     with patch("httpx.AsyncClient", return_value=cm):
-        tool = HiggsfieldSubmit(hf_key=SecretStr(_TEST_KEY))
+        tool = HiggsfieldSubmit(api_key=SecretStr(_TEST_KEY))
         out = await _invoke(
             tool,
             model="bytedance/seedream/v4/text-to-image",
@@ -117,7 +159,7 @@ async def test_check_status_returns_normalized_payload():
     cm, _client = _mock_async_client(get_side_effect=[status_response])
 
     with patch("httpx.AsyncClient", return_value=cm):
-        tool = HiggsfieldCheckStatus(hf_key=SecretStr(_TEST_KEY))
+        tool = HiggsfieldCheckStatus(api_key=SecretStr(_TEST_KEY))
         out = await _invoke(tool, request_id="req-abc")
 
     assert out.output["request_id"] == "req-abc"
@@ -140,7 +182,7 @@ async def test_get_result_polls_until_completed():
     cm, client = _mock_async_client(get_side_effect=[running, completed])
 
     with patch("httpx.AsyncClient", return_value=cm), patch("asyncio.sleep", new=AsyncMock()):
-        tool = HiggsfieldGetResult(hf_key=SecretStr(_TEST_KEY))
+        tool = HiggsfieldGetResult(api_key=SecretStr(_TEST_KEY))
         out = await _invoke(tool, request_id="req-poll", poll_interval=0.01, timeout=5.0)
 
     assert out.output["status"] == "completed"
@@ -161,7 +203,7 @@ async def test_text_to_image_subscribe_waits_by_default():
     cm, client = _mock_async_client(post_side_effect=[submit_response], get_side_effect=[completed])
 
     with patch("httpx.AsyncClient", return_value=cm):
-        tool = HiggsfieldTextToImage(hf_key=SecretStr(_TEST_KEY))
+        tool = HiggsfieldTextToImage(api_key=SecretStr(_TEST_KEY))
         out = await _invoke(tool, prompt="A red balloon")
 
     assert out.output["status"] == "completed"
@@ -179,7 +221,7 @@ async def test_text_to_image_wait_false_returns_submit_payload():
     cm, client = _mock_async_client(post_side_effect=[submit_response])
 
     with patch("httpx.AsyncClient", return_value=cm):
-        tool = HiggsfieldTextToImage(hf_key=SecretStr(_TEST_KEY))
+        tool = HiggsfieldTextToImage(api_key=SecretStr(_TEST_KEY))
         out = await _invoke(tool, prompt="wave", wait=False)
 
     assert out.output["submitted"] is True
@@ -204,7 +246,7 @@ async def test_upload_file_returns_public_url(tmp_path):
     cm, client = _mock_async_client(post_side_effect=[meta_response], put_side_effect=[put_response])
 
     with patch("httpx.AsyncClient", return_value=cm):
-        tool = HiggsfieldUploadFile(hf_key=SecretStr(_TEST_KEY))
+        tool = HiggsfieldUploadFile(api_key=SecretStr(_TEST_KEY))
         out = await _invoke(tool, file_path=str(image))
 
     assert out.output["url"] == "https://cdn.example/public.png"
@@ -220,7 +262,7 @@ async def test_cancel_request_posts_cancel_endpoint():
     cm, client = _mock_async_client(post_side_effect=[cancel_response])
 
     with patch("httpx.AsyncClient", return_value=cm):
-        tool = HiggsfieldCancelRequest(hf_key=SecretStr(_TEST_KEY))
+        tool = HiggsfieldCancelRequest(api_key=SecretStr(_TEST_KEY))
         out = await _invoke(tool, request_id="req-cancel")
 
     assert out.output["cancelled"] is True

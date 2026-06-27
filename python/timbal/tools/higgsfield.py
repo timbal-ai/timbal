@@ -1,6 +1,7 @@
 """Higgsfield AI platform tools (https://platform.higgsfield.ai).
 
-Uses the public REST API with ``Authorization: Key {api_key}:{api_secret}``.
+Uses the public REST API with ``Authorization: Key {api_key}`` where ``api_key`` is
+``key_id:secret`` (set ``HF_KEY``, pass ``api_key`` on the tool, or use a platform integration).
 Application strings are model routes accepted by ``platform.higgsfield.ai`` —
 hierarchical paths (``bytedance/seedream/v4/text-to-image``) or ``/v1/…``
 endpoints from the official JS SDK. Override ``model`` when your plan exposes
@@ -17,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,6 +28,7 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _HF_BASE = "https://platform.higgsfield.ai"
 _HF_TERMINAL_STATUSES = frozenset({"completed", "failed", "nsfw", "canceled", "cancelled"})
@@ -56,6 +57,8 @@ DEFAULT_SOUL_TRAIN_MODEL = "/v1/custom-references"
 # ComfyUI-Higgsfield-Direct / higgsfield-js Soul generation
 DEFAULT_SOUL_GENERATE_MODEL = "higgsfield-ai/soul/standard"
 
+_HF_CREDENTIAL_KEYS = ("api_key", "hf_key", "credential_key")
+
 
 def _auth_headers(credential_key: str) -> dict[str, str]:
     return {
@@ -75,60 +78,23 @@ def _application_url(application: str, webhook_url: str | None = None) -> str:
     return f"{application}?{urlencode({'hf_webhook': webhook_url})}"
 
 
-async def _resolve_higgsfield_credential_key(tool: Any) -> str:
-    """Return ``api_key:api_secret`` for Higgsfield ``Key`` auth."""
-    hf_key = getattr(tool, "hf_key", None)
-    if hf_key is not None:
-        return hf_key.get_secret_value()
-
-    api_key = getattr(tool, "api_key", None)
-    api_secret = getattr(tool, "api_secret", None)
-    if api_key is not None and api_secret is not None:
-        return f"{api_key.get_secret_value()}:{api_secret.get_secret_value()}"
-
-    integration = getattr(tool, "integration", None)
-    if isinstance(integration, Integration):
-        credentials = await integration.resolve()
-        combined = credentials.get("hf_key") or credentials.get("credential_key")
-        if combined:
-            return str(combined)
-        key = credentials.get("api_key")
-        secret = credentials.get("api_secret")
-        if key and secret:
-            return f"{key}:{secret}"
-
-    hf_key = os.getenv("HF_KEY")
-    if hf_key:
-        return hf_key
-
-    api_key_env = os.getenv("HF_API_KEY") or os.getenv("HIGGSFIELD_API_KEY")
-    api_secret_env = os.getenv("HF_API_SECRET") or os.getenv("HIGGSFIELD_SECRET")
-    if api_key_env and api_secret_env:
-        return f"{api_key_env}:{api_secret_env}"
-
-    raise ValueError(
-        "Higgsfield credentials not found. Set HF_KEY (or HIGGSFIELD_API_KEY as key:secret), "
-        "HF_API_KEY + HF_API_SECRET, pass hf_key / api_key+api_secret, or configure an integration."
+async def _credential_key(tool: Any) -> str:
+    return await resolve_api_key(
+        tool=tool,
+        provider_name="Higgsfield",
+        env_var="HF_KEY",
+        integration_keys=_HF_CREDENTIAL_KEYS,
     )
 
 
 class _HiggsfieldTool(Tool):
     integration: Annotated[str, Integration("higgsfield")] | None = None
-    hf_key: SecretStr | None = None
     api_key: SecretStr | None = None
-    api_secret: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {
-                    "integration": self.integration,
-                    "hf_key": self.hf_key,
-                    "api_key": self.api_key,
-                    "api_secret": self.api_secret,
-                }
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
 
@@ -269,7 +235,7 @@ class HiggsfieldSubmit(_HiggsfieldTool):
             arguments: dict[str, Any] = Field(..., description="Model-specific JSON arguments."),
             webhook_url: str | None = Field(None, description="Optional webhook URL notified on completion."),
         ) -> dict[str, Any]:
-            credential_key = await _resolve_higgsfield_credential_key(self)
+            credential_key = await _credential_key(self)
             return await _hf_submit(
                 credential_key=credential_key,
                 application=model,
@@ -290,7 +256,7 @@ class HiggsfieldCheckStatus(_HiggsfieldTool):
         async def _check_status(
             request_id: str = Field(..., description="Request ID from higgsfield_submit or a generation tool."),
         ) -> dict[str, Any]:
-            credential_key = await _resolve_higgsfield_credential_key(self)
+            credential_key = await _credential_key(self)
             payload = await _hf_status(credential_key=credential_key, request_id=request_id)
             return {
                 "request_id": request_id,
@@ -313,7 +279,7 @@ class HiggsfieldGetResult(_HiggsfieldTool):
             poll_interval: float = Field(2.0, description="Seconds between status polls."),
             timeout: float = Field(600.0, description="Max seconds to wait before raising TimeoutError."),
         ) -> dict[str, Any]:
-            credential_key = await _resolve_higgsfield_credential_key(self)
+            credential_key = await _credential_key(self)
             result = await _hf_poll_result(
                 credential_key=credential_key,
                 request_id=request_id,
@@ -334,7 +300,7 @@ class HiggsfieldCancelRequest(_HiggsfieldTool):
         async def _cancel(
             request_id: str = Field(..., description="Request ID to cancel."),
         ) -> dict[str, Any]:
-            credential_key = await _resolve_higgsfield_credential_key(self)
+            credential_key = await _credential_key(self)
             await _hf_cancel(credential_key=credential_key, request_id=request_id)
             return {"request_id": request_id, "cancelled": True}
 
@@ -359,7 +325,7 @@ class HiggsfieldUploadFile(_HiggsfieldTool):
             if not file_path and not file_base64:
                 raise ValueError("Provide file_path or file_base64.")
 
-            credential_key = await _resolve_higgsfield_credential_key(self)
+            credential_key = await _credential_key(self)
 
             if file_path:
                 path = Path(file_path)
@@ -400,7 +366,7 @@ async def _run_generation(
     poll_interval: float,
     timeout: float,
 ) -> dict[str, Any]:
-    credential_key = await _resolve_higgsfield_credential_key(tool)
+    credential_key = await _credential_key(tool)
     if wait:
         return await _hf_subscribe(
             credential_key=credential_key,
