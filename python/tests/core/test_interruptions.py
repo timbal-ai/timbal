@@ -178,18 +178,18 @@ class TestToolInterruption:
         def handler(count: int = 100, delay: float = 0.01) -> Generator[str, None, None]:
             for i in range(count):
                 time.sleep(delay)
+                yield f"sync_chunk_{i}"
                 if i == 0:
                     started.set()
-                yield f"sync_chunk_{i}"
 
         tool = Tool(name="sync_gen", handler=handler)
         task = asyncio.create_task(tool(count=100, delay=0.01).collect())
 
-        # Wait until the sync generator has yielded at least once. On macOS CI
-        # (py3.13) run_in_executor cold-start can exceed a fixed sleep, so cancel
-        # would fire before any chunk reached the collector.
+        # Wait until the first chunk was consumed (code after yield runs on the
+        # next pull). Sync gens go through run_in_executor, so signaling before
+        # yield can unblock before the collector has partial output.
         await asyncio.to_thread(started.wait, 2.0)
-        assert started.is_set(), "sync generator did not yield before timeout"
+        assert started.is_set(), "sync generator first chunk was not consumed before timeout"
 
         # Cancel while still yielding
         task.cancel()
@@ -209,13 +209,14 @@ class TestToolInterruption:
         async def handler(count: int = 100, delay: float = 0.01) -> AsyncGenerator[str, None]:
             for i in range(count):
                 await asyncio.sleep(delay)
+                yield f"async_chunk_{i}"
                 if i == 0:
                     started.set()
-                yield f"async_chunk_{i}"
 
         tool = Tool(name="async_gen", handler=handler)
         task = asyncio.create_task(tool(count=100, delay=0.01).collect())
 
+        # Same as sync: signal after yield so the collector has the first chunk.
         await asyncio.wait_for(started.wait(), timeout=2.0)
 
         # Cancel while still yielding
