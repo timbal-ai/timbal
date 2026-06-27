@@ -38,14 +38,11 @@ from ..core.tool import Tool
 from ..platform.integrations import Integration
 from ..tools.cala import _normalize_base_url as _normalize_cala_base_url
 from ..tools.cala import _post_cala as _cala_post
-from ..tools.cala import _resolve_api_key as _resolve_cala_key
 from ..tools.cala import _search_request_body as _cala_search_request_body
 from ..tools.firecrawl import _BASE_URL as _FIRECRAWL_BASE_URL
-from ..tools.firecrawl import _resolve_api_key as _resolve_firecrawl_key
 from ..tools.scraperapi import _STRUCTURED_URL as _SCRAPERAPI_STRUCTURED_URL
-from ..tools.scraperapi import _resolve_api_key as _resolve_scraperapi_key
 from ..tools.tavily import _BASE_URL as _TAVILY_BASE_URL
-from ..tools.tavily import _resolve_api_key as _resolve_tavily_key
+from ._creds import resolve_api_key
 
 
 def _get_logger():
@@ -76,7 +73,12 @@ def _make_tavily_handler(
         topic: str = Field("general", description='"general", "news", or "finance"'),
         time_range: str | None = Field(None, description='Time filter: "day", "week", "month", or "year"'),
     ) -> dict:
-        resolved_key = await _resolve_tavily_key(integration=integration, api_key=api_key)
+        resolved_key = await resolve_api_key(
+            env_var="TAVILY_API_KEY",
+            provider_name="Tavily",
+            integration=integration,
+            api_key=api_key,
+        )
         import httpx
 
         payload: dict[str, Any] = {
@@ -122,7 +124,12 @@ def _make_scraperapi_handler(*, integration=None, api_key=None, user_location=No
         hl: str | None = Field(None, description="Host language code (e.g. en, es, fr)"),
         start: int | None = Field(None, description="Pagination offset (0-based, increments of 10)"),
     ) -> dict:
-        resolved_key = await _resolve_scraperapi_key(integration=integration, api_key=api_key)
+        resolved_key = await resolve_api_key(
+            env_var="SCRAPERAPI_KEY",
+            provider_name="ScraperAPI",
+            integration=integration,
+            api_key=api_key,
+        )
         import httpx
 
         params: dict[str, Any] = {"api_key": resolved_key, "query": query}
@@ -154,7 +161,12 @@ def _make_cala_handler(*, integration=None, api_key=None, base_url=None):
         explainability: bool = True,
         return_entities: bool = True,
     ) -> dict:
-        resolved_key = await _resolve_cala_key(integration=integration, api_key=api_key)
+        resolved_key = await resolve_api_key(
+            env_var="CALA_API_KEY",
+            provider_name="Cala",
+            integration=integration,
+            api_key=api_key,
+        )
         return await _cala_post(
             path="/knowledge/search",
             api_key=resolved_key,
@@ -182,7 +194,12 @@ def _make_firecrawl_handler(*, integration=None, api_key=None, max_results=None)
         location: str | None = Field(None, description="Geo-targeted location (e.g. 'Germany', 'San Francisco')"),
         country: str | None = Field(None, description="ISO country code for localized results (e.g. 'US', 'DE')"),
     ) -> dict:
-        resolved_key = await _resolve_firecrawl_key(integration=integration, api_key=api_key)
+        resolved_key = await resolve_api_key(
+            env_var="FIRECRAWL_API_KEY",
+            provider_name="Firecrawl",
+            integration=integration,
+            api_key=api_key,
+        )
         import httpx
 
         payload: dict[str, Any] = {

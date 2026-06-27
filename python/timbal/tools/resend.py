@@ -5,21 +5,10 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.resend.com"
 _USER_AGENT = "timbal-resend-tools/1.0"
-
-
-async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
-    """Resolve Resend API key from integration, explicit field, or env var."""
-    from ._creds import resolve_api_key
-
-    return await resolve_api_key(
-        env_var="RESEND_API_KEY",
-        provider_name="Resend",
-        integration=integration,
-        api_key=api_key,
-    )
 
 
 def _headers(api_key: str, *, idempotency_key: str | None = None) -> dict[str, str]:
@@ -180,7 +169,12 @@ class ResendSendEmail(Tool):
                 template=template,
             )
 
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -240,7 +234,12 @@ class ResendSendBatch(Tool):
                     email["reply_to"] = default_reply_to
                 normalized.append(email)
 
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -271,7 +270,12 @@ class ResendListEmails(Tool):
         async def _list_emails(
             after: str | None = Field(None, description="Pagination cursor: ID of the last email from the previous page"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             params: dict[str, str] = {}
@@ -306,7 +310,12 @@ class ResendGetEmail(Tool):
         async def _get_email(
             email_id: str = Field(..., description="Sent email ID"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -340,7 +349,12 @@ class ResendUpdateEmail(Tool):
                 description="New scheduled send time in ISO 8601 format (e.g. 2026-08-05T11:52:01.858Z)",
             ),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -371,7 +385,12 @@ class ResendCancelEmail(Tool):
         async def _cancel_email(
             email_id: str = Field(..., description="Scheduled email ID to cancel"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -401,7 +420,12 @@ class ResendListEmailAttachments(Tool):
         async def _list_attachments(
             email_id: str = Field(..., description="Sent email ID"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -432,7 +456,12 @@ class ResendGetEmailAttachment(Tool):
             email_id: str = Field(..., description="Sent email ID"),
             attachment_id: str = Field(..., description="Attachment ID"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -462,7 +491,12 @@ class ResendListReceivedEmails(Tool):
         async def _list_received(
             after: str | None = Field(None, description="Pagination cursor: ID of the last email from the previous page"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             params: dict[str, str] = {}
@@ -497,7 +531,12 @@ class ResendGetReceivedEmail(Tool):
         async def _get_received(
             email_id: str = Field(..., description="Received email ID"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -527,7 +566,12 @@ class ResendListReceivedAttachments(Tool):
         async def _list_received_attachments(
             email_id: str = Field(..., description="Received email ID"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -558,7 +602,12 @@ class ResendGetReceivedAttachment(Tool):
             email_id: str = Field(..., description="Received email ID"),
             attachment_id: str = Field(..., description="Attachment ID"),
         ) -> dict:
-            key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            key = await resolve_api_key(
+                env_var="RESEND_API_KEY",
+                provider_name="Resend",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:

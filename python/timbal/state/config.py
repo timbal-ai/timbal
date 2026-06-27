@@ -54,6 +54,8 @@ class PlatformSubject(BaseModel):
     """Organization identifier."""
     app_id: str | None = None
     """Application identifier. Either project or app must be specified."""
+    project_id: str | None = None
+    """Project identifier (platform project scope)."""
     rev: str | None = None
     """Git revision the run was executed against. Internal use."""
 

@@ -8,7 +8,6 @@ Docs: https://docs.krea.ai/
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import Annotated, Any, Literal
 
@@ -17,6 +16,7 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 logger = structlog.get_logger("timbal.tools.krea")
 
@@ -26,22 +26,71 @@ _FAILED_STATUSES = frozenset({"failed", "cancelled"})
 
 MediaKind = Literal["video", "image"]
 
+# Model identifiers map directly to Krea's POST /generate/{media}/{provider}/{model} endpoints.
+# Source of truth: https://api.krea.ai/openapi.json. Update when Krea adds/removes models.
+KreaImageModel = Literal[
+    "bfl/flux-1-dev",
+    "bfl/flux-1-kontext-dev",
+    "bfl/flux-1.1-pro",
+    "bfl/flux-1.1-pro-ultra",
+    "bytedance/seededit",
+    "bytedance/seedream-4",
+    "bytedance/seedream-5-lite",
+    "google/imagen-3",
+    "google/imagen-4",
+    "google/imagen-4-fast",
+    "google/imagen-4-ultra",
+    "google/nano-banana",
+    "google/nano-banana-2",
+    "google/nano-banana-pro",
+    "ideogram/ideogram-2-turbo",
+    "ideogram/ideogram-3",
+    "krea/krea-2/large",
+    "krea/krea-2/medium",
+    "krea/krea-2/medium-turbo",
+    "luma/uni-1",
+    "openai/gpt-image",
+    "openai/gpt-image-2",
+    "qwen/2512",
+    "runway/gen-4-image",
+    "z-image/z-image",
+]
 
-async def _resolve_krea_api_key(tool: Any) -> str:
-    """Resolve Krea API key from integration, explicit field, or env var."""
-    if getattr(tool, "integration", None) is not None and isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        key = credentials.get("api_key")
-        if key:
-            return str(key)
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("KREA_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Krea API key not found. Set KREA_API_KEY, pass api_key, or configure a krea integration."
-    )
+KreaVideoModel = Literal[
+    "alibaba/wan-2.1",
+    "alibaba/wan-2.2",
+    "alibaba/wan-2.5",
+    "bytedance/seedance-1.0-pro",
+    "bytedance/seedance-1.0-pro-fast",
+    "bytedance/seedance-2",
+    "bytedance/seedance-2-fast",
+    "google/veo-2",
+    "google/veo-3",
+    "google/veo-3-fast",
+    "google/veo-3.1",
+    "google/veo-3.1-fast",
+    "google/veo-3.1-lite",
+    "kling/kling-1",
+    "kling/kling-1.5",
+    "kling/kling-1.6",
+    "kling/kling-2",
+    "kling/kling-2.1",
+    "kling/kling-2.5",
+    "kling/kling-2.6",
+    "kling/kling-3.0",
+    "kling/kling-o1",
+    "lightricks/ltx-video-2.3-22b",
+    "luma/ray-2",
+    "minimax/hailuo",
+    "minimax/hailuo-02",
+    "minimax/hailuo-2.3",
+    "minimax/hailuo-2.3-fast",
+    "runway/aleph",
+    "runway/gen-3",
+    "runway/gen-4-video",
+    "runway/gen-4.5",
+    "xai/grok-video",
+]
 
 
 def _krea_headers(api_key: str, *, webhook_url: str | None = None) -> dict[str, str]:
@@ -157,7 +206,7 @@ class KreaListJobs(Tool):
             ),
             status: str | None = Field(None, description="Filter by job status."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_krea_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
             import httpx
 
             params: dict[str, Any] = {"limit": max(1, min(limit, 1000))}
@@ -198,7 +247,7 @@ class KreaGetJob(Tool):
         async def _krea_get_job(
             job_id: str = Field(..., description="Job UUID returned by a Krea generate call."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_krea_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
@@ -228,7 +277,7 @@ class KreaCancelJob(Tool):
         async def _krea_cancel_job(
             job_id: str = Field(..., description="Job UUID to delete/cancel."),
         ) -> dict[str, Any]:
-            api_key = await _resolve_krea_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
             import httpx
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None)) as client:
@@ -265,9 +314,9 @@ class KreaGenerateVideo(Tool):
     def __init__(self, **kwargs: Any) -> None:
         async def _krea_generate_video(
             prompt: str = Field(..., description="Text description of the video to generate."),
-            model: str = Field(
+            model: KreaVideoModel = Field(
                 "google/veo-3.1-fast",
-                description="Krea video model path: provider/model (e.g. google/veo-3.1-fast).",
+                description="Krea video model as provider/model (e.g. google/veo-3.1-fast, kling/kling-2.5).",
             ),
             aspect_ratio: str = Field("16:9", description="Aspect ratio when supported by the model."),
             duration: int | None = Field(None, description="Duration in seconds when supported by the model."),
@@ -296,89 +345,74 @@ class KreaGenerateVideo(Tool):
             start = time.monotonic()
             resolved_model = model.strip()
 
-            try:
-                if not prompt or not prompt.strip():
-                    raise ValueError("prompt is required and must be non-empty")
+            if not prompt or not prompt.strip():
+                raise ValueError("prompt is required and must be non-empty")
 
-                payload: dict[str, Any] = {"prompt": prompt.strip()}
-                if aspect_ratio:
-                    payload["aspect_ratio"] = aspect_ratio
-                if duration is not None:
-                    payload["duration"] = duration
-                if resolution is not None:
-                    payload["resolution"] = resolution
-                if generate_audio is not None:
-                    payload["generate_audio"] = generate_audio
-                if start_image:
-                    payload["start_image"] = start_image
-                if end_image:
-                    payload["end_image"] = end_image
-                if reference_images:
-                    payload["reference_images"] = reference_images
-                if provider_params:
-                    for key, value in provider_params.items():
-                        if value is not None:
-                            payload[key] = value
+            payload: dict[str, Any] = {"prompt": prompt.strip()}
+            if aspect_ratio:
+                payload["aspect_ratio"] = aspect_ratio
+            if duration is not None:
+                payload["duration"] = duration
+            if resolution is not None:
+                payload["resolution"] = resolution
+            if generate_audio is not None:
+                payload["generate_audio"] = generate_audio
+            if start_image:
+                payload["start_image"] = start_image
+            if end_image:
+                payload["end_image"] = end_image
+            if reference_images:
+                payload["reference_images"] = reference_images
+            if provider_params:
+                for key, value in provider_params.items():
+                    if value is not None:
+                        payload[key] = value
 
-                path = _build_generate_path("video", resolved_model)
-                api_key = await _resolve_krea_api_key(self)
-                import httpx
+            path = _build_generate_path("video", resolved_model)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
+            import httpx
 
-                async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
-                    submit = await client.post(
-                        f"{_KREA_BASE}{path}",
-                        headers=_krea_headers(api_key, webhook_url=webhook_url),
-                        json=payload,
-                    )
-                    await _raise_for_krea_response(submit)
-                    submit_data = submit.json()
-
-                    job_id = submit_data.get("job_id")
-                    if not isinstance(job_id, str) or not job_id:
-                        raise ValueError(f"Krea video API returned no job_id: {submit_data}")
-
-                    job = await _poll_krea_job(
-                        client,
-                        api_key=api_key,
-                        job_id=job_id,
-                        poll_interval=poll_interval,
-                        timeout=timeout,
-                    )
-
-                urls = _extract_job_urls(job)
-                if not urls:
-                    raise ValueError(f"No output URLs in completed Krea job: {job}")
-
-                elapsed = time.monotonic() - start
-                logger.info(
-                    "Krea video generated",
-                    model=resolved_model,
-                    job_id=job_id,
-                    elapsed_s=round(elapsed, 2),
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
+                submit = await client.post(
+                    f"{_KREA_BASE}{path}",
+                    headers=_krea_headers(api_key, webhook_url=webhook_url),
+                    json=payload,
                 )
-                return {
-                    "success": True,
-                    "model": resolved_model,
-                    "job_id": job_id,
-                    "video_url": urls[0],
-                    "urls": urls,
-                    "job": job,
-                    "elapsed_seconds": round(elapsed, 2),
-                }
+                await _raise_for_krea_response(submit)
+                submit_data = submit.json()
 
-            except Exception as exc:
-                elapsed = time.monotonic() - start
-                logger.error("Krea video generation failed", model=resolved_model, error=str(exc))
-                return {
-                    "success": False,
-                    "model": resolved_model,
-                    "job_id": None,
-                    "video_url": None,
-                    "urls": [],
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "elapsed_seconds": round(elapsed, 2),
-                }
+                job_id = submit_data.get("job_id")
+                if not isinstance(job_id, str) or not job_id:
+                    raise ValueError(f"Krea video API returned no job_id: {submit_data}")
+
+                job = await _poll_krea_job(
+                    client,
+                    api_key=api_key,
+                    job_id=job_id,
+                    poll_interval=poll_interval,
+                    timeout=timeout,
+                )
+
+            urls = _extract_job_urls(job)
+            if not urls:
+                raise ValueError(f"No output URLs in completed Krea job: {job}")
+
+            elapsed = time.monotonic() - start
+            logger.info(
+                "Krea video generated",
+                model=resolved_model,
+                job_id=job_id,
+                elapsed_s=round(elapsed, 2),
+            )
+            return {
+                "success": True,
+                "model": resolved_model,
+                "job_id": job_id,
+                "video_url": urls[0],
+                "urls": urls,
+                "job": job,
+                "elapsed_seconds": round(elapsed, 2),
+            }
 
         super().__init__(handler=_krea_generate_video, **kwargs)
 
@@ -402,9 +436,9 @@ class KreaGenerateImage(Tool):
     def __init__(self, **kwargs: Any) -> None:
         async def _krea_generate_image(
             prompt: str = Field(..., description="Text description of the image to generate."),
-            model: str = Field(
+            model: KreaImageModel = Field(
                 "bfl/flux-1-dev",
-                description="Krea image model path: provider/model (e.g. bfl/flux-1-dev).",
+                description="Krea image model as provider/model (e.g. bfl/flux-1-dev, krea/krea-2/large).",
             ),
             width: int | None = Field(None, description="Output width in pixels when supported."),
             height: int | None = Field(None, description="Output height in pixels when supported."),
@@ -424,82 +458,67 @@ class KreaGenerateImage(Tool):
             start = time.monotonic()
             resolved_model = model.strip()
 
-            try:
-                if not prompt or not prompt.strip():
-                    raise ValueError("prompt is required and must be non-empty")
+            if not prompt or not prompt.strip():
+                raise ValueError("prompt is required and must be non-empty")
 
-                payload: dict[str, Any] = {"prompt": prompt.strip()}
-                if width is not None:
-                    payload["width"] = width
-                if height is not None:
-                    payload["height"] = height
-                if seed is not None:
-                    payload["seed"] = seed
-                if image_url:
-                    payload["image_url"] = image_url
-                if provider_params:
-                    for key, value in provider_params.items():
-                        if value is not None:
-                            payload[key] = value
+            payload: dict[str, Any] = {"prompt": prompt.strip()}
+            if width is not None:
+                payload["width"] = width
+            if height is not None:
+                payload["height"] = height
+            if seed is not None:
+                payload["seed"] = seed
+            if image_url:
+                payload["image_url"] = image_url
+            if provider_params:
+                for key, value in provider_params.items():
+                    if value is not None:
+                        payload[key] = value
 
-                path = _build_generate_path("image", resolved_model)
-                api_key = await _resolve_krea_api_key(self)
-                import httpx
+            path = _build_generate_path("image", resolved_model)
+            api_key = await resolve_api_key(tool=self, provider_name="Krea", env_var="KREA_API_KEY")
+            import httpx
 
-                async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
-                    submit = await client.post(
-                        f"{_KREA_BASE}{path}",
-                        headers=_krea_headers(api_key, webhook_url=webhook_url),
-                        json=payload,
-                    )
-                    await _raise_for_krea_response(submit)
-                    submit_data = submit.json()
-
-                    job_id = submit_data.get("job_id")
-                    if not isinstance(job_id, str) or not job_id:
-                        raise ValueError(f"Krea image API returned no job_id: {submit_data}")
-
-                    job = await _poll_krea_job(
-                        client,
-                        api_key=api_key,
-                        job_id=job_id,
-                        poll_interval=poll_interval,
-                        timeout=timeout,
-                    )
-
-                urls = _extract_job_urls(job)
-                if not urls:
-                    raise ValueError(f"No output URLs in completed Krea job: {job}")
-
-                elapsed = time.monotonic() - start
-                logger.info(
-                    "Krea image generated",
-                    model=resolved_model,
-                    job_id=job_id,
-                    elapsed_s=round(elapsed, 2),
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
+                submit = await client.post(
+                    f"{_KREA_BASE}{path}",
+                    headers=_krea_headers(api_key, webhook_url=webhook_url),
+                    json=payload,
                 )
-                return {
-                    "success": True,
-                    "model": resolved_model,
-                    "job_id": job_id,
-                    "image_url": urls[0],
-                    "urls": urls,
-                    "job": job,
-                    "elapsed_seconds": round(elapsed, 2),
-                }
+                await _raise_for_krea_response(submit)
+                submit_data = submit.json()
 
-            except Exception as exc:
-                elapsed = time.monotonic() - start
-                logger.error("Krea image generation failed", model=resolved_model, error=str(exc))
-                return {
-                    "success": False,
-                    "model": resolved_model,
-                    "job_id": None,
-                    "image_url": None,
-                    "urls": [],
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "elapsed_seconds": round(elapsed, 2),
-                }
+                job_id = submit_data.get("job_id")
+                if not isinstance(job_id, str) or not job_id:
+                    raise ValueError(f"Krea image API returned no job_id: {submit_data}")
+
+                job = await _poll_krea_job(
+                    client,
+                    api_key=api_key,
+                    job_id=job_id,
+                    poll_interval=poll_interval,
+                    timeout=timeout,
+                )
+
+            urls = _extract_job_urls(job)
+            if not urls:
+                raise ValueError(f"No output URLs in completed Krea job: {job}")
+
+            elapsed = time.monotonic() - start
+            logger.info(
+                "Krea image generated",
+                model=resolved_model,
+                job_id=job_id,
+                elapsed_s=round(elapsed, 2),
+            )
+            return {
+                "success": True,
+                "model": resolved_model,
+                "job_id": job_id,
+                "image_url": urls[0],
+                "urls": urls,
+                "job": job,
+                "elapsed_seconds": round(elapsed, 2),
+            }
 
         super().__init__(handler=_krea_generate_image, **kwargs)

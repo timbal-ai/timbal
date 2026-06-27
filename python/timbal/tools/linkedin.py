@@ -1,28 +1,12 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.linkedin.com/v2"
-
-
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve LinkedIn API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("LINKEDIN_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "LinkedIn API key not found. Set LINKEDIN_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
-    )
 
 
 class LinkedInSearchPeople(Tool):
@@ -65,7 +49,7 @@ class LinkedInSearchPeople(Tool):
             title: str | None = Field(None, description="Filter by job title keyword"),
             start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="LinkedIn", env_var="LINKEDIN_API_KEY")
             import httpx
 
             params: dict[str, Any] = {
@@ -134,7 +118,7 @@ class LinkedInSearchCompanies(Tool):
             ),
             start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="LinkedIn", env_var="LINKEDIN_API_KEY")
             import httpx
 
             params: dict[str, Any] = {
@@ -200,7 +184,7 @@ class LinkedInSearchJobs(Tool):
             posted_at_range: str | None = Field(None, description="Time range: '24h', '7d', '30d', '90d'"),
             start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="LinkedIn", env_var="LINKEDIN_API_KEY")
             import httpx
 
             params: dict[str, Any] = {
@@ -270,7 +254,7 @@ class LinkedInSearch(Tool):
             ),
             start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            api_key = await resolve_api_key(tool=self, provider_name="LinkedIn", env_var="LINKEDIN_API_KEY")
             import httpx
 
             parsed: dict[str, list[str]] = {}

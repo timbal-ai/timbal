@@ -11,6 +11,8 @@ except ImportError:
 
 from pydantic import BaseModel, Field, SkipValidation, computed_field, model_validator
 
+from ..errors import CredentialNotAvailable, PlatformError, ToolProxyUnavailable
+from ..platform.tool_proxy import execute_tool_proxy
 from ..utils import create_model_from_handler
 from .runnable import Runnable
 
@@ -118,6 +120,49 @@ class Tool(Runnable):
         self._is_gen = inspect_result["is_gen"]
         self._is_async_gen = inspect_result["is_async_gen"]
         self._dependencies = inspect_result["dependencies"]
+
+    @override
+    async def _execute_handler(
+        self,
+        validated_input: dict[str, Any],
+        run_context: Any,
+        span: Any,
+        event_queue: Any = None,
+    ):
+        """Execute handler locally; on missing credentials, run via platform tool proxy.
+
+        If no proxy is reachable for this tool — the platform has no proxy for it
+        (HTTP 403, or 404/501 fallbacks), or there's no platform config at all
+        (e.g. running locally) — re-raise the original ``CredentialNotAvailable``
+        so the user gets the actionable "configure credentials locally" message
+        instead of an opaque platform error.
+
+        When platform auth is configured but org/subject is missing (e.g.
+        ``TIMBAL_API_KEY`` without ``TIMBAL_ORG_ID``), propagate
+        ``ToolProxyUnavailable`` so the user fixes platform setup rather than
+        local provider credentials.
+        """
+        try:
+            async for event, final_output, collector in super()._execute_handler(
+                validated_input, run_context, span, event_queue
+            ):
+                yield (event, final_output, collector)
+        except CredentialNotAvailable as cred_error:
+            try:
+                output = await execute_tool_proxy(self.name, validated_input)
+            except ToolProxyUnavailable:
+                if run_context.platform_config is None:
+                    # Local run without platform config — fall back to credential error.
+                    raise cred_error from None
+                raise
+            except PlatformError as proxy_error:
+                # 403 is what the platform returns when no proxy is available for this
+                # tool (no service-account credentials configured). 404/501 are kept as
+                # fallbacks. In all these cases, surface the actionable credential error.
+                if proxy_error.status_code in (403, 404, 501):
+                    raise cred_error from None
+                raise
+            yield (None, output, None)
 
     @override
     def nest(self, parent_path: str) -> None:

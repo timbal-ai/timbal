@@ -71,8 +71,20 @@ def _extract_key_from_lambda(fn: Any, source_step: str) -> str | None:
 
 
 def _is_model_enum(values: list) -> bool:
-    """Return True if a list of enum values looks like LLM model IDs (provider/name)."""
-    return len(values) > 5 and all(isinstance(v, str) and "/" in v for v in values[:5])
+    """Return True if an enum is the canonical LLM model ID set (provider/name).
+
+    Matches against ``timbal.core.models.Model`` rather than guessing from shape:
+    other registries (e.g. Krea's image/video IDs) share the ``provider/name``
+    form but must keep their enum inline so editors resolve the right options.
+    """
+    if len(values) <= 5 or not all(isinstance(v, str) and "/" in v for v in values[:5]):
+        return False
+    import typing
+
+    from timbal.core.models import Model
+
+    known = set(typing.get_args(Model))
+    return all(v in known for v in values)
 
 
 def _compact_field(field: dict) -> dict:

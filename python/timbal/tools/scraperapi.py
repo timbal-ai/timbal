@@ -4,21 +4,11 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ._creds import resolve_api_key
 
 _BASE_URL = "http://api.scraperapi.com"
 _STRUCTURED_URL = "https://api.scraperapi.com/structured"
 _ASYNC_URL = "https://async.scraperapi.com"
-
-
-async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
-    """Resolve ScraperAPI API key from integration, explicit field, or env var."""
-    from ._creds import resolve_api_key
-    return await resolve_api_key(
-        env_var="SCRAPERAPI_KEY",
-        provider_name="ScraperAPI",
-        integration=integration,
-        api_key=api_key,
-    )
 
 
 class ScraperAPIScrape(Tool):
@@ -63,7 +53,12 @@ class ScraperAPIScrape(Tool):
             keep_headers: bool = Field(False, description="Forward your custom request headers to the target"),
             retry_404: bool = Field(False, description="Retry requests that return a 404 status"),
         ) -> str:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="SCRAPERAPI_KEY",
+                provider_name="ScraperAPI",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             params: dict[str, Any] = {"api_key": api_key, "url": url}
@@ -131,7 +126,12 @@ class ScraperAPIAsyncScrape(Tool):
             ),
             premium: bool = Field(False, description="Use premium residential proxies"),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="SCRAPERAPI_KEY",
+                provider_name="ScraperAPI",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import asyncio
 
             import httpx
@@ -208,7 +208,12 @@ class ScraperAPIGoogleSearch(Tool):
                 description='Time filter for results, e.g. "qdr:d" (past day), "qdr:w" (past week)',
             ),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="SCRAPERAPI_KEY",
+                provider_name="ScraperAPI",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             params: dict[str, Any] = {"api_key": api_key, "query": query}
@@ -261,7 +266,12 @@ class ScraperAPIAmazonProduct(Tool):
                 None, description="Amazon TLD for the target marketplace (e.g. com, co.uk, de)"
             ),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="SCRAPERAPI_KEY",
+                provider_name="ScraperAPI",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             params: dict[str, Any] = {"api_key": api_key, "asin": asin}
@@ -308,7 +318,12 @@ class ScraperAPIAmazonSearch(Tool):
                 None, description="Amazon TLD for the target marketplace (e.g. com, co.uk, de)"
             ),
         ) -> dict:
-            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
+            api_key = await resolve_api_key(
+                env_var="SCRAPERAPI_KEY",
+                provider_name="ScraperAPI",
+                integration=self.integration,
+                api_key=self.api_key,
+            )
             import httpx
 
             params: dict[str, Any] = {"api_key": api_key, "query": query}
