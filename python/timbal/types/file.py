@@ -371,11 +371,7 @@ class File(io.IOBase):
         bs64_content = base64.b64encode(content).decode("utf-8")
         return f"data:{self.__content_type__};base64,{bs64_content}"
 
-    async def persist(
-        self,
-        org_id: str | None = None,
-        # ? Add more resource specifiers
-    ) -> str | None:
+    async def persist(self) -> str | None:
         """Persist the file to some storage.
         If there's no run context or valid platform config, the file will be persisted to local disk.
         If there's a platform configuration, the file will be uploaded to the platform.
@@ -394,7 +390,7 @@ class File(io.IOBase):
                 object.__setattr__(self, "__persisted__", url)
                 return url
 
-        if not run_context.platform_config or (not org_id and not run_context.platform_config.subject):
+        if not run_context.platform_config or not run_context.platform_config.subject:
             if self.__source_scheme__ == "local_path":
                 local_path = str(self)
                 object.__setattr__(self, "__persisted__", local_path)

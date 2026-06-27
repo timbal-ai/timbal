@@ -426,6 +426,52 @@ class TestFilePersist:
         assert result is not None
         assert os.path.exists(result)
 
+    def _platform_ctx(self):
+        from timbal.state.context import RunContext
+        from timbal.state.config import (
+            PlatformAuth,
+            PlatformAuthType,
+            PlatformConfig,
+            PlatformSubject,
+        )
+
+        platform_config = PlatformConfig(
+            host="https://api.timbal.ai",
+            cdn="content.timbal.ai",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="token123"),
+            subject=PlatformSubject(org_id="org-1", app_id="app-9"),
+        )
+        return RunContext(platform_config=platform_config, tracing_provider=None)
+
+    async def test_persist_upload_returns_unsigned_url(self, tmp_path: pathlib.Path) -> None:
+        """POST /files returns an unsigned (public) url; the name segment is re-encoded."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from timbal.state import set_run_context
+
+        set_run_context(self._platform_ctx())
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content_length": 4,
+            "content_type": "application/octet-stream",
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": None,
+            "name": "my file.bin",
+            "url": "https://content.timbal.ai/org-1/my file.bin",
+        }
+
+        test_file = tmp_path / "my file.bin"
+        test_file.write_bytes(b"data")
+        file = File.validate(str(test_file))
+        with patch(
+            "timbal.platform.utils._request", new_callable=AsyncMock
+        ) as mock_request:
+            mock_request.return_value = mock_response
+            result = await file.persist()
+
+        assert result == "https://content.timbal.ai/org-1/my%20file.bin"
+        assert file.__persisted__ == result
+
 
 # ---------------------------------------------------------------------------
 # TestFileSerialize — serialize() with persisted value
