@@ -233,11 +233,13 @@ class TestToolSetResolution:
         """Test that resolve() supports async operations."""
         toolset = AsyncInitToolSet(delay=0.02)
         
-        start_time = time.time()
+        start_time = time.perf_counter()
         tools = await toolset.resolve()
-        elapsed = time.time() - start_time
-        
-        assert elapsed >= 0.02  # Should have waited for async operation
+        elapsed = time.perf_counter() - start_time
+
+        # Allow for OS timer granularity (Windows clock tick ~15.6ms / early
+        # event-loop wakeups); we only care that the async sleep was awaited.
+        assert elapsed >= 0.02 * 0.5
         assert len(tools) == 1
     
     @pytest.mark.asyncio
