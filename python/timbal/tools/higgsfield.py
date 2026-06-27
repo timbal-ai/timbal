@@ -1,9 +1,16 @@
 """Higgsfield AI platform tools (https://platform.higgsfield.ai).
 
 Uses the public REST API with ``Authorization: Key {api_key}:{api_secret}``.
-Application strings are hierarchical model routes (e.g.
-``bytedance/seedream/v4/text-to-image``). Override ``model`` on any generation
-tool when your plan exposes different routes in the Cloud dashboard.
+Application strings are model routes accepted by ``platform.higgsfield.ai`` —
+hierarchical paths (``bytedance/seedream/v4/text-to-image``) or ``/v1/…``
+endpoints from the official JS SDK. Override ``model`` when your plan exposes
+different routes in the Cloud dashboard.
+
+Default routes are aligned with official Higgsfield documentation:
+- Python SDK (higgsfield-client README): Seedream text-to-image
+- JS SDK (higgsfield-js): FLUX Kontext, Speak, custom-references
+- CLI catalog (higgsfield-ai/cli MODELS.md): outpaint, background remover
+- ComfyUI-Higgsfield-Direct (higgsfield-client routes): Soul, Reve, Seedream edit, Seedance/Kling I2V
 """
 
 from __future__ import annotations
@@ -26,16 +33,27 @@ _HF_BASE = "https://platform.higgsfield.ai"
 _HF_TERMINAL_STATUSES = frozenset({"completed", "failed", "nsfw", "canceled", "cancelled"})
 
 # Default application routes — override per call via the ``model`` parameter.
+# higgsfield-client README
 DEFAULT_TEXT_TO_IMAGE_MODEL = "bytedance/seedream/v4/text-to-image"
+# ComfyUI-Higgsfield-Direct (higgsfield-client)
 DEFAULT_IMAGE_TO_IMAGE_MODEL = "bytedance/seedream/v4/edit"
-DEFAULT_UPSCALE_IMAGE_MODEL = "higgsfield/image/upscale"
-DEFAULT_REMOVE_BACKGROUND_MODEL = "higgsfield/image/background-remover"
-DEFAULT_EXPAND_IMAGE_MODEL = "higgsfield/outpaint"
+# No dedicated upscale route in official SDK/CLI docs; Seedream Edit is the documented image-enhancement path.
+DEFAULT_UPSCALE_IMAGE_MODEL = "bytedance/seedream/v4/edit"
+# higgsfield-ai/cli MODELS.md job_set_type
+DEFAULT_REMOVE_BACKGROUND_MODEL = "image_background_remover"
+# higgsfield-ai/cli MODELS.md job_set_type
+DEFAULT_EXPAND_IMAGE_MODEL = "outpaint"
+# Seedance v1 Pro (documented I2V sibling; MCP unified verified family)
 DEFAULT_TEXT_TO_VIDEO_MODEL = "bytedance/seedance/v1/pro/text-to-video"
+# ComfyUI-Higgsfield-Direct
 DEFAULT_IMAGE_TO_VIDEO_MODEL = "bytedance/seedance/v1/pro/image-to-video"
-DEFAULT_UPSCALE_VIDEO_MODEL = "higgsfield/video/upscale"
-DEFAULT_LIPSYNC_MODEL = "higgsfield/lipsync/talking-avatar"
-DEFAULT_SOUL_TRAIN_MODEL = "higgsfield-ai/soul/train"
+# No dedicated video-upscale route in official docs; same Seedance family as I2V — override for your plan.
+DEFAULT_UPSCALE_VIDEO_MODEL = "bytedance/seedance/v1/pro/image-to-video"
+# higgsfield-js Speak v2 endpoint
+DEFAULT_LIPSYNC_MODEL = "/v1/speak/higgsfield"
+# higgsfield-js createSoulId endpoint
+DEFAULT_SOUL_TRAIN_MODEL = "/v1/custom-references"
+# ComfyUI-Higgsfield-Direct / higgsfield-js Soul generation
 DEFAULT_SOUL_GENERATE_MODEL = "higgsfield-ai/soul/standard"
 
 

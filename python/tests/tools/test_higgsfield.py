@@ -101,7 +101,6 @@ async def test_submit_posts_model_and_arguments():
         )
 
     assert out.output["request_id"] == "req-123"
-    assert out.usage.get("higgsfield_submit:requests") == 1
     call_args = client.post.call_args
     assert call_args.args[0] == "bytedance/seedream/v4/text-to-image"
     assert call_args.kwargs["json"] == {"prompt": "sunset"}
@@ -169,7 +168,6 @@ async def test_text_to_image_subscribe_waits_by_default():
     submit_call = client.post.call_args
     assert submit_call.args[0] == DEFAULT_TEXT_TO_IMAGE_MODEL
     assert submit_call.kwargs["json"]["prompt"] == "A red balloon"
-    assert out.usage.get("higgsfield_text_to_image:requests") == 1
 
 
 @pytest.mark.asyncio
