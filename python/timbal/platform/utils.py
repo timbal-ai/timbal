@@ -104,7 +104,9 @@ async def _request(
     """Utility function for making HTTP requests."""
     url, headers = _resolve_url_and_headers(service, path, headers)
     payload_kwargs = {}
-    if json:
+    # `is not None` so an empty dict still sends a JSON body + Content-Type
+    # (parameterless POSTs would otherwise 415 Unsupported Media Type).
+    if json is not None:
         payload_kwargs["json"] = json
     elif content:
         payload_kwargs["content"] = content
@@ -194,7 +196,9 @@ async def _stream(
         "Cache-Control": "no-cache",
     }
     payload_kwargs = {}
-    if json:
+    # `is not None` so an empty dict still sends a JSON body + Content-Type
+    # (parameterless POSTs would otherwise 415 Unsupported Media Type).
+    if json is not None:
         payload_kwargs["json"] = json
     elif content:
         payload_kwargs["content"] = content
