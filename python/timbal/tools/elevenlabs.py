@@ -881,6 +881,14 @@ class ElevenLabsCreateVoicePreviews(Tool):
             api_key = await resolve_api_key(tool=self, provider_name="ElevenLabs", env_var="ELEVENLABS_API_KEY")
             import httpx
 
+            # The design endpoint needs sample speech: either explicit `text` (100–1000 chars)
+            # or `auto_generate_text=True`. Auto-enable generation when no text is given so a
+            # bare `voice_description` call works as advertised.
+            if text and not 100 <= len(text) <= 1000:
+                raise ValueError(f"text must be between 100 and 1000 characters (got {len(text)}).")
+            if not text:
+                auto_generate_text = True
+
             payload: dict[str, Any] = {
                 "voice_description": voice_description,
                 "model_id": model_id,
@@ -999,6 +1007,12 @@ class ElevenLabsCreateDubbing(Tool):
             if name:
                 data["name"] = name
 
+            sources_given = sum(bool(s) for s in (source_url, audio_file_path, audio_file_base64))
+            if sources_given == 0:
+                raise ValueError("Provide source_url, audio_file_path, or audio_file_base64.")
+            if sources_given > 1:
+                raise ValueError("Provide exactly one of source_url, audio_file_path, or audio_file_base64.")
+
             files = None
             if source_url:
                 data["source_url"] = source_url
@@ -1007,11 +1021,9 @@ class ElevenLabsCreateDubbing(Tool):
                     audio_bytes = f.read()
                 resolved_name = filename or os.path.basename(audio_file_path)
                 files = {"file": (resolved_name, audio_bytes, "application/octet-stream")}
-            elif audio_file_base64:
+            else:
                 audio_bytes = base64.b64decode(audio_file_base64)
                 files = {"file": (filename or "source", audio_bytes, "application/octet-stream")}
-            else:
-                raise ValueError("Provide source_url, audio_file_path, or audio_file_base64.")
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
                 response = await client.post(
