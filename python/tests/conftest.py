@@ -87,9 +87,11 @@ class Timer:
         self.elapsed = None
 
     def __enter__(self):
-        self.start_time = time.time()
+        # perf_counter: high-res monotonic clock. time.time() has ~15.6ms
+        # granularity on Windows, which makes sub-tick durations flaky.
+        self.start_time = time.perf_counter()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.end_time = time.time()
+        self.end_time = time.perf_counter()
         self.elapsed = self.end_time - self.start_time
