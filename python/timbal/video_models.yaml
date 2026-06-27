@@ -1,0 +1,140 @@
+# Source of truth for direct video generation models (VideoGenerate tool).
+# fal.ai endpoints are resolved dynamically; add per-endpoint Costs rows separately.
+# Run scripts/generate_video_models.py to regenerate the VideoModel Literal.
+#
+# billing.costs maps 1:1 to OutputEvent.usage keys: {id}:{unit}
+# Rates are USD per unit (per second for video_seconds_*, per token for tokens).
+
+default: google/veo-3.1
+
+models:
+
+  - id: google/veo-3.1
+    provider: google
+    model_id: veo-3.1-generate-preview
+    display_name: Veo 3.1
+    description: Google Veo 3.1 standard quality text/image-to-video with native audio.
+    supports: [prompt, aspectRatio, resolution, durationSeconds, sampleCount, seed, negativePrompt]
+    defaults:
+      sampleCount: 1
+      durationSeconds: 8
+      aspectRatio: "16:9"
+      resolution: 720p
+    supports_audio: true
+    supports_image_to_video: true
+    allowed_aspect_ratios: ["16:9", "9:16", "1:1"]
+    allowed_resolutions: [720p, 1080p]
+    billing:
+      primary_unit: video_seconds
+      costs:
+        - unit: video_seconds_720p
+          rate: 0.40
+          description: Per generated video second at 720p (audio included)
+        - unit: video_seconds_1080p
+          rate: 0.40
+          description: Per generated video second at 1080p (audio included)
+        - unit: generations
+          rate: 0
+          description: Count of videos generated (informational)
+        - unit: requests
+          rate: 0
+          description: Successful API requests (informational)
+
+  - id: google/veo-3.1-fast
+    provider: google
+    model_id: veo-3.1-fast-generate-preview
+    display_name: Veo 3.1 Fast
+    description: Google Veo 3.1 Fast — lower latency and cost than standard Veo 3.1.
+    supports: [prompt, aspectRatio, resolution, durationSeconds, sampleCount, seed, negativePrompt]
+    defaults:
+      sampleCount: 1
+      durationSeconds: 8
+      aspectRatio: "16:9"
+      resolution: 720p
+    supports_audio: true
+    supports_image_to_video: true
+    allowed_aspect_ratios: ["16:9", "9:16", "1:1"]
+    allowed_resolutions: [720p, 1080p]
+    billing:
+      primary_unit: video_seconds
+      costs:
+        - unit: video_seconds_720p
+          rate: 0.10
+          description: Per generated video second at 720p (audio included)
+        - unit: video_seconds_1080p
+          rate: 0.12
+          description: Per generated video second at 1080p (audio included)
+        - unit: generations
+          rate: 0
+          description: Count of videos generated (informational)
+        - unit: requests
+          rate: 0
+          description: Successful API requests (informational)
+
+  - id: bytedance/seedance-2.0
+    provider: bytedance
+    model_id: dreamina-seedance-2-0-260128
+    display_name: Seedance 2.0
+    description: ByteDance Seedance 2.0 via BytePlus — high quality text/image-to-video.
+    supports: [model, content, ratio, resolution, duration, generate_audio, seed]
+    defaults:
+      duration: 5
+      ratio: "16:9"
+      resolution: 720p
+      generate_audio: true
+    supports_audio: true
+    supports_image_to_video: true
+    allowed_aspect_ratios: ["16:9", "9:16", "1:1"]
+    allowed_resolutions: [720p, 1080p]
+    billing:
+      primary_unit: video_seconds
+      costs:
+        - unit: video_seconds_720p
+          rate: 0.14
+          description: Approximate per-second cost at 720p (BytePlus token billing proxy)
+        - unit: video_seconds_1080p
+          rate: 0.30
+          description: Approximate per-second cost at 1080p (BytePlus token billing proxy)
+        - unit: tokens
+          rate: 0.000002
+          description: BytePlus total_tokens when returned by the API (USD per token)
+        - unit: generations
+          rate: 0
+          description: Count of videos generated (informational)
+        - unit: requests
+          rate: 0
+          description: Successful API requests (informational)
+
+  - id: bytedance/seedance-2.0-fast
+    provider: bytedance
+    model_id: dreamina-seedance-2-0-fast-260128
+    display_name: Seedance 2.0 Fast
+    description: ByteDance Seedance 2.0 Fast — lower latency variant via BytePlus.
+    supports: [model, content, ratio, resolution, duration, generate_audio, seed]
+    defaults:
+      duration: 5
+      ratio: "16:9"
+      resolution: 720p
+      generate_audio: true
+    supports_audio: true
+    supports_image_to_video: true
+    allowed_aspect_ratios: ["16:9", "9:16", "1:1"]
+    allowed_resolutions: [720p, 1080p]
+    billing:
+      primary_unit: video_seconds
+      costs:
+        - unit: video_seconds_720p
+          rate: 0.10
+          description: Approximate per-second cost at 720p (BytePlus token billing proxy)
+        - unit: video_seconds_1080p
+          rate: 0.18
+          description: Approximate per-second cost at 1080p (BytePlus token billing proxy)
+        - unit: tokens
+          rate: 0.000002
+          description: BytePlus total_tokens when returned by the API (USD per token)
+        - unit: generations
+          rate: 0
+          description: Count of videos generated (informational)
+        - unit: requests
+          rate: 0
+          description: Successful API requests (informational)
