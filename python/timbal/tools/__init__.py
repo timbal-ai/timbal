@@ -493,6 +493,7 @@ if TYPE_CHECKING:
         OutlookTrash,
         OutlookUpdateEmail,
     )
+    from .parallel import ParallelExtract, ParallelSearch, ParallelTaskRun
     from .pinecone import (
         PineconeCreateIndex,
         PineconeDeleteVectors,
@@ -1330,6 +1331,9 @@ __all__ = [
     "TavilyExtract",
     "TavilyMap",
     "TavilySearch",
+    "ParallelSearch",
+    "ParallelExtract",
+    "ParallelTaskRun",
     "WebSearch",
     "Write",
     "XSearch",
@@ -2400,6 +2404,9 @@ _LAZY_IMPORTS = {
     "TavilyExtract": ".tavily",
     "TavilyMap": ".tavily",
     "TavilySearch": ".tavily",
+    "ParallelSearch": ".parallel",
+    "ParallelExtract": ".parallel",
+    "ParallelTaskRun": ".parallel",
     "WebSearch": ".web_search",
     "Write": ".write",
     "XSearch": ".xai",
