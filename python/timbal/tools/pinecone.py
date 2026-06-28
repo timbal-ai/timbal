@@ -160,7 +160,10 @@ class PineconeUpsertVectors(Tool):
 
 class PineconeQuery(Tool):
     name: str = "pinecone_query"
-    description: str | None = "Query a Pinecone index for nearest neighbors."
+    description: str | None = (
+        "Query a Pinecone vector index for nearest neighbors — semantic similarity "
+        "search / vector search over stored embeddings."
+    )
     integration: Annotated[str, Integration("pinecone")] | None = None
     api_key: SecretStr | None = None
 

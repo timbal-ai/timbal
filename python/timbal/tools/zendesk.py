@@ -195,7 +195,10 @@ class ZendeskShowTicket(Tool):
 
 class ZendeskUpdateTicket(Tool):
     name: str = "zendesk_update_ticket"
-    description: str | None = "Update an existing Zendesk ticket."
+    description: str | None = (
+        "Update or reply to an existing Zendesk support ticket: add a public "
+        "reply/comment, change status, or reassign."
+    )
     integration: Annotated[str, Integration("zendesk")] | None = None
     subdomain: str | None = None
     email: SecretStr | None = None
@@ -8600,7 +8603,10 @@ class ZendeskCreateRequest(Tool):
 
 class ZendeskUpdateRequest(Tool):
     name: str = "zendesk_update_request"
-    description: str | None = "Update a Zendesk request (add comment, mark solved, add collaborators)."
+    description: str | None = (
+        "Update or reply to a Zendesk request (end-user support ticket): add a "
+        "comment/reply, mark solved, or add collaborators."
+    )
     integration: Annotated[str, Integration("zendesk")] | None = None
     subdomain: str | None = None
     email: SecretStr | None = None

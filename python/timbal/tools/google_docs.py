@@ -505,7 +505,7 @@ class GoogleDocsGetTabContent(Tool):
 class GoogleDocsGetDocument(Tool):
     name: str = "google_docs_get_document"
     description: str | None = (
-        "Get the contents of the latest version of a Google Doc. "
+        "Read and return the text contents of a Google Docs document. "
         "Set include_tabs_content=true for multi-tab documents."
     )
     integration: Annotated[str, Integration("google_docs")] | None = None

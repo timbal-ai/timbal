@@ -252,8 +252,8 @@ class SharePointGetFile(Tool):
 class SharePointDownloadFile(Tool):
     name: str = "sharepoint_download_file"
     description: str | None = (
-        "Download a file from a SharePoint site by file ID. Returns base64-encoded content "
-        "(safe for Word, Excel, PDF and other binaries)."
+        "Download a SharePoint file or document (Word, Excel, PDF, etc.) by file id. "
+        "Returns base64-encoded content (safe for Word, Excel, PDF and other binaries)."
     )
     integration: Annotated[str, Integration("sharepoint")] | None = None
 

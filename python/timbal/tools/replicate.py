@@ -22,9 +22,11 @@ def _replicate_headers(api_token: str, extra: dict[str, str] | None = None) -> d
 class ReplicateCreatePrediction(Tool):
     name: str = "replicate_create_prediction"
     description: str | None = (
-        "Create a Replicate prediction for a model version and inputs. "
-        "Use official model refs like owner/name or a full version id. "
-        "Optionally wait up to N seconds for completion via prefer_wait_seconds."
+        "Run any AI model on Replicate (owner/name model refs) to generate images, "
+        "video, audio, or text from inputs. General-purpose model runner / inference "
+        "call for open-source and community models. Use official model refs like "
+        "owner/name or a full version id. Optionally wait up to N seconds for "
+        "completion via prefer_wait_seconds."
     )
     integration: Annotated[str, Integration("replicate")] | None = None
     api_token: SecretStr | None = None

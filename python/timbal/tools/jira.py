@@ -495,7 +495,10 @@ class JiraGetIssueTypesForProject(Tool):
 
 class JiraCreateIssue(Tool):
     name: str = "jira_create_issue"
-    description: str | None = "Create an issue with a Jira fields payload (project, issuetype, summary, etc.)."
+    description: str | None = (
+        "Create a Jira issue — a bug, task, story, or ticket — from a fields "
+        "payload (project, issuetype, summary, etc.)."
+    )
     integration: Annotated[str, Integration("jira")] | None = None
     token: SecretStr | None = None
 
