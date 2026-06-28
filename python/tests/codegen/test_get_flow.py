@@ -1095,6 +1095,112 @@ class TestFormatCompact:
 
 
 # ---------------------------------------------------------------------------
+# Edge kinds (ordering vs param) and compact transitive reduction
+# ---------------------------------------------------------------------------
+
+# A linear 4-step pipeline where prepare's output is wired into every later
+# step via param maps, but the *ordering* is a simple chain. The param maps
+# add prepare->checker and prepare->mark edges that are transitively redundant.
+_LINEAR_PIPELINE = """\
+from timbal.core import Agent, Workflow, Tool
+from timbal.state import get_run_context
+
+def prepare() -> dict:
+    return {"analysis_prompt": "a", "crosscheck_prompt": "c", "document_id": "d"}
+
+def mark_processed(document_id: str) -> str:
+    return document_id
+
+requirement_analyzer = Agent(name="requirement_analyzer", model="openai/gpt-4o-mini", max_tokens=128)
+contradiction_checker = Agent(name="contradiction_checker", model="openai/gpt-4o-mini", max_tokens=128)
+
+agent = Workflow(name="wf")
+agent.step(Tool(handler=prepare))
+agent.step(
+    requirement_analyzer,
+    depends_on=["prepare"],
+    prompt=lambda: get_run_context().step_span("prepare").output["analysis_prompt"],
+)
+agent.step(
+    contradiction_checker,
+    depends_on=["requirement_analyzer"],
+    prompt=lambda: get_run_context().step_span("prepare").output["crosscheck_prompt"],
+)
+agent.step(
+    Tool(handler=mark_processed),
+    depends_on=["contradiction_checker"],
+    document_id=lambda: get_run_context().step_span("prepare").output["document_id"],
+)
+"""
+
+
+def _edge(flow: dict, source: str, target: str) -> dict | None:
+    for e in flow["edges"]:
+        if e["source"].split(".")[-1] == source and e["target"].split(".")[-1] == target:
+            return e
+    return None
+
+
+class TestEdgeKinds:
+    def test_linear_pipeline_param_maps_do_not_imply_parallel_fanout(self, workspace):
+        """The repro: param maps from prepare to every later step must NOT render
+        as a 3-way fan-out off prepare. Compact should show the linear chain."""
+        ws = workspace(_LINEAR_PIPELINE, fqn='fqn: "agent.py::agent"\n')
+        out = _compact(ws)
+
+        # The linear ordering is present.
+        assert "prepare → requirement_analyzer" in out
+        assert "requirement_analyzer → contradiction_checker" in out
+        assert "contradiction_checker → mark_processed" in out
+
+        # prepare must not fan out to the downstream steps it only feeds via params.
+        prepare_lines = [ln for ln in out.splitlines() if ln.strip().startswith("prepare →")]
+        assert len(prepare_lines) == 1
+        assert "," not in prepare_lines[0], f"unexpected fan-out: {prepare_lines[0]}"
+        assert "prepare → contradiction_checker" not in out
+        assert "prepare → mark_processed" not in out
+
+    def test_json_edge_kind_ordering_vs_param(self, workspace):
+        """JSON retains the full edge set and tags each edge's kind."""
+        ws = workspace(_LINEAR_PIPELINE, fqn='fqn: "agent.py::agent"\n')
+        flow = _flow(ws)
+
+        # Explicit depends_on that also carries a param map -> ordering wins.
+        assert _edge(flow, "prepare", "requirement_analyzer")["kind"] == "ordering"
+        # Chain edges are explicit ordering.
+        assert _edge(flow, "requirement_analyzer", "contradiction_checker")["kind"] == "ordering"
+        assert _edge(flow, "contradiction_checker", "mark_processed")["kind"] == "ordering"
+
+        # Param-only edges are retained in JSON (not reduced) and tagged param.
+        prepare_to_checker = _edge(flow, "prepare", "contradiction_checker")
+        prepare_to_mark = _edge(flow, "prepare", "mark_processed")
+        assert prepare_to_checker is not None and prepare_to_checker["kind"] == "param"
+        assert prepare_to_mark is not None and prepare_to_mark["kind"] == "param"
+
+    def test_param_only_edge_kept_when_not_redundant(self, workspace):
+        """A param map that is the sole dependency must still render as an edge."""
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        edge = _edge(flow, "agent_a", "agent_b")
+        assert edge is not None and edge["kind"] == "param"
+        # Not redundant (no alternate path) -> still shown in compact.
+        assert "agent_a → agent_b" in format_compact(flow)
+
+
+# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 

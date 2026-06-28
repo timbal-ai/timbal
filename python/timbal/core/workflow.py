@@ -142,29 +142,53 @@ class Workflow(Runnable):
         self._steps[runnable.name] = runnable
         runnable.previous_steps = set()
         runnable.next_steps = set()
+        # Per-source edge kinds: maps a previous step name -> set of kinds
+        # ("ordering" | "when" | "param"). Used by introspection (get_flow) to
+        # distinguish explicit sequencing from param/when-induced dependencies.
+        # Runtime sequencing only ever looks at ``previous_steps``.
+        runnable.previous_steps_kinds = {}
         runnable.when = None
 
         # Explicit dependencies
         if depends_on and not isinstance(depends_on, list):
             raise ValueError("depends_on must be a list of step names")
-        depends_on = set(depends_on or [])  # Deduplicate here to avoid duplicate _is_dag calls
 
-        depends_on.update(runnable._dependencies)
-        depends_on.update(runnable._pre_hook_dependencies)
-        depends_on.update(runnable._post_hook_dependencies)
+        # Track dependency origins so introspection can tell explicit ordering
+        # (depends_on / hooks) apart from param- and when-induced wiring. These
+        # all merge into ``previous_steps`` for execution, but the distinction is
+        # lossy once merged (a step can be both an explicit dep and a param dep),
+        # so we record it here while the sources are still separate.
+        ordering_deps = set(depends_on or [])
+        # Hooks read sibling outputs via step_span(); treat as ordering so they
+        # are never silently collapsed in compact views.
+        ordering_deps.update(runnable._pre_hook_dependencies)
+        ordering_deps.update(runnable._post_hook_dependencies)
+        # Handler-body step_span() references are data wiring, not explicit ordering.
+        param_deps = set(runnable._dependencies)
+        when_deps: set[str] = set()
 
         # Optional handler to determine whether to execute the step, and inspect it to automatically link steps
         if when:
             inspect_result = runnable._inspect_callable(when)
             runnable.when = {"callable": when, **inspect_result}
-            depends_on.update(inspect_result["dependencies"])
+            when_deps.update(inspect_result["dependencies"])
 
         # Use kwargs as default params for the runnable, and inspect callables to automatically link steps
         runnable._prepare_default_params(kwargs)
         for v in runnable._default_runtime_params.values():
-            depends_on.update(v["dependencies"])
+            param_deps.update(v["dependencies"])
 
-        for dep in depends_on:
+        edge_kinds: dict[str, set[str]] = {}
+        for dep in ordering_deps:
+            edge_kinds.setdefault(dep, set()).add("ordering")
+        for dep in when_deps:
+            edge_kinds.setdefault(dep, set()).add("when")
+        for dep in param_deps:
+            edge_kinds.setdefault(dep, set()).add("param")
+        runnable.previous_steps_kinds = edge_kinds
+
+        # Deduplicate (set union) to avoid duplicate _is_dag calls per shared dep.
+        for dep in edge_kinds:
             logger.info("Linking steps", previous_step=dep, next_step=runnable.name)
             self._link(dep, runnable.name)
 

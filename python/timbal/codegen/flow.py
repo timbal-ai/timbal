@@ -203,6 +203,24 @@ def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
     return node
 
 
+def _edge_kind(kinds: set[str] | None) -> str:
+    """Collapse a set of edge-origin kinds into a single label for JSON output.
+
+    A dependency can arise from several sources at once (e.g. an explicit
+    ``depends_on`` that also reads the step's output via a param map). Precedence
+    is ``ordering > when > param`` so explicit sequencing is never masked by
+    param wiring. Unknown/missing (e.g. edges from a direct ``_link``) default to
+    ``ordering`` — the safe choice, since ordering edges are never reduced away.
+    """
+    if not kinds:
+        return "ordering"
+    if "ordering" in kinds:
+        return "ordering"
+    if "when" in kinds:
+        return "when"
+    return "param"
+
+
 def get_flow(workspace_path: str | Path) -> dict[str, Any]:
     """Return a ReactFlow-compatible graph for the workspace entry point.
 
@@ -239,12 +257,14 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
 
         for _step_name, step in runnable._steps.items():
             when_source = _get_when_source(step) if step.when else None
+            kinds_map = getattr(step, "previous_steps_kinds", None) or {}
             for prev_name in step.previous_steps:
                 prev_step = runnable._steps[prev_name]
                 edge: dict[str, Any] = {
                     "id": f"{prev_step._path}->{step._path}",
                     "source": prev_step._path,
                     "target": step._path,
+                    "kind": _edge_kind(kinds_map.get(prev_name)),
                 }
                 if when_source is not None:
                     edge["when"] = when_source
@@ -390,6 +410,48 @@ def _fmt_node_lines(node: dict, indent: str) -> list[str]:
     return lines
 
 
+def _reduce_param_edges(edges: list[dict]) -> list[dict]:
+    """Drop param-induced edges that are transitively implied by another path.
+
+    A param dependency ``A → C`` (the handler/agent on C reads A's output) is a
+    real await-gate at runtime, but for an execution-order view it is redundant
+    when A already reaches C through some other path (e.g. ``A → B → C``). Left
+    in, such edges turn a linear pipeline into a misleading fan-out from the
+    first step.
+
+    Only edges whose single ``kind`` is ``param`` are eligible for removal —
+    explicit ordering (``depends_on`` / hooks) and ``when`` edges are always
+    kept so user-added structure never silently disappears from the compact
+    view. The full edge set (including these) is retained in the JSON output.
+    """
+    adj: dict[str, list[str]] = defaultdict(list)
+    for e in edges:
+        adj[e["source"]].append(e["target"])
+
+    def _reaches(start: str, goal: str, skip: tuple[str, str]) -> bool:
+        """True if ``goal`` is reachable from ``start`` without using the direct ``skip`` edge."""
+        stack = [start]
+        seen = {start}
+        while stack:
+            node = stack.pop()
+            for nxt in adj.get(node, []):
+                if (node, nxt) == skip:
+                    continue
+                if nxt == goal:
+                    return True
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
+
+    kept: list[dict] = []
+    for e in edges:
+        if e.get("kind") == "param" and _reaches(e["source"], e["target"], (e["source"], e["target"])):
+            continue
+        kept.append(e)
+    return kept
+
+
 def _build_edge_lines(edges: list[dict]) -> list[str]:
     """Render edges grouped by source, one line per source node."""
     targets_of: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
@@ -472,6 +534,7 @@ def format_compact(flow: dict) -> str:
             for line in _fmt_node_lines(node, indent="  "):
                 lines.append(line)
 
+    edges = _reduce_param_edges(edges)
     if edges:
         lines.append("")
         lines.append("EDGES")
