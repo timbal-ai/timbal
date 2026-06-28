@@ -39,9 +39,11 @@ def _normalize_image(image: str | dict[str, str]) -> dict[str, str]:
 class QuiverAIGenerateSVG(Tool):
     name: str = "quiver_ai_generate_svg"
     description: str | None = (
-        "Generate one or more SVG graphics from a text prompt using QuiverAI's Arrow models. "
-        "Supports optional reference images to guide style/composition. "
-        "Returns raw SVG markup along with request metadata and credit usage."
+        "Generate SVG vector graphics — logos, icons, and illustrations — from a "
+        "text prompt with QuiverAI's Arrow models. Produces scalable vector (SVG) "
+        "output, not raster images. Supports optional reference images to guide "
+        "style/composition. Returns raw SVG markup along with request metadata and "
+        "credit usage."
     )
     integration: Annotated[str, Integration("quiver_ai")] | None = None
     api_key: SecretStr | None = None

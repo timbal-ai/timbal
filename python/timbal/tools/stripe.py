@@ -147,7 +147,10 @@ class SearchCustomer(Tool):
 
 class CreatePayment(Tool):
     name: str = "stripe_create_payment"
-    description: str | None = "Create a Stripe PaymentIntent to collect a payment."
+    description: str | None = (
+        "Charge a customer / collect a payment — create a Stripe PaymentIntent to "
+        "bill, take, or process a payment."
+    )
     integration: Annotated[str, Integration("stripe")] | None = None
     api_key: SecretStr | None = None
 

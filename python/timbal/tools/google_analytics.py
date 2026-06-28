@@ -74,7 +74,10 @@ class GoogleAnalyticsListAccountSummaries(Tool):
 
 class GoogleAnalyticsRunReport(Tool):
     name: str = "google_analytics_run_report"
-    description: str | None = "Run a standard GA4 report with dimensions, metrics, and date ranges."
+    description: str | None = (
+        "Run a standard GA4 analytics report — website traffic, visitors, sessions, "
+        "pageviews, and conversions — with dimensions, metrics, and date ranges."
+    )
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
     default_property_id: str | None = None
@@ -131,7 +134,10 @@ class GoogleAnalyticsRunReport(Tool):
 
 class GoogleAnalyticsRunRealtimeReport(Tool):
     name: str = "google_analytics_run_realtime_report"
-    description: str | None = "Run a GA4 realtime report for active users and events."
+    description: str | None = (
+        "Run a GA4 realtime report: active users and visitors on your site right "
+        "now — live website traffic and events."
+    )
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
     default_property_id: str | None = None

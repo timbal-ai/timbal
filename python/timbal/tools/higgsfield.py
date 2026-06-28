@@ -653,7 +653,11 @@ class HiggsfieldSoulTrain(_HiggsfieldTool):
 
 class HiggsfieldSoulGenerate(_HiggsfieldTool):
     name: str = "higgsfield_soul_generate"
-    description: str | None = "Generate image or video using a trained Soul character."
+    description: str | None = (
+        "Generate photorealistic images of a person or character with Higgsfield "
+        "Soul — UGC-style content, avatars, and character image generation from a "
+        "prompt, using a trained Soul character."
+    )
 
     def __init__(self, **kwargs: Any) -> None:
         async def _soul_generate(

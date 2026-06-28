@@ -37,12 +37,15 @@ def _queue_model_path_from_submit_response(data: dict[str, Any]) -> str | None:
 class FalQueueSubmit(Tool):
     name: str = "fal_queue_submit"
     description: str | None = (
-        "Submit an async inference job to fal's queue for a model (e.g. fal-ai/flux/schnell). "
-        "Returns request_id, status_url, response_url, cancel_url, and queue_model_path (canonical path for "
-        "follow-up calls). Important: fal may rewrite the route—e.g. you submit fal-ai/flux/schnell but URLs use "
-        "fal-ai/flux. For fal_queue_status, fal_queue_result, and fal_queue_cancel always pass model_id="
-        "queue_model_path from this response (or the path segment from status_url before /requests/), not the "
-        "original submit string, or status polling can return HTTP 405."
+        "Run an AI model on fal (e.g. FLUX) to generate images, video, or audio — "
+        "submits an async inference/generation job to fal's queue. General-purpose "
+        "model runner. Returns request_id, status_url, response_url, cancel_url, and "
+        "queue_model_path (canonical path for follow-up calls). Important: fal may "
+        "rewrite the route—e.g. you submit fal-ai/flux/schnell but URLs use fal-ai/flux. "
+        "For fal_queue_status, fal_queue_result, and fal_queue_cancel always pass "
+        "model_id=queue_model_path from this response (or the path segment from "
+        "status_url before /requests/), not the original submit string, or status "
+        "polling can return HTTP 405."
     )
     integration: Annotated[str, Integration("fal")] | None = None
     api_key: SecretStr | None = None

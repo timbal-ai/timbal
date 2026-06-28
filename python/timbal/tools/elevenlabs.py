@@ -13,8 +13,9 @@ _ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 class ElevenLabsTextToSpeech(Tool):
     name: str = "elevenlabs_text_to_speech"
     description: str | None = (
-        "Convert text to speech using a specified ElevenLabs voice. "
-        "Returns the audio encoded as a base64 string."
+        "Generate a voiceover or narration from text: text-to-speech (TTS) that "
+        "produces natural spoken audio in a chosen ElevenLabs voice. Returns the "
+        "audio as a base64 string."
     )
     integration: Annotated[str, Integration("elevenlabs")] | None = None
     api_key: SecretStr | None = None

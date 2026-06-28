@@ -143,7 +143,7 @@ class GoogleDriveGetDownloadLink(Tool):
 
 class GoogleDriveGetFile(Tool):
     name: str = "google_drive_get_file"
-    description: str | None = "Download and return content of a Google Drive file."
+    description: str | None = "Download and return the content of a Google Drive file or document (PDF, Word, etc.) by id."
     integration: Annotated[str, Integration("google_drive")] | None = None
     token: SecretStr | None = None
 
@@ -308,7 +308,7 @@ class GoogleDriveSearchFolders(Tool):
 
 class GoogleDriveSearchFiles(Tool):
     name: str = "google_drive_search_files"
-    description: str | None = "Search for files in Google Drive with optional query. Supports pagination, filtering by folder, name, and trashed status."
+    description: str | None = "Search Google Drive to find a file, document, or folder by name or query. Locate documents in Drive. Supports pagination, filtering by folder, name, and trashed status."
     integration: Annotated[str, Integration("google_drive")] | None = None
     token: SecretStr | None = None
 

@@ -148,8 +148,9 @@ class GeminiImagesGenerateImage(Tool):
 class GeminiImagesAnalyzeImage(Tool):
     name: str = "gemini_analyze_image"
     description: str | None = (
-        "Analyze, describe, or extract information from an image using Gemini vision. "
-        "Returns a text response based on your question or instruction."
+        "Analyze an image with the Gemini vision model: describe a picture, photo, "
+        "or screenshot, answer questions about its contents, and OCR — read, "
+        "extract, and transcribe text from an image."
     )
     integration: Annotated[str, Integration("gemini")] | None = None
     api_key: SecretStr | None = None

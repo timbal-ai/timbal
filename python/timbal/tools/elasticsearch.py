@@ -33,8 +33,11 @@ async def _resolve_credentials(tool: Any) -> tuple[str, str | None]:
 class ElasticsearchIngestAttachment(Tool):
     name: str = "elasticsearch_ingest_attachment"
     description: str | None = (
-        "Ingest a base64-encoded file attachment into an Elasticsearch index "
-        "using the ingest-attachment pipeline to extract text content."
+        "Ingest and parse a file attachment — PDF, Word DOCX, PowerPoint PPTX, "
+        "Excel, HTML, RTF, or plain text document — into searchable full text in "
+        "an Elasticsearch index using the ingest-attachment (Apache Tika) pipeline. "
+        "Extract text and metadata from a base64-encoded document or file for "
+        "full-text search."
     )
     integration: Annotated[str, Integration("elasticsearch")] | None = None
     api_key: SecretStr | None = None

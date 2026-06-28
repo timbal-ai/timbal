@@ -127,7 +127,7 @@ class OneDriveListFiles(Tool):
 
 class OneDriveGetFile(Tool):
     name: str = "onedrive_get_file"
-    description: str | None = "Get file metadata and content by file ID from OneDrive."
+    description: str | None = "Get the content and metadata of a OneDrive file or document by id."
     integration: Annotated[str, Integration("onedrive")] | None = None
 
     def get_config(self) -> dict[str, Any]:
@@ -210,7 +210,7 @@ class OneDriveFindFile(Tool):
 
 class OneDriveDownloadFile(Tool):
     name: str = "onedrive_download_file"
-    description: str | None = "Download a file from OneDrive by file ID."
+    description: str | None = "Download a OneDrive file or document (Word, Excel, PDF, etc.) by id."
     integration: Annotated[str, Integration("onedrive")] | None = None
 
     def get_config(self) -> dict[str, Any]:
