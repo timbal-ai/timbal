@@ -544,7 +544,7 @@ uv run python scripts/generate_models.py
 python -m timbal.codegen get-flow
 ```
 
-Outputs a JSON representation of the entry point's execution graph with `nodes` and `edges`.
+Outputs a JSON representation of the entry point's execution graph with `nodes`, `edges`, and `pending_integrations`.
 
 Each node has a top-level `position` key (`{"x": ..., "y": ...}`) for ReactFlow canvas placement, defaulting to `{"x": 0, "y": 0}` when not set. Use `set-position` to configure it.
 
@@ -574,6 +574,21 @@ Config fields that reference the model registry use `"x-timbal-ref": "models"` i
     "x-timbal-ref": "models",
     "value": "anthropic/claude-haiku-4-5"
   }
+}
+```
+
+`pending_integrations` lists tools that declare a platform integration (`x-timbal-integration` on the `integration` config field) but have no binding yet (`value` is `null`). Walk the tree yourself with `extract_pending_integrations(flow)` if you already have a flow dict.
+
+```json
+{
+  "pending_integrations": [
+    {
+      "node_id": "my_agent.slack_read_messages",
+      "parent_id": "my_agent",
+      "tool_name": "slack_read_messages",
+      "provider": "slack"
+    }
+  ]
 }
 ```
 
