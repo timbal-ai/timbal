@@ -51,6 +51,8 @@ class TestTopLevel:
         assert isinstance(flow["_version"], str)
         assert "nodes" in flow
         assert "edges" in flow
+        assert "pending_integrations" in flow
+        assert flow["pending_integrations"] == []
 
     def test_agent_entry_point_single_node(self, workspace):
         ws = workspace("""\
@@ -1198,6 +1200,152 @@ class TestEdgeKinds:
         assert edge is not None and edge["kind"] == "param"
         # Not redundant (no alternate path) -> still shown in compact.
         assert "agent_a → agent_b" in format_compact(flow)
+
+
+# ---------------------------------------------------------------------------
+# Pending integrations
+# ---------------------------------------------------------------------------
+
+
+class TestPendingIntegrations:
+    def test_agent_tool_without_integration_binding(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools.slack import SlackReadMessages
+
+        agent = Agent(
+            name="my_agent",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[SlackReadMessages()],
+        )
+        """)
+        flow = _flow(ws)
+        assert flow["pending_integrations"] == [
+            {
+                "node_id": "my_agent.slack_read_messages",
+                "parent_id": "my_agent",
+                "tool_name": "slack_read_messages",
+                "provider": "slack",
+            }
+        ]
+
+    def test_configured_integration_not_pending(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools.slack import SlackReadMessages
+
+        agent = Agent(
+            name="my_agent",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[SlackReadMessages(integration="org-int-123")],
+        )
+        """)
+        flow = _flow(ws)
+        assert flow["pending_integrations"] == []
+
+    def test_mixed_configured_and_pending(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools.slack import SlackReadMessages, SlackSendMessage
+
+        agent = Agent(
+            name="my_agent",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[
+                SlackReadMessages(),
+                SlackSendMessage(integration="org-int-123"),
+            ],
+        )
+        """)
+        flow = _flow(ws)
+        assert len(flow["pending_integrations"]) == 1
+        assert flow["pending_integrations"][0]["tool_name"] == "slack_read_messages"
+
+    def test_non_integration_tools_ignored(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent, Tool
+
+        def greet(name: str) -> str:
+            return f"Hello {name}"
+
+        agent = Agent(
+            name="my_agent",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[Tool(handler=greet)],
+        )
+        """)
+        flow = _flow(ws)
+        assert flow["pending_integrations"] == []
+
+    def test_workflow_agent_step_tools(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.tools.slack import SlackReadMessages
+
+        inner = Agent(
+            name="summarizer",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[SlackReadMessages()],
+        )
+
+        agent = Workflow(name="wf")
+        agent.step(inner)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        assert flow["pending_integrations"] == [
+            {
+                "node_id": "wf.summarizer.slack_read_messages",
+                "parent_id": "wf.summarizer",
+                "tool_name": "slack_read_messages",
+                "provider": "slack",
+            }
+        ]
+
+    def test_agent_as_tool_does_not_recurse_into_inner_tools(self, workspace):
+        """Matches get-flow: agent-as-tool nodes omit nested tools."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools.slack import SlackReadMessages
+
+        inner = Agent(
+            name="inner",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[SlackReadMessages()],
+        )
+        agent = Agent(
+            name="outer",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[inner],
+        )
+        """)
+        flow = _flow(ws)
+        assert flow["pending_integrations"] == []
+
+    def test_compact_format_lists_pending(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools.slack import SlackReadMessages
+
+        agent = Agent(
+            name="my_agent",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            tools=[SlackReadMessages()],
+        )
+        """)
+        out = format_compact(_flow(ws))
+        assert "PENDING INTEGRATIONS" in out
+        assert "slack: slack_read_messages (my_agent)" in out
 
 
 # ---------------------------------------------------------------------------

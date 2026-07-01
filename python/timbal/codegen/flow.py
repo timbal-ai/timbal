@@ -203,6 +203,59 @@ def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
     return node
 
 
+def _integration_provider(field_schema: dict[str, Any]) -> str | None:
+    """Return the platform integration provider from an annotated config field."""
+    marker = field_schema.get("x-timbal-integration")
+    if isinstance(marker, dict) and marker.get("provider"):
+        return marker["provider"]
+    for item in field_schema.get("anyOf", []):
+        marker = item.get("x-timbal-integration")
+        if isinstance(marker, dict) and marker.get("provider"):
+            return marker["provider"]
+    return None
+
+
+def _pending_integrations_from_node(node: dict[str, Any], *, parent_id: str | None) -> list[dict[str, Any]]:
+    """Collect pending integration bindings from a flow node and its nested tools."""
+    node_id = node.get("id", "")
+    config = node.get("data", {}).get("config", {})
+    pending: list[dict[str, Any]] = []
+
+    if node.get("type") in ("tool", "agent"):
+        integration_field = config.get("integration")
+        if integration_field is not None:
+            provider = _integration_provider(integration_field)
+            value = integration_field.get("value")
+            if provider and (value is None or value == ""):
+                tool_name = config.get("name", {}).get("value") or _short(node_id)
+                pending.append(
+                    {
+                        "node_id": node_id,
+                        "parent_id": parent_id,
+                        "tool_name": tool_name,
+                        "provider": provider,
+                    }
+                )
+
+    for tool_node in config.get("tools") or []:
+        pending.extend(_pending_integrations_from_node(tool_node, parent_id=node_id))
+
+    return pending
+
+
+def extract_pending_integrations(flow: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return tools that declare a platform integration but have no binding yet.
+
+    Walks the ``get_flow`` node tree (including nested agent tools) and finds
+    config fields annotated with ``x-timbal-integration`` whose ``value`` is
+    ``null`` or empty.
+    """
+    pending: list[dict[str, Any]] = []
+    for node in flow.get("nodes", []):
+        pending.extend(_pending_integrations_from_node(node, parent_id=None))
+    return pending
+
+
 def _edge_kind(kinds: set[str] | None) -> str:
     """Collapse a set of edge-origin kinds into a single label for JSON output.
 
@@ -231,7 +284,7 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
         workspace_path: Path to directory containing timbal.yaml.
 
     Returns:
-        ``{"_version": ..., "nodes": [...], "edges": [...]}``
+        ``{"_version": ..., "nodes": [...], "edges": [...], "pending_integrations": [...]}``
     """
     workspace_path = Path(workspace_path)
     spec = parse_fqn(workspace_path)
@@ -272,11 +325,13 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
     else:
         nodes.append(_build_node(runnable, include_tools=isinstance(runnable, Agent)))
 
-    return {
+    flow = {
         "_version": __version__,
         "nodes": nodes,
         "edges": edges,
     }
+    flow["pending_integrations"] = extract_pending_integrations(flow)
+    return flow
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -540,5 +595,13 @@ def format_compact(flow: dict) -> str:
         lines.append("EDGES")
         for line in _build_edge_lines(edges):
             lines.append(f"  {line}")
+
+    pending = flow.get("pending_integrations") or []
+    if pending:
+        lines.append("")
+        lines.append("PENDING INTEGRATIONS")
+        for item in pending:
+            parent = _short(item.get("parent_id")) if item.get("parent_id") else "?"
+            lines.append(f"  {item['provider']}: {item['tool_name']} ({parent})")
 
     return "\n".join(lines)
