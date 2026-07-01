@@ -29,6 +29,8 @@ def _netsuite_auth_header(
     consumer_secret: str,
     token_id: str,
     token_secret: str,
+    query_params: dict[str, Any] | None = None,
+    body: str | None = None,
 ) -> str:
     """Generate OAuth 1.0a Token-Based Authentication (TBA) header for NetSuite."""
     import base64
@@ -41,7 +43,7 @@ def _netsuite_auth_header(
     nonce = uuid.uuid4().hex
     timestamp = str(int(time.time()))
 
-    params: dict[str, str] = {
+    oauth_params: dict[str, str] = {
         "oauth_consumer_key": consumer_key,
         "oauth_nonce": nonce,
         "oauth_signature_method": "HMAC-SHA256",
@@ -49,10 +51,21 @@ def _netsuite_auth_header(
         "oauth_token": token_id,
         "oauth_version": "1.0",
     }
+    if body is not None:
+        # NetSuite requires oauth_body_hash for non-form POST/PATCH/PUT bodies.
+        oauth_params["oauth_body_hash"] = base64.b64encode(
+            hashlib.sha1(body.encode(), usedforsecurity=False).digest()
+        ).decode()
+
+    signature_params = dict(oauth_params)
+    if query_params:
+        for key, value in query_params.items():
+            if value is not None:
+                signature_params[str(key)] = str(value)
 
     sorted_params = "&".join(
         f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
-        for k, v in sorted(params.items())
+        for k, v in sorted(signature_params.items())
     )
     base_string = (
         f"{method.upper()}&"
@@ -64,11 +77,11 @@ def _netsuite_auth_header(
         hmac.new(signing_key.encode(), base_string.encode(), hashlib.sha256).digest()
     ).decode()
 
-    params["oauth_signature"] = signature
+    oauth_params["oauth_signature"] = signature
     realm = account_id.strip().upper()
 
     header_parts = [f'realm="{urllib.parse.quote(realm, safe="")}"'] + [
-        f'{k}="{urllib.parse.quote(v, safe="")}"' for k, v in sorted(params.items())
+        f'{k}="{urllib.parse.quote(v, safe="")}"' for k, v in sorted(oauth_params.items())
     ]
     return "OAuth " + ", ".join(header_parts)
 
@@ -273,7 +286,9 @@ class NetSuiteGetAccount(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -328,7 +343,9 @@ class NetSuiteListAccounts(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
@@ -492,7 +509,9 @@ class NetSuiteGetAssemblyBuild(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -547,7 +566,9 @@ class NetSuiteListAssemblyBuilds(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
@@ -952,7 +973,9 @@ class NetSuiteGetAssemblyItem(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -1007,7 +1030,9 @@ class NetSuiteListAssemblyItems(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
@@ -1108,7 +1133,9 @@ class NetSuiteSuiteQL(Tool):
 
             payload = {"q": query}
             params = {"limit": min(limit, 1000), "offset": offset}
-            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
@@ -1284,7 +1311,9 @@ class NetSuiteGetBillingAccount(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -1339,7 +1368,9 @@ class NetSuiteListBillingAccounts(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
@@ -1552,7 +1583,9 @@ class NetSuiteGetBillingSchedule(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -1607,7 +1640,9 @@ class NetSuiteListBillingSchedules(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
@@ -1916,7 +1951,9 @@ class NetSuiteGetCalendarEvent(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -1971,7 +2008,9 @@ class NetSuiteListCalendarEvents(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
@@ -2118,7 +2157,9 @@ class NetSuiteCustomSuiteQL(Tool):
 
             payload = {"q": query}
             params = {"limit": min(limit, 1000), "offset": offset}
-            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
@@ -2287,7 +2328,9 @@ class NetSuiteGetIntercompanyJournalEntry(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -2342,7 +2385,9 @@ class NetSuiteListIntercompanyJournalEntries(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
@@ -2557,7 +2602,9 @@ class NetSuiteGetBinTransfer(Tool):
             if fields:
                 params["fields"] = fields
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
@@ -2612,7 +2659,9 @@ class NetSuiteListBinTransfers(Tool):
             if query:
                 params["q"] = query
 
-            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            auth = _netsuite_auth_header(
+                "GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret, query_params=params
+            )
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
                 response.raise_for_status()
