@@ -395,8 +395,12 @@ class File(io.IOBase):
             url = str(self)
             if not run_context.platform_config:
                 return url
-            host = urlparse(url).netloc
-            if host == run_context.platform_config.cdn or host in _PLATFORM_CDN_HOSTS:
+            # .hostname (unlike .netloc) drops port/userinfo and lowercases,
+            # so e.g. "content.timbal.ai:443" still matches. The configured cdn
+            # may carry a port too — strip it the same way.
+            host = urlparse(url).hostname
+            cdn_host = urlparse(f"//{run_context.platform_config.cdn}").hostname
+            if host and (host == cdn_host or host in _PLATFORM_CDN_HOSTS):
                 object.__setattr__(self, "__persisted__", url)
                 return url
 

@@ -399,6 +399,29 @@ class TestFilePersist:
         assert result == url
         assert file.__persisted__ == url
 
+    async def test_persist_url_cdn_with_explicit_port_short_circuits(self) -> None:
+        """CDN URLs with an explicit port (or uppercase host) still match the host check."""
+        from timbal.state import set_run_context
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig
+        from timbal.state.context import RunContext
+
+        platform_config = PlatformConfig(
+            host="https://api.timbal.ai",
+            cdn="content.timbal.ai",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="token123"),
+        )
+        set_run_context(RunContext(platform_config=platform_config, tracing_provider=None))
+
+        for url in (
+            "https://content.timbal.ai:443/assets/file.txt",
+            "https://Content.Timbal.AI/assets/file.txt",
+            "https://timbalusercontent.com:443/tmp/019f/file.png",
+        ):
+            file = File.validate(url)
+            result = await file.persist()
+            assert result == url
+            assert file.__persisted__ == url
+
     async def test_persist_local_path_no_platform_config(self, tmp_path: pathlib.Path) -> None:
         """Lines 322-325: Local path file without platform config returns the path string."""
         from timbal.state import set_run_context
