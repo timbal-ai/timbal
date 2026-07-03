@@ -10,6 +10,16 @@
 
 models:
 
+  - id: "anthropic/claude-fable-5"
+    provider: anthropic
+    display_name: "Claude Fable 5"
+    description: "Anthropic's most capable widely released model for long-horizon agentic work, complex reasoning, and ambitious coding tasks."
+    input_price: 10.0
+    output_price: 50.0
+    context_window: 1000000
+    capabilities: [vision, tools, reasoning]
+    notes: "Includes safety classifiers; blocked requests return stop_reason refusal. Configure Opus 4.8 fallback for production workloads."
+
   - id: "anthropic/claude-opus-4-8"
     provider: anthropic
     display_name: "Claude Opus 4.8"
@@ -18,6 +28,16 @@ models:
     output_price: 25.0
     context_window: 1000000
     capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-sonnet-5"
+    provider: anthropic
+    display_name: "Claude Sonnet 5"
+    description: "Best combination of speed and intelligence. Drop-in upgrade from Sonnet 4.6 for coding, agents, and professional work."
+    input_price: 3.0
+    output_price: 15.0
+    context_window: 1000000
+    capabilities: [vision, tools, reasoning]
+    notes: "Introductory API pricing ($2/$10 per 1M tokens) through August 31, 2026."
 
   - id: "anthropic/claude-opus-4-7"
     provider: anthropic
