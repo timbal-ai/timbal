@@ -5,4 +5,6 @@ openapi: "POST /orgs/{org_id}/billing/overage"
 
 <Info>
     `enabled` turns usage-based overage on or off. `cap_credits` limits how many overage credits can accrue; omit it or set it to `null` for no cap.
+
+    To read current-period overage usage (invoiced vs pending credits), see [Get Overage Summary](/api-reference/orgs/billing/overage-summary).
 </Info>

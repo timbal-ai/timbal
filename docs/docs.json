@@ -200,6 +200,13 @@
               "api-reference/me/list-orgs",
               "api-reference/me/update",
               {
+                "group": "Profile Photo",
+                "pages": [
+                  "api-reference/me/photo/upload",
+                  "api-reference/me/photo/delete"
+                ]
+              },
+              {
                 "group": "API Tokens",
                 "pages": [
                   "api-reference/me/tokens/list",
@@ -220,10 +227,42 @@
               {
                 "group": "Billing",
                 "pages": [
+                  "api-reference/orgs/billing/overage-summary",
                   "api-reference/orgs/billing/overage",
                   "api-reference/orgs/billing/budgets/get",
                   "api-reference/orgs/billing/budgets/replace",
                   "api-reference/orgs/billing/budgets/patch"
+                ]
+              },
+              {
+                "group": "Connectors",
+                "pages": [
+                  "api-reference/orgs/connectors/list",
+                  "api-reference/orgs/connectors/get",
+                  "api-reference/orgs/connectors/enrollment-tokens/create",
+                  "api-reference/orgs/connectors/jobs/list",
+                  "api-reference/orgs/connectors/jobs/create",
+                  "api-reference/orgs/connectors/syncs/list",
+                  "api-reference/orgs/connectors/syncs/create",
+                  "api-reference/orgs/connectors/syncs/get",
+                  "api-reference/orgs/connectors/syncs/update",
+                  "api-reference/orgs/connectors/syncs/delete",
+                  "api-reference/orgs/connectors/browse/connections",
+                  "api-reference/orgs/connectors/browse/tables",
+                  "api-reference/orgs/connectors/browse/columns",
+                  "api-reference/orgs/connectors/rebind",
+                  "api-reference/orgs/connectors/update"
+                ]
+              },
+              {
+                "group": "Content",
+                "pages": ["api-reference/orgs/content/sign"]
+              },
+              {
+                "group": "Organization Logo",
+                "pages": [
+                  "api-reference/orgs/photo/upload",
+                  "api-reference/orgs/photo/delete"
                 ]
               },
               {
@@ -261,9 +300,32 @@
                       "api-reference/orgs/users/add",
                       "api-reference/orgs/users/delete",
                       "api-reference/orgs/users/update",
+                      "api-reference/orgs/iam/users/batch-roles",
                       "api-reference/orgs/iam/users/effective-grants"
                     ]
                   }
+                ]
+              },
+              {
+                "group": "Identity Providers",
+                "pages": [
+                  "api-reference/orgs/identity-providers/list",
+                  "api-reference/orgs/identity-providers/create",
+                  "api-reference/orgs/identity-providers/get",
+                  "api-reference/orgs/identity-providers/update",
+                  "api-reference/orgs/identity-providers/delete",
+                  "api-reference/orgs/identity-providers/default-role",
+                  "api-reference/orgs/identity-providers/group-mappings/list",
+                  "api-reference/orgs/identity-providers/group-mappings/create",
+                  "api-reference/orgs/identity-providers/group-mappings/delete"
+                ]
+              },
+              {
+                "group": "SCIM",
+                "pages": [
+                  "api-reference/orgs/scim-tokens/list",
+                  "api-reference/orgs/scim-tokens/create",
+                  "api-reference/orgs/scim-tokens/revoke"
                 ]
               },
               {
@@ -280,10 +342,6 @@
             ]
           },
           {
-            "group": "Templates",
-            "pages": ["api-reference/templates/list"]
-          },
-          {
             "group": "Projects",
             "pages": [
               "api-reference/projects/list",
@@ -291,26 +349,23 @@
               "api-reference/projects/get",
               "api-reference/projects/update",
               "api-reference/projects/delete",
+              "api-reference/projects/duplicate",
               "api-reference/projects/link-knowledge-base",
               "api-reference/projects/unlink-knowledge-base",
+              {
+                "group": "App Auth",
+                "pages": [
+                  "api-reference/projects/auth/get",
+                  "api-reference/projects/auth/update",
+                  "api-reference/projects/auth/providers/update"
+                ]
+              },
               {
                 "group": "Analytics",
                 "pages": [
                   "api-reference/projects/analytics/credits",
                   "api-reference/projects/analytics/usage",
                   "api-reference/projects/analytics/users"
-                ]
-              },
-              {
-                "group": "Composer",
-                "tag": "Beta",
-                "pages": [
-                  "api-reference/projects/composer/prompt",
-                  "api-reference/projects/composer/plans-list",
-                  "api-reference/projects/composer/plans-single",
-                  "api-reference/projects/composer/list",
-                  "api-reference/projects/composer/single",
-                  "api-reference/projects/composer/stop"
                 ]
               },
               {
@@ -327,17 +382,6 @@
                   "api-reference/projects/environments/stop",
                   "api-reference/projects/environments/deployments/list",
                   "api-reference/projects/environments/logs"
-                ]
-              },
-              {
-                "group": "Previews",
-                "tag": "Beta",
-                "pages": [
-                  "api-reference/projects/previews/list",
-                  "api-reference/projects/previews/get",
-                  "api-reference/projects/previews/logs",
-                  "api-reference/projects/previews/start",
-                  "api-reference/projects/previews/stop"
                 ]
               },
               {
@@ -387,7 +431,6 @@
               "api-reference/knowledge-bases/get",
               "api-reference/knowledge-bases/update",
               "api-reference/knowledge-bases/delete",
-              "api-reference/knowledge-bases/restart",
               "api-reference/knowledge-bases/query",
               "api-reference/knowledge-bases/schema",
               "api-reference/knowledge-bases/upload",
@@ -399,7 +442,7 @@
                   "api-reference/knowledge-bases/policies/get",
                   "api-reference/knowledge-bases/policies/update",
                   "api-reference/knowledge-bases/policies/delete",
-                  "api-reference/knowledge-bases/policies/enforcement",
+                  "api-reference/knowledge-bases/policies/governance-mode",
                   {
                     "group": "Assignments",
                     "pages": [

@@ -4,7 +4,9 @@ openapi: "POST /files"
 ---
 
 <Note>
-  **Utility endpoint** — not org-scoped. Use it to conveniently pass binary data into agents and workflows (e.g. attachments, generated artifacts) and to receive short-lived URLs when components return files. Responses are **temporary** (~24h lifecycle); there is no durable org file record behind this route.
+  **Utility endpoint** — not org-scoped. Upload requires authentication; the response includes a download URL (~24h). Anyone with the URL can download until expiry — treat it as a secret. Not for sensitive or regulated data.
 </Note>
 
-If you need **long-lived storage, parsing, embedding, and reuse** across a knowledge base, use the [Knowledge Bases → Files](/api-reference/knowledge-bases/files/list) APIs under `/orgs/{org_id}/k2/{kb_id}/files` instead (upload, list, chunks, etc.).
+Ephemeral staging only (~24h lifecycle); there is no durable org file record behind this route.
+
+For **durable storage, parsing, embedding, and reuse** across a knowledge base, use [Knowledge Bases → Files](/api-reference/knowledge-bases/files/list) (`POST /orgs/{org_id}/k2/{kb_id}/files`) instead.

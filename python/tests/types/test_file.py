@@ -379,6 +379,49 @@ class TestFilePersist:
         assert result == url
         assert file.__persisted__ == url
 
+    async def test_persist_url_usercontent_host_short_circuits(self) -> None:
+        """timbalusercontent.com URLs are platform-persisted even when platform_config.cdn
+        still has the legacy default — no re-upload should happen."""
+        from timbal.state import set_run_context
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig
+        from timbal.state.context import RunContext
+
+        platform_config = PlatformConfig(
+            host="https://api.timbal.ai",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="token123"),
+        )
+        ctx = RunContext(platform_config=platform_config, tracing_provider=None)
+        set_run_context(ctx)
+
+        url = "https://timbalusercontent.com/tmp/019f285e/Screenshot%202026-07-03%20at%2016.23.06.png"
+        file = File.validate(url)
+        result = await file.persist()
+        assert result == url
+        assert file.__persisted__ == url
+
+    async def test_persist_url_cdn_with_explicit_port_short_circuits(self) -> None:
+        """CDN URLs with an explicit port (or uppercase host) still match the host check."""
+        from timbal.state import set_run_context
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig
+        from timbal.state.context import RunContext
+
+        platform_config = PlatformConfig(
+            host="https://api.timbal.ai",
+            cdn="content.timbal.ai",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="token123"),
+        )
+        set_run_context(RunContext(platform_config=platform_config, tracing_provider=None))
+
+        for url in (
+            "https://content.timbal.ai:443/assets/file.txt",
+            "https://Content.Timbal.AI/assets/file.txt",
+            "https://timbalusercontent.com:443/tmp/019f/file.png",
+        ):
+            file = File.validate(url)
+            result = await file.persist()
+            assert result == url
+            assert file.__persisted__ == url
+
     async def test_persist_local_path_no_platform_config(self, tmp_path: pathlib.Path) -> None:
         """Lines 322-325: Local path file without platform config returns the path string."""
         from timbal.state import set_run_context
@@ -444,7 +487,7 @@ class TestFilePersist:
         return RunContext(platform_config=platform_config, tracing_provider=None)
 
     async def test_persist_upload_returns_unsigned_url(self, tmp_path: pathlib.Path) -> None:
-        """POST /files returns an unsigned (public) url; the name segment is re-encoded."""
+        """POST /files returns a fully-encoded url; persist() must use it verbatim."""
         from unittest.mock import AsyncMock, MagicMock, patch
         from timbal.state import set_run_context
 
@@ -457,7 +500,7 @@ class TestFilePersist:
             "created_at": "2026-01-01T00:00:00Z",
             "expires_at": None,
             "name": "my file.bin",
-            "url": "https://content.timbal.ai/org-1/my file.bin",
+            "url": "https://timbalusercontent.com/tmp/019f/my%20file.bin",
         }
 
         test_file = tmp_path / "my file.bin"
@@ -469,7 +512,7 @@ class TestFilePersist:
             mock_request.return_value = mock_response
             result = await file.persist()
 
-        assert result == "https://content.timbal.ai/org-1/my%20file.bin"
+        assert result == "https://timbalusercontent.com/tmp/019f/my%20file.bin"
         assert file.__persisted__ == result
 
 

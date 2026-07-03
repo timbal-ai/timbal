@@ -1,10 +1,8 @@
 ---
 title: "Create Organization"
-description: "Get in touch to create a new organization on Timbal"
+openapi: "POST /orgs"
 ---
 
-Organization creation is not self-serve. To set up a new organization, please reach out to our team and we'll get you onboarded.
-
-<Card title="Contact Sales" icon="envelope" href="mailto:hello@timbal.ai">
-  Get in touch with our sales team to create your organization.
-</Card>
+<Info>
+  Self-serve callers may own at most one organization. Attempting to create a second org returns `429`; contact sales for additional orgs.
+</Info>
