@@ -5,7 +5,7 @@ import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import urlopen
 
 from pydantic import (
@@ -36,6 +36,13 @@ def _is_local_path(source: str) -> bool:
     )
 
 
+# Hosts serving platform-persisted content. URLs on these hosts are already
+# durable — re-uploading them via POST /files is wasteful and (worse) renames
+# the object using the encoded basename. `platform_config.cdn` is checked too,
+# but its default ("content.timbal.ai") predates the timbalusercontent.com move.
+_PLATFORM_CDN_HOSTS = ("timbalusercontent.com", "content.timbal.ai")
+
+
 def _extract_filename(headers: dict, url: str) -> str:
     """Extract filename from Content-Disposition header, falling back to URL path."""
     filename = None
@@ -46,7 +53,9 @@ def _extract_filename(headers: dict, url: str) -> str:
         except (IndexError, AttributeError):
             pass
     if not filename:
-        filename = url.split("/")[-1]
+        # Decode the basename: URL paths are percent-encoded, but the filename is
+        # used as-is for re-uploads — keeping it encoded double-encodes downstream.
+        filename = unquote(urlparse(url).path.split("/")[-1])
     return filename
 
 
@@ -386,7 +395,8 @@ class File(io.IOBase):
             url = str(self)
             if not run_context.platform_config:
                 return url
-            elif url.startswith(f"https://{run_context.platform_config.cdn}"):
+            host = urlparse(url).netloc
+            if host == run_context.platform_config.cdn or host in _PLATFORM_CDN_HOSTS:
                 object.__setattr__(self, "__persisted__", url)
                 return url
 
@@ -416,11 +426,12 @@ class File(io.IOBase):
         from ..platform.utils import _request
         res = await _request("POST", path, files=files)
         upload_response = UploadFileResponse.model_validate(res.json())
-        # Re-encode only the filename segment; the rest of the URL is already safe.
-        # NOTE: str.rstrip() takes a *set of chars*, not a suffix, so it would chew
-        # arbitrary trailing chars from the URL when they happen to be in the name.
-        url = upload_response.url.removesuffix(upload_response.name)
-        url = f"{url}{quote(upload_response.name)}"
+        # The platform returns a fully percent-encoded URL — use it verbatim.
+        # Reconstructing it from `name` (raw, unencoded) breaks whenever the name
+        # needs encoding: removesuffix() finds no match, so the encoded name got
+        # appended to the already-complete URL, yielding a duplicated, doubly
+        # encoded path that 403s on the CDN.
+        url = upload_response.url
         object.__setattr__(self, "__persisted__", url)
         return url
 
