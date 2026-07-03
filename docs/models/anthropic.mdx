@@ -1,6 +1,6 @@
 ---
 title: "Anthropic"
-description: "Claude 4 Opus, Sonnet, and Haiku models with specs, pricing, and capabilities"
+description: "Claude Fable 5, Sonnet 5, Opus, and Haiku models with specs, pricing, and capabilities"
 ---
 
 <Note>Source: [Anthropic model docs](https://docs.anthropic.com/en/docs/about-claude/models) · [Opus 4.8 pricing](https://docs.anthropic.com/en/about-claude/pricing)</Note>
@@ -8,6 +8,38 @@ description: "Claude 4 Opus, Sonnet, and Haiku models with specs, pricing, and c
 ## Latest
 
 <CardGroup cols={2}>
+  <Card title="claude-fable-5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-fable-5`
+
+  Anthropic's most capable widely released model for long-horizon agentic work, complex reasoning, and ambitious multi-day coding tasks.
+
+  - &#36;10 / &#36;50 per 1M tokens (input / output)
+  - <Icon icon="window-maximize" size={14} /> 1M context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Adaptive thinking (always on)
+  - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2026
+  </Card>
+
+  <Card title="claude-sonnet-5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-sonnet-5`
+
+  Current-generation Sonnet — near-Opus intelligence at Sonnet pricing for coding, agents, and everyday professional work. Drop-in replacement for Sonnet 4.6.
+
+  - &#36;3 / &#36;15 per 1M tokens (input / output; intro &#36;2 / &#36;10 through Aug 31, 2026)
+  - <Icon icon="window-maximize" size={14} /> 1M context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Adaptive thinking
+  - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2026
+  </Card>
+
   <Card title="claude-opus-4-8">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
@@ -54,22 +86,6 @@ description: "Claude 4 Opus, Sonnet, and Haiku models with specs, pricing, and c
   - <Icon icon="brain" size={14} /> Extended thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2025
-  </Card>
-
-  <Card title="claude-sonnet-4-6">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `anthropic/claude-sonnet-4-6`
-
-  The best combination of speed and intelligence, with stronger computer use skills enabling the model to use software the way a person would.
-
-  - &#36;3 / &#36;15
-  - <Icon icon="window-maximize" size={14} /> 200K context (1M beta)
-  - <Icon icon="right-from-bracket" size={14} /> 64K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
   </Card>
 
   <Card title="claude-haiku-4-5">
@@ -122,6 +138,21 @@ description: "Claude 4 Opus, Sonnet, and Haiku models with specs, pricing, and c
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Extended thinking
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  </Card>
+
+  <Card title="claude-sonnet-4-6">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-sonnet-4-6`
+
+  Previous Sonnet generation with strong speed/intelligence balance and computer use skills. Superseded by Sonnet 5.
+
+  - &#36;3 / &#36;15
+  - <Icon icon="window-maximize" size={14} /> 200K context (1M beta)
+  - <Icon icon="right-from-bracket" size={14} /> 64K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
   </Card>
 
   <Card title="claude-sonnet-4-5">
