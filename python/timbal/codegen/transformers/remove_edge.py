@@ -4,7 +4,9 @@ import libcst as cst
 
 from ..cst_utils import (
     collect_assignments,
+    collect_chained_step_names,
     collect_step_names,
+    require_step,
     resolve_entry_point_type,
 )
 
@@ -32,8 +34,15 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if ep_type != "Workflow":
         raise ValueError("remove-edge requires a Workflow entry point.")
 
-    assignments = collect_assignments(tree) if tree else {}
-    step_names = collect_step_names(tree, entry_point, assignments) if tree else {}
+    assignments = collect_assignments(tree)
+    step_names = collect_step_names(tree, entry_point, assignments)
+    chained_step_names = collect_chained_step_names(tree, entry_point, assignments)
+
+    # Only the target must be addressable — the source may already have been
+    # removed from the workflow, and remove-edge is how dangling references
+    # (stale depends_on entries, step_span kwargs) get cleaned up.
+    require_step(args.target, step_names, chained_step_names, kind="Target", operation="remove-edge")
+
     return EdgeRemover(entry_point, args.source, args.target, assignments, step_names)
 
 

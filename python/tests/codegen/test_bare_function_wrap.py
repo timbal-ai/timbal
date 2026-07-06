@@ -426,11 +426,12 @@ class TestBareFunctionEdgeCases:
         workflow = Workflow(name="my_workflow")
         workflow.step(agent_a)
         """)
-        # Trying to set position on "helper" — it's not a step, so no wrapping.
-        # The helper may be removed by dead-code cleanup (it's unused), but
-        # crucially it must NOT have been wrapped in Tool.
-        output = _run_dry(ws, "set-position", "--name", "helper", "--x", "10", "--y", "20")
-        assert "Tool(" not in output
+        # "helper" is not a workflow step, so set-position must not wrap it —
+        # it errors out instead of silently succeeding.
+        result = _run_dry_fail(ws, "set-position", "--name", "helper", "--x", "10", "--y", "20")
+        assert result.returncode != 0
+        assert "not found" in result.stderr
+        assert "agent_a" in result.stderr  # lists available steps
 
     def test_bare_function_step_with_real_world_pattern(self, wf_workspace):
         """Reproduce the pattern from the user's licitacion example."""

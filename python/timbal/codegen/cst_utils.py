@@ -190,6 +190,77 @@ def collect_step_names(
     return var_to_name
 
 
+def collect_chained_step_names(
+    tree: cst.Module,
+    entry_point: str,
+    assignments: dict[str, cst.Call],
+) -> dict[str, str]:
+    """Build a step variable → runtime name mapping for chained ``.step()`` calls.
+
+    Covers steps added in the entry point assignment itself, e.g.
+    ``workflow = Workflow(...).step(a).step(b)``. These steps exist in the
+    graph but cannot be modified by the standalone-statement transformers
+    (set-param, add-edge, remove-edge).
+    """
+    var_to_name: dict[str, str] = {}
+    for stmt in tree.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for item in stmt.body:
+            if not isinstance(item, cst.Assign):
+                continue
+            if not any(
+                isinstance(t.target, cst.Name) and t.target.value == entry_point
+                for t in item.targets
+            ):
+                continue
+            node = item.value
+            while isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute):
+                if node.func.attr.value == "step" and node.args:
+                    first_arg = node.args[0].value
+                    resolved = resolve_runnable_name(first_arg, assignments)
+                    if isinstance(first_arg, cst.Name):
+                        var_to_name[first_arg.value] = resolved if resolved is not None else first_arg.value
+                    elif resolved is not None:
+                        var_to_name[resolved] = resolved
+                node = node.func.value
+    return var_to_name
+
+
+def require_step(
+    ref: str,
+    step_names: dict[str, str],
+    chained_step_names: dict[str, str] | None = None,
+    *,
+    kind: str = "Target",
+    operation: str,
+) -> str:
+    """Resolve *ref* (a step variable name or runtime name) to the runtime name.
+
+    ``step_names`` are the steps the operation can address. When *ref* only
+    matches ``chained_step_names`` (steps the operation cannot modify), or
+    matches nothing, a ``ValueError`` with an actionable message is raised.
+    """
+    if ref in step_names.values():
+        return ref
+    if ref in step_names:
+        return step_names[ref]
+
+    chained = chained_step_names or {}
+    if ref in chained or ref in chained.values():
+        raise ValueError(
+            f"{kind} step '{ref}' is added via a chained .step() call, which {operation} "
+            f"cannot modify. Rewrite it as a standalone '<workflow>.step(...)' statement first."
+        )
+
+    available = sorted(set(step_names.values()) | set(chained.values()))
+    if available:
+        raise ValueError(
+            f"{kind} step '{ref}' not found in workflow. Available steps: {', '.join(available)}."
+        )
+    raise ValueError(f"{kind} step '{ref}' not found in workflow. The workflow has no steps.")
+
+
 def is_bare_function_step(
     tree: cst.Module,
     entry_point: str,

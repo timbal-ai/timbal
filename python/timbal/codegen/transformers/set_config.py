@@ -1,9 +1,8 @@
 import argparse
-import json
 
 import libcst as cst
 
-from ..cli_utils import arg_input
+from ..cli_utils import arg_input, parse_json_arg
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
@@ -53,7 +52,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
     ep_type = resolve_entry_point_type(tree, entry_point) if tree else None
 
-    config = json.loads(args.config) if args.config else {}
+    config = parse_json_arg(args.config, "--config") if args.config else {}
 
     # --- Workflow entry point ---
     if ep_type == "Workflow":

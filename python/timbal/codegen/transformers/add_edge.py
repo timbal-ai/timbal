@@ -5,8 +5,10 @@ import libcst as cst
 from ..cli_utils import arg_input
 from ..cst_utils import (
     collect_assignments,
+    collect_chained_step_names,
     collect_step_names,
     has_import,
+    require_step,
     resolve_entry_point_type,
 )
 
@@ -45,10 +47,16 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         raise ValueError("add-edge requires a Workflow entry point.")
 
     when_expr = args.when if args.when else None
-    assignments = collect_assignments(tree) if tree else {}
-    step_names = collect_step_names(tree, entry_point, assignments) if tree else {}
+    assignments = collect_assignments(tree)
+    step_names = collect_step_names(tree, entry_point, assignments)
+    chained_step_names = collect_chained_step_names(tree, entry_point, assignments)
 
-    return EdgeAdder(entry_point, args.source, args.target, when_expr, assignments, step_names)
+    require_step(args.target, step_names, chained_step_names, kind="Target", operation="add-edge")
+    # Sources only need to exist in the graph — they are referenced by runtime
+    # name inside the target's depends_on list.
+    source = require_step(args.source, {**step_names, **chained_step_names}, kind="Source", operation="add-edge")
+
+    return EdgeAdder(entry_point, source, args.target, when_expr, assignments, step_names)
 
 
 class EdgeAdder(cst.CSTTransformer):
