@@ -4,10 +4,13 @@ import re
 
 import libcst as cst
 
-from ..cli_utils import arg_input
+from ..cli_utils import arg_input, parse_json_arg
 from ..cst_utils import (
     collect_assignments,
+    collect_chained_step_names,
+    collect_step_names,
     has_import,
+    require_step,
     resolve_entry_point_type,
     resolve_runnable_name,
 )
@@ -108,7 +111,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         type=arg_input,
         help=(
-            "Static value as a JSON literal (required for type=value). Use 'null' to remove the param. "
+            "Static value as a JSON literal (required for type=value). "
+            "Strings must include the JSON quotes, e.g. --value '\"is:unread\"'. "
+            "Use 'null' to remove the param. "
             "Use '@path' to read from file or '-' to read from stdin."
         ),
     )
@@ -120,32 +125,48 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if ep_type != "Workflow":
         raise ValueError("set-param requires a Workflow entry point.")
 
+    assignments = collect_assignments(tree)
+    step_names = collect_step_names(tree, entry_point, assignments)
+    chained_step_names = collect_chained_step_names(tree, entry_point, assignments)
+
+    require_step(args.target, step_names, chained_step_names, kind="Target", operation="set-param")
+
     param_type = args.param_type
 
     if param_type == "map":
         if not args.source:
             raise ValueError("--source is required for type=map.")
+        # Sources only need to exist in the graph (chained steps are fine) —
+        # they are referenced by runtime name inside step_span().
+        source = require_step(
+            args.source, {**step_names, **chained_step_names}, kind="Source", operation="set-param",
+        )
         return ParamSetter(
             entry_point=entry_point,
             target=args.target,
             param_name=args.name,
             param_type="map",
-            source=args.source,
+            source=source,
             key=args.key,
-            assignments=collect_assignments(tree) if tree else {},
+            assignments=assignments,
+            step_names=step_names,
         )
 
     if param_type == "value":
         if args.value is None:
             raise ValueError("--value is required for type=value.")
-        value = json.loads(args.value)
+        value = parse_json_arg(
+            args.value, "--value",
+            hint="String values must include the JSON quotes, e.g. --value '\"is:unread label:inbox\"'.",
+        )
         return ParamSetter(
             entry_point=entry_point,
             target=args.target,
             param_name=args.name,
             param_type="value",
             value=value,
-            assignments=collect_assignments(tree) if tree else {},
+            assignments=assignments,
+            step_names=step_names,
         )
 
     raise ValueError(f"Unknown param type: {param_type}")
@@ -164,6 +185,7 @@ class ParamSetter(cst.CSTTransformer):
         key: str | None = None,
         value: object = None,
         assignments: dict[str, cst.Call] | None = None,
+        step_names: dict[str, str] | None = None,
     ):
         self.entry_point = entry_point
         self.target = target
@@ -173,6 +195,7 @@ class ParamSetter(cst.CSTTransformer):
         self.key = key
         self.value = value
         self.assignments = assignments or {}
+        self.step_names = step_names or {}
         self.needs_reorder = param_type == "map"
 
     def _is_step_call(self, call: cst.Call) -> bool:
@@ -197,16 +220,19 @@ class ParamSetter(cst.CSTTransformer):
         return False
 
     def _matches_target(self, call: cst.Call) -> bool:
+        """Match by variable name or runtime name (mirrors add-edge)."""
         if not call.args:
             return False
         first_arg = call.args[0].value
         if isinstance(first_arg, cst.Name):
             var_name = first_arg.value
-            if var_name in self.assignments:
-                resolved = resolve_runnable_name(self.assignments[var_name])
-                if resolved is not None:
-                    return resolved == self.target
-            return var_name == self.target
+            if var_name == self.target:
+                return True
+            runtime_name = self.step_names.get(var_name)
+            if runtime_name is None and var_name in self.assignments:
+                runtime_name = resolve_runnable_name(self.assignments[var_name])
+            if runtime_name is not None and runtime_name == self.target:
+                return True
         return False
 
     def leave_Expr(self, original_node: cst.Expr, updated_node: cst.Expr) -> cst.Expr:

@@ -1,9 +1,8 @@
 import argparse
-import json
 
 import libcst as cst
 
-from ..cli_utils import arg_input
+from ..cli_utils import arg_input, parse_json_arg
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
@@ -99,7 +98,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if args.tool_name is not None and args.tool_name == "":
         raise ValueError("--name cannot be empty. Omit --name to use the default tool name.")
 
-    config = json.loads(args.config) if getattr(args, "config", None) else {}
+    config = parse_json_arg(args.config, "--config") if getattr(args, "config", None) else {}
     if config:
         # Reject keys that would collide with explicit flags / derived values.
         # Without this, the generated source has duplicate kwargs and ruff

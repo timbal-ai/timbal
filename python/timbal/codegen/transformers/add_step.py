@@ -1,9 +1,8 @@
 import argparse
-import json
 
 import libcst as cst
 
-from ..cli_utils import arg_input
+from ..cli_utils import arg_input, parse_json_arg
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
@@ -132,6 +131,19 @@ def _clean_position(position: dict[str, float]) -> dict[str, int | float]:
     }
 
 
+def _reject_non_name_config(config: dict, step_kind: str) -> None:
+    """Only Agent steps take constructor params via --config; for other step
+    kinds the only accepted key is 'name' (an alias for --name). Anything else
+    would previously be dropped silently — a common trap."""
+    unknown = set(config.keys()) - {"name"}
+    if unknown:
+        raise ValueError(
+            f"--config for {step_kind} steps only accepts 'name'; "
+            f"got: {', '.join(sorted(unknown))}. "
+            f"Use set-param to set the step's parameters, or set-config for its constructor."
+        )
+
+
 def register(subparsers: argparse._SubParsersAction) -> None:
     sp = subparsers.add_parser(
         "add-step",
@@ -160,6 +172,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         type=arg_input,
         help=(
             'Agent constructor params as JSON. E.g. \'{"name": "agent_a", "model": "openai/gpt-4o-mini"}\'. '
+            "Framework tool and Custom steps only accept 'name' here (equivalent to --name); "
+            "use set-param for their step parameters. "
             "Use '@path' to read from file or '-' to read from stdin."
         ),
     )
@@ -175,7 +189,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     assignments = collect_assignments(tree) if tree else {}
     step_type = args.step_type
-    config = json.loads(args.config) if args.config else {}
+    config = parse_json_arg(args.config, "--config") if args.config else {}
 
     if args.x is not None and args.y is not None:
         position = _clean_position({"x": args.x, "y": args.y})
@@ -199,6 +213,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         )
 
     if step_type == "Custom":
+        _reject_non_name_config(config, "Custom")
         if not args.definition:
             raise ValueError("--definition is required for Custom steps.")
         func_tree = cst.parse_module(args.definition)
@@ -210,7 +225,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if func_def is None:
             raise ValueError("--definition must contain a function definition.")
         func_name = func_def.name.value
-        runtime_name = args.step_name if args.step_name else func_name
+        runtime_name = args.step_name or config.get("name") or func_name
         var_name = runtime_name
         # When the function name collides with the Tool variable name, add
         # a _fn suffix to the function to avoid shadowing.
@@ -258,9 +273,11 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         )
 
     # Framework tool step.
+    _reject_non_name_config(config, "framework tool")
     framework_names = get_framework_tool_names()
-    var_name = args.step_name if args.step_name else framework_names[step_type]
-    runtime_name = args.step_name if args.step_name else framework_names[step_type]
+    step_name = args.step_name or config.get("name")
+    var_name = step_name if step_name else framework_names[step_type]
+    runtime_name = step_name if step_name else framework_names[step_type]
     return StepAdder(
         entry_point, assignments,
         step_type=step_type,
@@ -268,7 +285,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         func_name=None,
         var_name=var_name,
         runtime_name=runtime_name,
-        step_name=args.step_name,
+        step_name=step_name,
         position=position,
     )
 

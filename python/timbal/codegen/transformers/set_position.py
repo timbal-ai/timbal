@@ -5,7 +5,10 @@ import libcst as cst
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
+    collect_chained_step_names,
+    collect_step_names,
     is_bare_function_step,
+    require_step,
     resolve_entry_point_type,
     resolve_runnable_name,
     wrap_bare_function_step,
@@ -42,7 +45,14 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             assignments = collect_assignments(tree)
             return StepPositionSetter(entry_point, args.name, position, assignments), tree
 
-        return StepPositionSetter(entry_point, args.name, position, assignments)
+        # Position lives on the step's constructor assignment, so chained
+        # steps are addressable too — validate against the full graph.
+        step_names = collect_step_names(tree, entry_point, assignments)
+        chained_step_names = collect_chained_step_names(tree, entry_point, assignments)
+        name = require_step(
+            args.name, {**step_names, **chained_step_names}, kind="Target", operation="set-position",
+        )
+        return StepPositionSetter(entry_point, name, position, assignments)
 
     # Agent (or unknown) entry point — set on the constructor directly.
     if args.name:
