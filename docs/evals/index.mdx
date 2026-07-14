@@ -89,7 +89,7 @@ Create a file named `eval_greeting.yaml`:
   output:
     not_null!: true
     type!: "string"
-    semantic!: "A polite greeting that acknowledges the user"
+    prompt!: "The response greets the user politely"
   
   elapsed:
     lt!: 5000
@@ -115,7 +115,7 @@ eval_greeting.yaml
     ├── output
     │   ├── not_null! ✓
     │   ├── type! ✓
-    │   └── semantic! ✓
+    │   └── prompt! ✓
     └── elapsed
         └── lt! ✓
 

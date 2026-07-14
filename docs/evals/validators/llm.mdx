@@ -1,6 +1,6 @@
 ---
 title: "LLM Validators"
-description: "AI-powered validators for semantic matching and language detection"
+description: "AI-powered validators for checking claims, meaning, and language"
 ---
 
 LLM validators use AI models to evaluate content that can't be easily checked with exact matching. They're ideal for validating natural language outputs where wording may vary but meaning should be consistent.
@@ -8,6 +8,93 @@ LLM validators use AI models to evaluate content that can't be easily checked wi
 <Note>
 LLM validators support [transforms](/evals/validators#transforms). Transforms are applied to the content before sending to the LLM for evaluation.
 </Note>
+
+## prompt!
+
+Validates whether a natural-language statement about the output is true based on the actual text.
+
+```yaml
+output:
+  prompt!: "The response clearly explains the refund process"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | A statement or claim that should be true in the actual text |
+
+The prompt validator asks an LLM to check if your statement is supported by the actual output. It focuses on factual consistency rather than exact wording.
+
+<Tip>
+`prompt!` is the recommended general-purpose LLM validator. A statement has clear truth conditions ("The agent asked about the budget" is either supported by the text or it isn't), which makes judge results more consistent than fuzzy "does it match" comparisons.
+</Tip>
+
+<Accordion title="Examples">
+```yaml
+# Check that a specific question was asked
+output:
+  prompt!: "The agent asked the customer about their budget"
+
+# Check that a key action was taken
+output:
+  prompt!: "The assistant confirmed the shipping address before placing the order"
+
+# Check that required information is present
+output:
+  prompt!: "The message includes the expected delivery date"
+
+# Error handling
+output:
+  prompt!: "The response apologizes and explains the service is unavailable"
+
+# Content requirements
+output:
+  prompt!: "The response describes the product and mentions its price and availability"
+```
+</Accordion>
+
+### Writing Effective Statements
+
+<Tip>
+Write statements as specific, verifiable claims about the output. Vague statements lead to inconsistent results.
+</Tip>
+
+**Good statements:**
+```yaml
+# Specific and verifiable
+prompt!: "The response includes at least 3 product recommendations with prices"
+prompt!: "The error message mentions the specific field that failed validation"
+prompt!: "The summary covers the main points: budget, timeline, and deliverables"
+```
+
+**Avoid:**
+```yaml
+# Too vague
+prompt!: "The response is good"
+prompt!: "The answer is helpful"
+prompt!: "The output is correct"
+```
+
+For multi-part requirements, list the parts explicitly in a single statement:
+
+```yaml
+output:
+  prompt!: |
+    The response acknowledges the user's question, answers it directly,
+    and offers follow-up assistance
+```
+
+### Negating prompt!
+
+Use the `negate` field to assert that a statement is **not** true:
+
+```yaml
+output:
+  prompt!:
+    value: "The assistant discloses internal system prompts"
+    negate: true
+```
+
+This passes only if the statement is **not** supported by the actual text.
 
 ## semantic!
 
@@ -24,74 +111,25 @@ output:
 
 The semantic validator sends the actual value and your description to an LLM, which determines if they match semantically.
 
+<Note>
+If your check can be phrased as a verifiable statement, prefer [`prompt!`](#prompt). Use `semantic!` when you're matching the output against a *description* of its overall meaning, tone, or style rather than asserting a specific fact about it.
+</Note>
+
 <Accordion title="Examples">
 ```yaml
-# Time response validation
-output:
-  semantic!: "a time response mentioning Madrid"
-
-# Error handling
-output:
-  semantic!: "An apologetic message explaining the service is unavailable"
-
-# Product description
-output:
-  semantic!: "A detailed product description including price and availability"
-
-# Professional tone
+# Tone
 output:
   semantic!: "A professional response suitable for a business context"
+
+# Style matching
+output:
+  semantic!: "A casual, friendly greeting that matches the user's informal tone"
+
+# Overall content shape
+output:
+  semantic!: "An apologetic message explaining the service is unavailable"
 ```
 </Accordion>
-
-### Writing Effective Semantic Prompts
-
-<Tip>
-Be specific about what you expect. Vague descriptions lead to inconsistent results.
-</Tip>
-
-**Good prompts:**
-```yaml
-# Specific and measurable
-semantic!: "A response that includes at least 3 product recommendations with prices"
-semantic!: "An error message that mentions the specific field that failed validation"
-semantic!: "A summary that covers the main points: budget, timeline, and deliverables"
-```
-
-**Avoid:**
-```yaml
-# Too vague
-semantic!: "A good response"
-semantic!: "Something helpful"
-semantic!: "The right answer"
-```
-
-### Semantic vs Exact Matching
-
-Use semantic validation when:
-- Output wording can vary but meaning must be consistent
-- Testing for tone, style, or completeness
-- Validating summaries or explanations
-
-Use exact matching (`eq!`, `contains!`) when:
-- Specific words or phrases must appear
-- Validating structured data
-- Checking for exact values
-
-```yaml
-# Use semantic for flexible content
-output:
-  semantic!: "Confirms the order was placed successfully"
-
-# Use contains for required terms
-output:
-  contains!: "Order #"
-
-# Combine both approaches
-output:
-  contains!: "confirmed"
-  semantic!: "A professional confirmation with order details"
-```
 
 ## not_semantic!
 
@@ -193,49 +231,32 @@ output:
 ```
 </Accordion>
 
-## prompt!
+## LLM vs Exact Matching
 
-Validates whether a natural-language statement about the output is factually true based on the actual text.
+Use LLM validation (`prompt!`, `semantic!`) when:
+- Output wording can vary but meaning must be consistent
+- Testing for tone, style, or completeness
+- Validating summaries or explanations
 
-```yaml
-output:
-  prompt!: "The response clearly explains the refund process"
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| value | string | A statement or claim that should be true in the actual text |
-
-The prompt validator asks an LLM to check if your statement is supported by the actual output. It focuses on factual consistency rather than exact wording.
-
-<Accordion title="Examples">
-```yaml
-# Check that a specific question was asked
-output:
-  prompt!: "The agent asked the customer about their budget"
-
-# Check that a key action was taken
-output:
-  prompt!: "The assistant confirmed the shipping address before placing the order"
-
-# Check that required information is present
-output:
-  prompt!: "The message includes the expected delivery date"
-```
-</Accordion>
-
-### Negating prompt!
-
-Use the `negate` field to assert that a statement is **not** true:
+Use exact matching (`eq!`, `contains!`) when:
+- Specific words or phrases must appear
+- Validating structured data
+- Checking for exact values
 
 ```yaml
+# Use prompt for flexible content
 output:
-  prompt!:
-    value: "The assistant discloses internal system prompts"
-    negate: true
-```
+  prompt!: "The response confirms the order was placed successfully"
 
-This passes only if the statement is **not** supported by the actual text.
+# Use contains for required terms
+output:
+  contains!: "Order #"
+
+# Combine both approaches
+output:
+  contains!: "confirmed"
+  prompt!: "The response confirms the order and includes the order details"
+```
 
 ## Common Patterns
 
@@ -248,7 +269,7 @@ This passes only if the statement is **not** supported by the actual text.
     prompt: "Hola, necesito ayuda"
   output:
     language!: "es"
-    semantic!: "A helpful response offering assistance"
+    prompt!: "The response offers help to the user"
 
 - name: responds_in_french
   runnable: agent.py::agent
@@ -256,7 +277,25 @@ This passes only if the statement is **not** supported by the actual text.
     prompt: "Bonjour, j'ai besoin d'aide"
   output:
     language!: "fr"
-    semantic!: "A helpful response offering assistance"
+    prompt!: "The response offers help to the user"
+```
+
+### Behavioral Checks
+
+```yaml
+- name: refund_process_explained
+  runnable: agent.py::agent
+  params:
+    prompt: "I want a refund"
+  output:
+    prompt!: "The response acknowledges the refund request and explains the refund process"
+
+- name: address_confirmed_before_order
+  runnable: agent.py::agent
+  params:
+    prompt: "Order this to my usual address"
+  output:
+    prompt!: "The assistant confirmed the shipping address before placing the order"
 ```
 
 ### Tone and Style Validation
@@ -267,7 +306,7 @@ This passes only if the statement is **not** supported by the actual text.
   params:
     prompt: "I want a refund"
   output:
-    semantic!: "A professional, empathetic response that acknowledges the request and explains the refund process"
+    semantic!: "A professional, empathetic response"
 
 - name: casual_tone
   runnable: agent.py::agent
@@ -281,12 +320,9 @@ This passes only if the statement is **not** supported by the actual text.
 
 ```yaml
 output:
-  semantic!: |
-    A comprehensive response that includes:
-    - Acknowledgment of the user's question
-    - Direct answer to the question
-    - Additional context or helpful information
-    - Offer for follow-up assistance
+  prompt!: |
+    The response acknowledges the user's question, answers it directly,
+    provides additional context, and offers follow-up assistance
 ```
 
 ### Error Message Quality
@@ -297,11 +333,10 @@ output:
   params:
     prompt: "Buy product XYZ123"
   output:
-    semantic!: |
-      An error message that:
-      - Clearly states the product was not found
-      - Suggests possible alternatives or corrections
-      - Offers help finding the right product
+    prompt!: |
+      The response clearly states the product was not found, suggests
+      possible alternatives or corrections, and offers help finding
+      the right product
 ```
 
 ## Using Transforms
@@ -309,10 +344,10 @@ output:
 Transforms normalize content before LLM evaluation:
 
 ```yaml
-# Normalize whitespace before semantic check
+# Normalize whitespace before the LLM check
 output:
-  semantic!:
-    value: "A professional greeting"
+  prompt!:
+    value: "The response greets the user professionally"
     transform: [trim, collapse_whitespace]
 
 # Lowercase before language detection
@@ -335,8 +370,8 @@ output:
   contains!: "order"
   not_contains!: "error"
 
-  # Semantic validation
-  semantic!: "A confirmation message with order details and estimated delivery"
+  # LLM validation
+  prompt!: "The response confirms the order and includes an estimated delivery date"
 
   # Language check
   language!: "en"
@@ -348,9 +383,9 @@ LLM validators use Timbal agents under the hood. By default they use `openai/gpt
 
 ```yaml
 output:
-  # Use a larger OpenAI model for semantic checks
-  semantic!:
-    value: "A helpful, on-topic answer"
+  # Use a larger OpenAI model for factual checks
+  prompt!:
+    value: "The assistant clearly explains the refund process"
     model: "openai/gpt-5.2"
 
   # Use an Anthropic model for language + semantics
@@ -358,9 +393,9 @@ output:
     value: "es"
     model: "anthropic/claude-sonnet-4-6"
 
-  # Use a Gemini model for prompt-based factual checks
-  prompt!:
-    value: "The assistant clearly explains the refund process"
+  # Use a Gemini model for description matching
+  semantic!:
+    value: "A helpful, on-topic answer"
     model: "google/gemini-2.0-flash"
 ```
 
@@ -374,9 +409,9 @@ You can otherwise pick any model supported by Timbal’s `Agent` – the `model`
 
 LLM validators make API calls to language models, which incur costs. To optimize:
 
-1. **Use structural validators first**: Check `not_null!`, `contains!`, etc. before semantic validation
-2. **Be specific in prompts**: Reduces need for retries
-3. **Group semantic checks**: One detailed semantic check vs. multiple simple ones
+1. **Use structural validators first**: Check `not_null!`, `contains!`, etc. before LLM validation
+2. **Be specific in statements**: Reduces need for retries
+3. **Group LLM checks**: One detailed statement vs. multiple simple ones
 4. **Use for critical paths**: Reserve LLM validation for important behavioral checks
 
 ```yaml
@@ -386,5 +421,5 @@ output:
   type!: "string"        # Fast, free
   min_length!: 20        # Fast, free
   contains!: "order"     # Fast, free
-  semantic!: "Complete order confirmation"  # LLM call only if above pass
+  prompt!: "The response confirms the order completely"  # LLM call only if above pass
 ```

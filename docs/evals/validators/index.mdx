@@ -95,7 +95,7 @@ output:
     Length constraints and bounds
   </Card>
   <Card title="LLM" icon="brain" href="/evals/validators/llm">
-    AI-powered semantic validation
+    AI-powered checks for claims, meaning, and language
   </Card>
   <Card title="Flow" icon="diagram-project" href="/evals/validators/flow">
     Execution sequence and parallelism
@@ -132,9 +132,9 @@ output:
 | `length!` | Length | Exact length | `length!: 10` |
 | `min_length!` | Length | Minimum length | `min_length!: 5` |
 | `max_length!` | Length | Maximum length | `max_length!: 100` |
+| `prompt!` | LLM | Statement/claim is true in output | `prompt!: "The response explains the refund process"` |
 | `semantic!` | LLM | Semantic match | `semantic!: "greeting"` |
 | `not_semantic!` | LLM | Semantic non-match | `not_semantic!: "rude"` |
-| `prompt!` | LLM | Statement/claim is true in output | `prompt!: "The response explains the refund process"` |
 | `language!` | LLM | Language detection | `language!: "en"` |
 | `not_language!` | LLM | Language exclusion | `not_language!: "fr"` |
 | `seq!` | Flow | Execution sequence | See [Flow](/evals/validators/flow) |
@@ -237,12 +237,12 @@ FAILED: output
   Error: Value does not contain expected substring
 ```
 
-For semantic validators:
+For LLM validators:
 
 ```
 FAILED: output
-  Validator: semantic!
-  Expected: "A polite greeting"
+  Validator: prompt!
+  Expected: "The response greets the user politely"
   Actual: "What do you want?"
   Reason: The response is curt and lacks politeness
 ```
