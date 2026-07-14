@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -138,6 +140,27 @@ class TestDumpSummary:
         assert len(r["validators"]) == 1
         assert r["validators"][0]["name"] == "not_null!"
         assert r["validators"][0]["passed"] is True
+
+
+class TestCliJsonOutput:
+    def test_stdout_is_pure_json_with_dash_output(self, tmp_path):
+        """With `-o -`, stdout must contain only the JSON document; human output goes to stderr."""
+        touch(tmp_path / "agent.py", AGENT_MODULE)
+        touch(tmp_path / "evals_simple.yaml", EVAL_FILE)
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "timbal.evals.cli", str(tmp_path), "-o", "-"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            timeout=60,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(proc.stdout)  # must parse without any surrounding noise
+        assert data["total"] == 1
+        assert data["passed"] == 1
+        assert "Timbal Evals" in proc.stderr
 
 
 class TestDiscoverConfig:

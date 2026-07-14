@@ -94,6 +94,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    if args.output == "-":
+        # Reserve stdout for the JSON document; route all human-readable
+        # output (headers, eval trees, failures, summary) to stderr so
+        # pipelines can parse stdout reliably.
+        from . import display
+
+        console.file = sys.stderr
+        display.console.file = sys.stderr
+
     if args.version:
         console.print(f"timbal.eval {__version__}")
         sys.exit(0)
