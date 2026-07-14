@@ -20,7 +20,7 @@ from .. import __version__
 from ..logs import setup_logging
 from ..utils import ImportSpec
 from .runner import run_evals
-from .utils import discover_config, discover_eval_files, parse_eval_file
+from .utils import discover_config, discover_eval_files, dump_summary, parse_eval_file
 
 console = Console()
 
@@ -78,6 +78,13 @@ if __name__ == "__main__":
         default=None,
         help="Filter evals by tags. Comma-separated list (e.g., 'smoke,fast'). "
         "Evals matching ANY of the tags will run.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        help="Write results as JSON to the given file. Use '-' to print JSON to stdout.",
     )
     parser.add_argument(
         "-V",
@@ -166,6 +173,19 @@ if __name__ == "__main__":
             capture=not args.no_capture,
         )
     )
+
+    if args.output:
+        import json
+
+        summary_dict = asyncio.run(dump_summary(summary))
+        summary_json = json.dumps(summary_dict, indent=2, default=str)
+        if args.output == "-":
+            sys.stdout.write(summary_json + "\n")
+        else:
+            output_path = Path(args.output).expanduser()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(summary_json)
+            console.print(f"[dim]Results written to {output_path}[/dim]")
 
     # Exit with error code if any eval failed
     sys.exit(0 if summary.failed == 0 else 1)
