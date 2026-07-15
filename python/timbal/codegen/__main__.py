@@ -83,10 +83,42 @@ def main() -> None:
         "--stream", "-s", action="store_true", help="Print every event instead of only the final output event."
     )
 
+    # Evals operation
+    evals_parser = subparsers.add_parser(
+        "evals",
+        help="Run evals against the workspace entry point.",
+    )
+    evals_parser.add_argument(
+        "evals_path",
+        nargs="?",
+        default=None,
+        help="Path to an eval file or directory (defaults to the workspace path). "
+        "Use ::eval_name to run a single eval.",
+    )
+    evals_parser.add_argument(
+        "--tags",
+        default=None,
+        help="Comma-separated tag filter; evals matching ANY tag will run.",
+    )
+    evals_parser.add_argument(
+        "--jobs",
+        "-j",
+        type=int,
+        default=1,
+        help="Run up to N evals concurrently (default 1). Results are emitted as they complete.",
+    )
+    evals_parser.add_argument(
+        "--format",
+        choices=["json", "pretty"],
+        default="json",
+        help="Output format: 'json' (default) streams one JSON event per line to stdout as each eval "
+        "completes; 'pretty' is the rich terminal report.",
+    )
+
     # Defer transformer module loading (pulls in libcst + timbal.codegen which
     # are expensive) — only needed for transformer operations, not for
     # list-tools, get-flow, or test.
-    _lightweight_ops = {"get-models", "get-tools", "get-flow", "test"}
+    _lightweight_ops = {"get-models", "get-tools", "get-flow", "test", "evals"}
     if not (_lightweight_ops & set(sys.argv[1:])):
         from timbal.codegen.transformers import load_modules
 
@@ -229,6 +261,66 @@ def main() -> None:
 
         asyncio.run(run_test(import_spec, params, run_context=run_context, stream=args.stream))
         return
+
+    if operation == "evals":
+        import asyncio
+        import os
+
+        os.environ.setdefault("TIMBAL_SUPPRESS_EVENTS", "tracing_setup")
+        os.environ["TIMBAL_LOG_LEVEL"] = "CRITICAL"
+
+        from ..logs import setup_logging
+
+        setup_logging()
+
+        from dotenv import load_dotenv
+
+        load_dotenv(override=True)
+
+        from . import parse_fqn
+
+        # The workspace entry point is the default runnable for all evals;
+        # individual evals can still override it with their own 'runnable' key.
+        try:
+            runnable = parse_fqn(workspace_path).load()
+        except (FileNotFoundError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"error: failed to load entry point: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        from timbal.evals.utils import collect_evals
+
+        evals_path_arg = args.evals_path if args.evals_path is not None else str(workspace_path)
+        eval_name = None
+        if "::" in evals_path_arg:
+            evals_path_arg, eval_name = evals_path_arg.rsplit("::", 1)
+        tags = {t.strip() for t in args.tags.split(",")} if args.tags else None
+
+        try:
+            evals = collect_evals(Path(evals_path_arg), runnable, eval_name, tags)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if not evals:
+            print(f"error: no evals found in {evals_path_arg}", file=sys.stderr)
+            sys.exit(1)
+
+        from timbal.evals.runner import run_evals
+
+        if args.format == "pretty":
+            from timbal.evals.reporters import PrettyReporter
+
+            reporter = PrettyReporter()
+        else:
+            from timbal.evals.reporters import JsonReporter
+
+            reporter = JsonReporter()
+
+        summary = asyncio.run(run_evals(evals, reporter=reporter, max_concurrency=args.jobs))
+        sys.exit(0 if summary.failed == 0 else 1)
 
     # Transformer operations — heavy imports already loaded above.
     from timbal.codegen import parse_fqn

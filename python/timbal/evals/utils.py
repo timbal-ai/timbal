@@ -10,7 +10,7 @@ from ..state.tracing.span import Span
 from ..state.tracing.trace import Trace
 from ..utils import ImportSpec
 from ..utils.serialization import dump
-from .models import Eval, EvalSummary
+from .models import Eval, EvalResult, EvalSummary
 
 logger = structlog.get_logger("timbal.evals.utils")
 
@@ -287,49 +287,81 @@ def discover_eval_files(path: Path) -> list[Path]:
     return sorted(eval_files)
 
 
-async def dump_summary(summary: EvalSummary) -> dict[str, Any]:
-    """Serialize an EvalSummary to a JSON-safe dict.
+async def dump_result(result: EvalResult) -> dict[str, Any]:
+    """Serialize a single EvalResult to a JSON-safe dict.
 
-    Purpose-built instead of EvalSummary.model_dump() because results hold
+    Purpose-built instead of EvalResult.model_dump() because results hold
     non-serializable objects (the Runnable instance, raw OutputEvents, etc.).
     """
-    results = []
-    for result in summary.results:
-        output_event = result.agent_output
-        results.append({
-            "name": result.eval.name,
-            "path": str(result.eval.path),
-            "description": result.eval.description,
-            "tags": result.eval.tags,
-            "passed": result.passed,
-            "duration": result.duration,
-            "error": result.error.model_dump() if result.error else None,
-            "params": await dump(result.eval.params),
-            "output": await dump(output_event.output) if output_event is not None else None,
-            "usage": output_event.usage if output_event is not None else {},
-            "validators": [
-                {
-                    "target": vr.target,
-                    "name": vr.name,
-                    "value": await dump(vr.value),
-                    "passed": vr.passed,
-                    "evaluated": vr.evaluated,
-                    "error": vr.error,
-                    "actual_value": await dump(vr.actual_value),
-                }
-                for vr in result.validator_results
-            ],
-            "captured_stdout": result.captured_stdout,
-            "captured_stderr": result.captured_stderr,
-        })
+    output_event = result.agent_output
+    return {
+        "name": result.eval.name,
+        "path": str(result.eval.path),
+        "description": result.eval.description,
+        "tags": result.eval.tags,
+        "passed": result.passed,
+        "duration": result.duration,
+        "error": result.error.model_dump() if result.error else None,
+        "params": await dump(result.eval.params),
+        "output": await dump(output_event.output) if output_event is not None else None,
+        "usage": output_event.usage if output_event is not None else {},
+        "validators": [
+            {
+                "target": vr.target,
+                "name": vr.name,
+                "value": await dump(vr.value),
+                "passed": vr.passed,
+                "evaluated": vr.evaluated,
+                "error": vr.error,
+                "actual_value": await dump(vr.actual_value),
+            }
+            for vr in result.validator_results
+        ],
+        "captured_stdout": result.captured_stdout,
+        "captured_stderr": result.captured_stderr,
+    }
 
+
+async def dump_summary(summary: EvalSummary) -> dict[str, Any]:
+    """Serialize an EvalSummary to a JSON-safe dict."""
     return {
         "total": summary.total,
         "passed": summary.passed,
         "failed": summary.failed,
         "total_duration": summary.total_duration,
-        "results": results,
+        "results": [await dump_result(r) for r in summary.results],
     }
+
+
+def collect_evals(
+    path: Path,
+    runnable: Runnable | None = None,
+    eval_name: str | None = None,
+    tags: set[str] | None = None,
+) -> list[Eval]:
+    """Discover, parse, and filter evals under a path.
+
+    Raises ValueError on duplicate eval names or when eval_name matches nothing.
+    Returns an empty list when no eval files, evals, or tag matches are found.
+    """
+    eval_files = discover_eval_files(path)
+    evals = [eval for eval_file in eval_files for eval in parse_eval_file(eval_file, runnable)]
+
+    seen_names: dict[str, Path] = {}
+    for e in evals:
+        if e.name in seen_names:
+            raise ValueError(f"Duplicate eval name '{e.name}' found in:\n  - {seen_names[e.name]}\n  - {e.path}")
+        seen_names[e.name] = e.path
+
+    if eval_name is not None:
+        evals = [e for e in evals if e.name == eval_name]
+        if not evals:
+            raise ValueError(f"No eval found with name '{eval_name}'")
+
+    if tags:
+        evals = [e for e in evals if tags & set(e.tags)]
+
+    return evals
 
 
 def _load_runnable(runnable_fqn: str, eval_file_path: Path) -> Runnable:

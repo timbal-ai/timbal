@@ -601,6 +601,42 @@ python -m timbal.codegen test --context '{"id": "my-run-id"}'
 | `--context`, `-c` | none | RunContext fields as JSON |
 | `--stream`, `-s` | off | Print every event instead of only the final output |
 
+### `evals` — Run evals against the entry point
+
+Runs the workspace's evals with the `timbal.yaml` entry point as the default runnable (individual evals can still override it with their own `runnable` key). By default, streams one JSON event per line (JSONL) to stdout as each eval completes.
+
+```bash
+# Run all evals discovered under the workspace path
+python -m timbal.codegen --path ws evals
+
+# Run a specific file or a single eval by name
+python -m timbal.codegen --path ws evals evals/eval_smoke.yaml
+python -m timbal.codegen --path ws evals evals/eval_smoke.yaml::greeting_test
+
+# Filter by tags, run 4 evals concurrently
+python -m timbal.codegen --path ws evals --tags smoke,fast --jobs 4
+
+# Human-readable report instead of JSONL
+python -m timbal.codegen --path ws evals --format pretty
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `evals_path` | workspace path | Eval file or directory; supports `::eval_name` suffix |
+| `--tags` | none | Comma-separated tag filter; evals matching ANY tag run |
+| `--jobs`, `-j` | `1` | Run up to N evals concurrently; results stream in completion order |
+| `--format` | `json` | `json` (JSONL events on stdout) or `pretty` (rich terminal report) |
+
+Event stream shape:
+
+```json
+{"event": "start", "total": 2, "evals": [{"name": "greeting_test", "path": "..."}]}
+{"event": "result", "name": "greeting_test", "passed": true, "duration": 1.2, "output": "...", "validators": [...]}
+{"event": "summary", "total": 2, "passed": 2, "failed": 0, "total_duration": 2.4}
+```
+
+Exit code is 0 when all evals pass, 1 otherwise.
+
 ---
 
 ## Pipeline
