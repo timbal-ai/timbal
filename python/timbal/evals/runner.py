@@ -279,7 +279,23 @@ async def run_evals(
                     # Wait for cancellations to settle while batch capture is
                     # still installed — otherwise in-flight evals keep writing
                     # after the real std streams are restored.
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    settled = await asyncio.gather(*tasks, return_exceptions=True)
+                    # On abnormal exit (e.g. reporter.result raised) some evals
+                    # finished but were never reported. Fold their results into
+                    # the summary so the closing counts reflect every eval that
+                    # actually ran, not just the ones reported before the error.
+                    # Skip runs the cancellation aborted mid-flight: .collect()
+                    # surfaces those as OutputEvents with status "cancelled",
+                    # and counting them as passed/failed would misrepresent
+                    # evals that never ran to completion.
+                    reported = {id(r) for r in summary.results}
+                    for outcome in settled:
+                        if not isinstance(outcome, EvalResult) or id(outcome) in reported:
+                            continue
+                        output_event = outcome.agent_output
+                        if output_event is not None and output_event.status.code == "cancelled":
+                            continue
+                        summary.results.append(outcome)
     finally:
         # Always emit the terminal summary, even on abnormal exit, so JSONL
         # consumers never see a stream without a closing summary event.

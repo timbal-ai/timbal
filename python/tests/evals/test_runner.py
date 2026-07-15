@@ -133,7 +133,40 @@ class TestAbnormalExit:
 
         # The terminal summary callback must still fire with the partial results.
         assert reporter.finished_with is not None
-        assert reporter.finished_with.total == 1
+        assert reporter.finished_with.total >= 1
+        reported_names = {r.eval.name for r in reporter.finished_with.results}
+        assert "fast" in reported_names
+
+    async def test_summary_includes_completed_but_unreported_evals(self):
+        """Evals that finished before cancellation must count in the summary
+        even when reporter.result raised and they were never reported."""
+
+        class SlowExplodingReporter(Reporter):
+            def __init__(self) -> None:
+                self.finished_with = None
+
+            async def result(self, result: EvalResult) -> None:  # noqa: ARG002
+                # Give the other fast evals time to finish before blowing up.
+                await asyncio.sleep(0.2)
+                raise RuntimeError("boom")
+
+            def finish(self, summary) -> None:
+                self.finished_with = summary
+
+        reporter = SlowExplodingReporter()
+        evals = [make_eval(f"fast{i}", 0.0, "out") for i in range(3)] + [make_eval("slow", 1.0, "out")]
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await run_evals(evals, reporter=reporter, max_concurrency=4)
+
+        assert reporter.finished_with is not None
+        names = {r.eval.name for r in reporter.finished_with.results}
+        # All three fast evals completed before the error; only one was
+        # reported, but the summary must account for all of them.
+        assert names == {"fast0", "fast1", "fast2"}
+        assert reporter.finished_with.total == 3
+        # The slow eval was cancelled mid-flight and never produced a result.
+        assert "slow" not in names
 
     async def test_finish_called_when_reporter_result_raises_sequential(self):
         class ExplodingReporter(Reporter):
@@ -311,6 +344,26 @@ class TestCodegenEvalsOperation:
         assert [line["event"] for line in lines] == ["start", "result", "summary"]
         assert lines[1]["name"] == "greeting_test"
         assert lines[1]["passed"] is True
+
+    def test_empty_run_emits_events_and_exits_zero(self, tmp_path):
+        """No matching evals must still produce start/summary, like the evals CLI."""
+        (tmp_path / "agent.py").write_text(AGENT_MODULE)
+        (tmp_path / "timbal.yaml").write_text('fqn: "agent.py::agent"\n')
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "timbal.codegen", "--path", str(tmp_path), "evals"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            timeout=60,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        lines = [json.loads(line) for line in proc.stdout.splitlines()]
+        assert [line["event"] for line in lines] == ["start", "summary"]
+        assert lines[0]["total"] == 0
+        assert lines[1]["total"] == 0
+        assert "no evals found" in proc.stderr
 
     def test_missing_timbal_yaml_errors(self, tmp_path):
         proc = subprocess.run(

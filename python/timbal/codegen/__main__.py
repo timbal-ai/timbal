@@ -311,8 +311,9 @@ def main() -> None:
             sys.exit(1)
 
         if not evals:
-            print(f"error: no evals found in {evals_path}", file=sys.stderr)
-            sys.exit(1)
+            # Warn but keep going, matching the evals CLI: an empty run must
+            # still emit the start/summary events consumers expect.
+            print(f"warning: no evals found in {evals_path}", file=sys.stderr)
 
         from timbal.evals.runner import run_evals
 
