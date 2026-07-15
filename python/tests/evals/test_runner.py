@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from timbal.core.tool import Tool
 from timbal.evals.models import Eval, EvalResult
 from timbal.evals.reporters import JsonReporter, Reporter
@@ -110,6 +111,66 @@ class TestParallelRun:
         assert elapsed < 0.6
 
 
+class TestAbnormalExit:
+    async def test_finish_called_when_reporter_result_raises_parallel(self):
+        class ExplodingReporter(RecordingReporter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.finished_with = None
+
+            async def result(self, result: EvalResult) -> None:
+                await super().result(result)
+                raise RuntimeError("reporter blew up")
+
+            def finish(self, summary) -> None:
+                self.finished_with = summary
+
+        reporter = ExplodingReporter()
+        evals = [make_eval("fast", 0.0, "fast out"), make_eval("slow", 0.3, "slow out")]
+
+        with pytest.raises(RuntimeError, match="reporter blew up"):
+            await run_evals(evals, reporter=reporter, max_concurrency=2)
+
+        # The terminal summary callback must still fire with the partial results.
+        assert reporter.finished_with is not None
+        assert reporter.finished_with.total == 1
+
+    async def test_finish_called_when_reporter_result_raises_sequential(self):
+        class ExplodingReporter(Reporter):
+            def __init__(self) -> None:
+                self.finished = False
+
+            async def result(self, result: EvalResult) -> None:  # noqa: ARG002
+                raise RuntimeError("boom")
+
+            def finish(self, summary) -> None:  # noqa: ARG002
+                self.finished = True
+
+        reporter = ExplodingReporter()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await run_evals([make_eval("a", 0.0, "out")], reporter=reporter)
+
+        assert reporter.finished
+
+    async def test_abnormal_exit_awaits_cancelled_tasks_before_restoring_streams(self):
+        class ExplodingReporter(Reporter):
+            async def result(self, result: EvalResult) -> None:  # noqa: ARG002
+                raise RuntimeError("boom")
+
+        stdout_before, stderr_before = sys.stdout, sys.stderr
+        evals = [make_eval("fast", 0.0, "fast out")] + [make_eval(f"slow{i}", 0.5, "slow out") for i in range(3)]
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await run_evals(evals, reporter=ExplodingReporter(), max_concurrency=4)
+
+        # Streams restored, and no eval task may still be running.
+        assert sys.stdout is stdout_before
+        assert sys.stderr is stderr_before
+        pending = [t for t in asyncio.all_tasks() if not t.done() and t is not asyncio.current_task()]
+        assert not pending
+
+
 class TestJsonReporterStream:
     async def test_emits_start_result_summary(self):
         import io
@@ -209,6 +270,39 @@ class TestCodegenEvalsOperation:
             capture_output=True,
             text=True,
             cwd=tmp_path,
+            timeout=60,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        lines = [json.loads(line) for line in proc.stdout.splitlines()]
+        assert [line["event"] for line in lines] == ["start", "result", "summary"]
+        assert lines[1]["name"] == "greeting_test"
+        assert lines[1]["passed"] is True
+
+    def test_relative_evals_path_resolves_from_workspace(self, tmp_path):
+        """A relative evals_path must resolve against --path, not the process cwd."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "agent.py").write_text(AGENT_MODULE)
+        (ws / "timbal.yaml").write_text('fqn: "agent.py::agent"\n')
+        evals_dir = ws / "evals"
+        evals_dir.mkdir()
+        (evals_dir / "eval_smoke.yaml").write_text(
+            "- name: greeting_test\n"
+            "  params:\n"
+            '    prompt: "Hi there!"\n'
+            "  output:\n"
+            "    not_null!: true\n"
+        )
+        # Run from an unrelated cwd that has no evals/ directory.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "timbal.codegen", "--path", str(ws), "evals", "evals/eval_smoke.yaml"],
+            capture_output=True,
+            text=True,
+            cwd=elsewhere,
             timeout=60,
         )
 

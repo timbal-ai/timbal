@@ -298,14 +298,20 @@ def main() -> None:
             evals_path_arg, eval_name = evals_path_arg.rsplit("::", 1)
         tags = {t.strip() for t in args.tags.split(",")} if args.tags else None
 
+        # Resolve relative eval paths against the workspace (--path), not the
+        # process cwd, so running codegen from outside the workspace works.
+        evals_path = Path(evals_path_arg)
+        if not evals_path.is_absolute():
+            evals_path = workspace_path / evals_path
+
         try:
-            evals = collect_evals(Path(evals_path_arg), runnable, eval_name, tags)
+            evals = collect_evals(evals_path, runnable, eval_name, tags)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
 
         if not evals:
-            print(f"error: no evals found in {evals_path_arg}", file=sys.stderr)
+            print(f"error: no evals found in {evals_path}", file=sys.stderr)
             sys.exit(1)
 
         from timbal.evals.runner import run_evals

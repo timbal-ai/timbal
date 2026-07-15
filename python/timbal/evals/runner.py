@@ -250,32 +250,39 @@ async def run_evals(
 
     reporter.start(evals)
 
-    if max_concurrency <= 1:
-        for eval in evals:
-            # TODO Add the optional env variables to eval
-            result = await run_eval(eval, capture=capture)
-            summary.results.append(result)
-            await reporter.result(result)
-    else:
-        capture_cm = _install_context_capture() if capture else contextlib.nullcontext()
-        with capture_cm:
-            semaphore = asyncio.Semaphore(max_concurrency)
+    try:
+        if max_concurrency <= 1:
+            for eval in evals:
+                # TODO Add the optional env variables to eval
+                result = await run_eval(eval, capture=capture)
+                summary.results.append(result)
+                await reporter.result(result)
+        else:
+            capture_cm = _install_context_capture() if capture else contextlib.nullcontext()
+            with capture_cm:
+                semaphore = asyncio.Semaphore(max_concurrency)
 
-            async def _run_one(e: Eval) -> EvalResult:
-                async with semaphore:
-                    return await run_eval(e, capture=capture)
+                async def _run_one(e: Eval) -> EvalResult:
+                    async with semaphore:
+                        return await run_eval(e, capture=capture)
 
-            tasks = [asyncio.create_task(_run_one(e)) for e in evals]
-            try:
-                # Report results in completion order (streaming), not file order.
-                for future in asyncio.as_completed(tasks):
-                    result = await future
-                    summary.results.append(result)
-                    await reporter.result(result)
-            finally:
-                for task in tasks:
-                    task.cancel()
-
-    reporter.finish(summary)
+                tasks = [asyncio.create_task(_run_one(e)) for e in evals]
+                try:
+                    # Report results in completion order (streaming), not file order.
+                    for future in asyncio.as_completed(tasks):
+                        result = await future
+                        summary.results.append(result)
+                        await reporter.result(result)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    # Wait for cancellations to settle while batch capture is
+                    # still installed — otherwise in-flight evals keep writing
+                    # after the real std streams are restored.
+                    await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        # Always emit the terminal summary, even on abnormal exit, so JSONL
+        # consumers never see a stream without a closing summary event.
+        reporter.finish(summary)
 
     return summary
