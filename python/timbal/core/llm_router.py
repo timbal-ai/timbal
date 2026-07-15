@@ -416,8 +416,9 @@ async def _llm_router(
     # Per-request headers: change every call, so passed via extra_headers on each .create().
     request_headers: dict[str, str] = {
         "x-timbal-run-id": run_context.id,
-        "x-timbal-call-id": call_id,
     }
+    if call_id:
+        request_headers["x-timbal-call-id"] = call_id
     if run_context.platform_config and run_context.platform_config.subject:
         if run_context.platform_config.subject.app_id:
             request_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
