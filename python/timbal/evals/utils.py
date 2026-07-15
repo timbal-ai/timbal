@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,8 @@ from ..core.runnable import Runnable
 from ..state.tracing.span import Span
 from ..state.tracing.trace import Trace
 from ..utils import ImportSpec
-from .models import Eval
+from ..utils.serialization import dump
+from .models import Eval, EvalResult, EvalSummary
 
 logger = structlog.get_logger("timbal.evals.utils")
 
@@ -239,26 +241,127 @@ def discover_config(path: Path) -> dict[str, Any]:
     return {}
 
 
+IGNORED_DIR_NAMES = {"node_modules", "__pycache__", "site-packages"}
+
+
+def _is_ignored_dir(path: Path) -> bool:
+    """Check whether a directory should be skipped during eval file discovery."""
+    if path.name.startswith("."):
+        return True
+    if path.name in IGNORED_DIR_NAMES:
+        return True
+    # Virtualenvs not named with a leading dot (e.g. "venv", "env")
+    if (path / "pyvenv.cfg").exists():
+        return True
+    return False
+
+
 def discover_eval_files(path: Path) -> list[Path]:
     """Discover all eval files given a path.
-    If the path is a directory, it will search recursively for files matching the pattern "eval*.yaml".
+
+    If the path is a directory, it searches recursively for files matching "eval*.yaml"
+    or "*eval.yaml", skipping hidden directories, virtualenvs, node_modules,
+    site-packages and __pycache__ (so e.g. fixtures shipped inside a project's .venv
+    are never picked up).
     If the path is a file, it'll simply check the file is .yaml and return it.
     """
-    eval_files = []
-
-    # If path doesn't exist, return empty list
     if not path.exists():
-        return eval_files
+        return []
 
-    if path.is_dir():
-        eval_file_set = set(path.rglob("eval*.yaml")) | set(path.rglob("*eval.yaml"))
-        eval_files = list(eval_file_set)
-    else:
+    if not path.is_dir():
         if not path.name.endswith(".yaml"):
             raise ValueError(f"Invalid evals path: {path}")
-        eval_files.append(path)
+        return [path]
 
-    return eval_files
+    eval_files: set[Path] = set()
+    for dirpath, dirnames, filenames in os.walk(path):
+        current = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not _is_ignored_dir(current / d)]
+        for filename in filenames:
+            if not filename.endswith(".yaml"):
+                continue
+            stem = filename[: -len(".yaml")]
+            if filename.startswith("eval") or stem.endswith("eval"):
+                eval_files.add(current / filename)
+
+    return sorted(eval_files)
+
+
+async def dump_result(result: EvalResult) -> dict[str, Any]:
+    """Serialize a single EvalResult to a JSON-safe dict.
+
+    Purpose-built instead of EvalResult.model_dump() because results hold
+    non-serializable objects (the Runnable instance, raw OutputEvents, etc.).
+    """
+    output_event = result.agent_output
+    return {
+        "name": result.eval.name,
+        "path": str(result.eval.path),
+        "description": result.eval.description,
+        "tags": result.eval.tags,
+        "passed": result.passed,
+        "duration": result.duration,
+        "error": result.error.model_dump() if result.error else None,
+        "params": await dump(result.eval.params),
+        "output": await dump(output_event.output) if output_event is not None else None,
+        "usage": output_event.usage if output_event is not None else {},
+        "validators": [
+            {
+                "target": vr.target,
+                "name": vr.name,
+                "value": await dump(vr.value),
+                "passed": vr.passed,
+                "evaluated": vr.evaluated,
+                "error": vr.error,
+                "actual_value": await dump(vr.actual_value),
+            }
+            for vr in result.validator_results
+        ],
+        "captured_stdout": result.captured_stdout,
+        "captured_stderr": result.captured_stderr,
+    }
+
+
+async def dump_summary(summary: EvalSummary) -> dict[str, Any]:
+    """Serialize an EvalSummary to a JSON-safe dict."""
+    return {
+        "total": summary.total,
+        "passed": summary.passed,
+        "failed": summary.failed,
+        "total_duration": summary.total_duration,
+        "results": [await dump_result(r) for r in summary.results],
+    }
+
+
+def collect_evals(
+    path: Path,
+    runnable: Runnable | None = None,
+    eval_name: str | None = None,
+    tags: set[str] | None = None,
+) -> list[Eval]:
+    """Discover, parse, and filter evals under a path.
+
+    Raises ValueError on duplicate eval names or when eval_name matches nothing.
+    Returns an empty list when no eval files, evals, or tag matches are found.
+    """
+    eval_files = discover_eval_files(path)
+    evals = [eval for eval_file in eval_files for eval in parse_eval_file(eval_file, runnable)]
+
+    seen_names: dict[str, Path] = {}
+    for e in evals:
+        if e.name in seen_names:
+            raise ValueError(f"Duplicate eval name '{e.name}' found in:\n  - {seen_names[e.name]}\n  - {e.path}")
+        seen_names[e.name] = e.path
+
+    if eval_name is not None:
+        evals = [e for e in evals if e.name == eval_name]
+        if not evals:
+            raise ValueError(f"No eval found with name '{eval_name}'")
+
+    if tags:
+        evals = [e for e in evals if tags & set(e.tags)]
+
+    return evals
 
 
 def _load_runnable(runnable_fqn: str, eval_file_path: Path) -> Runnable:
@@ -277,10 +380,17 @@ def _load_runnable(runnable_fqn: str, eval_file_path: Path) -> Runnable:
 
     runnable_path, runnable_target = parts
 
-    # Resolve relative paths from the eval file's directory
+    # Resolve relative paths from the eval file's directory, falling back to the
+    # current working directory (so eval files in e.g. an "evals/" subdirectory can
+    # reference project-root modules like "agent.py::agent").
     runnable_path_obj = Path(runnable_path)
     if not runnable_path_obj.is_absolute():
-        runnable_path_obj = (eval_file_path.parent / runnable_path_obj).resolve()
+        candidate = (eval_file_path.parent / runnable_path_obj).resolve()
+        if not candidate.exists():
+            cwd_candidate = (Path.cwd() / runnable_path_obj).resolve()
+            if cwd_candidate.exists():
+                candidate = cwd_candidate
+        runnable_path_obj = candidate
     else:
         runnable_path_obj = runnable_path_obj.expanduser().resolve()
 

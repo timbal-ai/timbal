@@ -63,7 +63,7 @@ Eval names must be unique across all eval files in your project. The CLI will er
     prompt: "Hello"
   
   output:
-    semantic!: "Friendly greeting"
+    prompt!: "The response greets the user in a friendly way"
   
   elapsed:
     lt!: 5000
@@ -125,7 +125,7 @@ output:
   contains!: "success"
   not_contains!: "error"
   pattern!: "Order #\\d{6}"
-  semantic!: "A confirmation message with order details"
+  prompt!: "The response confirms the order and includes the order details"
 ```
 
 Multiple validators can be combined - all must pass.
@@ -275,7 +275,7 @@ seq!:
     min_length!: 10
     contains!: ":"
     pattern!: "\\d{1,2}:\\d{2}"
-    semantic!: "a time response mentioning Madrid"
+    prompt!: "The response states the current time in Madrid"
   
   # Validate timing
   elapsed:
@@ -381,7 +381,7 @@ output:
   min_length!: 50
   contains!: "product"
   not_contains!: "error"
-  semantic!: "Product recommendations with prices"
+  prompt!: "The response recommends products and includes their prices"
 ```
 </Accordion>
 
@@ -390,7 +390,7 @@ Don't just check the output - validate how the agent got there:
 
 ```yaml
 output:
-  semantic!: "Weather information for Madrid"
+  prompt!: "The response provides weather information for Madrid"
 
 seq!:
   - llm
@@ -402,7 +402,7 @@ seq!:
 ```
 </Accordion>
 
-<Accordion title="Use semantic validators for natural language">
+<Accordion title="Use LLM validators for natural language">
 For outputs that can vary in wording but should convey the same meaning:
 
 ```yaml
@@ -410,10 +410,12 @@ For outputs that can vary in wording but should convey the same meaning:
 output:
   eq!: "The current time in Madrid is 14:30."
 
-# Use semantic validation
+# Use an LLM-checked statement
 output:
-  semantic!: "Indicates the current time in Madrid"
+  prompt!: "The response indicates the current time in Madrid"
 ```
+
+Prefer `prompt!` (a verifiable statement about the output) for behavioral checks. Use `semantic!` when matching against a description of tone or style, e.g. `semantic!: "A professional, empathetic response"`.
 </Accordion>
 
 <Accordion title="Test edge cases">
@@ -425,7 +427,7 @@ Create specific evals for error conditions:
   params:
     prompt: "what time is it in xyzland"
   output:
-    semantic!: "Indicates the timezone or location is not recognized"
+    prompt!: "The response indicates the timezone or location is not recognized"
 ```
 </Accordion>
 

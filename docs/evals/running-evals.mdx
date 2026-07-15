@@ -32,6 +32,9 @@ python -m timbal.evals.cli --runnable agent.py::my_agent path/to/evals/
 | `--log-level` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `-s`, `--no-capture` | Disable stdout/stderr capture (show output live) |
 | `-t`, `--tags` | Filter evals by tags (comma-separated) |
+| `-f`, `--format` | Output format: `pretty` (default) or `json` (streams JSONL events) |
+| `-j`, `--jobs` | Run up to N evals concurrently (default 1) |
+| `-o`, `--output` | Write the full results document as JSON to a file (`-` for stdout) |
 | `-V`, `--version` | Show version information |
 
 ### Runnable Specification
@@ -82,6 +85,94 @@ python -m timbal.evals.cli evals/
 
 # Live output - useful for debugging
 python -m timbal.evals.cli -s evals/
+```
+
+### Streaming JSON Output
+
+Use `--format json` to stream structured events instead of the rich terminal report. One JSON object is written per line (JSONL) to stdout, and each `result` event is emitted **as the eval completes** — human-readable output goes to stderr, so stdout stays parseable:
+
+```bash
+python -m timbal.evals.cli evals/ --format json
+```
+
+```json
+{"event": "start", "total": 2, "evals": [{"name": "greeting_test", "path": "evals/eval_basic.yaml"}, ...]}
+{"event": "result", "name": "greeting_test", "passed": true, "duration": 1.2, "output": ..., "validators": [...]}
+{"event": "result", "name": "search_test", "passed": false, "duration": 3.4, ...}
+{"event": "summary", "total": 2, "passed": 1, "failed": 1, "total_duration": 4.6}
+```
+
+#### Event Reference
+
+Every line is a JSON object with an `event` field: `start` (once, before any eval runs), `result` (once per eval), `summary` (once, at the end).
+
+**`start`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total` | int | Number of evals that will run |
+| `evals` | list | `{name, path}` for each eval, in file order |
+
+**`result`** — one per eval. With `--jobs 1` results arrive in file order; with `--jobs > 1` they arrive in **completion order**, so use `name` to correlate.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Eval name |
+| `path` | string | Eval file the eval was loaded from |
+| `description` | string \| null | Eval description |
+| `tags` | list | Eval tags |
+| `passed` | bool | Overall verdict (no error and all validators passed) |
+| `duration` | float | Wall-clock seconds for this eval |
+| `error` | object \| null | `{type, message, traceback}` when the run itself failed |
+| `params` | object | Input params the runnable was called with |
+| `output` | any | Final runnable output (messages serialize to `{role, content}`) |
+| `usage` | object | Token counts keyed by `provider/model:metric` |
+| `validators` | list | Per-validator verdicts (see below) |
+| `captured_stdout` | string | Stdout captured during the eval (empty with `-s`) |
+| `captured_stderr` | string | Stderr captured during the eval (empty with `-s`) |
+
+Each entry in `validators`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `target` | string | Span/property path the validator ran against (e.g. `agent.output`) |
+| `name` | string | Validator name (e.g. `contains!`, `prompt!`) |
+| `value` | any | Expected value from the eval YAML |
+| `passed` | bool | Whether the check passed |
+| `evaluated` | bool | `false` when the validator was invalid and never executed |
+| `error` | string \| null | Failure reason |
+| `actual_value` | any | Resolved value (populated for LLM validators) |
+
+**`summary`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total` / `passed` / `failed` | int | Eval counts |
+| `total_duration` | float | Sum of eval durations in seconds |
+
+The document written by `-o/--output` has the same shape: the `summary` fields at the top level plus a `results` list, where each entry matches the `result` event (minus the `event` key).
+
+### Parallel Execution
+
+Use `-j`/`--jobs` to run evals concurrently. Results are reported in **completion order**, which pairs naturally with `--format json` for streaming consumers:
+
+```bash
+# Run up to 4 evals at a time, streaming results as they finish
+python -m timbal.evals.cli evals/ --format json -j 4
+```
+
+Per-eval stdout/stderr capture works in parallel mode — output is attributed to the eval that produced it.
+
+### Saving Results
+
+Use `-o`/`--output` to write the full results document as JSON after the run:
+
+```bash
+# Write to a file (works with both formats)
+python -m timbal.evals.cli evals/ -o results.json
+
+# Print the document to stdout (pretty format only; report goes to stderr)
+python -m timbal.evals.cli evals/ -o -
 ```
 
 ## File Discovery
@@ -150,7 +241,7 @@ eval_search.yaml
   advanced_search ....................................... PASSED (0.82s)
     tags: search, regression
     ├── output
-    │   ├── semantic! ✓
+    │   ├── prompt! ✓
     │   └── min_length! ✓
     └── seq!
         ├── llm ✓
@@ -234,7 +325,14 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python -m timbal.evals.cli --runnable agent.py::agent evals/
+          python -m timbal.evals.cli --runnable agent.py::agent evals/ -j 4 -o results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: results.json
 ```
 
 ### GitLab CI

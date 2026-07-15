@@ -20,7 +20,7 @@ from .. import __version__
 from ..logs import setup_logging
 from ..utils import ImportSpec
 from .runner import run_evals
-from .utils import discover_config, discover_eval_files, parse_eval_file
+from .utils import collect_evals, discover_config, dump_summary
 
 console = Console()
 
@@ -80,12 +80,48 @@ if __name__ == "__main__":
         "Evals matching ANY of the tags will run.",
     )
     parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        help="Write results as JSON to the given file. Use '-' to print JSON to stdout.",
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        type=str,
+        choices=["pretty", "json"],
+        default="pretty",
+        help="Output format: 'pretty' (default) is the rich terminal report; "
+        "'json' streams one JSON event per line (JSONL) to stdout as each eval completes.",
+    )
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="Run up to N evals concurrently (default 1). Results are reported as they complete.",
+    )
+    parser.add_argument(
         "-V",
         "--version",
         action="store_true",
         help="Show version and exit.",
     )
     args = parser.parse_args()
+
+    if args.format == "json" and args.output == "-":
+        console.print("[red]Error:[/red] --format json already streams JSON to stdout; use -o <file> instead of '-'")
+        sys.exit(1)
+
+    if args.output == "-" or args.format == "json":
+        # Reserve stdout for JSON; route all human-readable output (headers,
+        # eval trees, failures, summary, warnings) to stderr so pipelines can
+        # parse stdout reliably.
+        from . import display
+
+        console.file = sys.stderr
+        display.console.file = sys.stderr
 
     if args.version:
         console.print(f"timbal.eval {__version__}")
@@ -125,47 +161,50 @@ if __name__ == "__main__":
             console.print(f"[red]Error:[/red] Failed to load runnable: {e}")
             sys.exit(1)
 
-    eval_files = discover_eval_files(path)
-    if not eval_files:
-        console.print(f"[yellow]Warning:[/yellow] No eval files found in {path}")
-        sys.exit(0)
+    tag_filters = {t.strip() for t in args.tags.split(",")} if args.tags else None
 
-    evals = [eval for eval_file in eval_files for eval in parse_eval_file(eval_file, runnable)]
+    try:
+        evals = collect_evals(path, runnable, eval_name_filter, tag_filters)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
     if not evals:
-        console.print(f"[yellow]Warning:[/yellow] No evals found in {len(eval_files)} file(s)")
-        sys.exit(0)
+        # Warn but keep going: an empty run must still produce the JSON
+        # events/document that -o and --format json consumers expect.
+        suffix = f" matching tags: {', '.join(sorted(tag_filters))}" if tag_filters else ""
+        console.print(f"[yellow]Warning:[/yellow] No evals found in {path}{suffix}")
 
-    # Check for duplicate eval names
-    seen_names: dict[str, Path] = {}
-    for e in evals:
-        if e.name in seen_names:
-            console.print(
-                f"[red]Error:[/red] Duplicate eval name '{e.name}' found in:\n  - {seen_names[e.name]}\n  - {e.path}"
-            )
-            sys.exit(1)
-        seen_names[e.name] = e.path
+    if args.format == "json":
+        from .reporters import JsonReporter
 
-    # Filter by eval name if specified
-    if eval_name_filter:
-        evals = [e for e in evals if e.name == eval_name_filter]
-        if not evals:
-            console.print(f"[red]Error:[/red] No eval found with name '{eval_name_filter}'")
-            sys.exit(1)
+        reporter = JsonReporter()
+    else:
+        from .reporters import PrettyReporter
 
-    # Filter by tags if specified
-    if args.tags:
-        tag_filters = {t.strip() for t in args.tags.split(",")}
-        evals = [e for e in evals if tag_filters & set(e.tags)]
-        if not evals:
-            console.print(f"[yellow]Warning:[/yellow] No evals found matching tags: {', '.join(sorted(tag_filters))}")
-            sys.exit(0)
+        reporter = PrettyReporter()
 
     summary = asyncio.run(
         run_evals(
             evals,
             capture=not args.no_capture,
+            reporter=reporter,
+            max_concurrency=args.jobs,
         )
     )
+
+    if args.output:
+        import json
+
+        summary_dict = asyncio.run(dump_summary(summary))
+        summary_json = json.dumps(summary_dict, indent=2, default=str)
+        if args.output == "-":
+            sys.stdout.write(summary_json + "\n")
+        else:
+            output_path = Path(args.output).expanduser()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(summary_json)
+            console.print(f"[dim]Results written to {output_path}[/dim]")
 
     # Exit with error code if any eval failed
     sys.exit(0 if summary.failed == 0 else 1)
