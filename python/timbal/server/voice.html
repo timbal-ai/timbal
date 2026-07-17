@@ -552,6 +552,8 @@ let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
 let micAudioToWs = false;
 let nextPlayTime = 0;
 const playbackSources = new Set();
+/** Sample rate reported to the server on connect; TTS audio is decoded at this rate. */
+let sessionSampleRate = SAMPLE_RATE;
 /** Scheduled-but-unfinished TTS segments as {start, end} in audioCtx time. */
 let playbackSchedule = [];
 /** Milliseconds of TTS audio fully played (finished segments). */
@@ -774,7 +776,11 @@ function playPCM(b64) {
   const i16 = new Int16Array(raw.buffer);
   const f32 = new Float32Array(i16.length);
   for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
-  const buf = audioCtx.createBuffer(1, f32.length, SAMPLE_RATE);
+  // Build the buffer at the rate reported to the server (== server TTS rate),
+  // not the fixed SAMPLE_RATE: browsers may force a different context rate, and
+  // a mismatch makes buf.duration diverge from the server's byte timing so the
+  // played_ms acks (and thus barge-in truncation) mis-estimate heard audio.
+  const buf = audioCtx.createBuffer(1, f32.length, sessionSampleRate);
   buf.getChannelData(0).set(f32);
   const src = audioCtx.createBufferSource();
   src.buffer = buf;
@@ -820,6 +826,7 @@ async function start() {
     if (playbackAckTimer) clearInterval(playbackAckTimer);
     playbackAckTimer = setInterval(() => sendPlaybackAck(false), PLAYBACK_ACK_INTERVAL_MS);
     const sr = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    sessionSampleRate = sr;
     ws.send(JSON.stringify({ sample_rate: sr }));
     const tryArmMic = async () => {
       try {
