@@ -500,10 +500,14 @@ class VoiceSession:
                 await self._current_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
-        elif self._turn_finalized_ok and truncate_completed:
-            # The turn completed but buffered audio was still playing: the full
-            # reply is already committed to transcript/memory, so truncate it
-            # in place to the heard prefix.
+        if self._turn_finalized_ok and truncate_completed and self._last_interruption_heard_text is None:
+            # The turn completed (AgentTextDone emitted, full reply committed to
+            # transcript/memory) but buffered audio was still playing: rewrite the
+            # committed entry in place to the heard prefix. Checked *after* the
+            # cancel/await above because the barge-in can land while the finished
+            # turn's ``finally`` is still persisting the trace — the task is not
+            # ``done()`` yet, the cancel is swallowed there, and no truncation has
+            # run (``_last_interruption_heard_text`` would be set otherwise).
             try:
                 self._apply_interruption_truncation(ctx=self._last_run_context, replace_last=True)
             except Exception as e:
@@ -761,6 +765,10 @@ class VoiceSession:
                             # the first moment LLM text exists, so stamp first-token now.
                             if msg_text and self._turn_first_token_at is None:
                                 self._turn_first_token_at = time.monotonic()
+                            # LLM generation for this iteration is complete; stamp before
+                            # the TTS drain below so llm_total_ms excludes synthesis time.
+                            # Multi-iteration agents overwrite — the last iteration wins.
+                            self._turn_llm_done_at = time.monotonic()
                             # Anything still buffered from deltas must hit TTS before we ``anext``
                             # again: the next event pull runs the outer Runnable's post-hook,
                             # ``dump(output)``, and trace save — and the loop would not flush
@@ -808,10 +816,11 @@ class VoiceSession:
                             if not self._cancel_turn.is_set():
                                 turn_phase = "await_tts_after_llm_output"
                                 await self._await_tts_chain()
-                                # Attach provisional metrics now: the outer Agent's trace is
-                                # persisted in its generator ``finally``, which runs *before*
-                                # we consume the outer OUTPUT event — waiting until this turn's
-                                # own ``finally`` would miss the store for successful turns.
+                                # Attach provisional metrics: the outer Agent's trace is first
+                                # persisted in its generator ``finally``, before this turn's own
+                                # ``finally`` builds the final numbers. The finally re-saves the
+                                # trace with final metrics; this keeps the intermediate snapshot
+                                # meaningful if the process dies before then.
                                 self._attach_metrics_to_trace(self._build_turn_metrics(user_text, interrupted=False))
             else:
                 turn_phase = "agent_generator_exhausted"
@@ -822,7 +831,10 @@ class VoiceSession:
                     **_trace_debug_fields(),
                 )
 
-            self._turn_llm_done_at = time.monotonic()
+            # Normally stamped at the .llm OUTPUT event (before the TTS drain);
+            # fall back here for runs that never produced one.
+            if self._turn_llm_done_at is None:
+                self._turn_llm_done_at = time.monotonic()
 
             if text_buffer and not self._cancel_turn.is_set():
                 turn_phase = "tts_synthesize_tail_buffer"
@@ -922,6 +934,20 @@ class VoiceSession:
             ctx = get_run_context()
             if ctx is not None:
                 self._last_run_context = ctx
+                # Re-persist the trace: the agent's own generator saved it on
+                # exhaustion, *before* this finally attached the final metrics.
+                # Live-object providers (in-memory) see the mutation anyway, but
+                # serializing providers (jsonl, platform) captured the provisional
+                # snapshot — without this re-save, stored voice_turn_metrics stay
+                # incomplete (e.g. null llm_total_ms). Providers already receive
+                # one put() per span completion and keep the latest snapshot per
+                # run id, so an extra save is consistent with their contract.
+                try:
+                    await asyncio.shield(ctx._save_trace())
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug("turn_trace_resave_failed", error=str(e))
             self._is_speaking = False
             self._active_turn_user_text = ""
 

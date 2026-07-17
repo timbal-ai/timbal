@@ -575,6 +575,35 @@ class TestTurnMetrics:
 
         assert session.metrics == [m]
 
+    async def test_final_metrics_persisted_by_serializing_provider(self, tmp_path) -> None:
+        """Regression: the agent run's trace is saved (provider put) when the
+        generator exhausts — before the turn's finally builds final metrics.
+        Serializing providers (jsonl, platform) captured that provisional
+        snapshot with null llm_total_ms; the turn finally must re-save."""
+        import json
+
+        from timbal.state.tracing.providers import JsonlTracingProvider
+
+        provider = JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+        agent = Agent(
+            name="t",
+            model=TestModel(responses=["Hello there friend"]),
+            tools=[],
+            tracing_provider=provider,
+        )
+        stt = MockSTT(script=[TranscriptEvent(type="committed", text="What time is it?")])
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS())
+        await _collect_events(session)
+
+        assert len(session.metrics) == 1
+        live = session.metrics[0]
+        assert live.llm_total_ms is not None
+
+        records = [json.loads(line) for line in (tmp_path / "traces.jsonl").read_text().splitlines()]
+        assert len(records) == 1
+        persisted = records[0]["spans"][0]["metadata"]["voice_turn_metrics"]
+        assert persisted == live.model_dump()
+
     async def test_metrics_emitted_after_agent_text_done(self) -> None:
         session, _, _ = _make_session(
             stt_script=[TranscriptEvent(type="committed", text="Hello")],
@@ -776,6 +805,72 @@ class TestInterruptionTruncation:
         assert heard != self.RESPONSE
         assert self.RESPONSE.startswith(heard)
         # Second turn's reply is intact.
+        assert assistant_entries[1].text == "Second reply"
+
+    async def test_barge_in_during_completed_turn_finally_still_truncates(self) -> None:
+        """Regression (Windows CI): the barge-in can land while the *finished*
+        turn's finally is still persisting the trace. The task is not done()
+        yet, so interrupt() cancels it (swallowed by the shielded aclose/save)
+        and the old ``elif _turn_finalized_ok`` branch never ran — no
+        truncation at all. A slow tracing provider makes the window
+        deterministic."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        class SlowSaveProvider(InMemoryTracingProvider):
+            _storage = {}
+
+            @classmethod
+            async def _store(cls, run_context) -> None:
+                await asyncio.sleep(0.15)
+                cls._storage[run_context.id] = run_context._trace
+
+        tracker = FakePlaybackTracker()
+        agent = Agent(
+            name="t",
+            model=TestModel(responses=[self.RESPONSE, "Second reply"]),
+            tools=[],
+            tracing_provider=SlowSaveProvider,
+        )
+        stt = DelayedMockSTT()
+        tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello there"))
+            # AgentTextDone is emitted *before* the turn's finally re-saves the
+            # trace (0.15s sleep) — inject the barge-in inside that window so
+            # interrupt() sees a finalized turn whose task is not done() yet.
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.005)
+            tracker.playing = True
+            tracker.played = 200  # half of the 400 emitted bytes
+            await stt.inject(TranscriptEvent(type="committed", text=self.BARGE_IN))
+            while sum(1 for e in events if isinstance(e, AgentTextDone)) < 2:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assistant_entries = [e for e in session.transcript if e.role == "assistant"]
+        heard = assistant_entries[0].text
+        assert heard != self.RESPONSE
+        assert self.RESPONSE.startswith(heard)
         assert assistant_entries[1].text == "Second reply"
 
     async def test_close_does_not_truncate_completed_turn(self) -> None:
