@@ -812,6 +812,7 @@ async function start() {
   ws.onopen = () => {
     transcriptEl.innerHTML = '';
     window._assistantEl = null;
+    window._lastAssistantEl = null;
     partialEl = null;
     resetPlaybackTracking();
     stopAssistantAudio();
@@ -904,25 +905,32 @@ async function start() {
         updateEmptyState();
         break;
       case 'agent_text_done':
+        // Keep a handle on the finished bubble: a barge-in while its TTS is
+        // still playing sends `interrupted.heard_text` after this point.
+        window._lastAssistantEl = window._assistantEl;
         window._assistantEl = null;
         updateEmptyState();
         break;
       case 'audio':
         playPCM(msg.data);
         break;
-      case 'interrupted':
-        // Align the displayed reply with what was actually spoken aloud.
-        if (window._assistantEl && msg.heard_text !== undefined && msg.heard_text !== null) {
+      case 'interrupted': {
+        // Align the displayed reply with what was actually spoken aloud — the
+        // reply may already be "done" (barge-in during buffered playback).
+        const el = window._assistantEl || window._lastAssistantEl;
+        if (el && msg.heard_text !== undefined && msg.heard_text !== null) {
           if (msg.heard_text) {
-            window._assistantEl.textContent = msg.heard_text;
+            el.textContent = msg.heard_text;
           } else {
-            window._assistantEl.remove();
+            el.remove();
           }
         }
         window._assistantEl = null;
+        window._lastAssistantEl = null;
         stopAssistantAudio();
         updateEmptyState();
         break;
+      }
       case 'error':
         log('error', msg.message);
         break;

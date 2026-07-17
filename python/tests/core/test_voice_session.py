@@ -807,6 +807,81 @@ class TestInterruptionTruncation:
         # Second turn's reply is intact.
         assert assistant_entries[1].text == "Second reply"
 
+    async def test_barge_in_during_final_tts_wait_rewrites_not_appends(self) -> None:
+        """Regression: ``_await_tts_chain`` swallows the cancellation of TTS
+        tasks, so a barge-in landing while the turn sits in the *final*
+        pre-commit wait lets the turn resume and commit the full reply with
+        ``_cancel_turn`` already set. The finally's truncation must then
+        rewrite the committed entry in place — append mode would leave the
+        full entry plus a duplicate heard-prefix entry. TestModel never
+        streams deltas (no pending tail segment), so the window is simulated
+        with a held fake TTS task registered in ``_tts_tasks``."""
+
+        class _RaceSession(VoiceSession):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self._chain_calls = 0
+                self.holding = asyncio.Event()
+
+            async def _await_tts_chain(self) -> None:
+                await super()._await_tts_chain()
+                self._chain_calls += 1
+                # Call 1 drains TTS after the llm OUTPUT event; call 2 is the
+                # final wait right before the transcript commit — hold a fake
+                # pending segment there until interrupt() cancels it.
+                if self._turn_index == 1 and self._chain_calls == 2:
+                    waiter = asyncio.ensure_future(asyncio.Event().wait())
+                    self._tts_tasks.add(waiter)
+                    self.holding.set()
+                    try:
+                        await waiter
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+        tracker = FakePlaybackTracker()
+        replies = iter([self.RESPONSE, "Second reply"])
+        agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[])
+        stt = DelayedMockSTT()
+        tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
+        session = _RaceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello there"))
+            await asyncio.wait_for(session.holding.wait(), timeout=5)
+            tracker.playing = True
+            tracker.played = 200  # half of the 400 emitted bytes
+            await stt.inject(TranscriptEvent(type="committed", text=self.BARGE_IN))
+            while not any(isinstance(e, AgentTextDone) and e.text == "Second reply" for e in events):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assistant_entries = [e for e in session.transcript if e.role == "assistant"]
+        # Exactly one entry for the first reply (rewritten in place) — append
+        # mode would produce two (full + heard prefix).
+        assert len(assistant_entries) == 2
+        heard = assistant_entries[0].text
+        assert heard != self.RESPONSE
+        assert self.RESPONSE.startswith(heard)
+        assert assistant_entries[1].text == "Second reply"
+
     async def test_barge_in_during_completed_turn_finally_still_truncates(self) -> None:
         """Regression (Windows CI): the barge-in can land while the *finished*
         turn's finally is still persisting the trace. The task is not done()

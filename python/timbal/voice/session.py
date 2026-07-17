@@ -926,9 +926,21 @@ class VoiceSession:
 
             # Interruption truncation runs after aclose so the salvaged partial
             # assistant message is already in the root span's memory.
+            #
+            # ``replace_last``: the barge-in can land while this turn awaits the
+            # final TTS chain — ``_await_tts_chain`` swallows the cancellation of
+            # the TTS tasks, so the turn resumes normally and commits the *full*
+            # reply (transcript + AgentTextDone) with ``_cancel_turn`` already
+            # set. In that case the committed entry must be rewritten in place;
+            # appending would leave the full entry plus a duplicate heard-prefix
+            # entry (and ``interrupt()`` skips its own rewrite once
+            # ``_last_interruption_heard_text`` is set here).
             if interrupted:
                 try:
-                    self._apply_interruption_truncation(ctx=get_run_context())
+                    self._apply_interruption_truncation(
+                        ctx=get_run_context(),
+                        replace_last=self._turn_finalized_ok,
+                    )
                 except Exception as e:
                     logger.warning("turn_truncation_failed", error=str(e), exc_info=True)
             ctx = get_run_context()
