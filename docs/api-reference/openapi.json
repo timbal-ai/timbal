@@ -71,6 +71,64 @@
             "bearer_auth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Enqueue a job against an ACE. Today: `regenerate` (playbook [re-]generation from the linked workforce's agent code file; the current playbook stays usable until the job commits a new one). The kind vocabulary grows server-side — future kinds include usage-driven adaptation.",
+        "operationId": "enqueue",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "description": "ACE uid (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnqueueAceJobReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Job enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnqueueJobResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request (e.g. unknown or non-enqueuable kind, unknown branch)"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "ACE not found, or no workforce linked"
+          },
+          "409": {
+            "description": "ACE already has a queued or running job, or multiple linked workforces and no app_id"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/ace/{ace_uid}/jobs/{job_uid}": {
@@ -278,98 +336,6 @@
           "ace"
         ],
         "description": "OpenAI-compatible chat completions endpoint for an ACE.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "ace_uid",
-            "in": "path",
-            "description": "ACE uid (UUID).",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Upstream response (JSON or SSE depending on `stream`)"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
-          },
-          "402": {
-            "description": "Credits limit exceeded"
-          },
-          "404": {
-            "description": "ACE not found"
-          },
-          "500": {
-            "description": "Upstream provider error"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/ace/{ace_uid}/v1/messages": {
-      "post": {
-        "tags": [
-          "ace"
-        ],
-        "description": "Anthropic-compatible messages endpoint for an ACE.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "ace_uid",
-            "in": "path",
-            "description": "ACE uid (UUID).",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Upstream response (JSON or SSE depending on `stream`)"
-          },
-          "400": {
-            "description": "Bad request"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
-          },
-          "402": {
-            "description": "Credits limit exceeded"
-          },
-          "404": {
-            "description": "ACE not found"
-          },
-          "500": {
-            "description": "Upstream provider error"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/ace/{ace_uid}/v1/responses": {
-      "post": {
-        "tags": [
-          "ace"
-        ],
-        "description": "OpenAI-compatible responses endpoint for an ACE.",
         "operationId": "handler",
         "parameters": [
           {
@@ -1054,6 +1020,324 @@
         ]
       }
     },
+    "/orgs/{org_id}/analytics/costs": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "description": "Time-binned credits and USD spend across an org, grouped by product surface.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "description": "Bucket size for aggregation (`minute`, `hour`, or `day`).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BinSize"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start (epoch milliseconds). Defaults: 1h / 1d / 30d before `to` by `group_by`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end (epoch milliseconds). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Restrict to spend attributed to a specific user.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Restrict to spend attributed to a single project. Omit for org-wide totals.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "resource_type",
+            "in": "query",
+            "description": "Restrict to one product surface (e.g. `composer`, `app_run`, `kb_query`,\n`kb_file_parsing`); `legacy` selects spend recorded before source\nattribution existed.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Costs analytics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgAnalyticsCostsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/analytics/usage": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "description": "Time-binned run counts, user counts, and duration percentiles across an org.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "description": "Bucket size for aggregation (`minute`, `hour`, or `day`).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BinSize"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start (epoch milliseconds). Defaults: 1h / 1d / 30d before `to` by `group_by`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end (epoch milliseconds). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Restrict to a specific user’s runs.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Restrict to a single project. Omit for org-wide totals.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage analytics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgAnalyticsUsageBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/analytics/users": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "description": "Per-user run counts and full-ledger spend aggregates across an org.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start (epoch milliseconds).",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end (epoch milliseconds).",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Restrict to a specific user’s runs.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Restrict to a single project. Omit for org-wide aggregates.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Opaque offset for the next page (from the previous response’s `next_page_token`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User analytics page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgAnalyticsUsersBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/billing/budgets": {
       "get": {
         "tags": [
@@ -1220,6 +1504,137 @@
           },
           "404": {
             "description": "Project or role not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/billing/compute": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Get purchased compute machines and the org's compute pool usage.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Compute machine fleet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputeFleetSummary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Set the compute machine add-ons purchased by the organization.",
+        "operationId": "put",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComputeFleetReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Compute machines updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable entity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1740,6 +2155,84 @@
         ]
       }
     },
+    "/orgs/{org_id}/connectors/{connector_id}/browse/table": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`GET /orgs/{org_id}/connectors/{connector_id}/browse/table`",
+        "description": "Full introspection of one remote table: rich columns (defaults, identity, comments, precision), indexes, foreign keys, check constraints, table comment and size. Requires a connector advertising browse:describe (0.1.25+).",
+        "operationId": "table",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connection_ref",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Table described",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDetailRes"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Connector not found"
+          },
+          "422": {
+            "description": "Connector offline / refused / timed out / too old"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/connectors/{connector_id}/browse/tables": {
       "get": {
         "tags": [
@@ -1861,6 +2354,132 @@
           },
           "422": {
             "description": "Unprocessable entity"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/connectors/{connector_id}/jobs/{job_id}/stop": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /orgs/{org_id}/connectors/{connector_id}/jobs/{job_id}/stop`",
+        "description": "Cancel a running extract job. The row is terminalized as `stopped` first\n(so the run is dead even if the connector is offline or never acks), then a\n`StopJob` command aborts the connector-side task best-effort. Idempotent:\nstopping an already-terminal job returns its current state.",
+        "operationId": "stop",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job stopped (or already terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopRes"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Job not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/connectors/{connector_id}/query": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /orgs/{org_id}/connectors/{connector_id}/query`",
+        "description": "Run an ad-hoc SQL query against a connector's source and return the bounded result inline. Read-only by default (enforced node-side); write mode must also be allowed by the connection's local policy on the connector box. Requires a connector advertising query:sql (0.1.26+).",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Query executed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryRes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Connector not found"
+          },
+          "422": {
+            "description": "Connector offline / refused / timed out / too old"
           }
         },
         "security": [
@@ -2626,6 +3245,81 @@
         ]
       }
     },
+    "/orgs/{org_id}/iam/actions/{action}/users": {
+      "get": {
+        "tags": [
+          "iam"
+        ],
+        "description": "List members who effectively hold an org-wide IAM action.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "path",
+            "description": "Org-wide IAM action key, for example `roles.manage`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Restrict the report to a single member. Filtering to yourself\nrequires only org membership; other members require `users.read`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Page token for pagination. Pass back the `next_page_token` from the\nprevious response.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Members holding the action",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionUsersResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "422": {
+            "description": "Unknown or non-org-wide action"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/iam/check": {
       "post": {
         "tags": [
@@ -2669,6 +3363,93 @@
           },
           "422": {
             "description": "Invalid request"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/resources/{resource}/users": {
+      "get": {
+        "tags": [
+          "iam"
+        ],
+        "description": "List members with effective access to a resource, per action.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "resource",
+            "in": "path",
+            "description": "Concrete resource path, for example `projects:42` or\n`projects:42:envs:5`. No wildcards.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actions",
+            "in": "query",
+            "description": "Comma-separated action keys to evaluate (for example\n`projects.envs.deploy,projects.envs.logs`). Every action must target\nthe resource's kind. Omit to evaluate every action applicable to the\nresource.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Restrict the report to a single member. Filtering to yourself\nrequires only org membership; other members require `users.read`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Page token for pagination. Pass back the `next_page_token` from the\nprevious response.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Members with access and their allowed actions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResourceUsersResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "422": {
+            "description": "Invalid resource or actions"
           }
         },
         "security": [
@@ -3995,7 +4776,7 @@
             }
           },
           "409": {
-            "description": "KB is already under maintenance (no backup row created)"
+            "description": "KB is under maintenance or served by another host (no backup row created)"
           }
         },
         "security": [
@@ -6053,6 +6834,215 @@
         ]
       }
     },
+    "/orgs/{org_id}/models/policies": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List model policies",
+        "description": "List the organization's LLM model and provider usage policies.",
+        "operationId": "list_org_model_policies",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy rules for the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgModelPoliciesResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Create a model policy",
+        "description": "Create a rule restricting which LLM providers or models the organization can use.",
+        "operationId": "create_org_model_policy",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateModelPolicyBody"
+              },
+              "examples": {
+                "Disable a provider": {
+                  "value": {
+                    "provider": "byteplus"
+                  }
+                },
+                "Disable one model": {
+                  "value": {
+                    "provider": "openai",
+                    "model_id": "gpt-5",
+                    "effect": "deny"
+                  }
+                },
+                "Re-allow one model of a disabled provider": {
+                  "value": {
+                    "provider": "byteplus",
+                    "model_id": "seed-2-0-pro-260215",
+                    "effect": "allow"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Policy rule created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Rule already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/models/policies/{policy_id}": {
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Delete a model policy",
+        "description": "Delete an LLM model or provider policy rule from the organization.",
+        "operationId": "delete_org_model_policy",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Policy rule deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/notifications/channels": {
       "get": {
         "tags": [
@@ -6819,7 +7809,15 @@
         },
         "responses": {
           "204": {
-            "description": "Project updated"
+            "description": "Project updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
           },
           "400": {
             "description": "Validation failed"
@@ -7040,7 +8038,7 @@
         "tags": [
           "analytics"
         ],
-        "description": "Per-user run and spend aggregates for a project.",
+        "description": "Per-user run counts and project-attributed spend aggregates for a project.",
         "operationId": "handler",
         "parameters": [
           {
@@ -7360,7 +8358,7 @@
         "tags": [
           "projects"
         ],
-        "description": "List environments for a project.",
+        "description": "List environments for a project with resolved per-component deploy config.",
         "operationId": "handler",
         "parameters": [
           {
@@ -7567,7 +8565,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Update deploy configuration for an environment.",
+        "description": "Update deploy configuration for an environment, including per-component overrides.",
         "operationId": "handler",
         "parameters": [
           {
@@ -7608,6 +8606,9 @@
         "responses": {
           "200": {
             "description": "Configuration updated successfully"
+          },
+          "400": {
+            "description": "Invalid component key or configuration value"
           },
           "403": {
             "description": "Insufficient permissions"
@@ -7841,6 +8842,657 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/evals/definitions": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "List eval definitions (test cases from evals/*.yaml) per workforce component. Reads the env branch's worktree by default; pass ?rev= to read from git.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git rev to read definitions from (branch, tag, or SHA). When set,\ndefinitions come from git at that rev instead of the worktree.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "component_id",
+            "in": "query",
+            "description": "Filter to a single workforce component by its numeric app id\n(returned as `component_id`). Combines with `component_uid`: when\nboth are set, components must match both.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "component_uid",
+            "in": "query",
+            "description": "Filter to a single workforce component by its manifest uid (the\n`_id` field in `timbal.yaml`, returned as `component_uid`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Eval definitions listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEvalDefinitionsResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown rev"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/evals/jobs": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "List eval jobs (background eval generation) for an env, most recent first.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "component_id",
+            "in": "query",
+            "description": "Filter to one workforce component by its numeric app id.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows to return (clamped to 200). Defaults to 50.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEvalJobsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Environment not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Enqueue a background eval job (today: generate_initial — Claude-generate an initial eval suite for a workforce component, written to the env branch's worktree).",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnqueueEvalJobReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Job enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnqueueEvalJobResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing component selector or unknown kind"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Component not found"
+          },
+          "409": {
+            "description": "Component already has a live eval job in this env"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/evals/jobs/{job_uid}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Get a single eval job by uid.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalJobView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Job not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/evals/runs": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "List eval runs (deploy-gate and manual executions) for an environment.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "component_id",
+            "in": "query",
+            "description": "Filter to a single workforce component by its numeric app id\n(the value the SDK reads from `TIMBAL_APP_ID`, also returned as\n`component.id` on each run). Combines with `component_uid`: when\nboth are set, rows must match both.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "component_uid",
+            "in": "query",
+            "description": "Filter to a single workforce component by its manifest uid (the\n`_id` field in `timbal.yaml`, also returned as `component.uid` on\neach run). Display name is deliberately not accepted as a filter\n— it's user-editable and not guaranteed unique within a project.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "trigger",
+            "in": "query",
+            "description": "Optional trigger filter. Accepts:\n  * `latest` — runs from the env's most recent deploy batch.\n  * a UUID — runs from that deploy batch.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "trigger_type",
+            "in": "query",
+            "description": "Filter by what started the run: `deploy` (gate), `manual`\n(`POST .../evals/runs`), or `push` (`deploy_config.evals_on_push`\nCI runs). Orthogonal to `trigger` (a deploy-batch selector).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by run status: `running`, `passed`, `failed`, or `error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "include_logs",
+            "in": "query",
+            "description": "Include the captured CLI stdout/stderr in each run. Off by\ndefault — logs can be hundreds of KB per run.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows returned, newest first. Defaults to 50, capped at 200.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Eval runs listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEvalRunsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Manually run evals for a workforce component (no deploy). Defaults to the env worktree so uncommitted evals are included; pass source=git for a clean extract.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunEvalsReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Eval run started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunEvalsResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing component filter, bad source/rev combo, or unknown rev"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Component not found (in the project, worktree, or at the rev)"
+          },
+          "422": {
+            "description": "Component has no eval files under evals/"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/evals/runs/{eval_run_id}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Get a single eval run, including its logs.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eval_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Eval run fetched successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalRunDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Eval run not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Delete an eval run from the history. Running runs cannot be deleted.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eval_run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Eval run deleted"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "404": {
+            "description": "Eval run not found"
+          },
+          "422": {
+            "description": "Eval run is still running"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/logs": {
       "get": {
         "tags": [
@@ -7876,15 +9528,34 @@
           {
             "name": "component",
             "in": "query",
-            "description": "Which component's logs to fetch. Shared vocabulary with\n`GET /preview/logs` (which 501s on `workforce`). `workforce`\nhere covers agent and workflow components interchangeably.",
-            "required": true,
+            "description": "Which component's logs to fetch. Shared vocabulary with\n`GET /preview/logs` (which 501s on `workforce`). `workforce`\nhere covers agent and workflow components interchangeably.\nResolves to the component's most recent deployment. Mutually\nexclusive with `deployment_id`; exactly one of the two must be\nprovided.",
+            "required": false,
             "schema": {
-              "type": "string",
-              "description": "Routing selector for the deployable units a Timbal project owns:\nthe project-level frontend (`Ui`), the project-level backend (`Api`),\nand the N workforce components (`Workforce`, keyed on\n`manifest_id`).\n\nUsed as a `?component=` query parameter on every surface that acts\non one component at a time (`GET /preview/logs`,\n`GET /envs/{env}/logs`, etc.). Wire values are lowercase\n(`ui`/`api`/`workforce`). Surfaces that don't apply to a given\nvariant (e.g. previews don't run workforce components today) reject\nwith `501 NotImplemented` instead of forking the schema — clients\nrely on a single shared vocabulary.\n\nDistinct from [`AppType`], which is a **type discriminator** on\nworkforce rows (`Agent` vs `Workflow`) carried in response payloads.\n`ProjectComponent` collapses both into `Workforce` because every\nsurface that *selects* a workforce component keys on `manifest_id`,\nnot on the Agent-vs-Workflow distinction (the underlying log\npipeline, deployment shape, etc. are identical for both). Use\n[`From\u003CAppType\u003E`] to bridge: any workforce type — including the\nforward-compat `AppType::Unknown` catch-all — maps to\n`ProjectComponent::Workforce`.",
-              "enum": [
-                "ui",
-                "api",
-                "workforce"
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "description": "Routing selector for the deployable units a Timbal project owns:\nthe project-level frontend (`Ui`), the project-level backend (`Api`),\nand the N workforce components (`Workforce`, keyed on\n`manifest_id`).\n\nUsed as a `?component=` query parameter on every surface that acts\non one component at a time (`GET /preview/logs`,\n`GET /envs/{env}/logs`, etc.). Wire values are lowercase\n(`ui`/`api`/`workforce`). Surfaces that don't apply to a given\nvariant (e.g. previews don't run workforce components today) reject\nwith `501 NotImplemented` instead of forking the schema — clients\nrely on a single shared vocabulary.\n\nDistinct from [`AppType`], which is a **type discriminator** on\nworkforce rows (`Agent` vs `Workflow`) carried in response payloads.\n`ProjectComponent` collapses both into `Workforce` because every\nsurface that *selects* a workforce component keys on `manifest_id`,\nnot on the Agent-vs-Workflow distinction (the underlying log\npipeline, deployment shape, etc. are identical for both). Use\n[`From\u003CAppType\u003E`] to bridge: any workforce type — including the\nforward-compat `AppType::Unknown` catch-all — maps to\n`ProjectComponent::Workforce`.",
+                  "enum": [
+                    "ui",
+                    "api",
+                    "workforce"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "deployment_id",
+            "in": "query",
+            "description": "Fetch logs for one specific deployment (the `id` field in the\ndeployments-list response) instead of the component's latest.\nLets you read the runtime output of a failed or superseded\ndeployment post-mortem. Mutually exclusive with `component`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
               ]
             }
           },
@@ -9382,7 +11053,7 @@
         "tags": [
           "ace"
         ],
-        "description": "Create an ACE for a workforce component and enqueue its initial generation job.",
+        "description": "Create an empty ACE (ready, empty playbook) and link it to a workforce component. Does not trigger playbook generation.",
         "operationId": "create",
         "parameters": [
           {
@@ -9423,12 +11094,12 @@
           }
         ],
         "responses": {
-          "202": {
-            "description": "ACE created; generation job enqueued",
+          "201": {
+            "description": "Empty ACE created and linked",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EnqueueJobResBody"
+                  "$ref": "#/components/schemas/CreateAceResBody"
                 }
               }
             }
@@ -10048,6 +11719,44 @@
   },
   "components": {
     "schemas": {
+      "AccessAttribution": {
+        "type": "object",
+        "description": "Attribution for one allowed action: which role attachment contributed\nthe matching allow grant.\n\nSame shape as [`GrantAttribution`] plus the attachment's expiry —\n\"has access until Friday\" and \"has access\" are different findings in\nan access review.",
+        "required": [
+          "role_id",
+          "role_name"
+        ],
+        "properties": {
+          "attachment_scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Attachment-level scope in effect, or null when unscoped."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the contributing role attachment expires, or null if permanent."
+          },
+          "grant_resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resource pattern as authored on the role, pre-scope-intersection."
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "role_name": {
+            "type": "string"
+          }
+        }
+      },
       "AceJobView": {
         "type": "object",
         "description": "Public view of a background job against an ACE.",
@@ -10113,69 +11822,97 @@
         }
       },
       "AcePolicy": {
-        "type": "object",
-        "description": "A single policy entry.\n\n- `id` is the human-readable stable key (e.g. `\"ev_subsidy\"`).\n- `requires` / `provides` / `tool_action` are kept as raw JSON because\n  their shape is still evolving.",
-        "required": [
-          "id",
-          "condition",
-          "action"
-        ],
-        "properties": {
-          "action": {
-            "type": "string"
+        "allOf": [
+          {
+            "type": "object",
+            "description": "Unknown keys preserved for round-tripping."
           },
-          "condition": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "provides": {
-            "type": "array",
-            "items": {
-              "type": "string"
+          {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "condition": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Upstream model to route to when this policy matches\n(`provider/model` form, e.g. `\"anthropic/claude-haiku-4-5\"`)."
+              },
+              "provides": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "requires": {
+
+              },
+              "tool_action": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ToolAction"
+                  }
+                ]
+              }
             }
-          },
-          "requires": {
-
-          },
-          "tool_action": {
-
           }
-        }
+        ],
+        "description": "A single policy entry.\n\n- `condition` is the fuzzy trigger evaluated by LLM voters. Empty /\n  absent means the policy is **requires-only**: decided deterministically\n  at prefilter time, never sent to voters (this also enables the\n  one-LLM-call routing fast path).\n- `requires` gates the policy on extracted context variables; see the\n  rule vocabulary in [`crate::matcher`].\n- `provides` deduplicates: a policy is skipped when every var it provides\n  is already present in context.\n- `model` routes the proxied request to a different upstream model when\n  this policy matches (first matched policy with a `model` wins)."
       },
       "AceVar": {
-        "type": "object",
-        "description": "A single variable declaration.\n\n- `id` is the human-readable stable key (e.g. `\"flow\"`, `\"presupuesto_max\"`).\n- `choices`, when present, restricts the variable to an enum of string values.\n- `match_mode` tweaks how the matcher compares extracted vs expected values\n  (e.g. `\"semantic\"`).",
-        "required": [
-          "id"
-        ],
-        "properties": {
-          "choices": {
-            "type": [
-              "array",
-              "null"
+        "allOf": [
+          {
+            "type": "object",
+            "description": "Unknown keys preserved for round-tripping."
+          },
+          {
+            "type": "object",
+            "required": [
+              "id"
             ],
-            "items": {
-              "type": "string"
+            "properties": {
+              "choices": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "match_mode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
             }
-          },
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "type": "string"
-          },
-          "match_mode": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
-        }
+        ],
+        "description": "A single variable declaration.\n\n- `id` is the human-readable stable key (e.g. `\"flow\"`, `\"presupuesto_max\"`).\n- `choices`, when present, restricts the variable to an enum of string values.\n- `match_mode` tweaks how eval-side matching compares extracted vs expected\n  values (e.g. `\"semantic\"`); inference ignores it."
       },
       "ActionInfo": {
         "type": "object",
@@ -10232,6 +11969,49 @@
           "template": {
             "type": "string",
             "description": "Example resource path with `{id}` placeholders."
+          }
+        }
+      },
+      "ActionUsersResBody": {
+        "type": "object",
+        "required": [
+          "users"
+        ],
+        "properties": {
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Token to fetch the next page, or null if this is the last page."
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserAccess"
+            },
+            "description": "Members who effectively hold the action. May hold fewer entries\nthan the page window even when more pages exist."
+          }
+        }
+      },
+      "AllowedAction": {
+        "type": "object",
+        "description": "One action a principal is effectively allowed to perform, with the\nrole attachments that grant it.",
+        "required": [
+          "action",
+          "via"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "IAM action key (for example `projects.envs.deploy`)."
+          },
+          "via": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccessAttribution"
+            },
+            "description": "Role attachments contributing a matching allow grant."
           }
         }
       },
@@ -10691,6 +12471,22 @@
           "created"
         ]
       },
+      "CheckConstraintView": {
+        "type": "object",
+        "required": [
+          "name",
+          "definition"
+        ],
+        "properties": {
+          "definition": {
+            "type": "string",
+            "description": "The check expression, verbatim from the source."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "CheckInput": {
         "type": "object",
         "required": [
@@ -10822,6 +12618,13 @@
           "cursor_candidate"
         ],
         "properties": {
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Column description from the source's own doc mechanism (`COMMENT ON`,\n`MS_Description`, `COLUMN_COMMENT`)."
+          },
           "cursor_candidate": {
             "type": "boolean",
             "description": "Usable as the extract job's `cursor_column`."
@@ -10829,11 +12632,72 @@
           "data_type": {
             "type": "string"
           },
+          "default": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Column default expression, verbatim from the source\n(`nextval('t_id_seq')`, `(getdate())`, …). `null` = no default, or a\npre-0.1.25 node."
+          },
+          "generated": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Computed/generated column."
+          },
+          "identity": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Auto-assigned by the source (identity / serial / auto_increment) —\nthe ideal extract cursor when integer-typed."
+          },
+          "max_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Declared max character length for string types; `-1` = unbounded\n(`varchar(max)`, `text`)."
+          },
           "name": {
             "type": "string"
           },
           "nullable": {
             "type": "boolean"
+          },
+          "numeric_precision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Numeric precision (total digits)."
+          },
+          "numeric_scale": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Numeric scale (fraction digits)."
+          },
+          "pk_position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1-based position in the table's primary key, or `null` if not a key\ncolumn. Order matters — it's the merge key for upsert syncs and the\nkeyset tiebreaker, both of which need composite columns in declared\norder. Always `null` from nodes older than key discovery; tell \"no PK\"\nfrom \"old node\" by node version, not by an all-`null` column set.",
+            "minimum": 0
+          },
+          "unique": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` when the column alone is guaranteed unique (sole key of a unique\nindex or the PK) — a unique cursor keeps incremental extraction on the\ncheap scalar path; a non-unique one needs a PK tie-breaker. `null` from\nnodes older than the hint (0.1.25): unknown, not \"not unique\"."
           }
         }
       },
@@ -10848,6 +12712,213 @@
             "items": {
               "$ref": "#/components/schemas/ColumnView"
             }
+          }
+        }
+      },
+      "ComponentConfigEntry": {
+        "type": "object",
+        "description": "Per-component deploy override stored under\n`ProjectEnvs.deploy_config.components[key]`. When set, the entry is the\nGROUND TRUTH for that component: its config resolves as type defaults +\nthis entry only (env flat keys and app-level `OrgsApps.deploy_config` are\nskipped), and `deploy_mode` here overrides both the app and env modes.",
+        "properties": {
+          "cpu": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "deploy_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "'ecs' | 'serverless' | 'disabled'"
+          },
+          "desired_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "ephemeral_storage": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "memory": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ComponentEvals": {
+        "type": "object",
+        "description": "A workforce component and the evals defined in its `evals/` dir.",
+        "required": [
+          "component_dir",
+          "evals"
+        ],
+        "properties": {
+          "component_dir": {
+            "type": "string",
+            "description": "Component directory name under `workforce/`."
+          },
+          "component_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`OrgsApps.id`, when the repo component matches a registered app.\nUse as `component_id` for `POST .../evals/runs`."
+          },
+          "component_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "App name in the platform, when registered."
+          },
+          "component_uid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`_id` from the component's `timbal.yaml` (`component_uid` for\n`POST .../evals/runs`)."
+          },
+          "evalconf": {
+            "description": "Parsed `evalconf.yaml` (from `evals/` or the component root),\nwhen present. Its `runnable` key is the per-component default."
+          },
+          "evals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvalDefinition"
+            }
+          },
+          "parse_errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Files that exist but failed to parse as eval YAML (path → error)."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Non-fatal issues the CLI would hit: duplicate eval names (hard\nerror, fails the gate), missing names, unknown validator\nkeywords, missing runnable."
+          }
+        }
+      },
+      "ComputeAmount": {
+        "type": "object",
+        "description": "A compute amount expressed in both pool dimensions.",
+        "required": [
+          "cpu_units",
+          "memory_mib"
+        ],
+        "properties": {
+          "cpu_units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Fargate cpu units (1 vCPU = 1024)."
+          },
+          "memory_mib": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Memory in MiB."
+          }
+        }
+      },
+      "ComputeFleetReqBody": {
+        "type": "object",
+        "required": [
+          "machines"
+        ],
+        "properties": {
+          "machines": {
+            "type": "object",
+            "description": "Desired machine count per size (e.g. `{\"medium\": 1, \"xlarge\": 2}`).\nSizes omitted from the map are set to zero.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ComputeFleetSummary": {
+        "type": "object",
+        "description": "The org's compute pool: purchased machines, total capacity, and current draw.",
+        "required": [
+          "machines",
+          "in_use"
+        ],
+        "properties": {
+          "in_use": {
+            "$ref": "#/components/schemas/ComputeAmount",
+            "description": "Pool currently drawn by active deployments."
+          },
+          "machines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComputeMachineStatus"
+            }
+          },
+          "pool": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComputeAmount",
+                "description": "Total pool capacity from purchased machines. `null` = unlimited\n(admin-granted)."
+              }
+            ]
+          }
+        }
+      },
+      "ComputeMachineStatus": {
+        "type": "object",
+        "description": "One machine size in the catalog, with the org's purchased quantity.",
+        "required": [
+          "slug",
+          "vcpu",
+          "memory_mib",
+          "monthly_price_cents",
+          "purchased"
+        ],
+        "properties": {
+          "memory_mib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Memory per machine in MiB."
+          },
+          "monthly_price_cents": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monthly price per machine in euro cents, before tax."
+          },
+          "purchased": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Machines of this size currently purchased."
+          },
+          "slug": {
+            "type": "string",
+            "description": "Machine size identifier (`medium`, `large`, `xlarge`, `2xlarge`, `4xlarge`)."
+          },
+          "vcpu": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Virtual CPUs per machine."
           }
         }
       },
@@ -10990,12 +13061,29 @@
           }
         }
       },
+      "CreateAceResBody": {
+        "type": "object",
+        "description": "Response body for the empty-create route. Generation is explicit —\nsee `POST /ace/{ace_uid}/jobs`.",
+        "required": [
+          "ace_uid"
+        ],
+        "properties": {
+          "ace_uid": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "CreateBackupRequest": {
         "type": "object",
         "properties": {
           "dry_run": {
             "type": "boolean",
             "description": "When omitted or when the request has no JSON body, treated as `false`."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Create the backup even if the knowledge base is currently served by\nanother host. Defaults to `false`, in which case such requests are\nrejected with `409 Conflict`."
           }
         }
       },
@@ -11345,6 +13433,37 @@
           }
         }
       },
+      "CreateModelPolicyBody": {
+        "type": "object",
+        "description": "Request body for `POST /orgs/{org_id}/models/policies`.",
+        "required": [
+          "provider"
+        ],
+        "properties": {
+          "effect": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelPolicyEffect",
+                "description": "Rule effect. Defaults to `deny`."
+              }
+            ]
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model to target. Omit to target every model of the provider."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Model provider slug, e.g. `byteplus`, `openai`."
+          }
+        }
+      },
       "CreateNotificationChannelOut": {
         "type": "object",
         "required": [
@@ -11587,6 +13706,16 @@
             "format": "int64",
             "description": "Target KB (numeric id, same as the `/k2` routes)."
           },
+          "key_columns": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered destination `PRIMARY KEY` columns. Omit for a keyless table. The\nfirst run declares the key; later runs then **merge** on it (upsert) so an\nupstream update — or a re-pulled boundary row from a non-unique cursor —\noverwrites in place instead of duplicating. Key columns are auto-added to\na `columns` subset, so they only need to exist on the source table. Source\nthese from the browse columns' `pk_position`."
+          },
           "name": {
             "type": [
               "string",
@@ -11596,6 +13725,13 @@
           },
           "source": {
             "$ref": "#/components/schemas/SourceBody"
+          },
+          "start_cursor": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional lower bound for the **first** run: only rows with\n`cursor_column \u003E= start_cursor` are pulled (e.g. seed a timestamp to\nbackfill \"from last month on\" instead of the whole table). Ignored on\nlater runs — the advancing cursor takes over. Shape matches the job\n`cursor` (e.g. `{\"kind\":\"timestamp\",\"value\":\"2026-06-01T00:00:00Z\"}`)."
           }
         }
       },
@@ -11976,12 +14112,22 @@
             "format": "int64",
             "description": "Target KB (numeric id, same as the `/k2` routes)."
           },
+          "key_columns": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered destination `PRIMARY KEY` columns. Omit for a keyless table.\nHonored when the run builds the table (`create`/`replace`). Key columns\nare auto-added to a `source.columns` subset, so they only need to exist\non the source table. Source these from the browse columns' `pk_position`\nfor a faithful copy of the source key."
+          },
           "mode": {
             "type": [
               "string",
               "null"
             ],
-            "description": "`create` | `append` | `replace`. Defaults to `create`."
+            "description": "`create` | `append` | `replace` | `upsert`. Defaults to `create`.\n`upsert` merges each batch on `key_columns` (rows with an existing key are\noverwritten, new keys inserted); requires non-empty `key_columns`. If the\ndestination table doesn't exist yet, the first upsert builds it keyed."
           },
           "pacing": {
             "oneOf": [
@@ -12088,14 +14234,18 @@
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "DEPRECATED and ignored: backups are system-managed for every KB; this\nflag gates nothing. Accepted for old clients, never applied.",
+            "deprecated": true
           },
           "backup_retention_days": {
             "type": [
               "integer",
               "null"
             ],
-            "format": "int32"
+            "format": "int32",
+            "description": "DEPRECATED and ignored: snapshot retention is system-managed\n(keep-last-N). Accepted for old clients, never applied.",
+            "deprecated": true
           },
           "backup_s3_bucket": {
             "type": [
@@ -12113,7 +14263,17 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "DEPRECATED and ignored: superseded by `backup_window_utc_hour`.\nAccepted for old clients, never applied.",
+            "deprecated": true
+          },
+          "backup_window_utc_hour": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "UTC hour (0–23) when this KB's fixed daily backup may run.\nSet `null` to reset to the fleet default (01:00 UTC)."
           },
           "description": {
             "type": [
@@ -12181,12 +14341,29 @@
               "null"
             ],
             "description": "Organization name"
+          },
+          "required_residency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Data-residency requirement for LLM inference: `\"eu\"` or `\"us\"`. When\nset, only models guaranteeing that residency are usable. Pass `null`\nto remove the requirement."
           }
         }
       },
       "EditProjectReqBody": {
         "type": "object",
         "properties": {
+          "channels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ProjectChannelWrite"
+            },
+            "description": "Messaging channel bindings (provider → workforce), full replace. Omit\nto leave unchanged; `null` or `[]` removes all channels. Per entry,\n`credentials` is write-only: omit to keep stored secrets, `null` to\nclear them, an object to replace them."
+          },
           "description": {
             "type": [
               "string",
@@ -12309,6 +14486,94 @@
       "EmbeddingModel": {
         "type": "string"
       },
+      "EnqueueAceJobReqBody": {
+        "type": "object",
+        "description": "Request body for `POST /ace/{ace_uid}/jobs`. `kind` selects the work;\nthe vocabulary lives in [`AceJobKind`] and grows server-side without\nnew endpoints (usage-window adaptation, policy scaffolding, ...).",
+        "properties": {
+          "app_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Disambiguates which linked workforce (`OrgsApps.id`) supplies the\nagent source when the ACE is attached to more than one. Optional\nwhen exactly one workforce is linked."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Job kind. Defaults to `\"regenerate\"` (playbook [re-]generation\nfrom the linked workforce's agent code file)."
+          },
+          "rev": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Git branch to read the agent source from. Defaults to the\nproject repository's HEAD branch."
+          }
+        }
+      },
+      "EnqueueEvalJobReqBody": {
+        "type": "object",
+        "properties": {
+          "commit": {
+            "type": "boolean",
+            "description": "Commit the generated file to the env branch when the job\nsucceeds. Default false: the file lands uncommitted in the\nworktree for review (manual runs see it; the deploy gate needs a\ncommit)."
+          },
+          "component_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workforce component by numeric app id (the `TIMBAL_APP_ID` value;\nnumber or string). At least one of `component_id` /\n`component_uid` is required; when both are set they must resolve\nto the same component."
+          },
+          "component_uid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workforce component by manifest uid (the `_id` in `timbal.yaml`)."
+          },
+          "guidance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional steer for the generator, e.g. \"focus on the refund flow\"."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Job kind. Defaults to `\"generate_initial\"` (the only kind today;\nthe vocabulary grows server-side without new endpoints)."
+          }
+        }
+      },
+      "EnqueueEvalJobResBody": {
+        "type": "object",
+        "description": "Response body returned by the enqueue endpoint. The HTTP status is\n`202 Accepted` — poll `GET .../evals/jobs/{job_uid}` for terminal\nstate (a succeeded `generate_initial` job's file then shows up on\n`GET .../evals/definitions` with `committed: false` unless the job\ncommitted).",
+        "required": [
+          "job_uid",
+          "kind",
+          "status"
+        ],
+        "properties": {
+          "job_uid": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Job kind (e.g. `\"generate_initial\"`)."
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `queued` at accept time."
+          }
+        }
+      },
       "EnqueueJobResBody": {
         "type": "object",
         "description": "Response body returned by any endpoint that enqueues a new job. The\nHTTP status is `202 Accepted` — poll `GET /ace/{ace_uid}/jobs/{job_uid}`\nfor terminal state.",
@@ -12375,6 +14640,313 @@
           "message": {
             "type": "string",
             "description": "Human-readable description."
+          }
+        }
+      },
+      "EvalDefinition": {
+        "type": "object",
+        "description": "One eval test case parsed from a YAML file. Field-for-field mirror of\n`timbal.evals.models.Eval` plus provenance.",
+        "required": [
+          "tags",
+          "validators",
+          "file",
+          "committed",
+          "spec"
+        ],
+        "properties": {
+          "committed": {
+            "type": "boolean",
+            "description": "Whether the file content is committed at the branch head. Always\ntrue when reading from git; from the worktree, false means the\ndeploy gate won't see this version until it's committed (manual\nruns default to the worktree and will)."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effective_runnable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`runnable` with the `evalconf.yaml` fallback resolved — what the\nCLI will actually load. Null means the CLI has nothing to run and\nthe eval will error."
+          },
+          "env": {
+            "description": "Env var overrides applied to the eval subprocess (`env` key)."
+          },
+          "file": {
+            "type": "string",
+            "description": "Repo-relative path of the YAML file this eval lives in."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Eval name. Required by the CLI — a missing name fails the run."
+          },
+          "params": {
+            "description": "Input params passed to the runnable (`params` key), e.g. `prompt`."
+          },
+          "runnable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "FQN of the runnable under test as written in this entry, e.g.\n`../agent.py::agent`. Null when the entry relies on the\n`evalconf.yaml` default."
+          },
+          "spec": {
+            "description": "The full raw eval entry as parsed YAML (lossless ground truth)."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeout": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Per-eval timeout in ms, when set."
+          },
+          "validators": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidatorSummary"
+            },
+            "description": "Flattened assertions (value + flow validators) for display.\nThe authoritative form stays in `spec`."
+          }
+        }
+      },
+      "EvalJobView": {
+        "type": "object",
+        "description": "Public view of a background eval job.",
+        "required": [
+          "uid",
+          "kind",
+          "status",
+          "component_id",
+          "output",
+          "queued_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Component the job writes evals for (`OrgsApps.id`) — same\nidentifier accepted as `component_id` on the other eval routes."
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when the job terminated unsuccessfully (`failed`, `error`)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Job kind (e.g. `\"generate_initial\"`)."
+          },
+          "output": {
+            "description": "Kind-specific result payload; `{}` until the job succeeds. For\n`generate_initial`: files, eval_count, eval_names, summary,\ncommitted, commit_sha."
+          },
+          "queued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "description": "`queued | running | succeeded | failed | error`."
+          },
+          "uid": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "EvalRunComponent": {
+        "type": "object",
+        "description": "The workforce component an eval run targets. Same identifiers the\ndeployments list exposes on its `target` object: `id` is\n`OrgsApps.id` (accepted as `component_id` filters/body params), `uid`\nis the manifest `_id` from `timbal.yaml` (accepted as\n`component_uid`). `name`/`type` are display metadata; `uid`/`name`/\n`type` go NULL if the app row was deleted after the run.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`agent` | `workflow`."
+          },
+          "uid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "EvalRunDetail": {
+        "type": "object",
+        "description": "One eval run against a workforce component (deploy gate or manual).",
+        "required": [
+          "id",
+          "component",
+          "trigger_type",
+          "status",
+          "started_at",
+          "created_at"
+        ],
+        "properties": {
+          "commit_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Git commit SHA the evals executed against."
+          },
+          "component": {
+            "$ref": "#/components/schemas/EvalRunComponent",
+            "description": "The workforce component the evals ran against."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deployment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `Deployments` row this run gated. NULL for manual runs."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "logs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Captured CLI output (only when `include_logs=true`)."
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "description": "`running` | `passed` | `failed` | `error`."
+          },
+          "status_detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short human summary, e.g. \"1 failed, 2 passed in 12.40s\"."
+          },
+          "trigger_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Deploy batch id — matches `Deployments.trigger_id`."
+          },
+          "trigger_type": {
+            "type": "string",
+            "description": "What started the run: `deploy` | `manual` | `push`."
+          }
+        }
+      },
+      "EvalRunSource": {
+        "type": "string",
+        "description": "Where to read the component source + eval YAML from for a manual run.",
+        "enum": [
+          "worktree",
+          "git"
+        ]
+      },
+      "ForeignKeyView": {
+        "type": "object",
+        "required": [
+          "name",
+          "columns",
+          "ref_schema",
+          "ref_table",
+          "ref_columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`columns[i]` references `ref_columns[i]`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "on_delete": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "on_update": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ref_columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ref_schema": {
+            "type": "string"
+          },
+          "ref_table": {
+            "type": "string"
           }
         }
       },
@@ -12595,6 +15167,41 @@
           "updated_at": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "IndexView": {
+        "type": "object",
+        "required": [
+          "name",
+          "unique",
+          "primary",
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Key columns in index order."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Source-native kind (`btree`, `CLUSTERED`, `FULLTEXT`, …)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "primary": {
+            "type": "boolean",
+            "description": "Backs the table's `PRIMARY KEY`."
+          },
+          "unique": {
+            "type": "boolean"
           }
         }
       },
@@ -13041,7 +15648,9 @@
             "description": "When false, file uploads to this knowledge base are stored as-is and skipped by the automatic parsing, chunking, and embedding pipeline."
           },
           "backup_enabled": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "DEPRECATED: backups are system-managed for every KB (idle teardown +\ndaily window pass); this flag gates nothing. Still returned for\nexisting clients; PATCH ignores it.",
+            "deprecated": true
           },
           "backup_last_completed_at": {
             "type": [
@@ -13092,7 +15701,17 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "DEPRECATED: never had a cron behind it; superseded by\n`backup_window_utc_hour`. Still returned for existing clients; PATCH\nignores it.",
+            "deprecated": true
+          },
+          "backup_window_utc_hour": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "UTC hour (0–23) of this KB's daily backup window; `null` = fleet\ndefault (01:00 UTC). The daily cadence itself is fixed."
           },
           "created_at": {
             "type": "string",
@@ -14072,6 +16691,67 @@
           }
         }
       },
+      "ListEvalDefinitionsResBody": {
+        "type": "object",
+        "required": [
+          "source",
+          "rev",
+          "commit_hash",
+          "components"
+        ],
+        "properties": {
+          "commit_hash": {
+            "type": "string",
+            "description": "Head commit of that rev. With `source = \"worktree\"`, uncommitted\nfile changes are NOT part of this commit — check per-file\n`committed` flags."
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComponentEvals"
+            }
+          },
+          "rev": {
+            "type": "string",
+            "description": "Branch (worktree) or rev (git) the definitions were read from."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where definitions were read from: `worktree` or `git`."
+          }
+        }
+      },
+      "ListEvalJobsResBody": {
+        "type": "object",
+        "required": [
+          "jobs",
+          "total"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvalJobView"
+            }
+          },
+          "total": {
+            "type": "string"
+          }
+        }
+      },
+      "ListEvalRunsResBody": {
+        "type": "object",
+        "required": [
+          "eval_runs"
+        ],
+        "properties": {
+          "eval_runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvalRunDetail"
+            }
+          }
+        }
+      },
       "ListGroupRoleMappingsResBody": {
         "type": "object",
         "required": [
@@ -14224,6 +16904,21 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/OrgContact"
+            }
+          }
+        }
+      },
+      "ListOrgModelPoliciesResBody": {
+        "type": "object",
+        "title": "ListOrgModelPoliciesResponse",
+        "required": [
+          "policies"
+        ],
+        "properties": {
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelPolicy"
             }
           }
         }
@@ -14513,6 +17208,54 @@
           }
         }
       },
+      "ModelPolicy": {
+        "type": "object",
+        "description": "An organization policy rule restricting LLM provider or model usage.",
+        "required": [
+          "id",
+          "provider",
+          "effect",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by_user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User who created the rule."
+          },
+          "effect": {
+            "$ref": "#/components/schemas/ModelPolicyEffect"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model targeted by the rule. Omitted when the rule covers the whole\nprovider."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Model provider slug, e.g. `byteplus`, `openai`."
+          }
+        }
+      },
+      "ModelPolicyEffect": {
+        "type": "string",
+        "description": "Whether a policy rule allows or denies its target. A model-level rule\nbeats a provider-level rule; `deny` beats `allow` at the same specificity.",
+        "enum": [
+          "allow",
+          "deny"
+        ]
+      },
       "NewReactionReqBody": {
         "type": "object",
         "required": [
@@ -14743,8 +17486,101 @@
             "format": "int64",
             "description": "Unix timestamp (seconds) when the current billing period ends and the\nplan renews. `null` on the free plan (no active subscription). When\n`plan_cancel_at_period_end` is `true`, the plan ends at this time instead\nof renewing."
           },
+          "required_residency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Data-residency requirement for LLM inference: `\"eu\"` or `\"us\"`. When\nset, only models guaranteeing that residency can be used and the model\ncatalog is filtered accordingly. `null` = unrestricted."
+          },
           "role": {
             "type": "string"
+          }
+        }
+      },
+      "OrgAnalyticsCostsBody": {
+        "type": "object",
+        "required": [
+          "group_by",
+          "from",
+          "to",
+          "bins"
+        ],
+        "properties": {
+          "bins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceBin"
+            }
+          },
+          "from": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "group_by": {
+            "$ref": "#/components/schemas/BinSize"
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "OrgAnalyticsUsageBody": {
+        "type": "object",
+        "required": [
+          "group_by",
+          "from",
+          "to",
+          "bins"
+        ],
+        "properties": {
+          "bins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageBin"
+            }
+          },
+          "from": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "group_by": {
+            "$ref": "#/components/schemas/BinSize"
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "OrgAnalyticsUsersBody": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "users"
+        ],
+        "properties": {
+          "from": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserRow"
+            }
           }
         }
       },
@@ -15240,6 +18076,14 @@
           }
         }
       },
+      "PrincipalKind": {
+        "type": "string",
+        "description": "Whether a principal is a person or a platform-managed machine identity\n(for example a project's service credential).",
+        "enum": [
+          "human",
+          "service"
+        ]
+      },
       "ProjectAnalyticsCreditsBody": {
         "type": "object",
         "required": [
@@ -15347,6 +18191,67 @@
           }
         }
       },
+      "ProjectChannel": {
+        "type": "object",
+        "description": "One channel binding as returned on the project payload. Topology only —\ncredentials are never included here.",
+        "required": [
+          "provider",
+          "workforce"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether credentials for this binding are stored platform-side."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Soft toggle from the UI. Omitted/`true` means the channel is on; `false`\nkeeps the workforce mapping so it can be re-enabled without reconfiguring."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Channel provider id (for example `telegram`, `slack`)."
+          },
+          "workforce": {
+            "type": "string",
+            "description": "Workforce component the channel talks to — always the component's\nmanifest uid on read."
+          }
+        }
+      },
+      "ProjectChannelWrite": {
+        "type": "object",
+        "description": "One channel binding in the PATCH body.",
+        "required": [
+          "provider",
+          "workforce"
+        ],
+        "properties": {
+          "credentials": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Provider secrets, **write-only** (never returned on any read). Omit to\nkeep the stored credentials for this binding; `null` clears them; an\nobject replaces them. Telegram: `token` (+ optional `secret_token`).\nSlack: `bot_token` + `signing_secret`.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Soft toggle; defaults to `true`."
+          },
+          "provider": {
+            "type": "string",
+            "description": "Channel provider id (for example `telegram`, `slack`)."
+          },
+          "workforce": {
+            "type": "string",
+            "description": "Workforce component: numeric app id, manifest uid, or name — the server\ncanonicalizes to the manifest uid."
+          }
+        }
+      },
       "ProjectDetail": {
         "type": "object",
         "required": [
@@ -15363,6 +18268,7 @@
           "integrations",
           "auth_enabled",
           "auth_providers",
+          "channels",
           "created_at",
           "updated_at"
         ],
@@ -15377,6 +18283,13 @@
               "type": "string"
             },
             "description": "Enabled end-user sign-in methods for the project's deployed app login\nscreen (for example `email`, `google`, `microsoft`, `github`). Empty when\nno sign-in method has been turned on."
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectChannel"
+            },
+            "description": "Messaging channel topology for the deployed app (provider → workforce).\nEmpty when no channels are connected. Topology and configuration state\nonly; credentials are never included."
           },
           "created_at": {
             "type": "integer",
@@ -15501,6 +18414,7 @@
           "name",
           "color",
           "subdomain",
+          "components",
           "created_at",
           "updated_at"
         ],
@@ -15514,12 +18428,12 @@
           "color": {
             "type": "string"
           },
-          "cpu": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32"
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectEnvComponent"
+            },
+            "description": "Effective per-component deploy configuration after resolution."
           },
           "created_at": {
             "type": "string",
@@ -15533,6 +18447,46 @@
               "string",
               "null"
             ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "subdomain": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProjectEnvComponent": {
+        "type": "object",
+        "description": "Effective deploy configuration for one component of an environment.",
+        "required": [
+          "component",
+          "type",
+          "deploy_mode"
+        ],
+        "properties": {
+          "component": {
+            "type": "string",
+            "description": "`\"api\"` or the workforce `OrgsApps.id` as a string. This is the key\nto use in `PATCH .../config` `components`."
+          },
+          "cpu": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "NULL unless the component deploys to ECS (resources only apply there)."
+          },
+          "deploy_mode": {
+            "type": "string"
           },
           "desired_count": {
             "type": [
@@ -15548,10 +18502,6 @@
             ],
             "format": "int32"
           },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
           "memory": {
             "type": [
               "integer",
@@ -15560,14 +18510,14 @@
             "format": "int32"
           },
           "name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "subdomain": {
-            "type": "string"
-          },
-          "updated_at": {
+          "type": {
             "type": "string",
-            "format": "date-time"
+            "description": "'api' | 'agent' | 'workflow'"
           }
         }
       },
@@ -15786,6 +18736,22 @@
           }
         }
       },
+      "QueryColumnView": {
+        "type": "object",
+        "required": [
+          "name",
+          "data_type"
+        ],
+        "properties": {
+          "data_type": {
+            "type": "string",
+            "description": "Source-native type name (`int4`, `nvarchar`, `decimal`, …)."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "QueryK2Request": {
         "type": "object",
         "required": [
@@ -15806,6 +18772,92 @@
           "sql": {
             "type": "string",
             "description": "SQL query to execute against the knowledge base.\nUse $1, $2, etc. for parameter placeholders."
+          }
+        }
+      },
+      "QueryReq": {
+        "type": "object",
+        "required": [
+          "connection_ref",
+          "sql"
+        ],
+        "properties": {
+          "connection_ref": {
+            "type": "string",
+            "description": "Connection ref on the node (from `/browse/connections`)."
+          },
+          "max_rows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Row cap on the returned result. Defaults to 500, ceiling 10000.",
+            "minimum": 0
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`read` (default) | `write`. `read` is enforced node-side with\nengine-level read-only semantics; `write` additionally requires the\nconnection's local policy (`connections.json`) to allow writes."
+          },
+          "sql": {
+            "type": "string",
+            "description": "The SQL to run. One statement on MySQL; multi-statement batches work on\nPostgres and SQL Server (the **last** result set is returned; on\nPostgres that's the last *row-returning* set — zero-row sets are\ninvisible to the node's driver — while SQL Server returns the true\nlast set even when empty)."
+          },
+          "timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Node-side execution budget in milliseconds. Defaults to 30000,\nceiling 60000.",
+            "minimum": 0
+          }
+        }
+      },
+      "QueryRes": {
+        "type": "object",
+        "required": [
+          "columns",
+          "rows",
+          "row_count",
+          "truncated"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueryColumnView"
+            }
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "description": "Row-major, aligned with `columns`. Cells are plain JSON scalars:\nnumbers stay numbers, exact decimals and timestamps are strings,\nbinary is `0x`-prefixed hex, NULL is `null`."
+          },
+          "rows_affected": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Rows changed by non-row-returning statements, when the engine reports\nit (Postgres/MySQL; `null` on SQL Server = unknown, not zero).",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "The node's row or byte cap bit — `rows` is a prefix of the real result."
           }
         }
       },
@@ -15869,11 +18921,10 @@
       },
       "RelationalSourceBody": {
         "type": "object",
-        "description": "Shared shape for the relational sources (Postgres, SQL Server). `schema`\ndefaults per-source (`public` / `dbo`).",
+        "description": "Shared shape for the relational sources (Postgres, SQL Server, MySQL).\n`schema` defaults per-source (`public` / `dbo` / the connection DSN's\ndefault database — on MySQL `schema` *is* the database name).",
         "required": [
           "connection_ref",
-          "table",
-          "cursor_column"
+          "table"
         ],
         "properties": {
           "columns": {
@@ -15891,8 +18942,11 @@
             "description": "Name of a connection in the connector's local `connections.json`.\nThe DSN itself never leaves the connector box."
           },
           "cursor_column": {
-            "type": "string",
-            "description": "Monotonic column for incremental extraction (`id`, `updated_at`, ...)."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Monotonic column for incremental extraction (`id`, `updated_at`, ...).\nOmit for a *snapshot* (full-scan) job: one unordered pass over the whole\ntable, no checkpoint/resume — for tables with no usable cursor (requires\nthe connector to advertise `extract:snapshot`, 0.1.25+)."
           },
           "schema": {
             "type": [
@@ -15982,6 +19036,36 @@
           },
           "token_id": {
             "type": "string"
+          }
+        }
+      },
+      "ResourceUsersResBody": {
+        "type": "object",
+        "required": [
+          "actions",
+          "users"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Action keys that were evaluated, in evaluation order."
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Token to fetch the next page, or null if this is the last page."
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserAccess"
+            },
+            "description": "Members with at least one allowed action on the resource. May hold\nfewer entries than the page window even when more pages exist."
           }
         }
       },
@@ -16231,6 +19315,53 @@
 
         }
       },
+      "RunEvalsReqBody": {
+        "type": "object",
+        "properties": {
+          "component_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workforce component by numeric app id (the `TIMBAL_APP_ID` value;\nnumber or string). At least one of `component_id` / `component_uid`\nis required; when both are set, they must resolve to the same\ncomponent."
+          },
+          "component_uid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workforce component by manifest uid (the `_id` in `timbal.yaml`)."
+          },
+          "rev": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Git rev to extract when `source = \"git\"` (branch, tag, or SHA).\nDefaults to the env's tracked branch. Rejected when\n`source = \"worktree\"`."
+          },
+          "source": {
+            "$ref": "#/components/schemas/EvalRunSource",
+            "description": "`worktree` (default) or `git`. Worktree includes uncommitted\nevals; git is a clean extract at `rev`."
+          }
+        }
+      },
+      "RunEvalsResBody": {
+        "type": "object",
+        "required": [
+          "eval_run_id",
+          "status"
+        ],
+        "properties": {
+          "eval_run_id": {
+            "type": "string",
+            "description": "Id of the created eval run. Poll `GET .../evals/runs/{eval_run_id}`."
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `running` at accept time."
+          }
+        }
+      },
       "RunPreview": {
         "type": "object",
         "required": [
@@ -16429,6 +19560,30 @@
           }
         }
       },
+      "SourceBin": {
+        "type": "object",
+        "required": [
+          "interval_starts_at",
+          "interval_ends_at",
+          "sources"
+        ],
+        "properties": {
+          "interval_ends_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_starts_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceCosts"
+            }
+          }
+        }
+      },
       "SourceBody": {
         "oneOf": [
           {
@@ -16472,9 +19627,114 @@
                 }
               }
             ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RelationalSourceBody"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "mysql"
+                    ]
+                  }
+                }
+              }
+            ]
           }
         ],
         "description": "The source half of a dispatch, tagged by `kind`. Each variant maps to a\n`SourceSpec` and gates on the connector advertising the matching\n`source:\u003Ckind\u003E` capability. Request shape:\n`\"source\": { \"kind\": \"sql_server\", \"connection_ref\": \"...\", \"table\": \"...\", \"cursor_column\": \"...\" }`."
+      },
+      "SourceCost": {
+        "type": "object",
+        "description": "One cost type's spend within a source group. Unlike [`Cost`], `usd` is\nnullable: credits-only surfaces never expose a dollar figure.",
+        "required": [
+          "id",
+          "name",
+          "unit",
+          "credits"
+        ],
+        "properties": {
+          "credits": {
+            "type": "number",
+            "format": "double"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string",
+            "description": "Metered unit (`tokens`, `seconds`, ...) for surfaces with a dollar\nprice; `credits` for credits-only surfaces."
+          },
+          "usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Dollar spend. `null` for credits-only surfaces (`composer`, `kb_*`),\nwhich are priced in credits."
+          }
+        }
+      },
+      "SourceCosts": {
+        "type": "object",
+        "description": "Spend for one product surface (`resource_type` on the credit ledger)\nwithin a bin, with the per-cost-type breakdown nested.",
+        "required": [
+          "resource_type",
+          "credits",
+          "costs"
+        ],
+        "properties": {
+          "costs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SourceCost"
+            }
+          },
+          "credits": {
+            "type": "number",
+            "format": "double"
+          },
+          "resource_type": {
+            "type": "string",
+            "description": "Product surface that produced the spend (`app_run`, `composer`,\n`kb_query`, `kb_file_parsing`, `kb_file_embedding`, `transcription`,\n`message`, `ace_run`, `org_api_request`, `project_api_request`), or\n`legacy` for rows recorded before source attribution existed."
+          },
+          "usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Dollar spend. `null` for credits-only surfaces (`composer`, `kb_*`),\nwhich are priced in credits."
+          }
+        }
+      },
+      "StopRes": {
+        "type": "object",
+        "required": [
+          "job_id",
+          "state"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "Job state after the stop: `stopped` if this call terminalized it, else\nthe terminal state it already had (idempotent re-stops included)."
+          }
+        }
       },
       "SyncDetailRes": {
         "type": "object",
@@ -16596,6 +19856,7 @@
           "source_schema",
           "source_table",
           "cursor_column",
+          "key_columns",
           "kb_uid",
           "dest_table",
           "interval_secs",
@@ -16637,6 +19898,13 @@
           },
           "kb_uid": {
             "type": "string"
+          },
+          "key_columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered destination primary-key columns; empty for a keyless table."
           },
           "last_run_at": {
             "type": [
@@ -16685,6 +19953,70 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "TableDetailRes": {
+        "type": "object",
+        "required": [
+          "schema",
+          "name",
+          "approx_rows",
+          "columns",
+          "indexes",
+          "foreign_keys",
+          "check_constraints"
+        ],
+        "properties": {
+          "approx_rows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Planner estimate; `-1` when unknown."
+          },
+          "check_constraints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckConstraintView"
+            }
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnView"
+            }
+          },
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Table description from the source's own doc mechanism."
+          },
+          "foreign_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ForeignKeyView"
+            }
+          },
+          "indexes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexView"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Total on-disk size (data + indexes) in bytes, when the source reports one."
           }
         }
       },
@@ -16819,9 +20151,49 @@
           }
         }
       },
+      "ToolAction": {
+        "allOf": [
+          {
+            "type": "object",
+            "description": "Unknown keys preserved for round-tripping."
+          },
+          {
+            "type": "object",
+            "required": [
+              "tool"
+            ],
+            "properties": {
+              "confirmation": {
+                "type": "string",
+                "description": "Matcher-confidence gate: `none` (prefilter alone suffices),\n`majority` (default), or `unanimous` (all voters must agree)."
+              },
+              "params": {
+                "type": "object"
+              },
+              "tool": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Deterministic tool invocation attached to a policy. `params` values of\nthe form `\"$var_id\"` are resolved from extracted context variables at\ninference time; `$var_id` tokens embedded in longer strings (template\nparams, e.g. a SQL string) interpolate in place."
+      },
       "UpdateEnvConfigReqBody": {
         "type": "object",
+        "required": [
+          "components"
+        ],
         "properties": {
+          "components": {
+            "type": "object",
+            "description": "Per-component overrides, keyed by `\"api\"` or a workforce\n`OrgsApps.id`. Each entry sent REPLACES the stored entry wholesale\n(it is the ground truth for that component); `null` removes the\nentry so the component falls back to the env/app-level layering.\nKeys not present in the map are left untouched.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ComponentConfigEntry"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "cpu": {
             "type": [
               "integer",
@@ -16842,6 +20214,20 @@
               "null"
             ],
             "format": "int32"
+          },
+          "evals": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Deploy-time eval gate (GitHub-Actions-style required check):\n`true` arms it for every workforce component in this env — deploys\nrun the component's committed evals first and fail on a non-pass.\n`false` disarms. Omit to leave unchanged. Per-component override\nlives on `OrgsApps.deploy_config.evals`."
+          },
+          "evals_on_push": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Push-triggered CI eval runs: `true` runs the eval suite of every\ncomponent with eval files on each push to this env's branch —\nreport-only (`trigger_type = 'push'` on the runs), gates nothing.\nPer component, skipped when that component's deploy gate is armed\n(env- or app-level `evals`), since the gate already runs those\nevals on the push-triggered redeploy. Omit to leave unchanged."
           },
           "memory": {
             "type": [
@@ -17084,6 +20470,42 @@
           }
         }
       },
+      "UserAccess": {
+        "type": "object",
+        "description": "A principal with effective access, as returned by the reverse-lookup\nendpoints (`GET /iam/resources/{resource}/users` and\n`GET /iam/actions/{action}/users`).\n\nOnly principals with at least one allowed action appear. Deny-beats-allow\nis already applied: an action covered by both an allow and a deny grant\nis not listed. Platform superadmins are not included unless they also\nhold explicit role attachments.",
+        "required": [
+          "user_id",
+          "kind",
+          "allowed_actions"
+        ],
+        "properties": {
+          "allowed_actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AllowedAction"
+            },
+            "description": "Actions this principal is effectively allowed to perform, with\nattribution."
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PrincipalKind"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
       "UserRef": {
         "type": "object",
         "required": [
@@ -17146,7 +20568,8 @@
         "properties": {
           "credits": {
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "description": "Total credit spend across all surfaces."
           },
           "n_error": {
             "type": "integer",
@@ -17166,7 +20589,8 @@
           },
           "usd": {
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "description": "Dollar spend, excluding credits-only surfaces (composer, knowledge-base\noperations) which are priced in credits."
           },
           "user_email": {
             "type": "string"
@@ -17220,6 +20644,28 @@
           "failed",
           "validationtimedout"
         ]
+      },
+      "ValidatorSummary": {
+        "type": "object",
+        "description": "One assertion extracted from an eval entry, flattened for display.",
+        "required": [
+          "target",
+          "name",
+          "value"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Validator keyword as written, e.g. `contains!`, `seq!`,\n`not_semantic!`."
+          },
+          "target": {
+            "type": "string",
+            "description": "Dot-path of what's being validated, relative to the eval root —\ne.g. `output`, `get_datetime.input.timezone`. Empty for\nvalidators attached directly to the root (e.g. a top-level\n`seq!`)."
+          },
+          "value": {
+            "description": "The expected value / steps list, as written in the YAML."
+          }
+        }
       },
       "Var": {
         "type": "object",
@@ -17421,7 +20867,7 @@
     },
     {
       "name": "analytics",
-      "description": "Project analytics"
+      "description": "Org and project analytics"
     },
     {
       "name": "billing",
