@@ -24,8 +24,7 @@ import time
 import unicodedata
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable, AsyncIterator
-from difflib import SequenceMatcher
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,6 +36,10 @@ from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta
 from ..types.message import Message
+from .turn_detection import CommitAction, HeuristicTurnDetector, PartialDecision, TurnDetector, TurnState
+
+if TYPE_CHECKING:
+    from .metrics import TurnMetrics
 
 logger = structlog.get_logger("timbal.voice.session")
 
@@ -312,11 +315,13 @@ class VoiceSession:
         audio_input: AudioInputConfig | None = None,
         audio_output: AudioOutputConfig | None = None,
         *,
+        turn_detector: TurnDetector | None = None,
         record_audio: bool = False,
     ):
         self.agent = agent
         self.stt = stt
         self.tts = tts
+        self.turn_detector = turn_detector or HeuristicTurnDetector()
         self.audio_input = audio_input or AudioInputConfig()
         self.audio_output = audio_output or AudioOutputConfig()
 
@@ -360,12 +365,29 @@ class VoiceSession:
         self._input_audio_chunks: list[bytes] = []
         self._output_audio_chunks: list[bytes] = []
 
+        # -- Per-turn latency metrics (time.monotonic stamps) --------------------
+        self._metrics: list[TurnMetrics] = []
+        self._turn_index = 0
+        self._turn_eou_at = 0.0
+        self._turn_first_token_at: float | None = None
+        self._turn_first_audio_at: float | None = None
+        self._turn_llm_done_at: float | None = None
+        self._turn_tts_started_at: float | None = None
+        self._turn_tts_ended_at: float | None = None
+        self._turn_tts_segments = 0
+        self._turn_audio_bytes = 0
+
     # -- Public: session recording ------------------------------------------
 
     @property
     def transcript(self) -> list[TranscriptEntry]:
         """Ordered transcript of committed user/assistant text for this session."""
         return list(self._transcript)
+
+    @property
+    def metrics(self) -> list[TurnMetrics]:
+        """Per-turn latency metrics accumulated this session (one entry per turn attempt)."""
+        return list(self._metrics)
 
     @property
     def input_audio(self) -> bytes:
@@ -398,6 +420,7 @@ class VoiceSession:
         try:
             await self.stt.connect(self.audio_input)
             await self.tts.connect(self.audio_output)
+            await self.turn_detector.start(self.audio_input)
             await self._emit(SessionStarted())
 
             audio_task = asyncio.create_task(self._forward_audio(audio_in))
@@ -474,6 +497,7 @@ class VoiceSession:
             async for chunk in audio_in:
                 if self._record_audio:
                     self._input_audio_chunks.append(chunk)
+                self.turn_detector.push_audio(chunk)
                 await self.stt.push_audio(chunk)
         except asyncio.CancelledError:
             pass
@@ -490,28 +514,15 @@ class VoiceSession:
                     text = event.text.strip()
                     self._partials_since_last_commit += 1
                     await self._emit(TranscriptPartial(text=text))
-                    is_playing = self._assistant_audio_playing
-                    if is_playing and text:
-                        is_noise = _is_noise(text)
-                        is_echo = _likely_stt_echo(text, self._turn_assistant_text) if not is_noise else False
-                        too_short = len(text) < 4
-                        if not is_noise and not is_echo and not too_short:
-                            logger.debug(
-                                "stt_partial_barge_in",
-                                text_preview=text[:80],
-                                assistant_chars=len(self._turn_assistant_text),
-                                audio_playing=is_playing,
-                            )
-                            await self.interrupt()
-                        else:
-                            logger.debug(
-                                "stt_partial_skipped",
-                                text_preview=text[:80],
-                                too_short=too_short,
-                                is_noise=is_noise,
-                                is_echo=is_echo,
-                                audio_playing=is_playing,
-                            )
+                    decision = await self.turn_detector.on_partial(text, self._turn_state())
+                    if decision is PartialDecision.BARGE_IN:
+                        logger.debug(
+                            "stt_partial_barge_in",
+                            text_preview=text[:80],
+                            assistant_chars=len(self._turn_assistant_text),
+                            audio_playing=self._assistant_audio_playing,
+                        )
+                        await self.interrupt()
                 elif event.type == "committed" and event.text.strip():
                     await self._handle_committed(event.text.strip())
         except asyncio.CancelledError:
@@ -528,90 +539,66 @@ class VoiceSession:
                 pass
         await self.close()
 
+    def _turn_state(self) -> TurnState:
+        """Snapshot of session state for :class:`TurnDetector` decisions."""
+        now = time.monotonic()
+        return TurnState(
+            assistant_active=self._assistant_active,
+            audio_playing=self._assistant_audio_playing,
+            assistant_text=self._turn_assistant_text,
+            active_user_text=self._active_turn_user_text,
+            seconds_since_turn_start=now - self._turn_started_at,
+            seconds_since_last_commit=now - self._last_commit_at,
+            partials_since_last_commit=self._partials_since_last_commit,
+        )
+
     async def _handle_committed(self, text: str) -> None:
-        partials_seen = self._partials_since_last_commit
+        state = self._turn_state()
         self._partials_since_last_commit = 0
         logger.debug(
             "stt_committed_received",
             text_preview=text[:160],
             text_len=len(text),
-            partials_before=partials_seen,
+            partials_before=state.partials_since_last_commit,
             is_speaking=self._is_speaking,
-            audio_playing=self._assistant_audio_playing,
-            active_user_preview=(self._active_turn_user_text[:100] if self._active_turn_user_text else ""),
-            assistant_so_far_chars=len(self._turn_assistant_text),
+            audio_playing=state.audio_playing,
+            active_user_preview=(state.active_user_text[:100] if state.active_user_text else ""),
+            assistant_so_far_chars=len(state.assistant_text),
             **_trace_debug_fields(),
         )
-        if _is_noise(text):
-            logger.debug("stt_noise_ignored", text=text)
+        decision = await self.turn_detector.on_committed(text, state)
+        if decision.action is CommitAction.IGNORE:
+            logger.debug(
+                "stt_commit_ignored",
+                reason=decision.reason,
+                text_preview=text[:160],
+            )
             return
-        if _is_garbage_commit(text):
-            logger.debug("stt_garbage_commit_ignored", text=text)
-            return
-        if partials_seen == 0 and len(text) > 40 and not self._assistant_active:
-            logger.debug("stt_hallucination_ignored", text=text[:160], text_len=len(text))
-            return
-        if self._assistant_active and _likely_stt_echo(text, self._turn_assistant_text):
-            logger.debug("stt_echo_ignored", text=text)
-            return
-        if self._assistant_active and self._active_turn_user_text:
-            if _is_same_user_utterance_refinement(self._active_turn_user_text, text):
-                logger.debug(
-                    "stt_committed_refinement_ignored",
-                    active=self._active_turn_user_text[:100],
-                    new=text[:100],
-                )
-                return
-            # Very soon after turn start, VAD often double-fires near-identical commits.
-            if time.monotonic() - self._turn_started_at < 1.5:
-                a, b = _normalize_echo(self._active_turn_user_text), _normalize_echo(text)
-                if min(len(a), len(b)) >= 5 and SequenceMatcher(None, a, b).ratio() >= 0.58:
-                    logger.debug(
-                        "stt_committed_early_duplicate_ignored",
-                        active=self._active_turn_user_text[:100],
-                        new=text[:100],
-                    )
-                    return
-            # VAD split a single utterance into two fast commits (e.g. "Hola, ¿qué tal" + "estás?").
-            # Combine and restart the turn instead of treating the fragment as a new query.
-            since_last_commit = time.monotonic() - self._last_commit_at
-            if since_last_commit < 3.0 and len(text) < 30:
-                combined = self._active_turn_user_text.rstrip(", ") + " " + text
-                logger.debug(
-                    "stt_committed_continuation",
-                    prev=self._active_turn_user_text[:100],
-                    new=text[:100],
-                    combined=combined[:160],
-                    since_last_commit=round(since_last_commit, 2),
-                )
-                await self.interrupt()
-                self._cancel_turn.clear()
-                self._last_commit_at = time.monotonic()
-                # Replace the previous user entry with the combined text.
-                if self._transcript and self._transcript[-1].role == "user":
-                    self._transcript[-1] = TranscriptEntry(role="user", text=combined)
-                else:
-                    self._transcript.append(TranscriptEntry(role="user", text=combined))
-                await self._emit(TranscriptCommitted(text=combined))
-                self._active_turn_user_text = combined
-                self._current_turn_task = asyncio.create_task(self._run_turn(combined))
-                return
+
+        final_text = decision.text or text
         logger.debug(
-            "stt_committed_accepted_new_turn",
+            "stt_committed_accepted",
+            action=decision.action.value,
+            reason=decision.reason,
             had_active_speech=self._is_speaking,
-            text_preview=text[:160],
+            text_preview=final_text[:160],
             **_trace_debug_fields(),
         )
         await self.interrupt()
         self._cancel_turn.clear()
         self._last_commit_at = time.monotonic()
-        self._transcript.append(TranscriptEntry(role="user", text=text))
-        await self._emit(TranscriptCommitted(text=text))
-        self._active_turn_user_text = text
-        self._current_turn_task = asyncio.create_task(self._run_turn(text))
+        if decision.action is CommitAction.CONTINUE_TURN and self._transcript and self._transcript[-1].role == "user":
+            # Replace the previous user entry with the combined text.
+            self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
+        else:
+            self._transcript.append(TranscriptEntry(role="user", text=final_text))
+        await self._emit(TranscriptCommitted(text=final_text))
+        self._active_turn_user_text = final_text
+        self._turn_eou_at = time.monotonic()
+        self._current_turn_task = asyncio.create_task(self._run_turn(final_text))
         logger.debug(
             "stt_turn_task_created",
-            text_preview=text[:120],
+            text_preview=final_text[:120],
             **_trace_debug_fields(),
         )
 
@@ -621,6 +608,14 @@ class VoiceSession:
         self._is_speaking = True
         self._turn_assistant_text = ""
         self._turn_started_at = time.monotonic()
+        self._turn_index += 1
+        self._turn_first_token_at = None
+        self._turn_first_audio_at = None
+        self._turn_llm_done_at = None
+        self._turn_tts_started_at = None
+        self._turn_tts_ended_at = None
+        self._turn_tts_segments = 0
+        self._turn_audio_bytes = 0
         agen = None
         # Where we were when cancel / finally ran (loop_exit is only set on break/else/exception;
         # CancelledError inside ``await _speak`` left the old code stuck at "not_started").
@@ -662,6 +657,8 @@ class VoiceSession:
                     chunk = event.item.text if isinstance(event.item, Text) else event.item.text_delta
                     if not chunk:
                         continue
+                    if self._turn_first_token_at is None:
+                        self._turn_first_token_at = time.monotonic()
                     full_response += chunk
                     text_buffer += chunk
                     self._turn_assistant_text += chunk
@@ -723,6 +720,10 @@ class VoiceSession:
                         out = event.output
                         if isinstance(out, Message):
                             msg_text = out.collect_text()
+                            # Models that skip streaming deliver all text here — this is
+                            # the first moment LLM text exists, so stamp first-token now.
+                            if msg_text and self._turn_first_token_at is None:
+                                self._turn_first_token_at = time.monotonic()
                             # Anything still buffered from deltas must hit TTS before we ``anext``
                             # again: the next event pull runs the outer Runnable's post-hook,
                             # ``dump(output)``, and trace save — and the loop would not flush
@@ -770,6 +771,11 @@ class VoiceSession:
                             if not self._cancel_turn.is_set():
                                 turn_phase = "await_tts_after_llm_output"
                                 await self._await_tts_chain()
+                                # Attach provisional metrics now: the outer Agent's trace is
+                                # persisted in its generator ``finally``, which runs *before*
+                                # we consume the outer OUTPUT event — waiting until this turn's
+                                # own ``finally`` would miss the store for successful turns.
+                                self._attach_metrics_to_trace(self._build_turn_metrics(user_text, interrupted=False))
             else:
                 turn_phase = "agent_generator_exhausted"
                 logger.debug(
@@ -778,6 +784,8 @@ class VoiceSession:
                     response_chars=len(full_response),
                     **_trace_debug_fields(),
                 )
+
+            self._turn_llm_done_at = time.monotonic()
 
             if text_buffer and not self._cancel_turn.is_set():
                 turn_phase = "tts_synthesize_tail_buffer"
@@ -827,6 +835,19 @@ class VoiceSession:
                 if self._tts_tasks:
                     await asyncio.gather(*self._tts_tasks, return_exceptions=True)
             self._tts_tasks.clear()
+            # Metrics: finalize and emit exactly once per turn attempt (interrupted included).
+            # Runs before ``agen.aclose()`` so interrupted turns still get final metrics
+            # attached to the trace before it is persisted.
+            interrupted = self._cancel_turn.is_set() or turn_phase.startswith("cancelled_during")
+            try:
+                from .metrics import TurnMetricsEvent
+
+                turn_metrics = self._build_turn_metrics(user_text, interrupted=interrupted)
+                self._metrics.append(turn_metrics)
+                self._attach_metrics_to_trace(turn_metrics)
+                await self._emit(TurnMetricsEvent(metrics=turn_metrics))
+            except Exception as e:
+                logger.debug("turn_metrics_failed", error=str(e))
             # Close the Agent async generator *before* mutating session state so nested
             # ``voice_live.llm`` spans flush OUTPUT while the run context is still valid.
             # ``task.cancel()`` does not trigger ``async for``'s implicit ``aclose()``.
@@ -908,6 +929,9 @@ class VoiceSession:
         )
         chunk_count = 0
         total_bytes = 0
+        if self._turn_tts_started_at is None:
+            self._turn_tts_started_at = time.monotonic()
+        self._turn_tts_segments += 1
         try:
             async for chunk in self.tts.synthesize(text):
                 if self._cancel_turn.is_set():
@@ -921,6 +945,9 @@ class VoiceSession:
                     break
                 chunk_count += 1
                 total_bytes += len(chunk)
+                if self._turn_first_audio_at is None:
+                    self._turn_first_audio_at = time.monotonic()
+                self._turn_audio_bytes += len(chunk)
                 if self._record_audio:
                     self._output_audio_chunks.append(chunk)
                 await self._emit(AudioOutput(data=chunk))
@@ -946,6 +973,47 @@ class VoiceSession:
                 cancel_turn_set=self._cancel_turn.is_set(),
                 **_trace_debug_fields(),
             )
+        finally:
+            self._turn_tts_ended_at = time.monotonic()
+
+    # -- Internal: metrics ----------------------------------------------------
+
+    def _build_turn_metrics(self, user_text: str, *, interrupted: bool) -> TurnMetrics:
+        """Compute :class:`TurnMetrics` from the current turn's monotonic stamps."""
+        from .metrics import TurnMetrics
+
+        def _ms(t0: float | None, t1: float | None) -> float | None:
+            if t0 is None or t1 is None:
+                return None
+            return round((t1 - t0) * 1000, 1)
+
+        eou = self._turn_eou_at or None
+        eou_to_first_audio = _ms(eou, self._turn_first_audio_at)
+        return TurnMetrics(
+            turn_index=self._turn_index,
+            user_text_chars=len(user_text),
+            eou_to_llm_first_token_ms=_ms(eou, self._turn_first_token_at),
+            eou_to_tts_first_byte_ms=eou_to_first_audio,
+            eou_to_first_audio_ms=eou_to_first_audio,
+            llm_total_ms=_ms(self._turn_started_at, self._turn_llm_done_at),
+            tts_total_ms=_ms(self._turn_tts_started_at, self._turn_tts_ended_at),
+            turn_total_ms=_ms(self._turn_started_at, time.monotonic()) or 0.0,
+            interrupted=interrupted,
+            tts_segments=self._turn_tts_segments,
+            audio_bytes=self._turn_audio_bytes,
+        )
+
+    def _attach_metrics_to_trace(self, metrics: TurnMetrics) -> None:
+        """Best-effort: store turn metrics on the run's root span metadata."""
+        ctx = get_run_context()
+        if ctx is None:
+            return
+        try:
+            root = ctx.root_span()
+            if root is not None:
+                root.metadata["voice_turn_metrics"] = metrics.model_dump()
+        except Exception as e:
+            logger.debug("turn_metrics_trace_attach_failed", error=str(e))
 
     # -- Internal: helpers --------------------------------------------------
 
@@ -968,91 +1036,7 @@ class VoiceSession:
                 pass
         await self.stt.close()
         await self.tts.close()
-
-
-_NOISE_PATTERN = re.compile(r"^\s*\(.*\)\s*$")
-# Word + closing paren only, no leading "(" — e.g. Scribe hallucinating "(music playing)" as "Music)"
-_STT_ORPHAN_CLOSE_CAPTION = re.compile(r"^[A-Za-z][A-Za-z\s'-]{0,48}\)\s*$")
-# Opens "(" but no ")" on this commit (split caption or noise)
-_STT_INCOMPLETE_OPEN_PAREN = re.compile(r"^\([^)]*$")
-
-
-def _is_noise(text: str) -> bool:
-    """Filter STT artifacts like '(wind blowing)', '(silence)', '(music)', etc."""
-    return bool(_NOISE_PATTERN.match(text))
-
-
-def _is_garbage_commit(text: str) -> bool:
-    """Filter silence/noise hallucinations: lone punctuation, broken captions, etc.
-
-    Realtime models often emit parenthetical *sound* labels; on silence you can get
-    fragments like ``(`` or ``Music)`` without the user speaking.
-    """
-    t = text.strip()
-    if not t:
-        return True
-    # Single non-alphanumeric (e.g. "(" from a split "(music)")
-    if len(t) == 1 and not t.isalnum():
-        return True
-    # Tiny all-punctuation runs
-    if len(t) <= 3 and all(not c.isalnum() for c in t):
-        return True
-    if t in {")", "]", "}", "…"}:
-        return True
-    if _STT_ORPHAN_CLOSE_CAPTION.match(t):
-        return True
-    if _STT_INCOMPLETE_OPEN_PAREN.match(t):
-        return True
-    return False
-
-
-def _normalize_echo(s: str) -> str:
-    return " ".join(s.lower().split())
-
-
-def _likely_stt_echo(committed: str, assistant_so_far: str) -> bool:
-    """True if STT text is probably the assistant's own speech leaking into the mic."""
-    c = _normalize_echo(committed)
-    a = _normalize_echo(assistant_so_far)
-    if not a:
-        return False
-    # Short leaks (punctuation / tail of TTS) often transcribe as 1–9 chars.
-    if len(c) < 10:
-        if len(c) >= 2 and c in a:
-            return True
-        return False
-    if c in a:
-        return True
-    tail_len = min(len(a), max(len(c) * 3, 100))
-    tail = a[-tail_len:]
-    return SequenceMatcher(None, c, tail).ratio() >= 0.68
-
-
-def _is_same_user_utterance_refinement(active: str, new: str) -> bool:
-    """True if ``new`` is a longer/corrected transcript of the same user phrase.
-
-    Realtime STT commonly emits multiple ``committed`` events per pause; the
-    second is usually an extension, not intentional barge-in.
-    """
-    if active.strip() == new.strip():
-        return True
-    a, b = _normalize_echo(active), _normalize_echo(new)
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    r = SequenceMatcher(None, a, b).ratio()
-    # Near-duplicate punctuation / spacing (possibly seconds apart).
-    if min(len(a), len(b)) >= 6 and r >= 0.84:
-        return True
-    if len(b) > len(a):
-        if (len(a) >= 5 and b.startswith(a)) or (len(a) >= 8 and a in b) or r >= 0.74:
-            return True
-    elif len(a) > len(b) and len(b) >= 8:
-        # Second pass shorter but same gist (rare).
-        if a.startswith(b) or r >= 0.86:
-            return True
-    return False
+        await self.turn_detector.close()
 
 
 def _reconcile_final_assistant_text(streamed: str, final_text: str) -> tuple[str, str | None]:

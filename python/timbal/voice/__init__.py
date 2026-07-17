@@ -1,5 +1,9 @@
-"""timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, and provider implementations."""
+"""timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, turn detection, metrics, and provider implementations."""
 
+from .metrics import (
+    TurnMetrics,
+    TurnMetricsEvent,
+)
 from .session import (
     AgentTextDelta,
     AgentTextDone,
@@ -19,6 +23,14 @@ from .session import (
     VoiceSession,
     VoiceSessionEvent,
 )
+from .turn_detection import (
+    CommitAction,
+    CommitDecision,
+    HeuristicTurnDetector,
+    PartialDecision,
+    TurnDetector,
+    TurnState,
+)
 
 __all__ = [
     "AgentTextDelta",
@@ -26,6 +38,10 @@ __all__ = [
     "AudioInputConfig",
     "AudioOutput",
     "AudioOutputConfig",
+    "CommitAction",
+    "CommitDecision",
+    "HeuristicTurnDetector",
+    "PartialDecision",
     "SessionEnded",
     "SessionError",
     "SessionInterrupted",
@@ -36,6 +52,10 @@ __all__ = [
     "TranscriptEntry",
     "TranscriptEvent",
     "TranscriptPartial",
+    "TurnDetector",
+    "TurnMetrics",
+    "TurnMetricsEvent",
+    "TurnState",
     "VoiceSession",
     "VoiceSessionEvent",
 ]

@@ -9,6 +9,7 @@ from contextlib import aclosing
 
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.voice.metrics import TurnMetricsEvent
 from timbal.voice.session import (
     AgentTextDelta,
     AgentTextDone,
@@ -537,6 +538,95 @@ class TestMultiTurn:
 
         types = [type(e) for e in events]
         assert SessionInterrupted in types
+
+
+# ---------------------------------------------------------------------------
+# Tests: per-turn latency metrics
+# ---------------------------------------------------------------------------
+
+
+class TestTurnMetrics:
+    async def test_single_turn_emits_metrics_event(self) -> None:
+        chunk = b"\x00\x01" * 16
+        session, _, _ = _make_session(
+            stt_script=[TranscriptEvent(type="committed", text="Hello")],
+            responses=["Hi there!"],
+            tts_chunk=chunk,
+            tts_num_chunks=2,
+        )
+        events = await _collect_events(session)
+
+        metrics_events = [e for e in events if isinstance(e, TurnMetricsEvent)]
+        assert len(metrics_events) == 1
+        m = metrics_events[0].metrics
+
+        assert m.turn_index == 1
+        assert m.user_text_chars == len("Hello")
+        assert m.interrupted is False
+        assert m.eou_to_llm_first_token_ms is not None and m.eou_to_llm_first_token_ms >= 0
+        assert m.eou_to_first_audio_ms is not None and m.eou_to_first_audio_ms >= 0
+        assert m.eou_to_tts_first_byte_ms == m.eou_to_first_audio_ms
+        assert m.llm_total_ms is not None and m.llm_total_ms >= 0
+        assert m.tts_total_ms is not None and m.tts_total_ms >= 0
+        assert m.turn_total_ms >= m.llm_total_ms
+        assert m.tts_segments >= 1
+        assert m.audio_bytes == len(chunk) * 2
+
+        assert session.metrics == [m]
+
+    async def test_metrics_emitted_after_agent_text_done(self) -> None:
+        session, _, _ = _make_session(
+            stt_script=[TranscriptEvent(type="committed", text="Hello")],
+            responses=["Hi!"],
+        )
+        events = await _collect_events(session)
+        types = [e.type for e in events]
+        assert types.index("metrics") > types.index("agent_text_done")
+
+    async def test_empty_session_has_no_metrics(self) -> None:
+        session, _, _ = _make_session(stt_script=[])
+        events = await _collect_events(session)
+        assert not any(isinstance(e, TurnMetricsEvent) for e in events)
+        assert session.metrics == []
+
+    async def test_interrupted_turn_flagged(self) -> None:
+        """Barge-in during playback → the first turn's metrics carry interrupted=True."""
+        agent = Agent(name="t", model=TestModel(responses=["First reply", "Second reply"]), tools=[])
+        stt = DelayedMockSTT()
+        big_chunk = b"\x00\x01" * 16_000
+        tts = SlowMockTTS(delay=0.05, chunk=big_chunk, num_chunks=3)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello there"))
+            while not any(isinstance(e, AudioOutput) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Actually I want to ask about something else entirely"))
+            while sum(1 for e in events if isinstance(e, AgentTextDone)) < 1:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert len(session.metrics) == 2
+        assert session.metrics[0].interrupted is True
+        assert session.metrics[1].interrupted is False
 
 
 # ---------------------------------------------------------------------------

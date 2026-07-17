@@ -125,6 +125,8 @@ async def voice_ws(ws: WebSocket) -> None:
         SessionStarted,
         TranscriptCommitted,
         TranscriptPartial,
+        TurnDetector,
+        TurnMetricsEvent,
         VoiceSession,
         VoiceSessionEvent,
     )
@@ -174,12 +176,19 @@ async def voice_ws(ws: WebSocket) -> None:
         extra=merged.get("tts_extra", {}),
     )
 
+    # Server-side only (an instance can't come over the wire): ``runnable.voice_config``
+    # may supply a custom TurnDetector; read from *defaults* so client JSON can't override.
+    turn_detector = defaults.get("turn_detector")
+    if not isinstance(turn_detector, TurnDetector):
+        turn_detector = None
+
     session = VoiceSession(
         agent=runnable,
         stt=stt,
         tts=tts,
         audio_input=audio_in,
         audio_output=audio_out,
+        turn_detector=turn_detector,
     )
 
     async def _recv_loop() -> None:
@@ -246,6 +255,8 @@ async def voice_ws(ws: WebSocket) -> None:
                     "data": base64.b64encode(event.data).decode("ascii"),
                 }
             )
+        elif isinstance(event, TurnMetricsEvent):
+            await _send_json({"type": "metrics", "metrics": event.metrics.model_dump()})
         elif isinstance(event, SessionInterrupted):
             await _send_json({"type": "interrupted"})
         elif isinstance(event, SessionError):

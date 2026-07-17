@@ -73,6 +73,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |
 | `agent_text_done`       | `text`        | Assistant text for the segment completed. |
 | `audio`                 | `data` (base64) | TTS audio: PCM s16le at merged `sample_rate`. Decode and play via Web Audio or equivalent. |
+| `metrics`               | `metrics`     | Per-turn latency metrics, sent once per turn after `agent_text_done` (also for interrupted turns). See [Turn metrics](#turn-metrics). |
 | `interrupted`           | —             | Interrupt / barge-in; stop playback and reset “current assistant” UI if needed. |
 | `error`                 | `message`     | Error description (STT, audio forward, turn, TTS, etc.). |
 | `session_transcript`    | `entries`     | Full conversation transcript (sent right before `session_ended`). See [Session transcript](#session-transcript). |
@@ -109,6 +110,31 @@ Each entry has:
 This lets the frontend persist the conversation without having to accumulate `transcript_committed` / `agent_text_done` messages itself.
 
 **Audio recording** is available server-side via the `VoiceSession` Python API (`record_audio=True`) but is not sent over the WebSocket (PCM dumps are too large for a single JSON frame). Use the `session.input_audio` / `session.output_audio` properties to access raw PCM bytes after the session closes for server-side storage, conversion, or upload.
+
+### Turn metrics
+
+Once per turn — after `agent_text_done`, and also when the turn is interrupted — the server sends a `metrics` message:
+
+```json
+{
+  "type": "metrics",
+  "metrics": {
+    "turn_index": 1,
+    "user_text_chars": 24,
+    "eou_to_llm_first_token_ms": 312.4,
+    "eou_to_tts_first_byte_ms": 587.9,
+    "eou_to_first_audio_ms": 587.9,
+    "llm_total_ms": 1204.0,
+    "tts_total_ms": 1890.2,
+    "turn_total_ms": 2101.7,
+    "interrupted": false,
+    "tts_segments": 3,
+    "audio_bytes": 96000
+  }
+}
+```
+
+`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
 
 ### Frontend notes
 

@@ -198,6 +198,46 @@ class TestVoiceWsRoundTrip:
         assert transcript_msg["entries"] == []
 
 
+class TestVoiceWsMetrics:
+    """Per-turn metrics should arrive as a ``metrics`` JSON message."""
+
+    def test_metrics_message_forwarded_after_turn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        spec = _write_agent_module(tmp_path, responses=["Hi there!"])
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
+        )
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({})
+                messages = _collect_ws_messages(ws)
+
+        types = [m["type"] for m in messages]
+        assert "metrics" in types
+        assert types.index("metrics") > types.index("agent_text_done")
+
+        metrics_msg = next(m for m in messages if m["type"] == "metrics")
+        m = metrics_msg["metrics"]
+        assert m["turn_index"] == 1
+        assert m["user_text_chars"] == len("Hello")
+        assert m["interrupted"] is False
+        assert m["eou_to_first_audio_ms"] is not None and m["eou_to_first_audio_ms"] >= 0
+        assert m["turn_total_ms"] >= 0
+        assert m["tts_segments"] >= 1
+        assert m["audio_bytes"] > 0
+
+
 class TestVoiceWsSessionTranscript:
     """Verify session_transcript payload structure and ordering."""
 
