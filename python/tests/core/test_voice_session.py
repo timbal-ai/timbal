@@ -948,6 +948,81 @@ class TestInterruptionTruncation:
         assert self.RESPONSE.startswith(heard)
         assert assistant_entries[1].text == "Second reply"
 
+    async def test_continuation_with_heard_audio_merges_user_entry(self) -> None:
+        """Regression: on CONTINUE_TURN, interrupt() runs before the transcript
+        merge, and the aborted fragment turn's truncation can append a heard
+        assistant entry. The old merge only replaced the last entry when it was
+        ``user``, so it appended a *second* user line and left the spurious
+        assistant fragment between them."""
+        from timbal.voice.turn_detection import (
+            CommitAction,
+            CommitDecision,
+            PartialDecision,
+            TurnDetector,
+        )
+
+        class _ScriptedDetector(TurnDetector):
+            def __init__(self, decisions: list[CommitDecision]) -> None:
+                self._decisions = list(decisions)
+
+            async def on_partial(self, text, state):  # noqa: ARG002
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):  # noqa: ARG002
+                return self._decisions.pop(0)
+
+        fragment = "hello can"
+        combined = "hello can you help me with something"
+        detector = _ScriptedDetector(
+            [
+                CommitDecision(action=CommitAction.NEW_TURN, text=fragment, reason="test"),
+                CommitDecision(action=CommitAction.CONTINUE_TURN, text=combined, reason="test"),
+            ]
+        )
+        tracker = FakePlaybackTracker()
+        agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE, "Second reply"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = SlowMockTTS(delay=0.03, chunk=b"\x00\x01" * 50, num_chunks=4)
+        session = VoiceSession(
+            agent=agent, stt=stt, tts=tts, turn_detector=detector, playback_tracker=tracker
+        )
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text=fragment))
+            while not any(isinstance(e, AudioOutput) for e in events):
+                await asyncio.sleep(0.01)
+            # Part of the fragment reply was heard when the user keeps talking.
+            tracker.playing = True
+            tracker.played = 50
+            await stt.inject(TranscriptEvent(type="committed", text=combined))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        # One merged user entry, one assistant reply — no duplicate user line,
+        # no stray assistant fragment in between.
+        assert [e.role for e in session.transcript] == ["user", "assistant"]
+        assert session.transcript[0].text == combined
+        assert session.transcript[1].text == "Second reply"
+
     async def test_close_does_not_truncate_completed_turn(self) -> None:
         tracker = FakePlaybackTracker()
         agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE]), tools=[])

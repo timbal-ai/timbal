@@ -624,9 +624,25 @@ class VoiceSession:
         await self.interrupt()
         self._cancel_turn.clear()
         self._last_commit_at = time.monotonic()
-        if decision.action is CommitAction.CONTINUE_TURN and self._transcript and self._transcript[-1].role == "user":
-            # Replace the previous user entry with the combined text.
-            self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
+        if decision.action is CommitAction.CONTINUE_TURN:
+            # interrupt() may have recorded the heard fragment of the aborted
+            # reply right after the fragment's user entry (interruption
+            # truncation). A continuation merges the fragment into a single
+            # utterance, so that reply is superseded — drop it so the merge
+            # below updates the fragment user entry instead of appending a
+            # duplicate user line around a stray assistant fragment.
+            if (
+                len(self._transcript) >= 2
+                and self._transcript[-1].role == "assistant"
+                and self._transcript[-2].role == "user"
+                and self._transcript[-2].text == state.active_user_text
+            ):
+                self._transcript.pop()
+            if self._transcript and self._transcript[-1].role == "user":
+                # Replace the previous user entry with the combined text.
+                self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
+            else:
+                self._transcript.append(TranscriptEntry(role="user", text=final_text))
         else:
             self._transcript.append(TranscriptEntry(role="user", text=final_text))
         await self._emit(TranscriptCommitted(text=final_text))
