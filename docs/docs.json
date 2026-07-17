@@ -8,6 +8,9 @@
     "dark": "#000000"
   },
   "favicon": "/favicon.png",
+  "api": {
+    "openapi": "api-reference/openapi.json"
+  },
   "navigation": {
     "tabs": [
       {
@@ -225,13 +228,23 @@
               "api-reference/orgs/contacts/list",
               "api-reference/orgs/embedding-models/list",
               {
+                "group": "Analytics",
+                "pages": [
+                  "api-reference/orgs/analytics/costs",
+                  "api-reference/orgs/analytics/usage",
+                  "api-reference/orgs/analytics/users"
+                ]
+              },
+              {
                 "group": "Billing",
                 "pages": [
                   "api-reference/orgs/billing/overage-summary",
                   "api-reference/orgs/billing/overage",
                   "api-reference/orgs/billing/budgets/get",
                   "api-reference/orgs/billing/budgets/replace",
-                  "api-reference/orgs/billing/budgets/patch"
+                  "api-reference/orgs/billing/budgets/patch",
+                  "api-reference/orgs/billing/compute/get",
+                  "api-reference/orgs/billing/compute/put"
                 ]
               },
               {
@@ -242,6 +255,7 @@
                   "api-reference/orgs/connectors/enrollment-tokens/create",
                   "api-reference/orgs/connectors/jobs/list",
                   "api-reference/orgs/connectors/jobs/create",
+                  "api-reference/orgs/connectors/jobs/stop",
                   "api-reference/orgs/connectors/syncs/list",
                   "api-reference/orgs/connectors/syncs/create",
                   "api-reference/orgs/connectors/syncs/get",
@@ -249,7 +263,9 @@
                   "api-reference/orgs/connectors/syncs/delete",
                   "api-reference/orgs/connectors/browse/connections",
                   "api-reference/orgs/connectors/browse/tables",
+                  "api-reference/orgs/connectors/browse/table",
                   "api-reference/orgs/connectors/browse/columns",
+                  "api-reference/orgs/connectors/query",
                   "api-reference/orgs/connectors/rebind",
                   "api-reference/orgs/connectors/update"
                 ]
@@ -270,6 +286,18 @@
                 "pages": ["api-reference/orgs/credit-grants/list"]
               },
               {
+                "group": "Model Policies",
+                "pages": [
+                  "api-reference/orgs/models/policies/list",
+                  "api-reference/orgs/models/policies/create",
+                  "api-reference/orgs/models/policies/delete"
+                ]
+              },
+              {
+                "group": "Templates",
+                "pages": ["api-reference/orgs/templates/list"]
+              },
+              {
                 "group": "Domains",
                 "pages": [
                   "api-reference/orgs/domains/list",
@@ -282,6 +310,8 @@
                 "group": "IAM",
                 "pages": [
                   "api-reference/orgs/iam/actions/list",
+                  "api-reference/orgs/iam/actions/users",
+                  "api-reference/orgs/iam/resources/users",
                   "api-reference/orgs/iam/check",
                   {
                     "group": "Roles",
@@ -381,7 +411,30 @@
                   "api-reference/projects/environments/get-metrics",
                   "api-reference/projects/environments/stop",
                   "api-reference/projects/environments/deployments/list",
-                  "api-reference/projects/environments/logs"
+                  "api-reference/projects/environments/logs",
+                  {
+                    "group": "Evals",
+                    "pages": [
+                      "api-reference/projects/environments/evals/definitions",
+                      {
+                        "group": "Jobs",
+                        "pages": [
+                          "api-reference/projects/environments/evals/jobs/list",
+                          "api-reference/projects/environments/evals/jobs/get",
+                          "api-reference/projects/environments/evals/jobs/create"
+                        ]
+                      },
+                      {
+                        "group": "Runs",
+                        "pages": [
+                          "api-reference/projects/environments/evals/runs/list",
+                          "api-reference/projects/environments/evals/runs/get",
+                          "api-reference/projects/environments/evals/runs/create",
+                          "api-reference/projects/environments/evals/runs/delete"
+                        ]
+                      }
+                    ]
+                  }
                 ]
               },
               {
@@ -418,7 +471,11 @@
                   "api-reference/projects/workforce/list",
                   "api-reference/projects/workforce/create",
                   "api-reference/projects/workforce/delete",
-                  "api-reference/projects/workforce/call"
+                  "api-reference/projects/workforce/call",
+                  "api-reference/projects/workforce/call-get",
+                  "api-reference/projects/workforce/call-put",
+                  "api-reference/projects/workforce/call-patch",
+                  "api-reference/projects/workforce/call-delete"
                 ]
               }
             ]
@@ -497,12 +554,11 @@
               "api-reference/ace/list-policies",
               "api-reference/ace/list-context-vars",
               "api-reference/ace/chat-completions",
-              "api-reference/ace/responses",
-              "api-reference/ace/messages",
               {
                 "group": "Jobs",
                 "pages": [
                   "api-reference/ace/jobs/list",
+                  "api-reference/ace/jobs/create",
                   "api-reference/ace/jobs/get",
                   "api-reference/ace/jobs/cancel",
                   "api-reference/ace/jobs/retry"

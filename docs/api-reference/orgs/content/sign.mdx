@@ -2,3 +2,5 @@
 title: "Sign Content URL"
 openapi: "POST /orgs/{org_id}/content/sign"
 ---
+
+Refresh a signed URL for stored content. Pass a content URL previously returned by the API (signed or unsigned), or a bare object key. The server resolves it back to a known object, re-checks your access, and mints a fresh URL — useful when a cached signed URL has expired.
