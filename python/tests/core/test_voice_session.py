@@ -10,6 +10,7 @@ from contextlib import aclosing
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.voice.metrics import TurnMetricsEvent
+from timbal.voice.playback import PlaybackTracker
 from timbal.voice.session import (
     AgentTextDelta,
     AgentTextDone,
@@ -627,6 +628,170 @@ class TestTurnMetrics:
         assert len(session.metrics) == 2
         assert session.metrics[0].interrupted is True
         assert session.metrics[1].interrupted is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: interruption truncation (what the user actually heard)
+# ---------------------------------------------------------------------------
+
+
+class FakePlaybackTracker(PlaybackTracker):
+    """Playback tracker with externally controlled position for deterministic tests."""
+
+    def __init__(self) -> None:
+        self.emitted_bytes = 0
+        self.played = 0
+        self.playing = False
+        self.interrupt_calls = 0
+
+    def on_audio_emitted(self, num_bytes: int) -> None:
+        self.emitted_bytes += num_bytes
+
+    def on_interrupted(self) -> None:
+        # Deliberately does not reset ``playing`` — tests control it explicitly.
+        self.interrupt_calls += 1
+
+    @property
+    def played_bytes(self) -> int:
+        return self.played
+
+    @property
+    def is_playing(self) -> bool:
+        return self.playing
+
+
+class TestInterruptionTruncation:
+    RESPONSE = "Hello world how are you doing today my friend"
+    BARGE_IN = "Actually I want to ask about something else entirely"
+
+    async def _run_barge_in_session(
+        self,
+        tracker: FakePlaybackTracker,
+        *,
+        played_bytes: int,
+        interrupt_after_done: bool,
+    ) -> tuple[VoiceSession, list[VoiceSessionEvent]]:
+        """One turn, then a barge-in commit with ``tracker`` reporting ``played_bytes`` heard."""
+        # Handler-based model: TestModel(responses=...) picks by assistant-message
+        # count in history, which the truncation itself changes (dropping the
+        # unheard reply would replay response[0]). The handler advances per call.
+        replies = iter([self.RESPONSE, "Second reply", "Third reply"])
+        agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[])
+        stt = DelayedMockSTT()
+        chunk = b"\x00\x01" * 50  # 100 bytes per chunk
+        tts = SlowMockTTS(delay=0.03, chunk=chunk, num_chunks=4) if not interrupt_after_done else MockTTS(chunk=chunk, num_chunks=4)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello there"))
+            if interrupt_after_done:
+                while not any(isinstance(e, AgentTextDone) for e in events):
+                    await asyncio.sleep(0.01)
+            else:
+                while not any(isinstance(e, AudioOutput) for e in events):
+                    await asyncio.sleep(0.01)
+            tracker.playing = True
+            tracker.played = played_bytes
+            await stt.inject(TranscriptEvent(type="committed", text=self.BARGE_IN))
+            while sum(1 for e in events if isinstance(e, AgentTextDone)) < (2 if interrupt_after_done else 1):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        return session, events
+
+    async def test_mid_turn_barge_in_records_heard_prefix(self) -> None:
+        tracker = FakePlaybackTracker()
+        # 100 bytes per chunk; heard 50 bytes — always a strict, non-empty
+        # prefix regardless of how many chunks were emitted before the cancel.
+        session, events = await self._run_barge_in_session(
+            tracker, played_bytes=50, interrupt_after_done=False
+        )
+
+        assistant_entries = [e for e in session.transcript if e.role == "assistant"]
+        # First assistant entry is the truncated heard prefix, not the full reply.
+        heard = assistant_entries[0].text
+        assert heard
+        assert heard != self.RESPONSE
+        assert self.RESPONSE.startswith(heard)
+
+        interrupted_events = [e for e in events if isinstance(e, SessionInterrupted)]
+        assert interrupted_events[0].heard_text == heard
+
+    async def test_mid_turn_barge_in_truncates_memory(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, _ = await self._run_barge_in_session(
+            tracker, played_bytes=50, interrupt_after_done=False
+        )
+        # The next turn resolved memory from the truncated context: the second
+        # turn's run context memory must contain the heard prefix, not the full reply.
+        ctx = session._last_run_context
+        root = ctx.root_span()
+        assistant_msgs = [m for m in root.memory if m.role == "assistant"]
+        first_reply_text = assistant_msgs[0].collect_text()
+        assert first_reply_text != self.RESPONSE
+        assert self.RESPONSE.startswith(first_reply_text)
+
+    async def test_nothing_heard_drops_assistant_from_memory_and_transcript(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, events = await self._run_barge_in_session(
+            tracker, played_bytes=0, interrupt_after_done=False
+        )
+        # Nothing was heard: no truncated transcript entry for the first reply.
+        assistant_entries = [e for e in session.transcript if e.role == "assistant"]
+        assert all(e.text != self.RESPONSE and not self.RESPONSE.startswith(e.text) for e in assistant_entries)
+
+        ctx = session._last_run_context
+        root = ctx.root_span()
+        assistant_msgs = [m for m in root.memory if m.role == "assistant"]
+        # Only the second turn's reply may be in memory.
+        assert all(not self.RESPONSE.startswith(m.collect_text() or "x") for m in assistant_msgs)
+
+        interrupted_events = [e for e in events if isinstance(e, SessionInterrupted)]
+        assert interrupted_events[0].heard_text is None or interrupted_events[0].heard_text == ""
+
+    async def test_completed_turn_barge_in_rewrites_committed_entry(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, _ = await self._run_barge_in_session(
+            tracker, played_bytes=200, interrupt_after_done=True
+        )
+        assistant_entries = [e for e in session.transcript if e.role == "assistant"]
+        heard = assistant_entries[0].text
+        assert heard != self.RESPONSE
+        assert self.RESPONSE.startswith(heard)
+        # Second turn's reply is intact.
+        assert assistant_entries[1].text == "Second reply"
+
+    async def test_close_does_not_truncate_completed_turn(self) -> None:
+        tracker = FakePlaybackTracker()
+        agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE]), tools=[])
+        stt = MockSTT(script=[TranscriptEvent(type="committed", text="Hello there, how are you doing?")])
+        tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        # Simulate audio still playing (and only partially heard) at close time:
+        # close() must NOT rewrite the committed transcript entry.
+        tracker.playing = True
+        tracker.played = 200
+        await _collect_events(session)
+
+        assistant_entries = [e for e in session.transcript if e.role == "assistant"]
+        assert assistant_entries[0].text == self.RESPONSE
 
 
 # ---------------------------------------------------------------------------

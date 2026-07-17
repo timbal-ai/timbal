@@ -36,6 +36,7 @@ from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta
 from ..types.message import Message
+from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
 from .turn_detection import CommitAction, HeuristicTurnDetector, PartialDecision, TurnDetector, TurnState
 
 if TYPE_CHECKING:
@@ -179,6 +180,8 @@ class AudioOutput(VoiceSessionEvent):
 
 class SessionInterrupted(VoiceSessionEvent):
     type: Literal["interrupted"] = "interrupted"
+    heard_text: str | None = None
+    """Assistant text the user actually heard before the interruption (None if unknown/none)."""
 
 
 class SessionError(VoiceSessionEvent):
@@ -316,6 +319,7 @@ class VoiceSession:
         audio_output: AudioOutputConfig | None = None,
         *,
         turn_detector: TurnDetector | None = None,
+        playback_tracker: PlaybackTracker | None = None,
         record_audio: bool = False,
     ):
         self.agent = agent
@@ -324,6 +328,10 @@ class VoiceSession:
         self.turn_detector = turn_detector or HeuristicTurnDetector()
         self.audio_input = audio_input or AudioInputConfig()
         self.audio_output = audio_output or AudioOutputConfig()
+        # PCM16 mono: 2 bytes per sample.
+        self.playback = playback_tracker or BufferedPlaybackTracker(
+            bytes_per_second=self.audio_output.sample_rate * 2,
+        )
 
         self._event_queue: asyncio.Queue[VoiceSessionEvent | None] = asyncio.Queue()
         self._cancel_turn = asyncio.Event()
@@ -353,11 +361,16 @@ class VoiceSession:
         # Concatenation of all strings passed to ``_schedule_tts`` this turn (OUTPUT tail catch-up).
         self._turn_tts_scheduled_text: str = ""
 
-        # Estimated wall-clock time when the browser finishes playing the queued
-        # audio.  Mirrors the browser's ``nextPlayTime`` gapless scheduling so we
-        # can allow barge-in even after ``_is_speaking`` goes False (the agent
-        # turn completed but buffered audio is still playing).
-        self._playback_end_estimate: float = 0.0
+        # Per-turn playback accounting for interruption truncation: played bytes
+        # at turn start, spoken (text, bytes) records per TTS segment, and the
+        # heard-bytes snapshot captured by interrupt() before the buffer clears.
+        self._turn_played_baseline = 0
+        self._turn_tts_segment_records: list[list] = []
+        self._turn_heard_bytes: int | None = None
+        self._last_interruption_heard_text: str | None = None
+        # True between a turn's normal completion and the next turn start; a
+        # barge-in in that window must truncate the already-committed entry.
+        self._turn_finalized_ok = False
 
         # -- Session recording --------------------------------------------------
         self._transcript: list[TranscriptEntry] = []
@@ -401,12 +414,10 @@ class VoiceSession:
 
     # -- Playback tracking --------------------------------------------------
 
-    _PCM_BYTES_PER_SEC = 32_000  # PCM16 mono 16 kHz
-
     @property
     def _assistant_audio_playing(self) -> bool:
-        """True if the browser likely still has queued audio to play."""
-        return time.monotonic() < self._playback_end_estimate
+        """True if the client likely still has queued audio to play."""
+        return self.playback.is_playing
 
     @property
     def _assistant_active(self) -> bool:
@@ -445,8 +456,14 @@ class VoiceSession:
             await self._cleanup()
             yield SessionEnded()
 
-    async def interrupt(self) -> None:
-        """Cancel TTS playback and the current agent turn."""
+    async def interrupt(self, *, truncate_completed: bool = True) -> None:
+        """Cancel TTS playback and the current agent turn.
+
+        ``truncate_completed`` controls the post-completion truncation path: on
+        a real barge-in a finished-but-still-playing reply is rewritten to what
+        was heard; on session close (``close()``) the committed transcript is
+        left untouched.
+        """
         if not self._assistant_active:
             logger.debug(
                 "session_interrupt_skipped",
@@ -463,8 +480,12 @@ class VoiceSession:
             audio_playing=self._assistant_audio_playing,
             **_trace_debug_fields(),
         )
+        # Snapshot how much of this turn's audio was heard *before* the playback
+        # buffer is cleared — the truncation in _run_turn's finally needs it.
+        if self._turn_heard_bytes is None:
+            self._turn_heard_bytes = max(0, self.playback.played_bytes - self._turn_played_baseline)
         self._is_speaking = False
-        self._playback_end_estimate = 0.0
+        self.playback.on_interrupted()
         self._cancel_turn.set()
         for t in list(self._tts_tasks):
             if not t.done():
@@ -479,7 +500,19 @@ class VoiceSession:
                 await self._current_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
-        await self._emit(SessionInterrupted())
+        elif self._turn_finalized_ok and truncate_completed:
+            # The turn completed but buffered audio was still playing: the full
+            # reply is already committed to transcript/memory, so truncate it
+            # in place to the heard prefix.
+            try:
+                self._apply_interruption_truncation(ctx=self._last_run_context, replace_last=True)
+            except Exception as e:
+                logger.warning("turn_truncation_failed", error=str(e), exc_info=True)
+        self._turn_finalized_ok = False
+        # The cancelled turn's finally (or the in-place path above) computed
+        # what the user actually heard.
+        await self._emit(SessionInterrupted(heard_text=self._last_interruption_heard_text))
+        self._last_interruption_heard_text = None
         logger.debug("session_interrupt_emitted", **_trace_debug_fields())
 
     async def close(self) -> None:
@@ -487,7 +520,7 @@ class VoiceSession:
         if self._closed:
             return
         self._closed = True
-        await self.interrupt()
+        await self.interrupt(truncate_completed=False)
         await self._emit(None)  # sentinel stops the run() iterator
 
     # -- Internal: audio → STT ---------------------------------------------
@@ -616,6 +649,10 @@ class VoiceSession:
         self._turn_tts_ended_at = None
         self._turn_tts_segments = 0
         self._turn_audio_bytes = 0
+        self._turn_played_baseline = self.playback.played_bytes
+        self._turn_tts_segment_records = []
+        self._turn_heard_bytes = None
+        self._turn_finalized_ok = False
         agen = None
         # Where we were when cancel / finally ran (loop_exit is only set on break/else/exception;
         # CancelledError inside ``await _speak`` left the old code stuck at "not_started").
@@ -798,6 +835,7 @@ class VoiceSession:
                 if full_response.strip():
                     self._transcript.append(TranscriptEntry(role="assistant", text=full_response))
                 await self._emit(AgentTextDone(text=full_response))
+                self._turn_finalized_ok = True
                 logger.debug(
                     "turn_agent_text_done_emitted",
                     response_chars=len(full_response),
@@ -874,6 +912,13 @@ class VoiceSession:
                 else:
                     logger.debug("turn_agent_aclose_ok", **_trace_debug_fields())
 
+            # Interruption truncation runs after aclose so the salvaged partial
+            # assistant message is already in the root span's memory.
+            if interrupted:
+                try:
+                    self._apply_interruption_truncation(ctx=get_run_context())
+                except Exception as e:
+                    logger.warning("turn_truncation_failed", error=str(e), exc_info=True)
             ctx = get_run_context()
             if ctx is not None:
                 self._last_run_context = ctx
@@ -932,6 +977,8 @@ class VoiceSession:
         if self._turn_tts_started_at is None:
             self._turn_tts_started_at = time.monotonic()
         self._turn_tts_segments += 1
+        segment_record: list = [text, 0]
+        self._turn_tts_segment_records.append(segment_record)
         try:
             async for chunk in self.tts.synthesize(text):
                 if self._cancel_turn.is_set():
@@ -950,10 +997,9 @@ class VoiceSession:
                 self._turn_audio_bytes += len(chunk)
                 if self._record_audio:
                     self._output_audio_chunks.append(chunk)
+                segment_record[1] += len(chunk)
                 await self._emit(AudioOutput(data=chunk))
-                now = time.monotonic()
-                play_start = max(self._playback_end_estimate, now)
-                self._playback_end_estimate = play_start + len(chunk) / self._PCM_BYTES_PER_SEC
+                self.playback.on_audio_emitted(len(chunk))
         except Exception as e:
             logger.error(
                 "tts_error",
@@ -975,6 +1021,77 @@ class VoiceSession:
             )
         finally:
             self._turn_tts_ended_at = time.monotonic()
+
+    # -- Internal: interruption truncation ------------------------------------
+
+    def _apply_interruption_truncation(self, ctx: RunContext | None, *, replace_last: bool = False) -> None:
+        """Align transcript and agent memory with what the user actually *heard*.
+
+        On barge-in the LLM has usually generated (and we may have synthesized)
+        more text than was played. The trace keeps the full generation for
+        observability, but:
+
+        * the session transcript gets an assistant entry with the heard prefix
+          (previously interrupted turns recorded no assistant text at all), and
+        * the assistant message in the run's memory — what the next turn
+          resolves as conversation history — is truncated to the heard prefix,
+          or dropped entirely if nothing was played. Without this the agent
+          "remembers saying" things that were never spoken.
+
+        Two call sites: the cancelled turn's ``finally`` (mid-generation
+        barge-in, appends the heard prefix) and ``interrupt()`` when the turn
+        already completed but buffered audio was still playing
+        (``replace_last=True`` — the full reply is already committed, so the
+        transcript entry is rewritten in place).
+        """
+        heard_bytes = self._turn_heard_bytes
+        if heard_bytes is None:
+            heard_bytes = max(0, self.playback.played_bytes - self._turn_played_baseline)
+        segments = [(str(t), int(b)) for t, b in self._turn_tts_segment_records]
+        heard_text = map_played_bytes_to_text(segments, heard_bytes)
+        # "" means "nothing was heard"; None (never set) means "unknown".
+        self._last_interruption_heard_text = heard_text
+        logger.debug(
+            "turn_interruption_truncation",
+            heard_bytes=heard_bytes,
+            heard_chars=len(heard_text),
+            generated_chars=len(self._turn_assistant_text),
+            tts_segments=len(segments),
+            replace_last=replace_last,
+            **_trace_debug_fields(),
+        )
+
+        if replace_last and self._transcript and self._transcript[-1].role == "assistant":
+            if heard_text:
+                self._transcript[-1] = TranscriptEntry(role="assistant", text=heard_text)
+            else:
+                self._transcript.pop()
+        elif heard_text:
+            self._transcript.append(TranscriptEntry(role="assistant", text=heard_text))
+
+        if ctx is None:
+            return
+        root = ctx.root_span()
+        if root is None or not isinstance(root.memory, list) or not root.memory:
+            return
+        last = root.memory[-1]
+        if getattr(last, "role", None) != "assistant":
+            return
+        # Only touch the message if it is this turn's reply — guard against
+        # mangling an earlier assistant/tool_use message.
+        last_text = last.collect_text()
+        turn_text = self._turn_assistant_text
+        if not last_text or not turn_text:
+            return
+        if not (last_text.startswith(turn_text) or turn_text.startswith(last_text)):
+            return
+        non_text_content = [c for c in last.content if not isinstance(c, TextContent)]
+        if heard_text:
+            last.content = [TextContent(text=heard_text), *non_text_content]
+        elif non_text_content:
+            last.content = non_text_content
+        else:
+            root.memory.pop()
 
     # -- Internal: metrics ----------------------------------------------------
 

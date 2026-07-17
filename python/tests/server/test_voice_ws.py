@@ -238,6 +238,78 @@ class TestVoiceWsMetrics:
         assert m["audio_bytes"] > 0
 
 
+class TestVoiceWsPlaybackAck:
+    """The ``playback`` uplink message must feed the session's playback tracker."""
+
+    def test_playback_ack_accepted_and_session_completes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        spec = _write_agent_module(tmp_path, responses=["Hi there!"])
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
+        )
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({})
+                ws.send_json({"type": "playback", "played_ms": 125.0})
+                ws.send_json({"type": "playback"})  # malformed — must be ignored
+                messages = _collect_ws_messages(ws)
+
+        types = [m["type"] for m in messages]
+        assert "error" not in types
+        assert types[-1] == "session_ended"
+        assert "agent_text_done" in types
+
+    def test_interrupted_message_carries_heard_text_field(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Barge-in mid-turn → ``interrupted`` message includes ``heard_text``."""
+        spec = _write_agent_module(
+            tmp_path,
+            responses=["First reply that is reasonably long for playback", "Second reply"],
+        )
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class(
+                [
+                    TranscriptEvent(type="committed", text="Hello there my friend"),
+                    TranscriptEvent(type="committed", text="Actually let me ask about something else entirely"),
+                ]
+            ),
+        )
+        # Enough audio that playback is still in flight when the barge-in lands.
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsStreamTTS",
+            _make_tts_class(chunk=b"\x00\x01" * 8000, num_chunks=4),
+        )
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({})
+                messages = _collect_ws_messages(ws)
+
+        interrupted = [m for m in messages if m["type"] == "interrupted"]
+        assert interrupted, f"no interrupted message in {[m['type'] for m in messages]}"
+        assert "heard_text" in interrupted[0]
+
+
 class TestVoiceWsSessionTranscript:
     """Verify session_transcript payload structure and ordering."""
 

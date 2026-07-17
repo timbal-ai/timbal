@@ -36,6 +36,12 @@ If the client needs to set `sample_rate` or `language`, the **first** frame shou
 
 If the **first** message is binary, it is queued as the first audio chunk (no separate config message).
 
+### Playback acks (client → server)
+
+Optional but recommended: `{ "type": "playback", "played_ms": <number> }` — **cumulative milliseconds of TTS audio actually played** since the connection opened (audio dropped on `interrupted` does not count and must not be added later). Send one every ~250 ms while audio is playing, plus a final one when playback stops.
+
+The server uses these to know exactly what the user *heard* when they barge in, so it can truncate the assistant's transcript entry and conversation memory to the heard prefix (see `interrupted.heard_text` below). Without acks the server falls back to a wall-clock estimate of gapless playback, which is close but can't account for client-side buffering delays. Malformed `playback` messages are ignored.
+
 ### Config overrides
 
 Optional **first** text frame: a JSON object merged on top of `app.state.voice_config`, which is built at startup from environment defaults and optional `runnable.voice_config` on the loaded agent (`http` lifespan).
@@ -74,7 +80,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 | `agent_text_done`       | `text`        | Assistant text for the segment completed. |
 | `audio`                 | `data` (base64) | TTS audio: PCM s16le at merged `sample_rate`. Decode and play via Web Audio or equivalent. |
 | `metrics`               | `metrics`     | Per-turn latency metrics, sent once per turn after `agent_text_done` (also for interrupted turns). See [Turn metrics](#turn-metrics). |
-| `interrupted`           | —             | Interrupt / barge-in; stop playback and reset “current assistant” UI if needed. |
+| `interrupted`           | `heard_text`  | Interrupt / barge-in; stop playback, then send a final playback ack. `heard_text` is the assistant text the user actually heard (use it to fix displayed captions); `null` when unknown, `""` when nothing was played. |
 | `error`                 | `message`     | Error description (STT, audio forward, turn, TTS, etc.). |
 | `session_transcript`    | `entries`     | Full conversation transcript (sent right before `session_ended`). See [Session transcript](#session-transcript). |
 | `session_ended`         | —             | Session ended on the server side. |

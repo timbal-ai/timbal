@@ -204,6 +204,12 @@ async def voice_ws(ws: WebSocket) -> None:
                     data = json.loads(msg["text"])
                     if data.get("type") == "audio":
                         await audio_queue.put(base64.b64decode(data["data"]))
+                    elif data.get("type") == "playback":
+                        # Cumulative ms of TTS audio the client actually played.
+                        try:
+                            session.playback.on_playback_ack(float(data["played_ms"]))
+                        except (KeyError, TypeError, ValueError):
+                            logger.debug("voice_ws_bad_playback_ack", data=str(data)[:120])
         except WebSocketDisconnect:
             pass
         finally:
@@ -258,7 +264,7 @@ async def voice_ws(ws: WebSocket) -> None:
         elif isinstance(event, TurnMetricsEvent):
             await _send_json({"type": "metrics", "metrics": event.metrics.model_dump()})
         elif isinstance(event, SessionInterrupted):
-            await _send_json({"type": "interrupted"})
+            await _send_json({"type": "interrupted", "heard_text": event.heard_text})
         elif isinstance(event, SessionError):
             await _send_json({"type": "error", "message": event.message})
         elif isinstance(event, SessionEnded):

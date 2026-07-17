@@ -4,6 +4,10 @@ from .metrics import (
     TurnMetrics,
     TurnMetricsEvent,
 )
+from .playback import (
+    BufferedPlaybackTracker,
+    PlaybackTracker,
+)
 from .session import (
     AgentTextDelta,
     AgentTextDone,
@@ -38,10 +42,12 @@ __all__ = [
     "AudioInputConfig",
     "AudioOutput",
     "AudioOutputConfig",
+    "BufferedPlaybackTracker",
     "CommitAction",
     "CommitDecision",
     "HeuristicTurnDetector",
     "PartialDecision",
+    "PlaybackTracker",
     "SessionEnded",
     "SessionError",
     "SessionInterrupted",

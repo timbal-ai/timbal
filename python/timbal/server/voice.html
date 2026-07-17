@@ -552,6 +552,46 @@ let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
 let micAudioToWs = false;
 let nextPlayTime = 0;
 const playbackSources = new Set();
+/** Scheduled-but-unfinished TTS segments as {start, end} in audioCtx time. */
+let playbackSchedule = [];
+/** Milliseconds of TTS audio fully played (finished segments). */
+let playedAccumMs = 0;
+let lastPlaybackAckMs = -1;
+let playbackAckTimer = null;
+const PLAYBACK_ACK_INTERVAL_MS = 250;
+
+/** Cumulative ms of TTS audio actually played this session. */
+function computePlayedMs() {
+  if (!audioCtx) return playedAccumMs;
+  const now = audioCtx.currentTime;
+  let inFlight = 0;
+  const remaining = [];
+  for (const seg of playbackSchedule) {
+    if (now >= seg.end) {
+      playedAccumMs += (seg.end - seg.start) * 1000;
+    } else {
+      inFlight += Math.max(0, now - seg.start) * 1000;
+      remaining.push(seg);
+    }
+  }
+  playbackSchedule = remaining;
+  return playedAccumMs + inFlight;
+}
+
+/** Report playback progress so the server can truncate interrupted replies to what was heard. */
+function sendPlaybackAck(force) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const played = computePlayedMs();
+  if (!force && played === lastPlaybackAckMs) return;
+  lastPlaybackAckMs = played;
+  ws.send(JSON.stringify({ type: 'playback', played_ms: played }));
+}
+
+function resetPlaybackTracking() {
+  playbackSchedule = [];
+  playedAccumMs = 0;
+  lastPlaybackAckMs = -1;
+}
 let userEndedSession = false;
 let sessionReady = false;
 /** @type {'connecting'|'live'|'ended'|'error'} */
@@ -575,6 +615,12 @@ function updateEmptyState() {
 }
 
 function stopAssistantAudio() {
+  // Clamp unfinished segments to "now" — audio past this point never plays.
+  if (audioCtx) {
+    const now = audioCtx.currentTime;
+    for (const seg of playbackSchedule) seg.end = Math.min(seg.end, Math.max(seg.start, now));
+  }
+  sendPlaybackAck(true);
   for (const s of playbackSources) {
     try { s.stop(0); } catch (e) {}
   }
@@ -736,6 +782,7 @@ function playPCM(b64) {
   const startAt = Math.max(nextPlayTime, audioCtx.currentTime);
   src.start(startAt);
   nextPlayTime = startAt + buf.duration;
+  playbackSchedule.push({ start: startAt, end: startAt + buf.duration });
   playbackSources.add(src);
   src.onended = () => playbackSources.delete(src);
 }
@@ -766,8 +813,11 @@ async function start() {
     transcriptEl.innerHTML = '';
     window._assistantEl = null;
     partialEl = null;
+    resetPlaybackTracking();
     stopAssistantAudio();
     sessionReady = false;
+    if (playbackAckTimer) clearInterval(playbackAckTimer);
+    playbackAckTimer = setInterval(() => sendPlaybackAck(false), PLAYBACK_ACK_INTERVAL_MS);
     const sr = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
     ws.send(JSON.stringify({ sample_rate: sr }));
     const tryArmMic = async () => {
@@ -805,6 +855,7 @@ async function start() {
   ws.onclose = (ev) => {
     micAudioToWs = false;
     btnStop.disabled = true;
+    if (playbackAckTimer) { clearInterval(playbackAckTimer); playbackAckTimer = null; }
     sessionReady = false;
     micViz.classList.remove('active');
     if (connVisual === 'ended' || connVisual === 'error') {
@@ -860,6 +911,14 @@ async function start() {
         playPCM(msg.data);
         break;
       case 'interrupted':
+        // Align the displayed reply with what was actually spoken aloud.
+        if (window._assistantEl && msg.heard_text !== undefined && msg.heard_text !== null) {
+          if (msg.heard_text) {
+            window._assistantEl.textContent = msg.heard_text;
+          } else {
+            window._assistantEl.remove();
+          }
+        }
         window._assistantEl = null;
         stopAssistantAudio();
         updateEmptyState();
