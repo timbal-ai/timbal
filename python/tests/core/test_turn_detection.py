@@ -374,6 +374,29 @@ class TestLocalAudioTurnDetector:
         assert decision.action is CommitAction.NEW_TURN
         await det.close()
 
+    async def test_short_audio_incomplete_text_holds(self) -> None:
+        """< 0.5s of buffered PCM must not pass an incomplete utterance through
+        as NEW_TURN — the lexical fallback holds it (audio model never called)."""
+        model = _FixedAudioEou(0.9)
+        det = LocalAudioTurnDetector(audio_eou=model)
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 100)  # ~12ms of audio
+        decision = await det.on_committed("I was wondering about", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_short_lexical_hold"
+        assert model.calls == 0
+        await det.close()
+
+    async def test_short_audio_complete_text_passes_through(self) -> None:
+        model = _FixedAudioEou(0.1)  # would HOLD if it were consulted
+        det = LocalAudioTurnDetector(audio_eou=model)
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 100)
+        decision = await det.on_committed("Tell me a story.", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        assert model.calls == 0
+        await det.close()
+
 
 class TestResolveTurnDetector:
     def test_none_and_heuristic(self) -> None:
@@ -774,8 +797,42 @@ class TestHoldInSession:
         await asyncio.wait_for(_run(), timeout=5)
         assert held_during == [longer]
 
+    async def test_stale_hold_expiry_identity_guard(self) -> None:
+        """A woken stale expiry timer must not wipe a re-armed hold.
+
+        Deterministic version of the race: detach the first hold task so the
+        re-arm's ``_cancel_hold`` cannot cancel it (mimicking a timer that
+        already woke before the cancel landed), then let it fire — the
+        ``self._hold_task is not me`` guard must bail without touching the
+        new hold or starting a turn.
+        """
+        import asyncio
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS())
+
+        await session._arm_hold("I was wondering about", 0.01)
+        stale = session._hold_task
+        # Simulate the stale timer surviving the re-arm's cancel.
+        session._hold_task = None
+        refined = "I was wondering about the weather"
+        await session._arm_hold(refined, 60.0)
+
+        await asyncio.sleep(0.05)  # stale timer fires and must no-op
+        assert stale.done()
+        assert session._held_user_text == refined
+        assert session._current_turn_task is None
+        session._cancel_hold()
+        await asyncio.sleep(0)  # let the cancellation land
+
     async def test_hold_expiry_does_not_wipe_rearmed_hold(self) -> None:
-        """Stale expiry must not clear a hold that was refined/re-armed."""
+        """Re-arm while holding, then the re-armed hold expires into a turn.
+
+        State-driven (no racing wall-clock sleeps — Windows CI timers are too
+        coarse for that): the refinement is injected only after the first hold
+        is observably armed, and its timeout is generous enough to still be
+        pending then.
+        """
         import asyncio
 
         from .test_voice_session import DelayedMockSTT
@@ -794,14 +851,14 @@ class TestHoldInSession:
                         action=CommitAction.HOLD,
                         text=text,
                         reason="hold1",
-                        hold_timeout_secs=0.08,
+                        hold_timeout_secs=2.0,
                     )
                 if state.holding:
                     return CommitDecision(
                         action=CommitAction.HOLD,
                         text=text,
                         reason="hold2",
-                        hold_timeout_secs=0.5,
+                        hold_timeout_secs=0.1,
                     )
                 return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="new")
 
@@ -812,7 +869,6 @@ class TestHoldInSession:
             stt=stt,
             tts=MockTTS(),
             turn_detector=_HoldThenRefine(),
-            hold_timeout_secs=0.08,
         )
         events: list[VoiceSessionEvent] = []
         refined = "I was wondering about the weather"
@@ -825,13 +881,15 @@ class TestHoldInSession:
             while not any(getattr(e, "type", None) == "session_started" for e in events):
                 await asyncio.sleep(0.01)
             await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
-            # Re-arm near the first timeout so H1 and H2 race.
-            await asyncio.sleep(0.07)
+            while session._held_user_text != "I was wondering about":
+                await asyncio.sleep(0.01)
             await stt.inject(TranscriptEvent(type="committed", text=refined))
-            # Stale H1 must not wipe the refined hold.
-            await asyncio.sleep(0.05)
-            assert session._held_user_text == refined
-            # Let the second hold expire into a real turn.
+            # The re-armed hold replaces the fragment, then expires into a real
+            # turn (it may expire before this loop observes the held text).
+            while session._held_user_text != refined and not any(
+                getattr(e, "type", None) == "agent_text_done" for e in events
+            ):
+                await asyncio.sleep(0.01)
             while not any(getattr(e, "type", None) == "agent_text_done" for e in events):
                 await asyncio.sleep(0.01)
             await stt.finish()
@@ -843,7 +901,7 @@ class TestHoldInSession:
                     events.append(ev)
                 await driver
 
-        await asyncio.wait_for(_run(), timeout=5)
+        await asyncio.wait_for(_run(), timeout=10)
         assert any(e.type == "agent_text_done" for e in events)
         assert session.transcript[0].text == refined
 
@@ -948,11 +1006,29 @@ class TestSessionHonorsDetector:
                 pass
         await session.close()
 
-        assert detector.started
-        assert detector.closed
-        assert detector.audio_chunks == [b"\x00\x01" * 8]
+        # The session runs a per-session clone, not the passed-in object.
+        assert session.turn_detector.started
+        assert session.turn_detector.closed
+        assert session.turn_detector.audio_chunks == [b"\x00\x01" * 8]
 
     async def test_default_detector_is_heuristic(self) -> None:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS())
         assert isinstance(session.turn_detector, HeuristicTurnDetector)
+
+    async def test_session_clones_shared_detector_instance(self) -> None:
+        """Two sessions built from one instance (or a singleton factory) must
+        not share a detector — its start/push_audio/close lifecycle is owned
+        per session."""
+        shared = LocalAudioTurnDetector(audio_eou=None)
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        s1 = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector=shared)
+        s2 = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector=shared)
+        assert s1.turn_detector is not shared
+        assert s2.turn_detector is not shared
+        assert s1.turn_detector is not s2.turn_detector
+        assert s1.turn_detector._pcm is not s2.turn_detector._pcm
+
+        # Factory that (incorrectly) returns a singleton — still isolated.
+        f1 = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector=lambda: shared)
+        assert f1.turn_detector is not shared

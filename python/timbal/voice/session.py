@@ -332,7 +332,11 @@ class VoiceSession:
         self.agent = agent
         self.stt = stt
         self.tts = tts
-        self.turn_detector = resolve_turn_detector(turn_detector)
+        # Always clone: the session owns the detector's start/push_audio/close
+        # lifecycle, and the spec may be a shared instance (server voice_config)
+        # or a factory returning a singleton. Inspect ``session.turn_detector``,
+        # not the object you passed in.
+        self.turn_detector = resolve_turn_detector(turn_detector).clone()
         self.audio_input = audio_input or AudioInputConfig()
         self.audio_output = audio_output or AudioOutputConfig()
         # PCM16 mono: 2 bytes per sample.

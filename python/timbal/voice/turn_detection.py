@@ -499,6 +499,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         *,
         completion_threshold: float | None = None,
         hold_timeout_secs: float | None = None,
+        fallback_text_eou: TextEouPredictor | None = None,
     ) -> None:
         self.audio_eou = audio_eou
         if completion_threshold is not None:
@@ -506,6 +507,11 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self.hold_timeout_secs = (
             hold_timeout_secs if hold_timeout_secs is not None else self.DEFAULT_HOLD_TIMEOUT_SECS
         )
+        # Used only when the buffered PCM is too short to score (fast commit at
+        # session start / mic audio not routed): a zero-dep lexical check so an
+        # obviously unfinished utterance still HOLDs instead of inheriting the
+        # heuristic NEW_TURN.
+        self.fallback_text_eou = fallback_text_eou or PunctuationEouPredictor()
         self._sample_rate = 16_000
         self._pcm: deque[bytes] = deque()
         self._pcm_bytes = 0
@@ -532,6 +538,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             audio_eou=self.audio_eou,
             completion_threshold=self.completion_threshold,
             hold_timeout_secs=self.hold_timeout_secs,
+            fallback_text_eou=self.fallback_text_eou,
         )
 
     def push_audio(self, chunk: bytes) -> None:
@@ -574,7 +581,19 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         candidate = decision.text or text
         pcm = self._recent_pcm()
         if len(pcm) < self._sample_rate:  # < ~0.5s of audio — not enough signal
-            return decision
+            # Parent HOLD stands; but don't let a NEW_TURN through unchecked —
+            # score the text lexically so an incomplete fast commit still HOLDs.
+            if decision.action is not CommitAction.NEW_TURN:
+                return decision
+            p_text = await self.fallback_text_eou.predict_eou(candidate)
+            if p_text >= self.completion_threshold:
+                return decision
+            return CommitDecision(
+                action=CommitAction.HOLD,
+                text=candidate,
+                reason="audio_short_lexical_hold",
+                hold_timeout_secs=self.hold_timeout_secs,
+            )
         try:
             p = await self.audio_eou.predict_complete(pcm, sample_rate=self._sample_rate)
         except Exception as e:

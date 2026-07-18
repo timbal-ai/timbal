@@ -186,11 +186,9 @@ async def voice_ws(ws: WebSocket) -> None:
     raw_td = defaults.get("turn_detector")
     if raw_td is not None:
         try:
+            # voice_config is process-wide; VoiceSession clones the resolved
+            # detector so concurrent connections never share buffers/lifecycle.
             turn_detector = resolve_turn_detector(raw_td)
-            # voice_config is process-wide; a shared instance would leak one
-            # session's audio buffer / lifecycle into every other connection.
-            if turn_detector is raw_td:
-                turn_detector = turn_detector.clone()
         except (TypeError, ValueError) as e:
             logger.warning("voice_ws_bad_turn_detector", error=str(e))
 
