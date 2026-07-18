@@ -50,17 +50,23 @@ class TurnState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     assistant_active: bool
-    """Agent is generating OR audio is still playing client-side."""
+    """Agent is generating OR audio is still playing client-side.
+
+    Must not include a pending HOLD — that is :attr:`holding`. Folding HOLD into
+    this flag breaks silence-hallucination filtering and mid-hold refinements.
+    """
     audio_playing: bool
     """Client likely still has queued TTS audio to play."""
     assistant_text: str
     """Assistant text accumulated so far this turn."""
     active_user_text: str
-    """User text of the in-flight turn (empty string if idle)."""
+    """User text of the in-flight turn, or the pending HOLD fragment when holding."""
     seconds_since_turn_start: float
     seconds_since_last_commit: float
     partials_since_last_commit: int
     """Partial transcripts seen since the previous committed transcript."""
+    holding: bool = False
+    """Session is debouncing an incomplete commit (:attr:`CommitAction.HOLD`)."""
 
 
 class PartialDecision(StrEnum):
@@ -241,7 +247,8 @@ class HeuristicTurnDetector(TurnDetector):
         if _is_garbage_commit(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
         # A long commit with zero preceding partials while nothing is playing is
-        # almost always an STT hallucination on silence.
+        # almost always an STT hallucination on silence. Uses assistant_active
+        # only — pending HOLD must not flip that flag (see TurnState.holding).
         if (
             state.partials_since_last_commit == 0
             and len(text) >= self.HALLUCINATION_MIN_CHARS
@@ -250,6 +257,15 @@ class HeuristicTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination")
         if state.assistant_active and _likely_stt_echo(text, state.assistant_text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
+        # Pending HOLD: STT often re-commits a longer form of the same fragment.
+        # Mid-turn "refinement" IGNORE would freeze the held text until timeout —
+        # re-HOLD with the updated utterance instead (session trusts decision.text).
+        if state.holding and state.active_user_text:
+            if _is_same_user_utterance_refinement(state.active_user_text, text):
+                better = text if len(text.strip()) >= len(state.active_user_text.strip()) else state.active_user_text
+                return CommitDecision(action=CommitAction.HOLD, text=better, reason="hold_refinement")
+            combined = state.active_user_text.rstrip(", ") + " " + text
+            return CommitDecision(action=CommitAction.HOLD, text=combined, reason="hold_merge")
         if state.assistant_active and state.active_user_text:
             if _is_same_user_utterance_refinement(state.active_user_text, text):
                 return CommitDecision(action=CommitAction.IGNORE, text=text, reason="refinement")
@@ -338,6 +354,25 @@ class LexicalTurnDetector(HeuristicTurnDetector):
         if decision.action is CommitAction.CONTINUE_TURN:
             return decision
 
+        candidate = decision.text or text
+
+        # Parent HOLD (hold_refinement / hold_merge) or an already-pending hold:
+        # re-score the updated utterance — it may now look complete.
+        if decision.action is CommitAction.HOLD or state.holding:
+            p = await self.text_eou.predict_eou(candidate)
+            if p < self.completion_threshold:
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=candidate,
+                    reason="lexical_hold" if not state.holding else "lexical_hold_update",
+                    hold_timeout_secs=self.DEFAULT_HOLD_TIMEOUT_SECS,
+                )
+            return CommitDecision(
+                action=CommitAction.NEW_TURN,
+                text=candidate,
+                reason="lexical_hold_complete",
+            )
+
         # Mid-turn incomplete fragment + new commit → merge (same as old semantic path).
         if state.assistant_active and state.active_user_text:
             if state.seconds_since_last_commit < self.CONTINUATION_WINDOW_SECS_LEXICAL:
@@ -352,11 +387,11 @@ class LexicalTurnDetector(HeuristicTurnDetector):
             return decision
 
         # Idle: hold if this commit itself looks incomplete.
-        p = await self.text_eou.predict_eou(text)
+        p = await self.text_eou.predict_eou(candidate)
         if p < self.completion_threshold:
             return CommitDecision(
                 action=CommitAction.HOLD,
-                text=text,
+                text=candidate,
                 reason="lexical_hold",
                 hold_timeout_secs=self.DEFAULT_HOLD_TIMEOUT_SECS,
             )
@@ -432,10 +467,16 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
 
     async def on_committed(self, text: str, state: TurnState) -> CommitDecision:
         decision = await super().on_committed(text, state)
-        if decision.action is not CommitAction.NEW_TURN:
+        if decision.action is CommitAction.IGNORE:
+            return decision
+        if decision.action is CommitAction.CONTINUE_TURN:
             return decision
         if self.audio_eou is None:
             return decision
+        # Score fresh turns and hold updates (parent may HOLD a refined fragment).
+        if decision.action not in (CommitAction.NEW_TURN, CommitAction.HOLD):
+            return decision
+        candidate = decision.text or text
         pcm = self._recent_pcm()
         if len(pcm) < self._sample_rate:  # < ~0.5s of audio — not enough signal
             return decision
@@ -445,9 +486,12 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             logger.warning("audio_eou_predict_failed", error=str(e))
             return decision
         if p >= self.completion_threshold:
-            return decision
-        # Incomplete: if we already have an in-flight user fragment, merge;
-        # otherwise HOLD and let the session wait.
+            return CommitDecision(
+                action=CommitAction.NEW_TURN,
+                text=candidate,
+                reason="audio_complete" if state.holding else (decision.reason or "new_turn"),
+            )
+        # Incomplete: mid-agent-turn → merge+restart; else HOLD (session debounce).
         if state.active_user_text and state.assistant_active:
             combined = state.active_user_text.rstrip(", ") + " " + text
             return CommitDecision(
@@ -457,7 +501,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             )
         return CommitDecision(
             action=CommitAction.HOLD,
-            text=decision.text or text,
+            text=candidate,
             reason="audio_hold",
             hold_timeout_secs=self.hold_timeout_secs,
         )

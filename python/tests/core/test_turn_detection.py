@@ -97,6 +97,7 @@ def _state(**overrides) -> TurnState:
         seconds_since_turn_start=10.0,
         seconds_since_last_commit=10.0,
         partials_since_last_commit=2,
+        holding=False,
     )
     defaults.update(overrides)
     return TurnState(**defaults)
@@ -396,6 +397,59 @@ class TestResolveTurnDetector:
             resolve_turn_detector("nope")
 
 
+class TestHoldDecisions:
+    """HOLD must not be conflated with mid-turn assistant_active."""
+
+    async def test_hold_refinement_updates_not_ignored(self) -> None:
+        det = HeuristicTurnDetector()
+        held = "I was wondering about"
+        longer = "I was wondering about the weather tomorrow"
+        decision = await det.on_committed(
+            longer,
+            _state(
+                holding=True,
+                active_user_text=held,
+                assistant_active=False,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "hold_refinement"
+        assert decision.text == longer
+
+    async def test_hallucination_still_ignored_while_holding(self) -> None:
+        """Pending HOLD must not disable the silence-hallucination guard."""
+        det = HeuristicTurnDetector()
+        text = "This is a long hallucinated sentence with no partials at all."
+        assert len(text) > 40
+        decision = await det.on_committed(
+            text,
+            _state(
+                holding=True,
+                active_user_text="I was wondering",
+                assistant_active=False,
+                partials_since_last_commit=0,
+            ),
+        )
+        assert decision.action is CommitAction.IGNORE
+        assert decision.reason == "hallucination"
+
+    async def test_lexical_hold_update_then_complete(self) -> None:
+        """Longer re-commit while holding can graduate to NEW_TURN when complete."""
+        det = LexicalTurnDetector(text_eou=_FixedTextEou(0.99))
+        decision = await det.on_committed(
+            "I was wondering about the weather tomorrow.",
+            _state(
+                holding=True,
+                active_user_text="I was wondering about",
+                assistant_active=False,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "lexical_hold_complete"
+
+
 class TestHoldInSession:
     async def test_hold_timeout_starts_turn(self) -> None:
         """HOLD must not start the agent until the hold timer expires."""
@@ -456,6 +510,122 @@ class TestHoldInSession:
         await asyncio.wait_for(_run(), timeout=5)
         assert any(e.type == "agent_text_done" for e in events)
         assert session.transcript[0].text == "I was wondering about"
+
+    async def test_hold_interrupts_playing_audio(self) -> None:
+        """HOLD while TTS is still buffered must interrupt like NEW_TURN."""
+        import asyncio
+
+        from .test_voice_session import DelayedMockSTT, FakePlaybackTracker
+
+        class _AlwaysHold(TurnDetector):
+            async def on_partial(self, text, state):  # noqa: ARG002
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):  # noqa: ARG002
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=text,
+                    reason="test_hold",
+                    hold_timeout_secs=5.0,
+                )
+
+        tracker = FakePlaybackTracker()
+        tracker.playing = True
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        session = VoiceSession(
+            agent=agent,
+            stt=stt,
+            tts=MockTTS(),
+            turn_detector=_AlwaysHold(),
+            playback_tracker=tracker,
+            hold_timeout_secs=5.0,
+        )
+        events: list[VoiceSessionEvent] = []
+        held_during: list[str | None] = []
+
+        async def _empty():
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(getattr(e, "type", None) == "session_started" for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
+            for _ in range(50):
+                if tracker.interrupt_calls > 0 and session._held_user_text:
+                    held_during.append(session._held_user_text)
+                    break
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+        assert tracker.interrupt_calls >= 1
+        assert held_during == ["I was wondering about"]
+        assert any(e.type == "interrupted" for e in events)
+
+    async def test_hold_refinement_updates_session_fragment(self) -> None:
+        """Longer STT re-commit while HOLDing must replace the held fragment."""
+        import asyncio
+
+        from .test_voice_session import DelayedMockSTT
+
+        class _HoldRefine(TurnDetector):
+            async def on_partial(self, text, state):  # noqa: ARG002
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):  # noqa: ARG002
+                # Exercise the real heuristic hold-refinement path via session state.
+                return await HeuristicTurnDetector().on_committed(text, state)
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        session = VoiceSession(
+            agent=agent,
+            stt=stt,
+            tts=MockTTS(),
+            turn_detector=_HoldRefine(),
+            hold_timeout_secs=5.0,
+        )
+        # Seed a pending HOLD the same way _arm_hold would.
+        session._held_user_text = "I was wondering about"
+        session._last_commit_at = 0.0
+        events: list[VoiceSessionEvent] = []
+        held_during: list[str | None] = []
+        # Keep under HALLUCINATION_MIN_CHARS so 0-partial commits aren't dropped.
+        longer = "I was wondering about weather"
+
+        async def _empty():
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(getattr(e, "type", None) == "session_started" for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text=longer))
+            for _ in range(50):
+                if session._held_user_text == longer:
+                    held_during.append(session._held_user_text)
+                    break
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+        assert held_during == [longer]
 
     async def test_heuristic_never_holds(self) -> None:
         """Default path: no HOLD action, no deferred turns."""

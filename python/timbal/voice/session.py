@@ -594,17 +594,20 @@ class VoiceSession:
     def _turn_state(self) -> TurnState:
         """Snapshot of session state for :class:`TurnDetector` decisions."""
         now = time.monotonic()
+        holding = self._held_user_text is not None
         # While HOLDing an incomplete commit, expose it as the active user text
-        # so the next commit can CONTINUE/merge against it.
-        active = self._held_user_text if self._held_user_text is not None else self._active_turn_user_text
+        # so the next commit can refine/merge against it — but do NOT fold HOLD
+        # into assistant_active (that breaks hallucination filters + refinements).
+        active = self._held_user_text if holding else self._active_turn_user_text
         return TurnState(
-            assistant_active=self._assistant_active or self._held_user_text is not None,
+            assistant_active=self._assistant_active,
             audio_playing=self._assistant_audio_playing,
             assistant_text=self._turn_assistant_text,
             active_user_text=active,
             seconds_since_turn_start=now - self._turn_started_at,
             seconds_since_last_commit=now - self._last_commit_at,
             partials_since_last_commit=self._partials_since_last_commit,
+            holding=holding,
         )
 
     def _cancel_hold(self) -> None:
@@ -702,11 +705,16 @@ class VoiceSession:
         )
 
         if decision.action is CommitAction.HOLD:
-            # Opt-in detectors only. Merge into any already-held fragment.
-            held = self._held_user_text
-            merged = (held.rstrip(", ") + " " + final_text).strip() if held else final_text
-            timeout = decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs
-            await self._arm_hold(merged, timeout)
+            # Stop any still-playing TTS (common right after agent_text_done).
+            # NEW_TURN / CONTINUE_TURN always interrupt first; HOLD must too or
+            # assistant audio keeps talking over the deferred user fragment.
+            await self.interrupt()
+            self._cancel_turn.clear()
+            # Detector returns the full utterance to hold (refine/merge already applied).
+            timeout = (
+                decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs
+            )
+            await self._arm_hold(final_text, timeout)
             return
 
         # A real accept cancels any pending HOLD, then interrupts so truncation
