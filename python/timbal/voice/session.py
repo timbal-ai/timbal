@@ -37,7 +37,13 @@ from ..types.events import OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta
 from ..types.message import Message
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
-from .turn_detection import CommitAction, HeuristicTurnDetector, PartialDecision, TurnDetector, TurnState
+from .turn_detection import (
+    CommitAction,
+    PartialDecision,
+    TurnDetector,
+    TurnState,
+    resolve_turn_detector,
+)
 
 if TYPE_CHECKING:
     from .metrics import TurnMetrics
@@ -318,26 +324,33 @@ class VoiceSession:
         audio_input: AudioInputConfig | None = None,
         audio_output: AudioOutputConfig | None = None,
         *,
-        turn_detector: TurnDetector | None = None,
+        turn_detector: TurnDetector | str | None = None,
         playback_tracker: PlaybackTracker | None = None,
         record_audio: bool = False,
+        hold_timeout_secs: float = 1.5,
     ):
         self.agent = agent
         self.stt = stt
         self.tts = tts
-        self.turn_detector = turn_detector or HeuristicTurnDetector()
+        self.turn_detector = resolve_turn_detector(turn_detector)
         self.audio_input = audio_input or AudioInputConfig()
         self.audio_output = audio_output or AudioOutputConfig()
         # PCM16 mono: 2 bytes per sample.
         self.playback = playback_tracker or BufferedPlaybackTracker(
             bytes_per_second=self.audio_output.sample_rate * 2,
         )
+        # Default HOLD timeout when a detector returns CommitAction.HOLD without
+        # a per-decision override. Heuristic/provider never HOLD, so this is inert
+        # unless an opt-in detector (local / lexical) is used.
+        self.hold_timeout_secs = hold_timeout_secs
 
         self._event_queue: asyncio.Queue[VoiceSessionEvent | None] = asyncio.Queue()
         self._cancel_turn = asyncio.Event()
         self._current_turn_task: asyncio.Task | None = None
         self._is_speaking = False
         self._closed = False
+        self._held_user_text: str | None = None
+        self._hold_task: asyncio.Task | None = None
 
         # Tracks the RunContext from the last completed turn so the agent's
         # __call__ auto-chains parent_id for multi-turn memory.
@@ -524,6 +537,8 @@ class VoiceSession:
         if self._closed:
             return
         self._closed = True
+        self._cancel_hold()
+        self._held_user_text = None
         await self.interrupt(truncate_completed=False)
         await self._emit(None)  # sentinel stops the run() iterator
 
@@ -579,14 +594,77 @@ class VoiceSession:
     def _turn_state(self) -> TurnState:
         """Snapshot of session state for :class:`TurnDetector` decisions."""
         now = time.monotonic()
+        # While HOLDing an incomplete commit, expose it as the active user text
+        # so the next commit can CONTINUE/merge against it.
+        active = self._held_user_text if self._held_user_text is not None else self._active_turn_user_text
         return TurnState(
-            assistant_active=self._assistant_active,
+            assistant_active=self._assistant_active or self._held_user_text is not None,
             audio_playing=self._assistant_audio_playing,
             assistant_text=self._turn_assistant_text,
-            active_user_text=self._active_turn_user_text,
+            active_user_text=active,
             seconds_since_turn_start=now - self._turn_started_at,
             seconds_since_last_commit=now - self._last_commit_at,
             partials_since_last_commit=self._partials_since_last_commit,
+        )
+
+    def _cancel_hold(self) -> None:
+        if self._hold_task is not None and not self._hold_task.done():
+            self._hold_task.cancel()
+        self._hold_task = None
+
+    async def _arm_hold(self, text: str, timeout_secs: float) -> None:
+        """Defer starting a turn until more speech arrives or ``timeout_secs`` elapses."""
+        self._cancel_hold()
+        self._held_user_text = text
+        self._last_commit_at = time.monotonic()
+
+        async def _expire() -> None:
+            try:
+                await asyncio.sleep(timeout_secs)
+            except asyncio.CancelledError:
+                return
+            held = self._held_user_text
+            self._held_user_text = None
+            self._hold_task = None
+            if held and not self._closed:
+                logger.debug(
+                    "stt_hold_expired",
+                    text_preview=held[:120],
+                    timeout_secs=timeout_secs,
+                    **_trace_debug_fields(),
+                )
+                await self.interrupt()
+                self._cancel_turn.clear()
+                await self._begin_user_turn(held, replace_user_entry=False)
+
+        self._hold_task = asyncio.create_task(_expire())
+        logger.debug(
+            "stt_hold_armed",
+            text_preview=text[:120],
+            timeout_secs=timeout_secs,
+            **_trace_debug_fields(),
+        )
+
+    async def _begin_user_turn(self, final_text: str, *, replace_user_entry: bool) -> None:
+        """Record ``final_text`` and start an agent turn.
+
+        Caller is responsible for ``interrupt()`` / clearing ``_cancel_turn``
+        when an in-flight reply must be stopped first (HOLD expiry is usually
+        idle; CONTINUE/NEW_TURN paths interrupt before calling this).
+        """
+        self._last_commit_at = time.monotonic()
+        if replace_user_entry and self._transcript and self._transcript[-1].role == "user":
+            self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
+        else:
+            self._transcript.append(TranscriptEntry(role="user", text=final_text))
+        await self._emit(TranscriptCommitted(text=final_text))
+        self._active_turn_user_text = final_text
+        self._turn_eou_at = time.monotonic()
+        self._current_turn_task = asyncio.create_task(self._run_turn(final_text))
+        logger.debug(
+            "stt_turn_task_created",
+            text_preview=final_text[:120],
+            **_trace_debug_fields(),
         )
 
     async def _handle_committed(self, text: str) -> None:
@@ -601,6 +679,7 @@ class VoiceSession:
             audio_playing=state.audio_playing,
             active_user_preview=(state.active_user_text[:100] if state.active_user_text else ""),
             assistant_so_far_chars=len(state.assistant_text),
+            holding=self._held_user_text is not None,
             **_trace_debug_fields(),
         )
         decision = await self.turn_detector.on_committed(text, state)
@@ -621,9 +700,24 @@ class VoiceSession:
             text_preview=final_text[:160],
             **_trace_debug_fields(),
         )
+
+        if decision.action is CommitAction.HOLD:
+            # Opt-in detectors only. Merge into any already-held fragment.
+            held = self._held_user_text
+            merged = (held.rstrip(", ") + " " + final_text).strip() if held else final_text
+            timeout = decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs
+            await self._arm_hold(merged, timeout)
+            return
+
+        # A real accept cancels any pending HOLD, then interrupts so truncation
+        # can append a heard assistant fragment *before* we rewrite the user
+        # entry (CONTINUE_TURN must see that fragment to pop it).
+        self._cancel_hold()
+        self._held_user_text = None
         await self.interrupt()
         self._cancel_turn.clear()
-        self._last_commit_at = time.monotonic()
+
+        replace = False
         if decision.action is CommitAction.CONTINUE_TURN:
             # interrupt() may have recorded the heard fragment of the aborted
             # reply right after the fragment's user entry (interruption
@@ -638,22 +732,9 @@ class VoiceSession:
                 and self._transcript[-2].text == state.active_user_text
             ):
                 self._transcript.pop()
-            if self._transcript and self._transcript[-1].role == "user":
-                # Replace the previous user entry with the combined text.
-                self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
-            else:
-                self._transcript.append(TranscriptEntry(role="user", text=final_text))
-        else:
-            self._transcript.append(TranscriptEntry(role="user", text=final_text))
-        await self._emit(TranscriptCommitted(text=final_text))
-        self._active_turn_user_text = final_text
-        self._turn_eou_at = time.monotonic()
-        self._current_turn_task = asyncio.create_task(self._run_turn(final_text))
-        logger.debug(
-            "stt_turn_task_created",
-            text_preview=final_text[:120],
-            **_trace_debug_fields(),
-        )
+            replace = bool(self._transcript and self._transcript[-1].role == "user")
+
+        await self._begin_user_turn(final_text, replace_user_entry=replace)
 
     # -- Internal: agent turn → TTS ----------------------------------------
 
@@ -1192,6 +1273,8 @@ class VoiceSession:
         await self._event_queue.put(event)
 
     async def _cleanup(self) -> None:
+        self._cancel_hold()
+        self._held_user_text = None
         for t in list(self._tts_tasks):
             if not t.done():
                 t.cancel()

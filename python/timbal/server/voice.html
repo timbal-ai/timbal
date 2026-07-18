@@ -290,11 +290,16 @@
     font-size: 0.875rem;
   }
   .msg.partial {
+    margin-left: auto;
+    text-align: right;
     color: var(--text-muted);
     font-style: italic;
     font-size: 0.8125rem;
-    padding: 0 0.25rem;
-    max-width: 100%;
+    padding: 0.4rem 0.7rem;
+    border-radius: 12px 12px 4px 12px;
+    background: rgba(0, 0, 0, 0.03);
+    border: 1px dashed var(--border);
+    max-width: 90%;
   }
   .msg.system {
     display: none;
@@ -647,7 +652,18 @@ function setPartial(text) {
     updateEmptyState();
     return;
   }
-  if (!partialEl) partialEl = log('partial', '');
+  // Seal any in-flight assistant bubble so live STT can't read as a
+  // continuation of the previous reply.
+  if (window._assistantEl) {
+    window._lastAssistantEl = window._assistantEl;
+    window._assistantEl = null;
+  }
+  if (!partialEl) {
+    partialEl = log('partial', '');
+  } else {
+    // Always park the live caption after the latest committed bubble.
+    transcriptEl.appendChild(partialEl);
+  }
   partialEl.textContent = '… ' + text;
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   updateEmptyState();
@@ -906,6 +922,7 @@ async function start() {
         log('user', msg.text);
         break;
       case 'agent_text_delta':
+        setPartial(null);
         if (!window._assistantEl) window._assistantEl = log('assistant', '');
         window._assistantEl.textContent += msg.text;
         transcriptEl.scrollTop = transcriptEl.scrollHeight;

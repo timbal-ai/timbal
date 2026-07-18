@@ -58,6 +58,7 @@ Only send keys you need; omitted keys keep server defaults.
 | `encoding`    | Default `"pcm_s16le"`. |
 | `stt_extra`   | Object merged with default STT options (e.g. VAD). |
 | `tts_extra`   | Object merged with default TTS options. |
+| `turn_detector` | Server-side only (not from the client JSON). A `TurnDetector` instance **or** mode name: `"heuristic"` (default), `"provider"` (trust STT/realtime endpointing), `"local"` (audio EOU via `push_audio` + injectable `AudioEouModel`), `"lexical"` (optional punctuation HOLD). |
 
 Example — align server with the browser capture rate (only if that rate is supported end-to-end):
 

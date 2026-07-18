@@ -12,16 +12,22 @@ from contextlib import aclosing
 
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.voice.eou import AudioEouModel, PunctuationEouPredictor, TextEouPredictor
 from timbal.voice.session import TranscriptEvent, VoiceSession, VoiceSessionEvent
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,
     HeuristicTurnDetector,
+    LexicalTurnDetector,
+    LocalAudioTurnDetector,
     PartialDecision,
+    ProviderTurnDetector,
+    SemanticTurnDetector,
     TurnDetector,
     TurnState,
     _is_garbage_commit,
     _is_same_user_utterance_refinement,
+    resolve_turn_detector,
 )
 
 from .test_voice_session import MockSTT, MockTTS
@@ -225,6 +231,237 @@ class TestOnCommitted:
             ),
         )
         assert decision.action is CommitAction.NEW_TURN
+
+
+class _FixedTextEou(TextEouPredictor):
+    """Text predictor returning a constant score."""
+
+    def __init__(self, score: float) -> None:
+        self.score = score
+        self.started = False
+        self.closed = False
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def predict_eou(self, text: str) -> float:  # noqa: ARG002
+        return self.score
+
+
+class _FixedAudioEou(AudioEouModel):
+    """Audio EOU model returning a constant score."""
+
+    def __init__(self, score: float) -> None:
+        self.score = score
+        self.calls = 0
+
+    async def predict_complete(self, pcm: bytes, *, sample_rate: int) -> float:  # noqa: ARG002
+        self.calls += 1
+        return self.score
+
+
+class TestLexicalTurnDetector:
+    async def test_alias_semantic_is_lexical(self) -> None:
+        assert SemanticTurnDetector is LexicalTurnDetector
+
+    async def test_defaults_to_punctuation_predictor(self) -> None:
+        det = LexicalTurnDetector()
+        assert isinstance(det.text_eou, PunctuationEouPredictor)
+
+    async def test_lifecycle_forwards_to_predictor(self) -> None:
+        eou = _FixedTextEou(0.9)
+        det = LexicalTurnDetector(text_eou=eou)
+        await det.start(None)
+        await det.close()
+        assert eou.started and eou.closed
+
+    async def test_idle_incomplete_holds(self) -> None:
+        det = LexicalTurnDetector(text_eou=_FixedTextEou(0.1))
+        decision = await det.on_committed("I was wondering about the", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "lexical_hold"
+
+    async def test_idle_complete_is_new_turn(self) -> None:
+        det = LexicalTurnDetector(text_eou=_FixedTextEou(0.99))
+        decision = await det.on_committed("Tell me a story.", _state())
+        assert decision.action is CommitAction.NEW_TURN
+
+    async def test_incomplete_fragment_merges(self) -> None:
+        det = LexicalTurnDetector(text_eou=_FixedTextEou(0.1))
+        active = "I was wondering if you could tell me about"
+        decision = await det.on_committed(
+            "the weather forecast for tomorrow please now",
+            _state(
+                assistant_active=True,
+                active_user_text=active,
+                seconds_since_turn_start=3.0,
+                seconds_since_last_commit=1.0,
+            ),
+        )
+        assert decision.action is CommitAction.CONTINUE_TURN
+        assert decision.reason == "lexical_continuation"
+
+    async def test_punctuation_end_to_end_merge(self) -> None:
+        det = LexicalTurnDetector()
+        commit = "about your refund policy for damaged items please"
+        decision = await det.on_committed(
+            commit,
+            _state(
+                assistant_active=True,
+                active_user_text="I have a question about the",
+                seconds_since_turn_start=3.0,
+                seconds_since_last_commit=1.0,
+            ),
+        )
+        assert decision.action is CommitAction.CONTINUE_TURN
+        assert decision.reason == "lexical_continuation"
+
+
+class TestProviderTurnDetector:
+    async def test_trusts_real_commits(self) -> None:
+        det = ProviderTurnDetector()
+        decision = await det.on_committed("Tell me a story", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "provider"
+
+    async def test_still_filters_noise_and_garbage(self) -> None:
+        det = ProviderTurnDetector()
+        assert (await det.on_committed("(music)", _state())).action is CommitAction.IGNORE
+        assert (await det.on_committed("Music)", _state())).action is CommitAction.IGNORE
+
+    async def test_no_heuristic_continuation(self) -> None:
+        # Short fast fragment that HeuristicTurnDetector would CONTINUE — provider does not.
+        det = ProviderTurnDetector()
+        decision = await det.on_committed(
+            "estás?",
+            _state(
+                assistant_active=True,
+                active_user_text="Hola, ¿qué tal",
+                seconds_since_turn_start=2.0,
+                seconds_since_last_commit=1.0,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+
+
+class TestLocalAudioTurnDetector:
+    async def test_without_model_matches_heuristic(self) -> None:
+        det = LocalAudioTurnDetector(audio_eou=None)
+        decision = await det.on_committed("Tell me a story", _state())
+        assert decision.action is CommitAction.NEW_TURN
+
+    async def test_incomplete_audio_holds(self) -> None:
+        model = _FixedAudioEou(0.1)
+        det = LocalAudioTurnDetector(audio_eou=model)
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        # >= 0.5s of PCM16 @ 16kHz so the detector has enough signal.
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("I was wondering", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_hold"
+        assert model.calls == 1
+        await det.close()
+
+    async def test_complete_audio_new_turn(self) -> None:
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.9))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Tell me a story", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+
+class TestResolveTurnDetector:
+    def test_none_and_heuristic(self) -> None:
+        assert isinstance(resolve_turn_detector(None), HeuristicTurnDetector)
+        assert isinstance(resolve_turn_detector("heuristic"), HeuristicTurnDetector)
+
+    def test_named_modes(self) -> None:
+        assert isinstance(resolve_turn_detector("provider"), ProviderTurnDetector)
+        assert isinstance(resolve_turn_detector("local"), LocalAudioTurnDetector)
+        assert isinstance(resolve_turn_detector("lexical"), LexicalTurnDetector)
+        assert isinstance(resolve_turn_detector("semantic"), LexicalTurnDetector)
+
+    def test_passthrough_instance(self) -> None:
+        det = ProviderTurnDetector()
+        assert resolve_turn_detector(det) is det
+
+    def test_unknown_raises(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError):
+            resolve_turn_detector("nope")
+
+
+class TestHoldInSession:
+    async def test_hold_timeout_starts_turn(self) -> None:
+        """HOLD must not start the agent until the hold timer expires."""
+        import asyncio
+
+        from .test_voice_session import DelayedMockSTT
+
+        class _HoldOnce(TurnDetector):
+            def __init__(self) -> None:
+                self.n = 0
+
+            async def on_partial(self, text, state):  # noqa: ARG002
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):  # noqa: ARG002
+                self.n += 1
+                if self.n == 1:
+                    return CommitDecision(
+                        action=CommitAction.HOLD,
+                        text=text,
+                        reason="test_hold",
+                        hold_timeout_secs=0.05,
+                    )
+                return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="test")
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        session = VoiceSession(
+            agent=agent,
+            stt=stt,
+            tts=MockTTS(),
+            turn_detector=_HoldOnce(),
+            hold_timeout_secs=0.05,
+        )
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty():
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(getattr(e, "type", None) == "session_started" for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
+            # Wait past the hold timeout so the deferred turn starts.
+            while not any(getattr(e, "type", None) == "agent_text_done" for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+        assert any(e.type == "agent_text_done" for e in events)
+        assert session.transcript[0].text == "I was wondering about"
+
+    async def test_heuristic_never_holds(self) -> None:
+        """Default path: no HOLD action, no deferred turns."""
+        det = HeuristicTurnDetector()
+        d = await det.on_committed("Tell me a story", _state())
+        assert d.action is not CommitAction.HOLD
 
 
 # ---------------------------------------------------------------------------

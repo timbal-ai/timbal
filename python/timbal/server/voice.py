@@ -30,7 +30,8 @@ router = APIRouter(prefix="/voice", tags=["voice"])
 
 _HTML_PATH = Path(__file__).parent / "voice.html"
 
-_DEFAULT_VOICE_ID = "851ejYcv2BoNPjrkw93G"
+# Override with ELEVENLABS_VOICE_ID / TIMBAL_VOICE_ID (cloned/custom voices are account-specific).
+_DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 
 
 def default_voice_config_from_env() -> dict[str, Any]:
@@ -125,7 +126,6 @@ async def voice_ws(ws: WebSocket) -> None:
         SessionStarted,
         TranscriptCommitted,
         TranscriptPartial,
-        TurnDetector,
         TurnMetricsEvent,
         VoiceSession,
         VoiceSessionEvent,
@@ -176,11 +176,18 @@ async def voice_ws(ws: WebSocket) -> None:
         extra=merged.get("tts_extra", {}),
     )
 
-    # Server-side only (an instance can't come over the wire): ``runnable.voice_config``
-    # may supply a custom TurnDetector; read from *defaults* so client JSON can't override.
-    turn_detector = defaults.get("turn_detector")
-    if not isinstance(turn_detector, TurnDetector):
-        turn_detector = None
+    # Server-side only (can't come over the wire): ``runnable.voice_config`` may
+    # supply a TurnDetector instance or a mode name ("heuristic"|"provider"|
+    # "local"|"lexical"). Read from *defaults* so client JSON can't override.
+    from ..voice.turn_detection import resolve_turn_detector
+
+    turn_detector = None
+    raw_td = defaults.get("turn_detector")
+    if raw_td is not None:
+        try:
+            turn_detector = resolve_turn_detector(raw_td)
+        except (TypeError, ValueError) as e:
+            logger.warning("voice_ws_bad_turn_detector", error=str(e))
 
     session = VoiceSession(
         agent=runnable,

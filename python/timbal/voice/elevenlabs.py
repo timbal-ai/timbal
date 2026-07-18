@@ -271,6 +271,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._audio_queues: dict[str, asyncio.Queue[dict | None]] = {}
         self._active_contexts: set[str] = set()
         self._ctx_counter: int = 0
+        self._last_ws_error: str | None = None
 
     async def connect(self, config: AudioOutputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
@@ -320,6 +321,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
             additional_headers={"xi-api-key": self._api_key},
         )
         self._ws_open = True
+        self._last_ws_error = None
         self._stop.clear()
         self._reader_task = asyncio.create_task(self._read_loop())
         self._keepalive_task = asyncio.create_task(
@@ -362,10 +364,12 @@ class ElevenLabsStreamTTS(TextToSpeech):
                 if ctx and ctx in self._audio_queues:
                     await self._audio_queues[ctx].put(msg)
         except ConnectionClosed as e:
+            self._last_ws_error = str(e)
             logger.warning("el_tts_ws_closed", error=str(e))
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            self._last_ws_error = str(e)
             logger.error("el_tts_reader_error", error=str(e), exc_info=True)
         finally:
             self._ws_open = False
@@ -435,12 +439,18 @@ class ElevenLabsStreamTTS(TextToSpeech):
             while True:
                 msg = await queue.get()
                 if msg is None:
+                    if chunk_count == 0 and self._last_ws_error:
+                        raise RuntimeError(f"ElevenLabs TTS closed: {self._last_ws_error}")
                     break
+                if msg.get("error"):
+                    raise RuntimeError(f"ElevenLabs TTS error: {msg.get('error')}")
                 if msg.get("audio"):
                     chunk_count += 1
                     yield base64.b64decode(msg["audio"])
                 if msg.get("is_final") or msg.get("isFinal"):
                     break
+            if chunk_count == 0 and self._last_ws_error:
+                raise RuntimeError(f"ElevenLabs TTS closed: {self._last_ws_error}")
         finally:
             self._audio_queues.pop(ctx_id, None)
             self._active_contexts.discard(ctx_id)
