@@ -391,6 +391,11 @@ class LexicalTurnDetector(HeuristicTurnDetector):
             return decision
         if decision.action is CommitAction.CONTINUE_TURN:
             return decision
+        # Parent already replaced the held fragment with a distinct utterance
+        # ("stop", a new question). Do not re-HOLD just because state.holding
+        # is still true — that defers the supersede until the old timer fires.
+        if decision.reason == "hold_supersede":
+            return decision
 
         candidate = decision.text or text
 
@@ -412,9 +417,10 @@ class LexicalTurnDetector(HeuristicTurnDetector):
                     reason="lexical_hold_supersede",
                 )
 
-        # Parent HOLD (hold_refinement / hold_merge) or an already-pending hold:
-        # re-score the updated utterance — it may now look complete.
-        if decision.action is CommitAction.HOLD or state.holding:
+        # Parent HOLD (hold_refinement / hold_merge): re-score the updated
+        # utterance — it may now look complete. Only enter on HOLD decisions;
+        # ``state.holding`` alone must not override a parent NEW_TURN.
+        if decision.action is CommitAction.HOLD:
             p = await self.text_eou.predict_eou(candidate)
             if p < self.completion_threshold:
                 return CommitDecision(
@@ -535,6 +541,10 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             and _looks_like_fresh_hold_utterance(text)
         ):
             decision = CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
+        # Distinct utterance already replaced the hold — start immediately even
+        # if the audio EOU still scores the previous window as incomplete.
+        if decision.reason == "hold_supersede":
+            return decision
         if self.audio_eou is None:
             return decision
         # Score fresh turns and hold updates (parent may HOLD a refined fragment).

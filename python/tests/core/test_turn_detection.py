@@ -485,7 +485,44 @@ class TestHoldDecisions:
         )
         assert decision.action is CommitAction.NEW_TURN
         assert decision.text == "stop"
-        assert decision.reason in ("hold_supersede", "lexical_hold_supersede", "lexical_hold_complete")
+        assert decision.reason == "hold_supersede"
+
+    async def test_lexical_does_not_rehold_parent_supersede(self) -> None:
+        """Low EOU must not convert hold_supersede back into HOLD."""
+        det = LexicalTurnDetector(text_eou=_FixedTextEou(0.1))
+        decision = await det.on_committed(
+            "stop",
+            _state(
+                holding=True,
+                active_user_text="I was wondering about",
+                assistant_active=False,
+                seconds_since_last_commit=0.5,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "hold_supersede"
+        assert decision.text == "stop"
+
+    async def test_local_does_not_rehold_parent_supersede(self) -> None:
+        """Incomplete audio must not convert hold_supersede back into HOLD."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed(
+            "stop",
+            _state(
+                holding=True,
+                active_user_text="I was wondering about",
+                assistant_active=False,
+                seconds_since_last_commit=0.5,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "hold_supersede"
+        assert decision.text == "stop"
+        await det.close()
 
     async def test_hallucination_still_ignored_while_holding(self) -> None:
         """Pending HOLD must not disable the silence-hallucination guard."""
