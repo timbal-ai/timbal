@@ -866,7 +866,12 @@ class TestInterruptionTruncation:
             await stt.inject(TranscriptEvent(type="committed", text="Hello there"))
             while not any(isinstance(e, AgentTextDone) for e in events):
                 await asyncio.sleep(0.01)
-            first_run_id = session._last_run_context.id if session._last_run_context else None
+            # AgentTextDone is emitted *before* ``_run_turn``'s finally assigns
+            # ``_last_run_context``. Wait for that — this test covers the
+            # post-finalize barge-in path (turn task done, audio still "playing").
+            while session._last_run_context is None:
+                await asyncio.sleep(0.01)
+            first_run_id = session._last_run_context.id
             tracker.playing = True
             tracker.played = 200  # half of 400 emitted bytes
             await stt.inject(TranscriptEvent(type="committed", text=self.BARGE_IN))
