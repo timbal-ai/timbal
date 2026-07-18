@@ -36,7 +36,13 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from .eou import AudioEouModel, PunctuationEouPredictor, TextEouPredictor
+from .eou import (
+    _DANGLING_TOKENS,
+    _WORD_RE,
+    AudioEouModel,
+    PunctuationEouPredictor,
+    TextEouPredictor,
+)
 
 if TYPE_CHECKING:
     from .session import AudioInputConfig
@@ -209,6 +215,28 @@ def _is_same_user_utterance_refinement(active: str, new: str) -> bool:
     return False
 
 
+def _looks_like_fresh_hold_utterance(text: str) -> bool:
+    """True if ``text`` looks like its own utterance, not a VAD-split continuation.
+
+    Used while HOLDing to avoid gluing ``stop`` / short new questions onto an
+    incomplete held fragment. Function-word / lowercase multi-word starts
+    (``the weather…``) stay eligible for merge.
+    """
+    n = text.strip()
+    if not n:
+        return False
+    words = _WORD_RE.findall(n)
+    if not words:
+        return True
+    first = words[0].lower()
+    if first in _DANGLING_TOKENS:
+        return False
+    # Lowercase multi-word glue is usually the rest of the held phrase.
+    if n[0].islower() and n[0].isalpha() and len(words) >= 2:
+        return False
+    return True
+
+
 class HeuristicTurnDetector(TurnDetector):
     """Default detector: the regex/similarity heuristics tuned for ElevenLabs Scribe.
 
@@ -260,12 +288,20 @@ class HeuristicTurnDetector(TurnDetector):
         # Pending HOLD: STT often re-commits a longer form of the same fragment.
         # Mid-turn "refinement" IGNORE would freeze the held text until timeout —
         # re-HOLD with the updated utterance instead (session trusts decision.text).
+        # Do NOT glue every non-refinement onto the held fragment — a separate
+        # utterance ("stop", a new question) must supersede the hold.
         if state.holding and state.active_user_text:
             if _is_same_user_utterance_refinement(state.active_user_text, text):
                 better = text if len(text.strip()) >= len(state.active_user_text.strip()) else state.active_user_text
                 return CommitDecision(action=CommitAction.HOLD, text=better, reason="hold_refinement")
-            combined = state.active_user_text.rstrip(", ") + " " + text
-            return CommitDecision(action=CommitAction.HOLD, text=combined, reason="hold_merge")
+            # Same gates as mid-turn VAD-split continuation.
+            if (
+                state.seconds_since_last_commit < self.CONTINUATION_WINDOW_SECS
+                and len(text) < self.CONTINUATION_MAX_CHARS
+            ):
+                combined = state.active_user_text.rstrip(", ") + " " + text
+                return CommitDecision(action=CommitAction.HOLD, text=combined, reason="hold_merge")
+            return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
         if state.assistant_active and state.active_user_text:
             if _is_same_user_utterance_refinement(state.active_user_text, text):
                 return CommitDecision(action=CommitAction.IGNORE, text=text, reason="refinement")
@@ -355,6 +391,24 @@ class LexicalTurnDetector(HeuristicTurnDetector):
             return decision
 
         candidate = decision.text or text
+
+        # Parent glued a short non-refinement onto the held fragment (hold_merge).
+        # If the new commit alone looks complete and isn't a function-word
+        # continuation ("the weather…"), drop the held fragment — otherwise
+        # "stop" / a short new question becomes garbled user text.
+        if (
+            state.holding
+            and decision.action is CommitAction.HOLD
+            and decision.reason == "hold_merge"
+            and _looks_like_fresh_hold_utterance(text)
+        ):
+            p_new = await self.text_eou.predict_eou(text)
+            if p_new >= self.completion_threshold:
+                return CommitDecision(
+                    action=CommitAction.NEW_TURN,
+                    text=text,
+                    reason="lexical_hold_supersede",
+                )
 
         # Parent HOLD (hold_refinement / hold_merge) or an already-pending hold:
         # re-score the updated utterance — it may now look complete.
@@ -471,6 +525,14 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             return decision
         if decision.action is CommitAction.CONTINUE_TURN:
             return decision
+        # Parent hold_merge of a self-contained commit → don't glue onto held text.
+        if (
+            state.holding
+            and decision.action is CommitAction.HOLD
+            and decision.reason == "hold_merge"
+            and _looks_like_fresh_hold_utterance(text)
+        ):
+            decision = CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
         if self.audio_eou is None:
             return decision
         # Score fresh turns and hold updates (parent may HOLD a refined fragment).

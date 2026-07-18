@@ -417,6 +417,59 @@ class TestHoldDecisions:
         assert decision.reason == "hold_refinement"
         assert decision.text == longer
 
+    async def test_hold_merge_short_continuation(self) -> None:
+        """VAD-split continuation while holding still glues onto the fragment."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "the weather tomorrow",
+            _state(
+                holding=True,
+                active_user_text="I was wondering about",
+                assistant_active=False,
+                seconds_since_last_commit=0.8,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "hold_merge"
+        assert decision.text == "I was wondering about the weather tomorrow"
+
+    async def test_hold_does_not_merge_long_new_utterance(self) -> None:
+        """A separate long commit while holding must not be concatenated."""
+        det = HeuristicTurnDetector()
+        new = "Actually what is the capital of France please tell me"
+        assert len(new) >= HeuristicTurnDetector.CONTINUATION_MAX_CHARS
+        decision = await det.on_committed(
+            new,
+            _state(
+                holding=True,
+                active_user_text="I was wondering about",
+                assistant_active=False,
+                seconds_since_last_commit=1.0,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "hold_supersede"
+        assert decision.text == new
+
+    async def test_lexical_hold_supersedes_stop_command(self) -> None:
+        """Complete short command while holding must not produce garbled merge text."""
+        det = LexicalTurnDetector()  # real punctuation EOU
+        decision = await det.on_committed(
+            "stop",
+            _state(
+                holding=True,
+                active_user_text="I was wondering about",
+                assistant_active=False,
+                seconds_since_last_commit=0.5,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "lexical_hold_supersede"
+        assert decision.text == "stop"
+
     async def test_hallucination_still_ignored_while_holding(self) -> None:
         """Pending HOLD must not disable the silence-hallucination guard."""
         det = HeuristicTurnDetector()
