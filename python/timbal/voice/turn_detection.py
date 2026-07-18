@@ -26,6 +26,7 @@ deprecated text-classifier ONNX models.
 
 from __future__ import annotations
 
+import copy
 import re
 from abc import ABC, abstractmethod
 from collections import deque
@@ -118,6 +119,18 @@ class TurnDetector(ABC):
 
     def push_audio(self, chunk: bytes) -> None:  # noqa: B027
         """Raw mic PCM, for detectors that run local VAD / audio models."""
+
+    def clone(self) -> TurnDetector:
+        """Per-session copy for shared configs (server ``voice_config``).
+
+        Each :class:`~timbal.voice.VoiceSession` owns its detector's
+        ``start``/``push_audio``/``close`` lifecycle, so a single instance must
+        not be shared across concurrent sessions. Default is a shallow copy
+        (fine for stateless detectors; injected models stay shared). Detectors
+        with per-session mutable state must override (see
+        :class:`LocalAudioTurnDetector`).
+        """
+        return copy.copy(self)
 
     @abstractmethod
     async def on_partial(self, text: str, state: TurnState) -> PartialDecision: ...
@@ -513,6 +526,14 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self._pcm.clear()
         self._pcm_bytes = 0
 
+    def clone(self) -> LocalAudioTurnDetector:
+        """Fresh PCM buffer per session; the ``audio_eou`` model stays shared."""
+        return type(self)(
+            audio_eou=self.audio_eou,
+            completion_threshold=self.completion_threshold,
+            hold_timeout_secs=self.hold_timeout_secs,
+        )
+
     def push_audio(self, chunk: bytes) -> None:
         if not chunk:
             return
@@ -582,10 +603,12 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
 
 
 def resolve_turn_detector(spec: Any = None) -> TurnDetector:
-    """Build a :class:`TurnDetector` from a string name, instance, or ``None``.
+    """Build a :class:`TurnDetector` from a name, instance, factory, or ``None``.
 
     Accepted names: ``heuristic`` (default), ``provider``, ``local``, ``lexical``.
-    Instances are returned unchanged. Unknown strings raise ``ValueError``.
+    Instances are returned unchanged — callers that reuse one spec across
+    concurrent sessions (server ``voice_config``) must :meth:`~TurnDetector.clone`
+    per session, or pass a zero-arg factory callable instead.
     """
     if spec is None:
         return HeuristicTurnDetector()
@@ -603,6 +626,14 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
             return LexicalTurnDetector()
         raise ValueError(
             f"Unknown turn_detector {spec!r}; expected one of "
-            "'heuristic', 'provider', 'local', 'lexical', or a TurnDetector instance"
+            "'heuristic', 'provider', 'local', 'lexical', a TurnDetector instance, "
+            "or a zero-arg factory returning one"
         )
-    raise TypeError(f"turn_detector must be str | TurnDetector | None, got {type(spec)!r}")
+    if callable(spec):
+        built = spec()
+        if not isinstance(built, TurnDetector):
+            raise TypeError(
+                f"turn_detector factory must return a TurnDetector, got {type(built)!r}"
+            )
+        return built
+    raise TypeError(f"turn_detector must be str | TurnDetector | callable | None, got {type(spec)!r}")

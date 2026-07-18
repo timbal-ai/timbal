@@ -390,11 +390,51 @@ class TestResolveTurnDetector:
         det = ProviderTurnDetector()
         assert resolve_turn_detector(det) is det
 
+    def test_factory_callable_builds_per_call(self) -> None:
+        a = resolve_turn_detector(ProviderTurnDetector)
+        b = resolve_turn_detector(ProviderTurnDetector)
+        assert isinstance(a, ProviderTurnDetector)
+        assert a is not b
+
+    def test_factory_returning_non_detector_raises(self) -> None:
+        import pytest
+
+        with pytest.raises(TypeError):
+            resolve_turn_detector(lambda: object())
+
     def test_unknown_raises(self) -> None:
         import pytest
 
         with pytest.raises(ValueError):
             resolve_turn_detector("nope")
+
+
+class TestTurnDetectorClone:
+    """Per-session copies so a shared voice_config instance is never reused."""
+
+    def test_base_clone_is_distinct_object(self) -> None:
+        det = HeuristicTurnDetector()
+        assert det.clone() is not det
+
+    async def test_local_audio_clone_isolates_pcm_buffer(self) -> None:
+        model = _FixedAudioEou(0.9)
+        det = LocalAudioTurnDetector(audio_eou=model, completion_threshold=0.7, hold_timeout_secs=3.0)
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+
+        other = det.clone()
+        assert other is not det
+        assert other.audio_eou is model  # weights shared, buffers not
+        assert other.completion_threshold == 0.7
+        assert other.hold_timeout_secs == 3.0
+        assert other._pcm is not det._pcm
+        assert len(other._pcm) == 0 and len(det._pcm) == 1
+
+        # One session's close() must not clear another's buffer.
+        await other.start(type("C", (), {"sample_rate": 16000})())
+        other.push_audio(b"\x00\x01" * 8000)
+        await det.close()
+        assert len(other._pcm) == 1
 
 
 class TestHoldDecisions:

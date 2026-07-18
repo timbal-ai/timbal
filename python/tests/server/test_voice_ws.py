@@ -432,6 +432,45 @@ class TestVoiceWsAgentValidation:
                     pass
 
 
+class TestVoiceWsTurnDetectorIsolation:
+    """A TurnDetector instance in voice_config must be cloned per session."""
+
+    def test_shared_instance_is_cloned_per_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from timbal.voice.turn_detection import HeuristicTurnDetector
+
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        started: list = []
+
+        class _TrackingDetector(HeuristicTurnDetector):
+            async def start(self, config) -> None:
+                started.append(self)
+
+        shared = _TrackingDetector()
+        app = create_app()
+        with TestClient(app) as client:
+            app.state.voice_config = {**(app.state.voice_config or {}), "turn_detector": shared}
+            for _ in range(2):
+                with client.websocket_connect("/voice/ws") as ws:
+                    ws.send_json({})
+                    _collect_ws_messages(ws)
+
+        assert len(started) == 2
+        assert started[0] is not shared
+        assert started[1] is not shared
+        assert started[0] is not started[1]
+
+
 class TestVoiceWsAudioTransport:
     """Verify audio bytes survive the base64 round-trip over WS."""
 
