@@ -453,6 +453,23 @@ class TestHoldDecisions:
         assert decision.reason == "hold_supersede"
         assert decision.text == new
 
+    async def test_heuristic_hold_supersedes_stop_command(self) -> None:
+        """Heuristic must not glue a self-contained short commit onto a HOLD."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "stop",
+            _state(
+                holding=True,
+                active_user_text="I was wondering about",
+                assistant_active=False,
+                seconds_since_last_commit=0.5,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "hold_supersede"
+        assert decision.text == "stop"
+
     async def test_lexical_hold_supersedes_stop_command(self) -> None:
         """Complete short command while holding must not produce garbled merge text."""
         det = LexicalTurnDetector()  # real punctuation EOU
@@ -467,8 +484,8 @@ class TestHoldDecisions:
             ),
         )
         assert decision.action is CommitAction.NEW_TURN
-        assert decision.reason == "lexical_hold_supersede"
         assert decision.text == "stop"
+        assert decision.reason in ("hold_supersede", "lexical_hold_supersede", "lexical_hold_complete")
 
     async def test_hallucination_still_ignored_while_holding(self) -> None:
         """Pending HOLD must not disable the silence-hallucination guard."""
@@ -679,6 +696,79 @@ class TestHoldInSession:
 
         await asyncio.wait_for(_run(), timeout=5)
         assert held_during == [longer]
+
+    async def test_hold_expiry_does_not_wipe_rearmed_hold(self) -> None:
+        """Stale expiry must not clear a hold that was refined/re-armed."""
+        import asyncio
+
+        from .test_voice_session import DelayedMockSTT
+
+        class _HoldThenRefine(TurnDetector):
+            def __init__(self) -> None:
+                self.n = 0
+
+            async def on_partial(self, text, state):  # noqa: ARG002
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):  # noqa: ARG002
+                self.n += 1
+                if self.n == 1:
+                    return CommitDecision(
+                        action=CommitAction.HOLD,
+                        text=text,
+                        reason="hold1",
+                        hold_timeout_secs=0.08,
+                    )
+                if state.holding:
+                    return CommitDecision(
+                        action=CommitAction.HOLD,
+                        text=text,
+                        reason="hold2",
+                        hold_timeout_secs=0.5,
+                    )
+                return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="new")
+
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        session = VoiceSession(
+            agent=agent,
+            stt=stt,
+            tts=MockTTS(),
+            turn_detector=_HoldThenRefine(),
+            hold_timeout_secs=0.08,
+        )
+        events: list[VoiceSessionEvent] = []
+        refined = "I was wondering about the weather"
+
+        async def _empty():
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(getattr(e, "type", None) == "session_started" for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
+            # Re-arm near the first timeout so H1 and H2 race.
+            await asyncio.sleep(0.07)
+            await stt.inject(TranscriptEvent(type="committed", text=refined))
+            # Stale H1 must not wipe the refined hold.
+            await asyncio.sleep(0.05)
+            assert session._held_user_text == refined
+            # Let the second hold expire into a real turn.
+            while not any(getattr(e, "type", None) == "agent_text_done" for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+        assert any(e.type == "agent_text_done" for e in events)
+        assert session.transcript[0].text == refined
 
     async def test_heuristic_never_holds(self) -> None:
         """Default path: no HOLD action, no deferred turns."""

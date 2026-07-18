@@ -294,10 +294,12 @@ class HeuristicTurnDetector(TurnDetector):
             if _is_same_user_utterance_refinement(state.active_user_text, text):
                 better = text if len(text.strip()) >= len(state.active_user_text.strip()) else state.active_user_text
                 return CommitDecision(action=CommitAction.HOLD, text=better, reason="hold_refinement")
-            # Same gates as mid-turn VAD-split continuation.
+            # Same gates as mid-turn VAD-split continuation — but still refuse
+            # to glue a self-contained utterance ("stop", a short new question).
             if (
                 state.seconds_since_last_commit < self.CONTINUATION_WINDOW_SECS
                 and len(text) < self.CONTINUATION_MAX_CHARS
+                and not _looks_like_fresh_hold_utterance(text)
             ):
                 combined = state.active_user_text.rstrip(", ") + " " + text
                 return CommitDecision(action=CommitAction.HOLD, text=combined, reason="hold_merge")

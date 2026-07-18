@@ -690,6 +690,17 @@ class FakePlaybackTracker(PlaybackTracker):
 
 
 class TestInterruptionTruncation:
+    """Invariants under test (voice barge-in / HOLD / CONTINUE):
+
+    * transcript assistant text == heard prefix (or absent if 0 bytes)
+    * root.memory last assistant matches that prefix (or both dropped)
+    * serializing providers re-save after post-AgentTextDone truncation
+    * CONTINUE_TURN: one merged user entry; no stray heard-assistant in
+      transcript *or* parent memory
+    * interrupt() cancels orphan ``_current_turn_task`` before ``_is_speaking``
+    * HOLD expiry must not wipe a refined/re-armed hold
+    """
+
     RESPONSE = "Hello world how are you doing today my friend"
     BARGE_IN = "Actually I want to ask about something else entirely"
 
@@ -806,6 +817,86 @@ class TestInterruptionTruncation:
         assert self.RESPONSE.startswith(heard)
         # Second turn's reply is intact.
         assert assistant_entries[1].text == "Second reply"
+
+    async def test_completed_turn_barge_in_resaves_serialized_trace(self) -> None:
+        """Regression: interrupt() after AgentTextDone must re-persist the
+        truncated memory. Serializing providers already saved the full reply in
+        the turn's finally; without a re-save the stored snapshot stays wrong
+        even though session_transcript / live memory are truncated."""
+        from copy import deepcopy
+
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        class SnapshotProvider(InMemoryTracingProvider):
+            """Capture a deep copy on each store — mimics jsonl/platform."""
+
+            _snapshots: dict = {}
+
+            @classmethod
+            async def _store(cls, run_context) -> None:
+                await super()._store(run_context)
+                cls._snapshots[run_context.id] = deepcopy(run_context._trace)
+
+        SnapshotProvider._snapshots = {}
+        SnapshotProvider._storage = {}
+
+        tracker = FakePlaybackTracker()
+        replies = iter([self.RESPONSE, "Second reply"])
+        agent = Agent(
+            name="t",
+            model=TestModel(handler=lambda _messages: next(replies)),
+            tools=[],
+            tracing_provider=SnapshotProvider,
+        )
+        stt = DelayedMockSTT()
+        tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+
+        events: list[VoiceSessionEvent] = []
+        first_run_id: str | None = None
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            nonlocal first_run_id
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello there"))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            first_run_id = session._last_run_context.id if session._last_run_context else None
+            tracker.playing = True
+            tracker.played = 200  # half of 400 emitted bytes
+            await stt.inject(TranscriptEvent(type="committed", text=self.BARGE_IN))
+            while sum(1 for e in events if isinstance(e, AgentTextDone)) < 2:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert first_run_id is not None
+        snap = SnapshotProvider._snapshots.get(first_run_id)
+        assert snap is not None
+        # Find the root span memory in the serialized snapshot.
+        root = next(s for s in snap.values() if getattr(s, "path", None) and "." not in s.path)
+        memory = root.memory or []
+        assistant_texts = [
+            m.collect_text() for m in memory if getattr(m, "role", None) == "assistant"
+        ]
+        assert assistant_texts, "expected truncated assistant message in stored trace"
+        heard = assistant_texts[0]
+        assert heard != self.RESPONSE
+        assert self.RESPONSE.startswith(heard)
 
     async def test_barge_in_during_final_tts_wait_rewrites_not_appends(self) -> None:
         """Regression: ``_await_tts_chain`` swallows the cancellation of TTS
@@ -980,7 +1071,11 @@ class TestInterruptionTruncation:
             ]
         )
         tracker = FakePlaybackTracker()
-        agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE, "Second reply"]), tools=[])
+        # Handler (not responses=): CONTINUE memory cleanup drops the fragment
+        # assistant message, so assistant-count-based TestModel would replay
+        # response[0] for the merged turn.
+        replies = iter([self.RESPONSE, "Second reply"])
+        agent = Agent(name="t", model=TestModel(handler=lambda _m: next(replies)), tools=[])
         stt = DelayedMockSTT()
         tts = SlowMockTTS(delay=0.03, chunk=b"\x00\x01" * 50, num_chunks=4)
         session = VoiceSession(
@@ -1022,6 +1117,86 @@ class TestInterruptionTruncation:
         assert [e.role for e in session.transcript] == ["user", "assistant"]
         assert session.transcript[0].text == combined
         assert session.transcript[1].text == "Second reply"
+
+    async def test_align_continue_memory_drops_heard_assistant(self) -> None:
+        """Unit: CONTINUE rewrite must pop assistant:heard and rewrite user."""
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.span import Span
+        from timbal.types.content import TextContent
+        from timbal.types.message import Message
+
+        agent = Agent(name="t", model=TestModel(responses=["x"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        ctx = RunContext(tracing_provider=None, platform_config=None)
+        root = Span(
+            path="t",
+            call_id="c1",
+            parent_call_id=None,
+            t0=0,
+            memory=[
+                Message(role="user", content=[TextContent(text="hello can")]),
+                Message(role="assistant", content=[TextContent(text="Hello wor")]),
+            ],
+        )
+        ctx._trace[root.call_id] = root
+        session._last_run_context = ctx
+
+        await session._align_continue_memory(
+            fragment_user_text="hello can",
+            combined_user_text="hello can you help me with something",
+        )
+        mem = root.memory
+        assert len(mem) == 1
+        assert mem[0].role == "user"
+        assert mem[0].collect_text() == "hello can you help me with something"
+
+    async def test_interrupt_cancels_orphan_turn_before_speaking(self) -> None:
+        """``interrupt()`` must cancel a scheduled turn even if ``_is_speaking``
+        is still False — otherwise HOLD expiry / commit races double-run agents."""
+        gate = asyncio.Event()
+
+        class _GatedSession(VoiceSession):
+            async def _run_turn(self, user_text: str) -> None:
+                await gate.wait()
+                await super()._run_turn(user_text)
+
+        agent = Agent(name="t", model=TestModel(responses=["should not speak", "ok"]), tools=[])
+        stt = DelayedMockSTT()
+        session = _GatedSession(agent=agent, stt=stt, tts=MockTTS())
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello there"))
+            # Wait until the turn task exists but has not set _is_speaking yet.
+            for _ in range(100):
+                task = session._current_turn_task
+                if task is not None and not task.done() and not session._is_speaking:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("orphan turn never scheduled")
+            assert session._assistant_active is False
+            await session.interrupt()
+            assert session._current_turn_task is None or session._current_turn_task.done()
+            gate.set()  # would let the orphan proceed if cancel failed
+            await asyncio.sleep(0.05)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+        assert not any(isinstance(e, AgentTextDone) for e in events)
 
     async def test_close_does_not_truncate_completed_turn(self) -> None:
         tracker = FakePlaybackTracker()
