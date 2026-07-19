@@ -11,13 +11,22 @@ from timbal.state.context import RunContext
 
 NEW_MODEL_IDS = [
     "xai/grok-4.5",
+    "xai/grok-4.3",
     "fireworks/accounts/fireworks/models/minimax-m2p7",
+    "fireworks/accounts/fireworks/models/minimax-m3",
     "fireworks/accounts/fireworks/models/qwen3p7-plus",
     "fireworks/accounts/fireworks/models/deepseek-v4-flash",
+    "fireworks/accounts/fireworks/models/kimi-k2p7-code",
     "openai/gpt-5.6-sol",
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-luna",
+    "openai/gpt-5.5-pro",
+    "openai/gpt-5.4-pro",
     "fireworks/accounts/fireworks/models/glm-5p2",
+    "groq/qwen/qwen3.6-27b",
+    "togetherai/moonshotai/Kimi-K2.7-Code",
+    "togetherai/zai-org/GLM-5.2",
+    "togetherai/MiniMaxAI/MiniMax-M3",
     "moonshot/kimi-k3",
     "moonshot/kimi-k2.6",
     "moonshot/kimi-k2.5",
@@ -100,6 +109,28 @@ class TestXaiRouterDispatch:
                         pass
 
         assert captured_kwargs.get("model") == "grok-4.5"
+        assert captured_kwargs.get("max_output_tokens") == 32
+
+    @pytest.mark.asyncio
+    async def test_grok_43_uses_responses_path(self):
+        from timbal.core.llm_router import _llm_router
+
+        _make_run_context()
+        mock_client, captured_kwargs = self._make_mock_client_and_capturer()
+
+        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"XAI_API_KEY": "key"}):
+                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                    try:
+                        async for _ in _llm_router(
+                            model="xai/grok-4.3",
+                            max_tokens=32,
+                        ):
+                            pass
+                    except (RuntimeError, StopAsyncIteration):
+                        pass
+
+        assert captured_kwargs.get("model") == "grok-4.3"
         assert captured_kwargs.get("max_output_tokens") == 32
 
 
