@@ -25,12 +25,13 @@ class ThinkingContent(BaseContent):
         }
 
     @override
-    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
-        """See base class."""
-        return {
-            "type": "text", 
-            "text": self.thinking
-        }
+    def to_openai_chat_completions_input(self, **kwargs: Any) -> None:
+        """Not a chat-completions content block by itself.
+
+        Use ``Message.to_openai_chat_completions_input(reasoning_as=...)``:
+        ``reasoning_content`` for Moonshot/Fireworks-style providers, omit otherwise.
+        """
+        return None
 
     @override
     def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any]:

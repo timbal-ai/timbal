@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     GetCoreSchemaHandler,
@@ -10,7 +10,7 @@ from pydantic import (
 )
 from pydantic_core import CoreSchema, core_schema
 
-from .content import TextContent, ToolResultContent, ToolUseContent, content_factory
+from .content import TextContent, ThinkingContent, ToolResultContent, ToolUseContent, content_factory
 
 
 def _append_anthropic_content_blocks(target: list[dict[str, Any]], anthropic_input: dict[str, Any] | list[dict[str, Any]]) -> None:
@@ -77,19 +77,37 @@ class Message:
             inputs.append({"role": self.role, "content": message_content})
         return inputs
 
-    def to_openai_chat_completions_input(self) -> dict[str, Any]:
-        """Convert the message to OpenAI's chat completions api expected input format."""
+    def to_openai_chat_completions_input(
+        self,
+        *,
+        reasoning_as: Literal["omit", "reasoning_content"] = "omit",
+    ) -> dict[str, Any]:
+        """Convert the message to OpenAI's chat completions api expected input format.
+
+        Args:
+            reasoning_as: How to serialize ``ThinkingContent``:
+                - ``"omit"`` (default): drop thinking from the outbound message. Matches
+                  Vercel AI SDK / LiteLLM defaults — do not dump CoT into visible ``content``.
+                - ``"reasoning_content"``: top-level ``reasoning_content`` string for
+                  providers that round-trip it (Moonshot, Fireworks, DeepSeek-style, etc.).
+        """
         role = self.role
-        # OpenAI chat completions api expects tool calls to be in a separate field in the message
+        # OpenAI chat completions api expects tool calls to be in a separate field in the message.
         content = []
         tool_calls = []
+        reasoning_parts: list[str] = []
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent):
                 tool_calls.append(content_item.to_openai_chat_completions_input())
             elif isinstance(content_item, ToolResultContent):
                 return content_item.to_openai_chat_completions_input()
+            elif isinstance(content_item, ThinkingContent):
+                if content_item.thinking and reasoning_as == "reasoning_content":
+                    reasoning_parts.append(content_item.thinking)
             else:
                 openai_input = content_item.to_openai_chat_completions_input()
+                if openai_input is None:
+                    continue
                 # Enabling splitting files into multiple pages or chunks.
                 if isinstance(openai_input, list):
                     content.extend(openai_input)
@@ -102,6 +120,8 @@ class Message:
             openai_input["content"] = content
         if len(tool_calls):
             openai_input["tool_calls"] = tool_calls
+        if reasoning_parts:
+            openai_input["reasoning_content"] = "".join(reasoning_parts)
         return openai_input
 
     def to_anthropic_input(self) -> dict[str, Any]:

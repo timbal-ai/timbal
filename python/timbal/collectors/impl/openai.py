@@ -1,4 +1,5 @@
 import time
+from collections import deque
 from typing import Any
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
@@ -98,17 +99,37 @@ ResponseEvent = (
 logger = structlog.get_logger("timbal.collectors.impl.openai")
 
 
+def _delta_reasoning_content(delta: Any) -> str | None:
+    """Extract chat-completions reasoning text (Fireworks / DeepSeek / etc.).
+
+    OpenAI's typed ``ChoiceDelta`` does not declare ``reasoning_content``; providers
+    put it on the delta as an extra field (kept in ``model_extra``).
+    """
+    rc = getattr(delta, "reasoning_content", None)
+    if isinstance(rc, str) and rc:
+        return rc
+    extra = getattr(delta, "model_extra", None) or {}
+    if isinstance(extra, dict):
+        for key in ("reasoning_content", "reasoning"):
+            val = extra.get(key)
+            if isinstance(val, str) and val:
+                return val
+    return None
+
+
 @register_collector
 class ChatCompletionCollector(BaseCollector):
     """Collector for OpenAI chat completions streaming events."""
 
     # Content block ID for text content (chat completions only have one text block)
     TEXT_BLOCK_ID = "text_0"
+    THINKING_BLOCK_ID = "thinking_0"
 
     def __init__(self, start: float, **kwargs: Any):
         super().__init__(**kwargs)
         self._start = start
         self._content: str = ""
+        self._thinking: str = ""
         # `_current_tool_call` is appended to `_tool_calls` by reference (same dict).
         # Subsequent mutations of `_current_tool_call` propagate to the entry in
         # `_tool_calls` without needing to re-append.
@@ -118,14 +139,39 @@ class ChatCompletionCollector(BaseCollector):
         self._first_token: float | None = None
         self._output_tokens: int = 0
         self._text_block_started: bool = False
+        self._thinking_block_started: bool = False
         self._content_blocks: set[str] = set()
         self._stop_reason: str | None = None
         self._pending_usage: Any | None = None  # Last usage event, written once in result()
+        # One source chunk can produce multiple stream items (e.g. reasoning + text).
+        # process() returns the first; the rest drain via __anext__ / pop_pending_stream_item().
+        self._pending_stream_items: deque[Any] = deque()
 
     @classmethod
     @override
     def can_handle(cls, event: Any) -> bool:
         return isinstance(event, ChatCompletionEvent)
+
+    def pop_pending_stream_item(self) -> Any | None:
+        """Return the next queued stream item, if any (used after process() on the peek chunk)."""
+        if self._pending_stream_items:
+            return self._pending_stream_items.popleft()
+        return None
+
+    async def __anext__(self):
+        pending = self.pop_pending_stream_item()
+        if pending is not None:
+            return pending
+        return await super().__anext__()
+
+    def _emit_stream_items(self, items: list[Any]) -> Any:
+        """Return the first stream item and queue any remaining for later yields."""
+        filtered = [item for item in items if item is not None]
+        if not filtered:
+            return None
+        first, *rest = filtered
+        self._pending_stream_items.extend(rest)
+        return first
 
     @override
     def process(self, event: ChatCompletionEvent) -> Any:
@@ -143,15 +189,24 @@ class ChatCompletionCollector(BaseCollector):
         # 'length' indicates max_tokens was reached
         if event.choices[0].finish_reason:
             self._stop_reason = event.choices[0].finish_reason
-        # Calculate TTFT (Time To First Token) on first token
-        if self._first_token is None:
+        delta = event.choices[0].delta
+        has_tool_calls = bool(delta.tool_calls)
+        reasoning = _delta_reasoning_content(delta)
+        has_text = bool(delta.content)
+        # Calculate TTFT on first visible / reasoning / tool token
+        if self._first_token is None and (has_tool_calls or reasoning or has_text):
             self._first_token = time.perf_counter()
-        # Handle tool calls
-        if event.choices[0].delta.tool_calls:
-            return self._handle_tool_calls(event)
-        # Handle text content
-        if event.choices[0].delta.content:
-            return self._handle_text_content(event)
+
+        # Fireworks / Moonshot / DeepSeek-style: reasoning may co-arrive with
+        # visible content or tool_calls on the same chunk. Emit all of them.
+        items: list[Any] = []
+        if reasoning:
+            items.append(self._handle_reasoning_content(reasoning))
+        if has_tool_calls:
+            items.append(self._handle_tool_calls(event))
+        elif has_text:
+            items.append(self._handle_text_content(event))
+        return self._emit_stream_items(items)
 
     @staticmethod
     def _usage_billing_id(api_model: str) -> str:
@@ -296,6 +351,21 @@ class ChatCompletionCollector(BaseCollector):
             )
         return None
 
+    def _handle_reasoning_content(self, reasoning_chunk: str) -> TimbalThinking | TimbalThinkingDelta:
+        """Handle ``delta.reasoning_content`` from OpenAI-compatible reasoning models."""
+        self._thinking += reasoning_chunk
+        if not self._thinking_block_started:
+            self._thinking_block_started = True
+            self._content_blocks.add(self.THINKING_BLOCK_ID)
+            return TimbalThinking(
+                id=self.THINKING_BLOCK_ID,
+                thinking=reasoning_chunk,
+            )
+        return TimbalThinkingDelta(
+            id=self.THINKING_BLOCK_ID,
+            thinking_delta=reasoning_chunk,
+        )
+
     def _handle_text_content(self, event: ChatCompletionEvent) -> TimbalText | TimbalTextDelta:
         """Handle text content from OpenAI events."""
         text_chunk = event.choices[0].delta.content
@@ -325,12 +395,17 @@ class ChatCompletionCollector(BaseCollector):
             self._handle_usage(self._pending_usage)
 
         span = get_run_context().current_span()
-        ttft = self._first_token - self._start
+        # finish_reason-only chunks never set _first_token — keep metrics defined.
+        first = self._first_token if self._first_token is not None else time.perf_counter()
+        ttft = first - self._start
         span.metadata["ttft"] = ttft
-        tps = self._output_tokens / (time.perf_counter() - self._first_token)
+        elapsed = time.perf_counter() - first
+        tps = self._output_tokens / elapsed if elapsed > 0 else 0.0
         span.metadata["tps"] = tps
 
-        content = []
+        content: list[Any] = []
+        if self._thinking:
+            content.append({"type": "thinking", "thinking": self._thinking})
         if self._content:
             content.append(self._content)
 

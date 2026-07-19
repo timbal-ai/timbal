@@ -14,8 +14,11 @@ class BaseContent(ABC, BaseModel):
         pass
     
     @abstractmethod
-    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert the content to the input format required by OpenAI's chat completions api."""
+    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any] | None:
+        """Convert the content to the input format required by OpenAI's chat completions api.
+
+        Return ``None`` to omit this item from the content array (rare).
+        """
         pass
     
     @abstractmethod

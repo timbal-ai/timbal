@@ -5,17 +5,18 @@ import yaml
 _MODELS_YAML = Path(__file__).parent.parent / "models.yaml"
 
 _PROVIDER_LOGOS = {
-    "anthropic": "https://content.timbal.ai/assets/anthropic_favicon.svg",
-    "openai": "https://content.timbal.ai/assets/openai_favicon.svg",
-    "google": "https://content.timbal.ai/assets/google_favicon.svg",
-    "togetherai": "https://content.timbal.ai/assets/togetherai_favicon.svg",
-    "xai": "https://content.timbal.ai/assets/xai_favicon.svg",
-    "groq": "https://content.timbal.ai/assets/groq_favicon.svg",
-    "fireworks": "https://content.timbal.ai/assets/fireworks_favicon.svg",
-    "xiaomi": "https://content.timbal.ai/assets/xiaomi_favicon.svg",
-    "byteplus": "https://content.timbal.ai/assets/byteplus_favicon.svg",
-    "cerebras": "https://content.timbal.ai/assets/cerebras_favicon.svg",
-    "sambanova": "https://content.timbal.ai/assets/sambanova_favicon.svg",
+    "anthropic": "https://timbalusercontent.com/assets/anthropic_favicon.svg",
+    "openai": "https://timbalusercontent.com/assets/openai_favicon.svg",
+    "google": "https://timbalusercontent.com/assets/google_favicon.svg",
+    "togetherai": "https://timbalusercontent.com/assets/togetherai_favicon.svg",
+    "xai": "https://timbalusercontent.com/assets/xai_favicon.svg",
+    "groq": "https://timbalusercontent.com/assets/groq_favicon.svg",
+    "fireworks": "https://timbalusercontent.com/assets/fireworks_favicon.svg",
+    "xiaomi": "https://timbalusercontent.com/assets/xiaomi_favicon.svg",
+    "byteplus": "https://timbalusercontent.com/assets/byteplus_favicon.svg",
+    "cerebras": "https://timbalusercontent.com/assets/cerebras_favicon.svg",
+    "sambanova": "https://timbalusercontent.com/assets/sambanova_favicon.svg",
+    "moonshot": "https://timbalusercontent.com/assets/moonshot_favicon.svg",
 }
 
 

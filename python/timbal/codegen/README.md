@@ -375,8 +375,8 @@ Returns provider summaries sorted by tool count:
 ```json
 {
   "providers": [
-    {"name": "zendesk", "logo": "https://content.timbal.ai/assets/zendesk_favicon.svg", "tool_count": 442},
-    {"name": "slack", "logo": "https://content.timbal.ai/assets/slack_favicon.svg", "tool_count": 27},
+    {"name": "zendesk", "logo": "https://timbalusercontent.com/assets/zendesk_favicon.svg", "tool_count": 442},
+    {"name": "slack", "logo": "https://timbalusercontent.com/assets/slack_favicon.svg", "tool_count": 27},
     {"name": "system", "logo": null, "tool_count": 6}
   ]
 }
@@ -448,9 +448,9 @@ Returns provider summaries sorted by model count:
 ```json
 {
   "providers": [
-    {"name": "togetherai", "logo": "https://content.timbal.ai/assets/togetherai_favicon.svg", "model_count": 30},
-    {"name": "openai", "logo": "https://content.timbal.ai/assets/openai_favicon.svg", "model_count": 20},
-    {"name": "anthropic", "logo": "https://content.timbal.ai/assets/anthropic_favicon.svg", "model_count": 10}
+    {"name": "togetherai", "logo": "https://timbalusercontent.com/assets/togetherai_favicon.svg", "model_count": 30},
+    {"name": "openai", "logo": "https://timbalusercontent.com/assets/openai_favicon.svg", "model_count": 20},
+    {"name": "anthropic", "logo": "https://timbalusercontent.com/assets/anthropic_favicon.svg", "model_count": 10}
   ]
 }
 ```
@@ -517,7 +517,7 @@ When filtering, response includes pagination metadata and full model objects:
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Full routing ID passed to `model=` (e.g. `"anthropic/claude-opus-4-6"`) |
-| `provider` | string | Provider key (`anthropic`, `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`, `byteplus`, `xiaomi`, `cerebras`, `sambanova`) |
+| `provider` | string | Provider key (`anthropic`, `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`, `byteplus`, `xiaomi`, `cerebras`, `sambanova`, `moonshot`) |
 | `display_name` | string | Human-readable name for UI |
 | `description` | string | One-sentence description from provider docs |
 | `input_price` | float \| null | USD per 1M input tokens (`null` if not publicly listed) |

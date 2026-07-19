@@ -265,6 +265,11 @@
                   "api-reference/orgs/connectors/browse/tables",
                   "api-reference/orgs/connectors/browse/table",
                   "api-reference/orgs/connectors/browse/columns",
+                  "api-reference/orgs/connectors/browse/filesystems/list",
+                  "api-reference/orgs/connectors/browse/filesystems/entries",
+                  "api-reference/orgs/connectors/browse/filesystems/search",
+                  "api-reference/orgs/connectors/browse/filesystems/summary",
+                  "api-reference/orgs/connectors/filesystems/copy",
                   "api-reference/orgs/connectors/query",
                   "api-reference/orgs/connectors/rebind",
                   "api-reference/orgs/connectors/update"
@@ -429,6 +434,7 @@
                         "pages": [
                           "api-reference/projects/environments/evals/runs/list",
                           "api-reference/projects/environments/evals/runs/get",
+                          "api-reference/projects/environments/evals/runs/events",
                           "api-reference/projects/environments/evals/runs/create",
                           "api-reference/projects/environments/evals/runs/delete"
                         ]
@@ -463,6 +469,13 @@
                   "api-reference/projects/vars/get",
                   "api-reference/projects/vars/delete",
                   "api-reference/projects/vars/update"
+                ]
+              },
+              {
+                "group": "Channels",
+                "pages": [
+                  "api-reference/projects/channels/put",
+                  "api-reference/projects/channels/delete"
                 ]
               },
               {
@@ -581,6 +594,7 @@
               "models/fireworks",
               "models/google",
               "models/groq",
+              "models/moonshot",
               "models/openai",
               "models/sambanova",
               "models/togetherai",
