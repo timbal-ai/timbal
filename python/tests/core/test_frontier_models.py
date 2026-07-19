@@ -18,6 +18,11 @@ NEW_MODEL_IDS = [
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-luna",
     "fireworks/accounts/fireworks/models/glm-5p2",
+    "moonshot/kimi-k3",
+    "moonshot/kimi-k2.6",
+    "moonshot/kimi-k2.5",
+    "moonshot/kimi-k2.7-code",
+    "moonshot/kimi-k2.7-code-highspeed",
 ]
 
 
@@ -135,3 +140,49 @@ class TestFireworksRouterDispatch:
 
         assert captured_kwargs.get("model") == api_name
         assert captured_kwargs.get("max_completion_tokens") == 16
+
+
+class TestMoonshotRouterDispatch:
+    def _make_mock_client_and_capturer(self):
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = fake_create
+        return mock_client, captured_kwargs
+
+    @pytest.mark.parametrize(
+        "model_id,api_name",
+        [
+            ("moonshot/kimi-k3", "kimi-k3"),
+            ("moonshot/kimi-k2.6", "kimi-k2.6"),
+            ("moonshot/kimi-k2.5", "kimi-k2.5"),
+            ("moonshot/kimi-k2.7-code", "kimi-k2.7-code"),
+            ("moonshot/kimi-k2.7-code-highspeed", "kimi-k2.7-code-highspeed"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_moonshot_models_use_chat_completions(self, model_id: str, api_name: str):
+        from timbal.core.llm_router import _llm_router
+
+        _make_run_context()
+        mock_client, captured_kwargs = self._make_mock_client_and_capturer()
+
+        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"MOONSHOT_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model=model_id,
+                        max_tokens=16,
+                        provider_params={"reasoning_effort": "max"},
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assert captured_kwargs.get("model") == api_name
+        assert captured_kwargs.get("max_completion_tokens") == 16
+        assert captured_kwargs.get("reasoning_effort") == "max"

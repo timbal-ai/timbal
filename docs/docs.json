@@ -581,6 +581,7 @@
               "models/fireworks",
               "models/google",
               "models/groq",
+              "models/moonshot",
               "models/openai",
               "models/sambanova",
               "models/togetherai",

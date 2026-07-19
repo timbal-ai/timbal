@@ -14,8 +14,12 @@ class BaseContent(ABC, BaseModel):
         pass
     
     @abstractmethod
-    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert the content to the input format required by OpenAI's chat completions api."""
+    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any] | None:
+        """Convert the content to the input format required by OpenAI's chat completions api.
+
+        Return ``None`` when the content is not represented as a content block
+        (e.g. thinking is carried as top-level ``reasoning_content`` on the message).
+        """
         pass
     
     @abstractmethod

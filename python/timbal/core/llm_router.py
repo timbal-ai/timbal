@@ -118,6 +118,9 @@ class _ProviderConfig:
     supports_stream_options: bool = True
     """Whether the provider supports ``stream_options`` in Chat Completions."""
 
+    supports_platform_proxy: bool = True
+    """If False, never fall back to the Timbal platform proxy — require the provider API key."""
+
 
 _PROVIDERS: dict[str, _ProviderConfig] = {
     "openai": _ProviderConfig(
@@ -165,6 +168,11 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
         env_key="CEREBRAS_API_KEY",
         default_base_url="https://api.cerebras.ai/v1",
     ),
+    "moonshot": _ProviderConfig(
+        env_key="MOONSHOT_API_KEY",
+        default_base_url="https://api.moonshot.ai/v1",
+        supports_platform_proxy=False,
+    ),
     "sambanova": _ProviderConfig(
         env_key="SAMBANOVA_API_KEY",
         default_base_url="https://api.sambanova.ai/v1",
@@ -188,7 +196,11 @@ def _resolve_client(
     if not api_key:
         api_key = os.getenv(config.env_key)
     if not api_key:
-        if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+        if (
+            config.supports_platform_proxy
+            and run_context.platform_config is not None
+            and run_context.platform_config.subject is not None
+        ):
             api_key = run_context.platform_config.auth.header_value
             base_url = (
                 f"https://{run_context.platform_config.host}"

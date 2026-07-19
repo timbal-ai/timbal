@@ -1128,3 +1128,52 @@ models:
     output_price: 0.8
     context_window: 131072
     capabilities: [tools, vision]
+
+  - id: "moonshot/kimi-k3"
+    provider: moonshot
+    display_name: "Kimi K3"
+    description: "Moonshot flagship 2.8T MoE with 1M context, native vision, and always-on reasoning for long-horizon coding and knowledge work."
+    notes: "Cache-hit input is $0.30 / 1M tokens. Pass reasoning_effort via model_params (max only at launch). Do not set temperature — fixed at 1.0."
+    input_price: 3.0
+    output_price: 15.0
+    context_window: 1048576
+    capabilities: [vision, tools, reasoning, video]
+
+  - id: "moonshot/kimi-k2.7-code"
+    provider: moonshot
+    display_name: "Kimi K2.7 Code"
+    description: "Moonshot coding-focused multimodal model with thinking mode for long-context programming agents."
+    notes: "Cache-hit input is $0.19 / 1M tokens."
+    input_price: 0.95
+    output_price: 4.0
+    context_window: 262144
+    capabilities: [vision, tools, reasoning, video]
+
+  - id: "moonshot/kimi-k2.7-code-highspeed"
+    provider: moonshot
+    display_name: "Kimi K2.7 Code HighSpeed"
+    description: "Same Kimi K2.7 Code weights with higher output throughput (~180 tok/s) for interactive coding agents."
+    notes: "Cache-hit input is $0.38 / 1M tokens."
+    input_price: 1.9
+    output_price: 8.0
+    context_window: 262144
+    capabilities: [vision, tools, reasoning, video]
+
+  - id: "moonshot/kimi-k2.6"
+    provider: moonshot
+    display_name: "Kimi K2.6"
+    description: "Moonshot general-purpose multimodal MoE with thinking/non-thinking modes for chat, agents, and vision."
+    notes: "Cache-hit input is $0.16 / 1M tokens."
+    input_price: 0.95
+    output_price: 4.0
+    context_window: 262144
+    capabilities: [vision, tools, reasoning, video]
+
+  - id: "moonshot/kimi-k2.5"
+    provider: moonshot
+    display_name: "Kimi K2.5"
+    description: "Previous Moonshot multimodal MoE generation; prefer Kimi K2.6 or K3 for new workloads."
+    input_price: null
+    output_price: null
+    context_window: 262144
+    capabilities: [vision, tools, reasoning]

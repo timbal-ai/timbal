@@ -10,7 +10,7 @@ from pydantic import (
 )
 from pydantic_core import CoreSchema, core_schema
 
-from .content import TextContent, ToolResultContent, ToolUseContent, content_factory
+from .content import TextContent, ThinkingContent, ToolResultContent, ToolUseContent, content_factory
 
 
 def _append_anthropic_content_blocks(target: list[dict[str, Any]], anthropic_input: dict[str, Any] | list[dict[str, Any]]) -> None:
@@ -80,16 +80,24 @@ class Message:
     def to_openai_chat_completions_input(self) -> dict[str, Any]:
         """Convert the message to OpenAI's chat completions api expected input format."""
         role = self.role
-        # OpenAI chat completions api expects tool calls to be in a separate field in the message
+        # OpenAI chat completions api expects tool calls to be in a separate field in the message.
+        # Providers that emit reasoning (Moonshot, Fireworks, etc.) expect thinking back as
+        # top-level `reasoning_content`, not as text content blocks.
         content = []
         tool_calls = []
+        reasoning_parts: list[str] = []
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent):
                 tool_calls.append(content_item.to_openai_chat_completions_input())
             elif isinstance(content_item, ToolResultContent):
                 return content_item.to_openai_chat_completions_input()
+            elif isinstance(content_item, ThinkingContent):
+                if content_item.thinking:
+                    reasoning_parts.append(content_item.thinking)
             else:
                 openai_input = content_item.to_openai_chat_completions_input()
+                if openai_input is None:
+                    continue
                 # Enabling splitting files into multiple pages or chunks.
                 if isinstance(openai_input, list):
                     content.extend(openai_input)
@@ -102,6 +110,8 @@ class Message:
             openai_input["content"] = content
         if len(tool_calls):
             openai_input["tool_calls"] = tool_calls
+        if reasoning_parts:
+            openai_input["reasoning_content"] = "".join(reasoning_parts)
         return openai_input
 
     def to_anthropic_input(self) -> dict[str, Any]:

@@ -456,7 +456,17 @@ class TestLlmRouterChatCompletionsKwargs:
 
 class TestLlmRouterProviderLookup:
     def test_all_expected_providers_present(self):
-        expected = {"openai", "anthropic", "google", "groq", "cerebras", "sambanova", "xai", "fireworks"}
+        expected = {
+            "openai",
+            "anthropic",
+            "google",
+            "groq",
+            "cerebras",
+            "sambanova",
+            "xai",
+            "fireworks",
+            "moonshot",
+        }
         for provider in expected:
             assert provider in _PROVIDERS, f"Missing provider: {provider}"
 
@@ -464,7 +474,7 @@ class TestLlmRouterProviderLookup:
         assert _PROVIDERS["anthropic"].client_type == "anthropic"
 
     def test_openai_compatible_providers_use_openai_client(self):
-        for provider in ("google", "groq", "cerebras", "sambanova", "xai"):
+        for provider in ("google", "groq", "cerebras", "sambanova", "xai", "moonshot"):
             assert _PROVIDERS[provider].client_type == "openai"
 
     def test_sambanova_flattens_text_content(self):
@@ -472,6 +482,9 @@ class TestLlmRouterProviderLookup:
 
     def test_xiaomi_no_stream_options(self):
         assert _PROVIDERS["xiaomi"].supports_stream_options is False
+
+    def test_moonshot_requires_provider_api_key(self):
+        assert _PROVIDERS["moonshot"].supports_platform_proxy is False
 
 
 class TestLlmRouterTestModelPath:

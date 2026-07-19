@@ -132,7 +132,7 @@ def _discover_framework_tools() -> dict[str, FrameworkTool]:
                         for meta in typing.get_args(candidate)[1:]:
                             if isinstance(meta, _Integration):
                                 provider = meta.provider
-                                provider_logo = f"https://content.timbal.ai/assets/{provider}_favicon.svg"
+                                provider_logo = f"https://timbalusercontent.com/assets/{provider}_favicon.svg"
                                 break
                     if provider:
                         break

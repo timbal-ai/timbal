@@ -78,8 +78,19 @@ def _make_context():
     return ctx
 
 
-def _make_cc_chunk(content=None, tool_calls=None, finish_reason=None, usage=None, model="gpt-4o"):
-    delta = ChoiceDelta(content=content, tool_calls=tool_calls, role="assistant")
+def _make_cc_chunk(
+    content=None,
+    tool_calls=None,
+    finish_reason=None,
+    usage=None,
+    model="gpt-4o",
+    reasoning_content=None,
+):
+    delta_kwargs = {"content": content, "tool_calls": tool_calls, "role": "assistant"}
+    if reasoning_content is not None:
+        # Providers stream this as an extra field (not on the typed ChoiceDelta schema).
+        delta_kwargs["reasoning_content"] = reasoning_content
+    delta = ChoiceDelta(**delta_kwargs)
     choice = Choice(index=0, delta=delta, finish_reason=finish_reason, logprobs=None)
     return ChatCompletionChunk(
         id="chatcmpl_123",
@@ -195,6 +206,98 @@ class TestChatCompletionCollectorText:
         collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
         item = collector.process(_make_cc_chunk(content=None, tool_calls=None))
         assert item is None
+
+
+class TestChatCompletionCollectorReasoning:
+    """Fireworks / DeepSeek-style ``delta.reasoning_content`` → ThinkingContent."""
+
+    def test_first_reasoning_chunk_returns_thinking(self):
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+
+        item = collector.process(_make_cc_chunk(reasoning_content="Let me think"))
+        assert isinstance(item, Thinking)
+        assert item.thinking == "Let me think"
+        assert item.id == ChatCompletionCollector.THINKING_BLOCK_ID
+
+    def test_subsequent_reasoning_chunks_return_thinking_delta(self):
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+
+        collector.process(_make_cc_chunk(reasoning_content="Let me"))
+        item = collector.process(_make_cc_chunk(reasoning_content=" think"))
+        assert isinstance(item, TimbalThinkingDelta)
+        assert item.thinking_delta == " think"
+
+    def test_result_includes_thinking_then_text(self):
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        collector.process(_make_cc_chunk(reasoning_content="plan"))
+        collector.process(_make_cc_chunk(content="ok"))
+        collector.process(_make_cc_chunk(content=None, finish_reason="stop"))
+
+        msg = collector.result()
+        assert len(msg.content) == 2
+        assert isinstance(msg.content[0], ThinkingContent)
+        assert msg.content[0].thinking == "plan"
+        assert isinstance(msg.content[1], TextContent)
+        assert msg.content[1].text == "ok"
+        # Visible text only — collect_text ignores thinking (by design).
+        assert msg.collect_text() == "ok"
+
+    def test_reasoning_only_result(self):
+        """max_tokens exhausted on reasoning still yields ThinkingContent, not an empty message."""
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        collector.process(_make_cc_chunk(reasoning_content="still thinking…"))
+        collector.process(_make_cc_chunk(content=None, finish_reason="length"))
+
+        msg = collector.result()
+        assert msg.stop_reason == "length"
+        assert len(msg.content) == 1
+        assert isinstance(msg.content[0], ThinkingContent)
+        assert msg.content[0].thinking == "still thinking…"
+        assert msg.collect_text() == ""
+
+    def test_same_chunk_reasoning_and_text_emits_both_stream_items(self):
+        """Dual-field chunks must not drop the text DeltaEvent."""
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+
+        first = collector.process(
+            _make_cc_chunk(reasoning_content="plan", content="answer")
+        )
+        second = collector.pop_pending_stream_item()
+        assert collector.pop_pending_stream_item() is None
+
+        assert isinstance(first, Thinking)
+        assert first.thinking == "plan"
+        assert isinstance(second, Text)
+        assert second.text == "answer"
+
+        msg = collector.result()
+        assert msg.content[0].thinking == "plan"
+        assert msg.content[1].text == "answer"
+
+    def test_same_chunk_reasoning_and_tool_call_emits_both(self):
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        tc_start = ChoiceDeltaToolCall(
+            index=0,
+            id="call_001",
+            type="function",
+            function=ChoiceDeltaToolCallFunction(name="get_weather", arguments=""),
+        )
+
+        first = collector.process(
+            _make_cc_chunk(reasoning_content="need tool", tool_calls=[tc_start])
+        )
+        second = collector.pop_pending_stream_item()
+
+        assert isinstance(first, Thinking)
+        assert first.thinking == "need tool"
+        assert isinstance(second, ToolUse)
+        assert second.name == "get_weather"
 
 
 class TestChatCompletionCollectorToolCalls:

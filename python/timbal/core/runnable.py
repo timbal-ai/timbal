@@ -1022,12 +1022,22 @@ class Runnable(ABC, BaseModel):
                         event_queue.put_nowait(event)
                     return event
 
-                # We need to manually process the first chunk, since we removed it from the generator
+                # We need to manually process the first chunk, since we removed it from the generator.
+                # Some collectors (e.g. ChatCompletionCollector) can emit multiple stream items
+                # per source chunk — process() returns the first and queues the rest.
                 first_event = collector.process(first_chunk)
-                if first_event is not None:
-                    first_event = process_event(first_event)
-                    if first_event is not None:
-                        yield (first_event, None, collector)
+                pending_events = [first_event] if first_event is not None else []
+                pop_pending = getattr(collector, "pop_pending_stream_item", None)
+                if callable(pop_pending):
+                    while True:
+                        pending_item = pop_pending()
+                        if pending_item is None:
+                            break
+                        pending_events.append(pending_item)
+                for raw_event in pending_events:
+                    event = process_event(raw_event)
+                    if event is not None:
+                        yield (event, None, collector)
                 # Process remaining events
                 async for event in collector:
                     event = process_event(event)

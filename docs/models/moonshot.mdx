@@ -1,0 +1,100 @@
+---
+title: "Moonshot (Kimi)"
+description: "Kimi K3 and K2.x models via Moonshot's OpenAI-compatible API"
+---
+
+<Note>Source: [Kimi API Platform](https://platform.kimi.ai). All model IDs use the prefix `moonshot/`. Base URL: `https://api.moonshot.ai/v1`.</Note>
+
+<Warning>Moonshot models are not yet available through the Timbal platform proxy. A `MOONSHOT_API_KEY` is required to use these models. If you'd like to access Moonshot models via your Timbal API key, please [contact sales](https://timbal.ai).</Warning>
+
+## Flagship
+
+<CardGroup cols={2}>
+  <Card title="kimi-k3">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
+
+  `moonshot/kimi-k3`
+
+  Moonshot's 2.8T-parameter flagship MoE with a 1M-token context window, native vision/video, and always-on reasoning for long-horizon coding and knowledge work. Pass `reasoning_effort` via `model_params` (currently `"max"` only). Do not set `temperature` — the API fixes it at `1.0`.
+
+  - &#36;3 / &#36;15 (cache-hit input &#36;0.30)
+  - <Icon icon="window-maximize" size={14} /> 1M context
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
+  - <Icon icon="brain" size={14} /> Thinking (`reasoning_content` / `reasoning_effort`)
+  </Card>
+</CardGroup>
+
+## Coding
+
+<CardGroup cols={2}>
+  <Card title="kimi-k2.7-code">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `moonshot/kimi-k2.7-code`
+
+  Coding-focused multimodal model with thinking mode for long-context programming agents.
+
+  - &#36;0.95 / &#36;4 (cache-hit input &#36;0.19)
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
+  - <Icon icon="brain" size={14} /> Thinking
+  </Card>
+
+  <Card title="kimi-k2.7-code-highspeed">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `moonshot/kimi-k2.7-code-highspeed`
+
+  Same K2.7 Code weights with higher output throughput (~180 tok/s) for interactive coding.
+
+  - &#36;1.90 / &#36;8 (cache-hit input &#36;0.38)
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
+  - <Icon icon="brain" size={14} /> Thinking
+  </Card>
+</CardGroup>
+
+## General
+
+<CardGroup cols={2}>
+  <Card title="kimi-k2.6">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `moonshot/kimi-k2.6`
+
+  General-purpose multimodal MoE with thinking and non-thinking modes for chat, agents, and vision.
+
+  - &#36;0.95 / &#36;4 (cache-hit input &#36;0.16)
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
+  - <Icon icon="brain" size={14} /> Thinking
+  </Card>
+
+  <Card title="kimi-k2.5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
+
+  `moonshot/kimi-k2.5`
+
+  Previous multimodal MoE generation. Prefer K2.6 or K3 for new workloads.
+
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Thinking
+  </Card>
+</CardGroup>
+
+## Usage
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="kimi",
+    model="moonshot/kimi-k3",
+    model_params={"reasoning_effort": "max"},
+    tools=[],
+)
+
+result = await agent.collect(prompt="Explain Kimi K3 in one sentence.")
+print(result.output.collect_text())
+```

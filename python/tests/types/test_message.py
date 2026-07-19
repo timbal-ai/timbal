@@ -4,7 +4,7 @@ import pathlib
 import pytest
 from pydantic import ValidationError
 from timbal.types import File, Message
-from timbal.types.content import FileContent, TextContent, ToolResultContent, ToolUseContent
+from timbal.types.content import FileContent, TextContent, ThinkingContent, ToolResultContent, ToolUseContent
 
 
 def test_message_text_validation() -> None:
@@ -57,6 +57,26 @@ def test_message_full_envelope_dict_is_parsed() -> None:
 def test_message_text_to_openai_chat_completions_input() -> None:
     message = Message(role="assistant", content=[TextContent(text="Hello, World!")])
     assert message.to_openai_chat_completions_input() == {"role": "assistant", "content": [{"type": "text", "text": "Hello, World!"}]}
+
+
+def test_message_thinking_to_openai_chat_completions_reasoning_content() -> None:
+    message = Message(
+        role="assistant",
+        content=[
+            ThinkingContent(thinking="step 1"),
+            ThinkingContent(thinking=" step 2"),
+            TextContent(text="answer"),
+        ],
+    )
+    assert message.to_openai_chat_completions_input() == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "answer"}],
+        "reasoning_content": "step 1 step 2",
+    }
+
+
+def test_thinking_content_not_serialized_as_chat_completions_text_block() -> None:
+    assert ThinkingContent(thinking="secret plan").to_openai_chat_completions_input() is None
 
 
 def test_message_text_to_anthropic_input() -> None:

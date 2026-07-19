@@ -164,4 +164,9 @@ Model = Literal[
     "sambanova/MiniMax-M2.7",
     "sambanova/gemma-3-12b-it",
     "sambanova/gemma-4-31B-it",
+    "moonshot/kimi-k3",
+    "moonshot/kimi-k2.7-code",
+    "moonshot/kimi-k2.7-code-highspeed",
+    "moonshot/kimi-k2.6",
+    "moonshot/kimi-k2.5",
 ]
