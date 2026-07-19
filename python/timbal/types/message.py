@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     GetCoreSchemaHandler,
@@ -77,12 +77,22 @@ class Message:
             inputs.append({"role": self.role, "content": message_content})
         return inputs
 
-    def to_openai_chat_completions_input(self) -> dict[str, Any]:
-        """Convert the message to OpenAI's chat completions api expected input format."""
+    def to_openai_chat_completions_input(
+        self,
+        *,
+        reasoning_as: Literal["omit", "reasoning_content"] = "omit",
+    ) -> dict[str, Any]:
+        """Convert the message to OpenAI's chat completions api expected input format.
+
+        Args:
+            reasoning_as: How to serialize ``ThinkingContent``:
+                - ``"omit"`` (default): drop thinking from the outbound message. Matches
+                  Vercel AI SDK / LiteLLM defaults — do not dump CoT into visible ``content``.
+                - ``"reasoning_content"``: top-level ``reasoning_content`` string for
+                  providers that round-trip it (Moonshot, Fireworks, DeepSeek-style, etc.).
+        """
         role = self.role
         # OpenAI chat completions api expects tool calls to be in a separate field in the message.
-        # Providers that emit reasoning (Moonshot, Fireworks, etc.) expect thinking back as
-        # top-level `reasoning_content`, not as text content blocks.
         content = []
         tool_calls = []
         reasoning_parts: list[str] = []
@@ -92,7 +102,7 @@ class Message:
             elif isinstance(content_item, ToolResultContent):
                 return content_item.to_openai_chat_completions_input()
             elif isinstance(content_item, ThinkingContent):
-                if content_item.thinking:
+                if content_item.thinking and reasoning_as == "reasoning_content":
                     reasoning_parts.append(content_item.thinking)
             else:
                 openai_input = content_item.to_openai_chat_completions_input()

@@ -422,6 +422,79 @@ class TestLlmRouterChatCompletionsKwargs:
         assert "stream_options" not in captured_kwargs
 
     @pytest.mark.asyncio
+    async def test_thinking_omitted_for_providers_without_reasoning_content(self):
+        """Groq path: omit CoT from outbound messages (do not dump into content)."""
+        from timbal.core.llm_router import _llm_router
+        from timbal.types.content.text import TextContent
+        from timbal.types.content.thinking import ThinkingContent
+        from timbal.types.message import Message
+
+        _make_run_context()
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = fake_create
+        prior = Message(
+            role="assistant",
+            content=[ThinkingContent(thinking="plan"), TextContent(text="ok")],
+        )
+
+        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="groq/llama-3.3-70b-versatile",
+                        messages=[prior],
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assistant = next(m for m in captured_kwargs["messages"] if m["role"] == "assistant")
+        assert "reasoning_content" not in assistant
+        assert assistant["content"] == [{"type": "text", "text": "ok"}]
+
+    @pytest.mark.asyncio
+    async def test_thinking_serialized_as_reasoning_content_for_moonshot(self):
+        from timbal.core.llm_router import _llm_router
+        from timbal.types.content.text import TextContent
+        from timbal.types.content.thinking import ThinkingContent
+        from timbal.types.message import Message
+
+        _make_run_context()
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = fake_create
+        prior = Message(
+            role="assistant",
+            content=[ThinkingContent(thinking="plan"), TextContent(text="ok")],
+        )
+
+        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"MOONSHOT_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="moonshot/kimi-k3",
+                        messages=[prior],
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assistant = next(m for m in captured_kwargs["messages"] if m["role"] == "assistant")
+        assert assistant.get("reasoning_content") == "plan"
+        assert assistant["content"] == [{"type": "text", "text": "ok"}]
+
+    @pytest.mark.asyncio
     async def test_output_model_adds_response_format(self):
         from timbal.core.llm_router import _llm_router
         _make_run_context()
@@ -485,6 +558,12 @@ class TestLlmRouterProviderLookup:
 
     def test_moonshot_requires_provider_api_key(self):
         assert _PROVIDERS["moonshot"].supports_platform_proxy is False
+
+    def test_reasoning_content_providers(self):
+        for provider in ("moonshot", "fireworks", "togetherai", "byteplus"):
+            assert _PROVIDERS[provider].supports_chat_reasoning_content is True
+        for provider in ("openai", "google", "groq", "cerebras", "sambanova", "xiaomi"):
+            assert _PROVIDERS[provider].supports_chat_reasoning_content is False
 
 
 class TestLlmRouterTestModelPath:

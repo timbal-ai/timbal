@@ -26,11 +26,10 @@ class ThinkingContent(BaseContent):
 
     @override
     def to_openai_chat_completions_input(self, **kwargs: Any) -> None:
-        """Thinking is not a chat-completions content block.
+        """Not a chat-completions content block by itself.
 
-        Providers that round-trip reasoning (Moonshot, Fireworks, etc.) expect it as
-        top-level ``reasoning_content`` on the message — see
-        ``Message.to_openai_chat_completions_input``.
+        Use ``Message.to_openai_chat_completions_input(reasoning_as=...)``:
+        ``reasoning_content`` for Moonshot/Fireworks-style providers, omit otherwise.
         """
         return None
 

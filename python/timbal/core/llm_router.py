@@ -121,6 +121,12 @@ class _ProviderConfig:
     supports_platform_proxy: bool = True
     """If False, never fall back to the Timbal platform proxy — require the provider API key."""
 
+    supports_chat_reasoning_content: bool = False
+    """If True, serialize ThinkingContent as top-level ``reasoning_content`` (Moonshot/Fireworks-style).
+
+    Otherwise thinking is omitted from outbound chat-completions messages (Vercel/LiteLLM default).
+    """
+
 
 _PROVIDERS: dict[str, _ProviderConfig] = {
     "openai": _ProviderConfig(
@@ -140,6 +146,7 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
     "togetherai": _ProviderConfig(
         env_key="TOGETHER_API_KEY",
         default_base_url="https://api.together.xyz/v1/",
+        supports_chat_reasoning_content=True,
     ),
     "xai": _ProviderConfig(
         env_key="XAI_API_KEY",
@@ -153,10 +160,12 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
     "fireworks": _ProviderConfig(
         env_key="FIREWORKS_API_KEY",
         default_base_url="https://api.fireworks.ai/inference/v1",
+        supports_chat_reasoning_content=True,
     ),
     "byteplus": _ProviderConfig(
         env_key="BYTEPLUS_API_KEY",
         default_base_url="https://ark.ap-southeast.bytepluses.com/api/v3",
+        supports_chat_reasoning_content=True,
     ),
     "xiaomi": _ProviderConfig(
         env_key="XIAOMI_API_KEY",
@@ -172,6 +181,7 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
         env_key="MOONSHOT_API_KEY",
         default_base_url="https://api.moonshot.ai/v1",
         supports_platform_proxy=False,
+        supports_chat_reasoning_content=True,
     ),
     "sambanova": _ProviderConfig(
         env_key="SAMBANOVA_API_KEY",
@@ -541,8 +551,9 @@ async def _llm_router(
         chat_completions_messages = []
         if system_prompt:
             chat_completions_messages.append({"role": "system", "content": system_prompt})
+        reasoning_as = "reasoning_content" if config.supports_chat_reasoning_content else "omit"
         for message in messages:
-            chat_completions_message = message.to_openai_chat_completions_input()
+            chat_completions_message = message.to_openai_chat_completions_input(reasoning_as=reasoning_as)
             chat_completions_messages.append(chat_completions_message)
 
         # Some providers have incomplete OpenAI chat completions support.
