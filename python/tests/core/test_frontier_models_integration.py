@@ -63,7 +63,9 @@ def _skip_if_no_key(primary: str, fallback: str | None) -> None:
 async def test_frontier_model_agent_collect(model: str, env_key: str, fallback_env: str | None):
     _skip_if_no_key(env_key, fallback_env)
 
-    agent = Agent(name=f"probe_{model.replace('/', '_')}", model=model, max_tokens=64, tools=[])
+    # Reasoning models (MiniMax / Qwen) spend many tokens on reasoning_content
+    # before visible text — 64 is often exhausted with an empty content array.
+    agent = Agent(name=f"probe_{model.replace('/', '_')}", model=model, max_tokens=512, tools=[])
     result: OutputEvent = await agent(prompt=PROMPT).collect()
 
     assert result.status.code == "success", result.error
@@ -85,7 +87,7 @@ async def test_frontier_model_llm_router_streams(model: str, env_key: str, fallb
     async for chunk in _llm_router(
         model=model,
         messages=[Message(role="user", content=[TextContent(text=PROMPT)])],
-        max_tokens=32,
+        max_tokens=512,
     ):
         chunks.append(chunk)
 

@@ -150,33 +150,43 @@ class TestBashCommandExecution:
         assert output.error is None
         assert isinstance(output.output['stdout'], str)
 
-    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_tool_with_agent_not_matching_pattern(self):
-        """Test agent with Bash tool when the command doesn't match allowed patterns."""
+        """Disallowed bash commands fail the tool call; the agent continues after the error."""
+        from timbal.core.test_model import TestModel
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+
+        model = TestModel(
+            responses=[
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseContent(
+                            id="c1",
+                            name="bash",
+                            input={"command": "ls *.py"},
+                        )
+                    ],
+                    stop_reason="tool_use",
+                ),
+                "I can only run mkdir commands with this tool.",
+            ]
+        )
         agent = Agent(
             name="code_analyzer",
-            model="openai/gpt-4o-mini",
-            system_prompt="""You are a helpful assistant.
-            You can only run mkdir commands using the bash tool.
-            You cannot run any other commands.
-            """,
-            tools=[Bash("mkdir *")]
+            model=model,
+            system_prompt="You can only run mkdir via bash.",
+            tools=[Bash("mkdir *")],
         )
 
-        response = await agent(
-            prompt="List all Python files in the current directory"
-        ).collect()
+        response = await agent(prompt="List all Python files in the current directory").collect()
 
-        # The agent should recognize that it can only run mkdir commands
         assert response.error is None
-        assert response.output is not None
-        response_text = response.output.content[0].text.lower()
-
-        # Should indicate that it can't list files or mention mkdir limitation
-        assert any(keyword in response_text for keyword in [
-            "mkdir", "cannot", "unable", "only", "directory", "create", "listing"
-        ])
+        assert response.status.code == "success"
+        assert "mkdir" in response.output.collect_text().lower()
+        # The rejected tool call should appear in the transcript as an error result.
+        assert model.call_count == 2
 
     @pytest.mark.asyncio
     async def test_tool_functionality_with_list(self):

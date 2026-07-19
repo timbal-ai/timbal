@@ -36,6 +36,12 @@ If the client needs to set `sample_rate` or `language`, the **first** frame shou
 
 If the **first** message is binary, it is queued as the first audio chunk (no separate config message).
 
+### Playback acks (client → server)
+
+Optional but recommended: `{ "type": "playback", "played_ms": <number> }` — **cumulative milliseconds of TTS audio actually played** since the connection opened (audio dropped on `interrupted` does not count and must not be added later). Send one every ~250 ms while audio is playing, plus a final one when playback stops.
+
+The server uses these to know exactly what the user *heard* when they barge in, so it can truncate the assistant's transcript entry and conversation memory to the heard prefix (see `interrupted.heard_text` below). Without acks the server falls back to a wall-clock estimate of gapless playback, which is close but can't account for client-side buffering delays. Malformed `playback` messages are ignored.
+
 ### Config overrides
 
 Optional **first** text frame: a JSON object merged on top of `app.state.voice_config`, which is built at startup from environment defaults and optional `runnable.voice_config` on the loaded agent (`http` lifespan).
@@ -52,6 +58,7 @@ Only send keys you need; omitted keys keep server defaults.
 | `encoding`    | Default `"pcm_s16le"`. |
 | `stt_extra`   | Object merged with default STT options (e.g. VAD). |
 | `tts_extra`   | Object merged with default TTS options. |
+| `turn_detector` | Server-side only (not from the client JSON). A mode name (`"heuristic"` default, `"provider"` trust STT/realtime endpointing, `"local"` audio EOU via `push_audio` + injectable `AudioEouModel`, `"lexical"` optional punctuation HOLD), a zero-arg factory returning a `TurnDetector`, or an instance. Instances are `clone()`d per WebSocket session so concurrent clients never share buffers or lifecycle; custom detectors with per-session mutable state should override `TurnDetector.clone()`. |
 
 Example — align server with the browser capture rate (only if that rate is supported end-to-end):
 
@@ -73,7 +80,8 @@ All downlink messages are **text JSON** with a **`type`** field.
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |
 | `agent_text_done`       | `text`        | Assistant text for the segment completed. |
 | `audio`                 | `data` (base64) | TTS audio: PCM s16le at merged `sample_rate`. Decode and play via Web Audio or equivalent. |
-| `interrupted`           | —             | Interrupt / barge-in; stop playback and reset “current assistant” UI if needed. |
+| `metrics`               | `metrics`     | Per-turn latency metrics, sent once per turn after `agent_text_done` (also for interrupted turns). See [Turn metrics](#turn-metrics). |
+| `interrupted`           | `heard_text`  | Interrupt / barge-in; stop playback, then send a final playback ack. `heard_text` is the assistant text the user actually heard (use it to fix displayed captions); `null` when unknown, `""` when nothing was played. |
 | `error`                 | `message`     | Error description (STT, audio forward, turn, TTS, etc.). |
 | `session_transcript`    | `entries`     | Full conversation transcript (sent right before `session_ended`). See [Session transcript](#session-transcript). |
 | `session_ended`         | —             | Session ended on the server side. |
@@ -109,6 +117,31 @@ Each entry has:
 This lets the frontend persist the conversation without having to accumulate `transcript_committed` / `agent_text_done` messages itself.
 
 **Audio recording** is available server-side via the `VoiceSession` Python API (`record_audio=True`) but is not sent over the WebSocket (PCM dumps are too large for a single JSON frame). Use the `session.input_audio` / `session.output_audio` properties to access raw PCM bytes after the session closes for server-side storage, conversion, or upload.
+
+### Turn metrics
+
+Once per turn — after `agent_text_done`, and also when the turn is interrupted — the server sends a `metrics` message:
+
+```json
+{
+  "type": "metrics",
+  "metrics": {
+    "turn_index": 1,
+    "user_text_chars": 24,
+    "eou_to_llm_first_token_ms": 312.4,
+    "eou_to_tts_first_byte_ms": 587.9,
+    "eou_to_first_audio_ms": 587.9,
+    "llm_total_ms": 1204.0,
+    "tts_total_ms": 1890.2,
+    "turn_total_ms": 2101.7,
+    "interrupted": false,
+    "tts_segments": 3,
+    "audio_bytes": 96000
+  }
+}
+```
+
+`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
 
 ### Frontend notes
 

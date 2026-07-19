@@ -1,5 +1,19 @@
-"""timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, and provider implementations."""
+"""timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, turn detection, metrics, and provider implementations."""
 
+from .eou import (
+    AudioEouModel,
+    EouPredictor,
+    PunctuationEouPredictor,
+    TextEouPredictor,
+)
+from .metrics import (
+    TurnMetrics,
+    TurnMetricsEvent,
+)
+from .playback import (
+    BufferedPlaybackTracker,
+    PlaybackTracker,
+)
 from .session import (
     AgentTextDelta,
     AgentTextDone,
@@ -19,23 +33,55 @@ from .session import (
     VoiceSession,
     VoiceSessionEvent,
 )
+from .turn_detection import (
+    CommitAction,
+    CommitDecision,
+    HeuristicTurnDetector,
+    LexicalTurnDetector,
+    LocalAudioTurnDetector,
+    PartialDecision,
+    ProviderTurnDetector,
+    SemanticTurnDetector,
+    TurnDetector,
+    TurnState,
+    resolve_turn_detector,
+)
 
 __all__ = [
     "AgentTextDelta",
     "AgentTextDone",
+    "AudioEouModel",
     "AudioInputConfig",
     "AudioOutput",
     "AudioOutputConfig",
+    "BufferedPlaybackTracker",
+    "CommitAction",
+    "CommitDecision",
+    "EouPredictor",
+    "HeuristicTurnDetector",
+    "LexicalTurnDetector",
+    "LocalAudioTurnDetector",
+    "PartialDecision",
+    "PlaybackTracker",
+    "ProviderTurnDetector",
+    "PunctuationEouPredictor",
+    "SemanticTurnDetector",
     "SessionEnded",
     "SessionError",
     "SessionInterrupted",
     "SessionStarted",
     "SpeechToText",
+    "TextEouPredictor",
     "TextToSpeech",
     "TranscriptCommitted",
     "TranscriptEntry",
     "TranscriptEvent",
     "TranscriptPartial",
+    "TurnDetector",
+    "TurnMetrics",
+    "TurnMetricsEvent",
+    "TurnState",
     "VoiceSession",
     "VoiceSessionEvent",
+    "resolve_turn_detector",
 ]

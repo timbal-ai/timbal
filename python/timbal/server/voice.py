@@ -30,7 +30,8 @@ router = APIRouter(prefix="/voice", tags=["voice"])
 
 _HTML_PATH = Path(__file__).parent / "voice.html"
 
-_DEFAULT_VOICE_ID = "851ejYcv2BoNPjrkw93G"
+# Override with ELEVENLABS_VOICE_ID / TIMBAL_VOICE_ID (cloned/custom voices are account-specific).
+_DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 
 
 def default_voice_config_from_env() -> dict[str, Any]:
@@ -125,6 +126,7 @@ async def voice_ws(ws: WebSocket) -> None:
         SessionStarted,
         TranscriptCommitted,
         TranscriptPartial,
+        TurnMetricsEvent,
         VoiceSession,
         VoiceSessionEvent,
     )
@@ -174,12 +176,29 @@ async def voice_ws(ws: WebSocket) -> None:
         extra=merged.get("tts_extra", {}),
     )
 
+    # Server-side only (can't come over the wire): ``runnable.voice_config`` may
+    # supply a TurnDetector instance, factory, or a mode name ("heuristic"|
+    # "provider"|"local"|"lexical"). Read from *defaults* so client JSON can't
+    # override.
+    from ..voice.turn_detection import resolve_turn_detector
+
+    turn_detector = None
+    raw_td = defaults.get("turn_detector")
+    if raw_td is not None:
+        try:
+            # voice_config is process-wide; VoiceSession clones the resolved
+            # detector so concurrent connections never share buffers/lifecycle.
+            turn_detector = resolve_turn_detector(raw_td)
+        except (TypeError, ValueError) as e:
+            logger.warning("voice_ws_bad_turn_detector", error=str(e))
+
     session = VoiceSession(
         agent=runnable,
         stt=stt,
         tts=tts,
         audio_input=audio_in,
         audio_output=audio_out,
+        turn_detector=turn_detector,
     )
 
     async def _recv_loop() -> None:
@@ -195,6 +214,12 @@ async def voice_ws(ws: WebSocket) -> None:
                     data = json.loads(msg["text"])
                     if data.get("type") == "audio":
                         await audio_queue.put(base64.b64decode(data["data"]))
+                    elif data.get("type") == "playback":
+                        # Cumulative ms of TTS audio the client actually played.
+                        try:
+                            session.playback.on_playback_ack(float(data["played_ms"]))
+                        except (KeyError, TypeError, ValueError):
+                            logger.debug("voice_ws_bad_playback_ack", data=str(data)[:120])
         except WebSocketDisconnect:
             pass
         finally:
@@ -246,8 +271,10 @@ async def voice_ws(ws: WebSocket) -> None:
                     "data": base64.b64encode(event.data).decode("ascii"),
                 }
             )
+        elif isinstance(event, TurnMetricsEvent):
+            await _send_json({"type": "metrics", "metrics": event.metrics.model_dump()})
         elif isinstance(event, SessionInterrupted):
-            await _send_json({"type": "interrupted"})
+            await _send_json({"type": "interrupted", "heard_text": event.heard_text})
         elif isinstance(event, SessionError):
             await _send_json({"type": "error", "message": event.message})
         elif isinstance(event, SessionEnded):

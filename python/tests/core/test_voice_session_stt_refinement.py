@@ -1,11 +1,13 @@
-"""Unit tests for VoiceSession STT duplicate/refinement handling."""
+"""Unit tests for VoiceSession TTS flush segmentation and final-text reconciliation.
+
+Turn-taking heuristics (garbage commits, refinements, echo) are tested in
+``test_turn_detection.py``.
+"""
 
 import unicodedata
 
 from timbal.voice.session import (
     _flush_segment,
-    _is_garbage_commit,
-    _is_same_user_utterance_refinement,
     _pending_tts_after_scheduled,
     _reconcile_final_assistant_text,
 )
@@ -124,57 +126,6 @@ def test_flush_segment_inverted_question_not_clause_end():
 
     final_remainder = remainder[len(result2):]
     assert final_remainder == "¿"
-
-
-def test_refinement_prefix_extension():
-    a = "Hello, hello"
-    b = "Hello, hello, how are you?"
-    assert _is_same_user_utterance_refinement(a, b)
-
-
-def test_refinement_duplicate():
-    t = "Hello, hello, how are you?"
-    assert _is_same_user_utterance_refinement(t, t)
-
-
-def test_refinement_substring_when_long_enough():
-    a = "Hello, hello, how are you"
-    b = "Well hello, hello, how are you today?"
-    assert len(a) >= 10
-    assert _is_same_user_utterance_refinement(a, b)
-
-
-def test_barge_in_shorter_not_refinement():
-    active = "Hello, hello, how are you?"
-    new = "stop"
-    assert not _is_same_user_utterance_refinement(active, new)
-
-
-def test_barge_in_unrelated_longer_not_refinement():
-    active = "What is the weather"
-    new = "Tell me a short story about space"
-    assert not _is_same_user_utterance_refinement(active, new)
-
-
-def test_garbage_lone_open_paren():
-    assert _is_garbage_commit("(")
-    assert _is_garbage_commit(" ( ")
-
-
-def test_garbage_music_close_caption_hallucination():
-    assert _is_garbage_commit("Music)")
-    assert _is_garbage_commit("Applause)")
-
-
-def test_garbage_incomplete_open_caption():
-    assert _is_garbage_commit("(Music")
-    assert _is_garbage_commit("(water splashing")
-
-
-def test_garbage_not_real_utterances():
-    assert not _is_garbage_commit("Probably, yeah, maybe you can tell me a story.")
-    assert not _is_garbage_commit("no")
-    assert not _is_garbage_commit("Hello")
 
 
 def test_reconcile_final_assistant_empty_stream():
