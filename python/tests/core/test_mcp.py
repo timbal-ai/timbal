@@ -1,5 +1,8 @@
+import asyncio
 import os
 import sys
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -95,6 +98,71 @@ class TestMCPServerResolve:
         await stdio_server.close()
         assert stdio_server._tools_cache is None
         assert stdio_server._session is None
+
+
+class TestMCPConnectConcurrency:
+    @pytest.mark.asyncio
+    async def test_parallel_connect_opens_session_once(self):
+        """Two concurrent _connect() calls must not each open a transport."""
+        server = MCPServer(transport="http", url="https://example.com/mcp")
+        opens = 0
+        gate = asyncio.Event()
+
+        @asynccontextmanager
+        async def slow_connect():
+            nonlocal opens
+            opens += 1
+            await gate.wait()
+            yield AsyncMock(name="session")
+
+        server._connect_http = slow_connect  # type: ignore[method-assign]
+
+        t1 = asyncio.create_task(server._connect())
+        t2 = asyncio.create_task(server._connect())
+        # Let both tasks reach the lock / check before releasing the open.
+        await asyncio.sleep(0.05)
+        gate.set()
+        s1, s2 = await asyncio.gather(t1, t2)
+
+        assert opens == 1
+        assert s1 is s2
+        assert server._session is s1
+        await server.close()
+
+    @pytest.mark.asyncio
+    async def test_parallel_resolve_lists_tools_once(self):
+        server = MCPServer(transport="http", url="https://example.com/mcp")
+        opens = 0
+        list_calls = 0
+
+        class FakeSession:
+            async def list_tools(self):
+                nonlocal list_calls
+                list_calls += 1
+                await asyncio.sleep(0.05)
+                return mcp_types.ListToolsResult(
+                    tools=[
+                        mcp_types.Tool(
+                            name="ping",
+                            description="ping",
+                            inputSchema={"type": "object", "properties": {}},
+                        )
+                    ]
+                )
+
+        @asynccontextmanager
+        async def instant_connect():
+            nonlocal opens
+            opens += 1
+            yield FakeSession()
+
+        server._connect_http = instant_connect  # type: ignore[method-assign]
+
+        tools1, tools2 = await asyncio.gather(server.resolve(), server.resolve())
+        assert opens == 1
+        assert list_calls == 1
+        assert tools1 is tools2
+        await server.close()
 
 
 class TestMCPToolExecution:

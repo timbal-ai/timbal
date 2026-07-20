@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from functools import cached_property
 from typing import Any, Literal
@@ -117,6 +118,13 @@ class MCPServer(ToolSet):
     _session: Any | None = PrivateAttr(default=None)
     _tools_cache: list[Runnable] | None = PrivateAttr(default=None)
     _context: Any | None = PrivateAttr(default=None)
+    _lock: asyncio.Lock | None = PrivateAttr(default=None)
+
+    def _get_lock(self) -> asyncio.Lock:
+        # Lazily create so model construction doesn't require a running loop.
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     @model_validator(mode="after")
     def _validate_transport_fields(self) -> "MCPServer":
@@ -152,11 +160,8 @@ class MCPServer(ToolSet):
                     logger.info("Connected to MCP server via http", url=self.url)
                     yield session
 
-    async def _connect(self) -> ClientSession:
-        """Establish connection and store session for reuse."""
-        if self._session is not None:
-            return self._session
-
+    async def _open_session(self) -> ClientSession:
+        """Open the transport. Caller must hold ``_get_lock()`` and check ``_session`` first."""
         if self.transport == "stdio":
             ctx = self._connect_stdio()
         else:
@@ -166,6 +171,20 @@ class MCPServer(ToolSet):
         self._session = session
         self._context = ctx
         return session
+
+    async def _connect(self) -> ClientSession:
+        """Establish connection and store session for reuse.
+
+        Synchronized so parallel tool calls (agent multiplexing) don't each
+        open a duplicate stdio subprocess / HTTP session and orphan the first.
+        """
+        if self._session is not None:
+            return self._session
+
+        async with self._get_lock():
+            if self._session is not None:
+                return self._session
+            return await self._open_session()
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         tool_name = mcp_tool.name
@@ -187,23 +206,31 @@ class MCPServer(ToolSet):
         if self._tools_cache is not None:
             return self._tools_cache
 
-        session = await self._connect()
-        result = await session.list_tools()
-        tools: list[Runnable] = [self._make_tool(mcp_tool) for mcp_tool in result.tools]
-        logger.info("Resolved MCP tools", tools=[t.name for t in tools])
-        self._tools_cache = tools
-        return tools
+        async with self._get_lock():
+            if self._tools_cache is not None:
+                return self._tools_cache
+
+            if self._session is None:
+                await self._open_session()
+            assert self._session is not None
+
+            result = await self._session.list_tools()
+            tools: list[Runnable] = [self._make_tool(mcp_tool) for mcp_tool in result.tools]
+            logger.info("Resolved MCP tools", tools=[t.name for t in tools])
+            self._tools_cache = tools
+            return tools
 
     async def close(self) -> None:
         """Close the MCP server connection."""
-        if self._context is not None:
-            try:
-                await self._context.__aexit__(None, None, None)
-            except Exception as e:
-                logger.error("Error closing MCP connection", error=str(e))
-            self._session = None
-            self._context = None
-            self._tools_cache = None
+        async with self._get_lock():
+            if self._context is not None:
+                try:
+                    await self._context.__aexit__(None, None, None)
+                except Exception as e:
+                    logger.error("Error closing MCP connection", error=str(e))
+                self._session = None
+                self._context = None
+                self._tools_cache = None
 
     def __del__(self):
         session = getattr(self, "_session", None)

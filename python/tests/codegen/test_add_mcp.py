@@ -217,7 +217,7 @@ class TestNameCollisions:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[fs])
         """)
         stderr = _run(ws, "--name", "fs", "--command", "npx", expect_error=True)
-        assert "already used by a non-MCP tool" in stderr
+        assert "already exists and is not MCP server" in stderr or "already used by a non-MCP tool" in stderr
         # Source untouched.
         assert 'Tool(name="fs"' in (ws / "agent.py").read_text()
 
@@ -278,6 +278,26 @@ class TestNameCollisions:
         output = _run(ws, "--name", "fs", "--command", "npx")
         assert output.count("MCPServer(") == 1
         ns = _exec_agent(output)
+        assert ns["agent"].tools[0].command == "npx"
+
+    def test_nameless_mcp_server_updates_by_variable(self, workspace):
+        """MCPServer without name= must still be an update target for --name == var.
+
+        resolve_runnable_name falls back to the class name \"MCPServer\", which
+        used to make the pre-check treat the assignment as a non-MCP collision.
+        """
+        ws = workspace("""\
+        from timbal.core import Agent, MCPServer
+
+        fs = MCPServer(transport="stdio", command="old-command")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[fs])
+        """)
+        output = _run(ws, "--name", "fs", "--command", "npx")
+        assert output.count("MCPServer(") == 1
+        assert "tools=[fs]" in output
+        ns = _exec_agent(output)
+        assert ns["agent"].tools[0].name == "fs"
         assert ns["agent"].tools[0].command == "npx"
 
 
