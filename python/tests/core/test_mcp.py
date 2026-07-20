@@ -100,6 +100,113 @@ class TestMCPServerResolve:
         assert stdio_server._session is None
 
 
+class TestMCPToolNamespacing:
+    def test_unnamed_server_keeps_bare_tool_names(self):
+        server = MCPServer(transport="http", url="https://example.com/mcp")
+        tool = server._make_tool(
+            mcp_types.Tool(
+                name="greet",
+                description="Greet someone.",
+                inputSchema={"type": "object", "properties": {}},
+            )
+        )
+        assert tool.name == "greet"
+        assert tool.description == "Greet someone."
+
+    def test_named_server_prefixes_tool_names(self):
+        server = MCPServer(name="alpha", transport="http", url="https://example.com/mcp")
+        tool = server._make_tool(
+            mcp_types.Tool(
+                name="greet",
+                description="Greet someone.",
+                inputSchema={"type": "object", "properties": {}},
+            )
+        )
+        assert tool.name == "alpha__greet"
+        assert tool.description == "[alpha] Greet someone."
+
+    @pytest.mark.asyncio
+    async def test_two_named_servers_with_same_tool_both_register(self):
+        """Two MCPServers exposing the same bare tool name must both be usable."""
+        from timbal.core.test_model import TestModel
+        from timbal.types.events import OutputEvent
+
+        calls: list[tuple[str, str]] = []
+
+        def _fake_server(name: str) -> MCPServer:
+            server = MCPServer(name=name, transport="http", url=f"https://{name}.example/mcp")
+
+            async def resolve() -> list:
+                tool = server._make_tool(
+                    mcp_types.Tool(
+                        name="greet",
+                        description=f"Greet via {name}.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {"who": {"type": "string"}},
+                            "required": ["who"],
+                        },
+                    )
+                )
+
+                # Replace the real MCP handler with one that records which server ran.
+                async def _handler(**kwargs):
+                    calls.append((name, kwargs["who"]))
+                    return f"{name}:{kwargs['who']}"
+
+                tool.handler = _handler
+                return [tool]
+
+            server.resolve = resolve  # type: ignore[method-assign]
+            return server
+
+        alpha = _fake_server("alpha")
+        beta = _fake_server("beta")
+
+        tool_calls = Message(
+            role="assistant",
+            content=[
+                ToolUseContent(id="c1", name="alpha__greet", input={"who": "A"}),
+                ToolUseContent(id="c2", name="beta__greet", input={"who": "B"}),
+            ],
+            stop_reason="tool_use",
+        )
+        agent = Agent(
+            name="multi_mcp",
+            model=TestModel(responses=[tool_calls, "done"]),
+            tools=[alpha, beta],
+            max_iter=3,
+        )
+        events = [event async for event in agent(prompt="greet both")]
+        final = events[-1]
+        assert isinstance(final, OutputEvent)
+        assert final.status.code == "success"
+
+        paths = {e.path for e in events if isinstance(e, OutputEvent)}
+        assert "multi_mcp.alpha__greet" in paths
+        assert "multi_mcp.beta__greet" in paths
+        assert sorted(calls) == [("alpha", "A"), ("beta", "B")]
+
+    @pytest.mark.asyncio
+    async def test_qualified_name_still_calls_bare_mcp_tool(self, stdio_server):
+        """Wire call must use the bare MCP name even when the agent sees a prefix."""
+        named = MCPServer(
+            name="demo",
+            transport="stdio",
+            command=sys.executable,
+            args=stdio_server.args,
+        )
+        try:
+            tools = {t.name: t for t in await named.resolve()}
+            assert "demo__greet" in tools
+            assert "greet" not in tools
+            result = await tools["demo__greet"](name="Zed").collect()
+            assert result.status.code == "success"
+            assert result.output == "Hello, Zed!"
+        finally:
+            await named.close()
+
+
 class TestMCPConnectConcurrency:
     @pytest.mark.asyncio
     async def test_parallel_connect_opens_session_once(self):

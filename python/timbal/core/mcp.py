@@ -102,9 +102,13 @@ class MCPServer(ToolSet):
     """
 
     name: str | None = None
-    """Optional identifier for this server. Not used at runtime; it gives codegen
-    and tooling a stable handle (e.g. ``remove-tool --name``) when multiple
-    MCPServer instances exist in one agent."""
+    """Optional identifier for this server.
+
+    When set, each resolved tool is exposed to the agent as
+    ``{name}__{tool}`` so two servers that declare the same bare tool name
+    don't collide in the agent's flat registry. The bare name is still used
+    for ``session.call_tool``. Also used by codegen (``remove-tool --name``).
+    """
 
     transport: Literal["stdio", "http"]
 
@@ -186,17 +190,36 @@ class MCPServer(ToolSet):
                 return self._session
             return await self._open_session()
 
+    def _qualified_tool_name(self, tool_name: str) -> str:
+        """Name exposed to the agent/LLM for an MCP tool.
+
+        Prefix with ``{server}__`` when this server has a ``name``, so multiple
+        MCPServer instances can coexist without their tools clobbering each
+        other in the agent's flat registry. Without a server name the bare
+        MCP tool name is kept (fine for a single unnamed server).
+        """
+        if self.name:
+            return f"{self.name}__{tool_name}"
+        return tool_name
+
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
-        tool_name = mcp_tool.name
+        # Bare name for the wire call; qualified name for the agent registry.
+        bare_name = mcp_tool.name
+        exposed_name = self._qualified_tool_name(bare_name)
+        description = mcp_tool.description or ""
+        if self.name and description:
+            description = f"[{self.name}] {description}"
+        elif self.name:
+            description = f"[{self.name}] {bare_name}"
 
         async def _handler(**kwargs: Any) -> Any:
             session = await self._connect()
-            result = await session.call_tool(tool_name, arguments=kwargs)
-            return _convert_call_tool_result(tool_name, result)
+            result = await session.call_tool(bare_name, arguments=kwargs)
+            return _convert_call_tool_result(bare_name, result)
 
         return MCPTool(
-            name=tool_name,
-            description=mcp_tool.description or "",
+            name=exposed_name,
+            description=description,
             handler=_handler,
             input_schema=mcp_tool.inputSchema or {},
         )

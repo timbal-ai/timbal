@@ -179,7 +179,7 @@ agent = Agent(
 ```
 
 - `transport` — `"stdio"` (spawns `command` + `args` with optional `env`) or `"http"` (streamable HTTP at `url` with optional `headers`)
-- `name` — optional identifier; used by codegen (`remove-tool --name`) and useful with multiple servers
+- `name` — optional identifier; when set, tools are exposed as `{name}__{tool}` (bare name still used for `call_tool`). Required for codegen (`remove-tool --name`) and whenever multiple servers might share tool names
 - Connections are lazy; the tool list is cached until `await server.close()`
 - Results: text → str, images/audio/blobs → `File`s in a `Message`, `structuredContent` fallback, `isError` → raised so the LLM sees an error tool result
 - Codegen: `python -m timbal.codegen add-mcp --name x --url ... --headers '{"Authorization": "Bearer $API_KEY"}'` ($VAR placeholders become `os.environ` lookups; also supports `--command/--args/--env` and `--from-json` with standard `mcpServers` configs)

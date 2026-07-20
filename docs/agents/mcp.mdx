@@ -44,11 +44,13 @@ agent = Agent(
 
 That's it — before each LLM call, the agent lists the server's tools and offers them to the model alongside any other tools. When the model calls one, the arguments are forwarded to the server and the result comes back as a tool result.
 
+With `name=` set, a tool declared as `list_files` on the `filesystem` server appears to the LLM as `filesystem__list_files`. The bare name is still used on the wire.
+
 ## Configuration
 
 | Field | Transport | Description |
 |-------|-----------|-------------|
-| `name` | both | Optional identifier. Recommended when using multiple servers or the [codegen CLI](#codegen-cli). |
+| `name` | both | Optional identifier. When set, tools are exposed as `{name}__{tool}` so multiple servers don't collide in the agent's flat tool registry. Recommended whenever you attach more than one server (and required by the [codegen CLI](#codegen-cli)). |
 | `transport` | — | `"stdio"` or `"http"` (required) |
 | `command` | stdio | Executable to spawn (e.g. `"npx"`, `"uvx"`, `"python"`) |
 | `args` | stdio | Command arguments |
