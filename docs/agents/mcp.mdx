@@ -1,0 +1,132 @@
+---
+title: "MCP Servers"
+description: "Connect any Model Context Protocol server to your agents and use its tools like native Timbal tools"
+---
+
+## What is MCP?
+
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/docs/getting-started/intro) is an open standard that enables communication between AI models and external tools and services. Thousands of MCP servers exist for filesystems, databases, browsers, SaaS APIs, and more.
+
+Timbal agents can connect to any MCP server with `MCPServer`. The server's tools are discovered at runtime and exposed to the LLM exactly like native tools — schemas, streaming, tracing, and error handling included.
+
+<Note>
+This page covers **consuming MCP servers from your agents**. For the reverse direction — connecting your editor to the Timbal platform's MCP server — see [MCP Integration](/mcp-integration).
+</Note>
+
+## Basic Usage
+
+Add an `MCPServer` to the agent's tools list. Two transports are supported:
+
+```python
+from timbal import Agent
+from timbal.core import MCPServer
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    tools=[
+        # stdio: spawn a local server process
+        MCPServer(
+            name="filesystem",
+            transport="stdio",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "."],
+        ),
+        # http: connect to a remote server (streamable HTTP)
+        MCPServer(
+            name="timbal",
+            transport="http",
+            url="https://api.timbal.ai/mcp",
+        ),
+    ],
+)
+```
+
+That's it — before each LLM call, the agent lists the server's tools and offers them to the model alongside any other tools. When the model calls one, the arguments are forwarded to the server and the result comes back as a tool result.
+
+## Configuration
+
+| Field | Transport | Description |
+|-------|-----------|-------------|
+| `name` | both | Optional identifier. Recommended when using multiple servers or the [codegen CLI](#codegen-cli). |
+| `transport` | — | `"stdio"` or `"http"` (required) |
+| `command` | stdio | Executable to spawn (e.g. `"npx"`, `"uvx"`, `"python"`) |
+| `args` | stdio | Command arguments |
+| `env` | stdio | Environment variables for the spawned process |
+| `url` | http | Server URL |
+| `headers` | http | HTTP headers sent with every request |
+
+### Authentication
+
+For servers that require auth, pass headers (http) or environment variables (stdio). Read secrets from the environment instead of hardcoding them:
+
+```python
+import os
+
+timbal_mcp = MCPServer(
+    name="timbal",
+    transport="http",
+    url="https://api.timbal.ai/mcp",
+    headers={"Authorization": f"Bearer {os.environ['TIMBAL_API_KEY']}"},
+)
+
+github_mcp = MCPServer(
+    name="github",
+    transport="stdio",
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-github"],
+    env={"GITHUB_PERSONAL_ACCESS_TOKEN": os.environ["GITHUB_TOKEN"]},
+)
+```
+
+## How Results Are Handled
+
+MCP tool results are converted so the LLM always receives something useful:
+
+- **Text content** becomes a plain string (or a list of strings for multiple blocks)
+- **Images, audio, and binary resources** become Timbal [`File`](/core-concepts/runnables#files)s, forwarded to the model as file content — vision models can see returned images directly
+- **Structured content** is returned as-is when the server sends no text representation
+- **Errors** (`isError`) raise inside the tool call, so the model receives a proper error tool result and can self-correct
+
+## Connection Lifecycle
+
+Connections are **lazy**: nothing is spawned or contacted until the agent first needs the server's tools. The tool list is fetched once and cached for the life of the connection.
+
+Close the connection when you're done:
+
+```python
+server = MCPServer(transport="stdio", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "."])
+agent = Agent(name="my_agent", model="openai/gpt-4o-mini", tools=[server])
+
+result = await agent(prompt="List the files in the current directory").collect()
+
+await server.close()
+```
+
+<Warning>
+For long-running processes (servers, bots), create the `MCPServer` once and reuse it across runs — reconnecting per request adds latency, especially for stdio servers that spawn a subprocess.
+</Warning>
+
+## Dynamic Resolution
+
+`MCPServer` is a [`ToolSet`](/agents/dynamic#dynamic-tools): tools are resolved at runtime, not import time. This means the available tools always reflect what the server currently offers, and you can mix MCP servers freely with functions, built-in tools, and other agents in the same `tools` list.
+
+## Codegen CLI
+
+The [codegen CLI](https://github.com/timbal-ai/timbal/tree/main/python/timbal/codegen) can add MCP servers to an agent's source file:
+
+```bash
+# stdio server
+python -m timbal.codegen add-mcp --name fs \
+  --command npx --args '["-y", "@modelcontextprotocol/server-filesystem", "."]'
+
+# http server — $VARS are emitted as os.environ lookups, never hardcoded
+python -m timbal.codegen add-mcp --name timbal \
+  --url https://api.timbal.ai/mcp \
+  --headers '{"Authorization": "Bearer $TIMBAL_API_KEY"}'
+
+# import a standard mcpServers JSON config (claude-desktop / cursor style)
+python -m timbal.codegen add-mcp --from-json @mcp.json
+```
+
+Re-running `add-mcp` with the same `--name` replaces the server spec. Remove a server with `remove-tool --name <server_name>` — the assignment and import are cleaned up automatically.

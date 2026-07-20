@@ -32,6 +32,8 @@ timbal/
 │   │   │   ├── agent.py      # Agent execution engine
 │   │   │   ├── workflow.py   # DAG workflow engine
 │   │   │   ├── tool.py       # Tool wrapper
+│   │   │   ├── tool_set.py   # ToolSet ABC for runtime tool resolution
+│   │   │   ├── mcp.py        # MCPServer — MCP servers as tool sources
 │   │   │   ├── llm_router.py # Multi-provider LLM dispatch
 │   │   │   ├── models.py     # Model strings + context window lookup
 │   │   │   └── test_model.py # Offline TestModel for testing
@@ -156,6 +158,31 @@ tool = Tool(
 ```
 
 Schema is auto-generated from type hints and docstrings for LLM consumption.
+
+---
+
+### MCPServer
+
+Connects any MCP server as a tool source. Tools are resolved at runtime (it's a `ToolSet`) and exposed to the LLM with the server-declared JSON schemas.
+
+```python
+from timbal.core import MCPServer
+
+agent = Agent(
+    name="my_agent",
+    model="...",
+    tools=[
+        MCPServer(transport="stdio", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "."]),
+        MCPServer(name="timbal", transport="http", url="https://api.timbal.ai/mcp", headers={"Authorization": "Bearer ..."}),
+    ],
+)
+```
+
+- `transport` — `"stdio"` (spawns `command` + `args` with optional `env`) or `"http"` (streamable HTTP at `url` with optional `headers`)
+- `name` — optional identifier; used by codegen (`remove-tool --name`) and useful with multiple servers
+- Connections are lazy; the tool list is cached until `await server.close()`
+- Results: text → str, images/audio/blobs → `File`s in a `Message`, `structuredContent` fallback, `isError` → raised so the LLM sees an error tool result
+- Codegen: `python -m timbal.codegen add-mcp --name x --url ... --headers '{"Authorization": "Bearer $API_KEY"}'` ($VAR placeholders become `os.environ` lookups; also supports `--command/--args/--env` and `--from-json` with standard `mcpServers` configs)
 
 ---
 

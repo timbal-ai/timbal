@@ -1,17 +1,93 @@
 from contextlib import asynccontextmanager
+from functools import cached_property
 from typing import Any, Literal
+
+# `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 import httpx
 import structlog
 from mcp import ClientSession, StdioServerParameters
+from mcp import types as mcp_types
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import Field, PrivateAttr, computed_field, model_validator
 
+from ..types.content import FileContent, TextContent
+from ..types.file import File
+from ..types.message import Message
 from .runnable import Runnable
+from .tool import Tool
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.mcp")
+
+
+def _convert_call_tool_result(tool_name: str, result: mcp_types.CallToolResult) -> Any:
+    """Convert an MCP CallToolResult into a value Timbal can feed back to the LLM.
+
+    Text-only results collapse to a plain string, structured results return the
+    structured payload, and binary content (images, audio, blob resources) is
+    wrapped in Timbal Files inside a Message so the agent forwards them as
+    FileContent tool results.
+    """
+    texts: list[str] = []
+    files: list[File] = []
+    for block in result.content:
+        if isinstance(block, mcp_types.TextContent):
+            texts.append(block.text)
+        elif isinstance(block, mcp_types.ImageContent | mcp_types.AudioContent):
+            files.append(File(f"data:{block.mimeType};base64,{block.data}"))
+        elif isinstance(block, mcp_types.EmbeddedResource):
+            resource = block.resource
+            if isinstance(resource, mcp_types.TextResourceContents):
+                texts.append(resource.text)
+            else:
+                mime_type = resource.mimeType or "application/octet-stream"
+                files.append(File(f"data:{mime_type};base64,{resource.blob}"))
+        elif isinstance(block, mcp_types.ResourceLink):
+            texts.append(str(block.uri))
+
+    if result.isError:
+        raise RuntimeError("\n".join(texts) or f"MCP tool '{tool_name}' call failed.")
+
+    if files:
+        content: list[Any] = [TextContent(text=text) for text in texts]
+        content.extend(FileContent(file=file) for file in files)
+        return Message(role="assistant", content=content)
+    # Per the MCP spec, text blocks carry the canonical serialized result even when
+    # structuredContent is present (e.g. FastMCP wraps returns as {"result": ...}),
+    # so prefer text and only fall back to the structured payload.
+    if len(texts) == 1:
+        return texts[0]
+    if texts:
+        return texts
+    return result.structuredContent
+
+
+class MCPTool(Tool):
+    """A Tool whose parameter schema comes from an MCP server instead of handler introspection.
+
+    The handler is a ``**kwargs`` passthrough that forwards the arguments to the
+    MCP session, so ``params_model`` accepts anything; the schema the LLM sees is
+    the server-declared JSON schema.
+    """
+
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    """The JSON schema declared by the MCP server for this tool's arguments."""
+
+    @override
+    @computed_field
+    @cached_property
+    def params_model_schema(self) -> dict[str, Any]:
+        """See base class."""
+        schema = dict(self.input_schema)
+        schema.setdefault("type", "object")
+        schema.setdefault("properties", {})
+        return schema
 
 
 class MCPServer(ToolSet):
@@ -23,6 +99,11 @@ class MCPServer(ToolSet):
         MCPServer(transport="stdio", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "."])
         MCPServer(transport="http", url="https://api.timbal.ai/mcp")
     """
+
+    name: str | None = None
+    """Optional identifier for this server. Not used at runtime; it gives codegen
+    and tooling a stable handle (e.g. ``remove-tool --name``) when multiple
+    MCPServer instances exist in one agent."""
 
     transport: Literal["stdio", "http"]
 
@@ -86,12 +167,32 @@ class MCPServer(ToolSet):
         self._context = ctx
         return session
 
+    def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
+        tool_name = mcp_tool.name
+
+        async def _handler(**kwargs: Any) -> Any:
+            session = await self._connect()
+            result = await session.call_tool(tool_name, arguments=kwargs)
+            return _convert_call_tool_result(tool_name, result)
+
+        return MCPTool(
+            name=tool_name,
+            description=mcp_tool.description or "",
+            handler=_handler,
+            input_schema=mcp_tool.inputSchema or {},
+        )
+
     async def resolve(self) -> list[Runnable]:
+        """See base class. Lists the server's tools once and caches them until close()."""
+        if self._tools_cache is not None:
+            return self._tools_cache
+
         session = await self._connect()
         result = await session.list_tools()
-        print(result)
-        # TODO
-        return []
+        tools: list[Runnable] = [self._make_tool(mcp_tool) for mcp_tool in result.tools]
+        logger.info("Resolved MCP tools", tools=[t.name for t in tools])
+        self._tools_cache = tools
+        return tools
 
     async def close(self) -> None:
         """Close the MCP server connection."""

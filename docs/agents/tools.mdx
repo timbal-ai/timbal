@@ -210,6 +210,30 @@ Tool(handler=get_weather, command="weather")
 
 See [Commands](/agents/commands) for argument parsing, nested agents, and workflows.
 
+## MCP Servers
+
+Connect any [Model Context Protocol](https://modelcontextprotocol.io/docs/getting-started/intro) server and use its tools like native ones:
+
+```python
+from timbal import Agent
+from timbal.core import MCPServer
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    tools=[
+        MCPServer(
+            name="filesystem",
+            transport="stdio",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", "."],
+        ),
+    ],
+)
+```
+
+The server's tools are discovered at runtime and offered to the LLM alongside your other tools. See [MCP Servers](/agents/mcp) for transports, authentication, result handling, and connection lifecycle.
+
 ## Dynamic Tools
 
 When tool availability depends on runtime conditions (user role, permissions, input parameters), you need dynamic tool resolution.
@@ -236,6 +260,7 @@ See [Dynamic Agents](/agents/dynamic#dynamic-tools) for implementation details a
 - **Performance**: Concurrent execution and optimized patterns
 - **Robustness**: Improved error handling and tracing
 - **Tool Sets**: Dynamic tool resolution
+- **MCP Servers**: Any Model Context Protocol server as a tool source — see [MCP Servers](/agents/mcp)
 - **Commands**: Slash-command shortcuts for direct tool invocation — see [Commands](/agents/commands)
 
 For more advanced patterns, see [Dynamic Agents](/agents/dynamic) and explore the built-in tools in the Timbal library.

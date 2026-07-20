@@ -91,6 +91,52 @@ python -m timbal.codegen add-tool --type WebSearch --step agent_a
 
 ---
 
+### `add-mcp` — Add an MCP server to an Agent
+
+```bash
+# stdio server (transport inferred from --command)
+python -m timbal.codegen add-mcp --name fs \
+  --command npx --args '["-y", "@modelcontextprotocol/server-filesystem", "."]'
+
+# http server (transport inferred from --url), secret via env placeholder
+python -m timbal.codegen add-mcp --name timbal \
+  --url https://api.timbal.ai/mcp \
+  --headers '{"Authorization": "Bearer $TIMBAL_API_KEY"}'
+
+# import every server from a standard mcpServers config (claude-desktop/cursor style)
+python -m timbal.codegen add-mcp --from-json @mcp.json
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--name` | yes (unless `--from-json`) | Server identifier. Used as the variable name and for `remove-tool` targeting. |
+| `--transport` | no | `stdio` or `http`. Inferred from `--command` / `--url` when omitted. |
+| `--command` | stdio | Executable to spawn (e.g. `npx`). |
+| `--args` | no | Command arguments as a JSON array. |
+| `--env` | no | Environment variables as a JSON object. |
+| `--url` | http | Server URL. |
+| `--headers` | no | HTTP headers as a JSON object. |
+| `--from-json` | no | `{"mcpServers": {...}}` JSON config; adds every server in it. Mutually exclusive with the per-server flags. Accepts the `type` aliases `streamable-http`/`sse` for `http`. |
+| `--step` | no | Target step name within a Workflow (adds the server to that step's tools list) |
+
+**Requires**: Agent entry point, or Workflow entry point when using `--step`.
+
+**What it does**:
+- Adds the import (`from timbal.core import MCPServer`)
+- Creates a variable assignment (`fs = MCPServer(name="fs", transport="stdio", ...)`)
+- Adds the variable to the Agent's `tools=[...]` list
+- Idempotent — re-running with the same `--name` replaces the server spec (full spec each time, no merge)
+
+**Secrets are never hardcoded**: `$VAR` / `${VAR}` placeholders inside `--env` and `--headers` values are emitted as `os.environ` lookups (adding `import os` when needed). A value that is exactly one placeholder becomes `os.environ["VAR"]`; embedded placeholders become f-strings:
+
+```python
+headers={"Authorization": f"Bearer {os.environ['TIMBAL_API_KEY']}"}
+```
+
+The config is validated against the `MCPServer` model at codegen time, so transport mismatches fail immediately instead of when the generated file first runs. Use `remove-tool --name <server_name>` to remove a server — the assignment and import are cleaned up automatically.
+
+---
+
 ### `remove-tool` — Remove a tool from an Agent
 
 ```bash
