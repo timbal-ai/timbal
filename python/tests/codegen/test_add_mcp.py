@@ -201,6 +201,86 @@ class TestRemoval:
         assert "tools=[]" in output
 
 
+class TestNameCollisions:
+    """A same-named non-MCP runnable must never be replaced or rewired by add-mcp."""
+
+    def test_tool_assignment_with_same_name_rejected(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent, Tool
+
+        def list_files(path: str) -> str:
+            \"\"\"List files.\"\"\"
+            return path
+
+        fs = Tool(name="fs", handler=list_files)
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[fs])
+        """)
+        stderr = _run(ws, "--name", "fs", "--command", "npx", expect_error=True)
+        assert "already used by a non-MCP tool" in stderr
+        # Source untouched.
+        assert 'Tool(name="fs"' in (ws / "agent.py").read_text()
+
+    def test_inline_tool_with_same_name_rejected(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent, Tool
+
+        def list_files(path: str) -> str:
+            \"\"\"List files.\"\"\"
+            return path
+
+        agent = Agent(
+            name="a",
+            model="openai/gpt-4o-mini",
+            tools=[Tool(name="fs", handler=list_files)],
+        )
+        """)
+        stderr = _run(ws, "--name", "fs", "--command", "npx", expect_error=True)
+        assert "already used by a non-MCP tool" in stderr
+
+    def test_bare_function_with_same_name_rejected(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        def fs(path: str) -> str:
+            \"\"\"List files.\"\"\"
+            return path
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[fs])
+        """)
+        stderr = _run(ws, "--name", "fs", "--command", "npx", expect_error=True)
+        assert "already exists" in stderr
+
+    def test_unrelated_variable_shadowing_rejected(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent, Tool
+
+        def list_files(path: str) -> str:
+            \"\"\"List files.\"\"\"
+            return path
+
+        fs = Tool(name="lister", handler=list_files)
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[fs])
+        """)
+        stderr = _run(ws, "--name", "fs", "--command", "npx", expect_error=True)
+        assert "already exists and is not MCP server" in stderr
+
+    def test_existing_mcp_server_still_updates(self, workspace):
+        """The legit idempotent path must keep working after the collision guard."""
+        ws = workspace("""\
+        from timbal.core import Agent, MCPServer
+
+        fs = MCPServer(name="fs", transport="stdio", command="old-command")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[fs])
+        """)
+        output = _run(ws, "--name", "fs", "--command", "npx")
+        assert output.count("MCPServer(") == 1
+        ns = _exec_agent(output)
+        assert ns["agent"].tools[0].command == "npx"
+
+
 class TestErrors:
     def test_name_required(self, workspace):
         ws = workspace(AGENT_SOURCE)

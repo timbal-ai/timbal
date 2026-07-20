@@ -197,6 +197,24 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             )
 
     servers = _servers_from_args(args)
+
+    # Reject variable-name shadowing upfront: the generated `<var> = MCPServer(...)`
+    # must not silently rebind an existing function or unrelated assignment.
+    # (Same-named *runnables* are caught inside MCPAdder, which sees the calls.)
+    if tree is not None:
+        for server_name, _kwargs in servers:
+            var_name = _var_name_for(server_name)
+            existing = assignments.get(var_name)
+            if existing is not None and resolve_runnable_name(existing) != server_name:
+                raise ValueError(
+                    f"Variable '{var_name}' already exists and is not MCP server '{server_name}'. "
+                    "Pick a different --name."
+                )
+            if any(isinstance(stmt, cst.FunctionDef) and stmt.name.value == var_name for stmt in tree.body):
+                raise ValueError(
+                    f"A function named '{var_name}' already exists in the source. Pick a different --name."
+                )
+
     return MCPAdder(assignments, target=target, servers=servers)
 
 
@@ -257,6 +275,22 @@ def _server_call_code(kwargs: dict) -> tuple[str, bool]:
     return f"MCPServer({', '.join(parts)})", uses_env
 
 
+def _is_mcp_call(call: cst.Call) -> bool:
+    """True when the Call constructs an MCPServer (plain or attribute-qualified)."""
+    if isinstance(call.func, cst.Name):
+        return call.func.value == "MCPServer"
+    if isinstance(call.func, cst.Attribute):
+        return call.func.attr.value == "MCPServer"
+    return False
+
+
+def _name_collision_error(runtime_name: str) -> ValueError:
+    return ValueError(
+        f"Name '{runtime_name}' is already used by a non-MCP tool. "
+        f"Pick a different --name, or remove the existing tool first with: remove-tool --name {runtime_name}"
+    )
+
+
 class MCPAdder(cst.CSTTransformer):
     def __init__(self, assignments: dict[str, cst.Call], *, target: str, servers: list[tuple[str, dict]]):
         self.assignments = assignments
@@ -275,12 +309,15 @@ class MCPAdder(cst.CSTTransformer):
             if target_name == self.target and isinstance(updated_node.value, cst.Call):
                 return updated_node.with_changes(value=self._add_to_tools(updated_node.value))
 
-            # Existing assignment for one of the servers — replace it wholesale
-            # (add-mcp takes the full spec each time, so no merge semantics).
+            # Existing MCPServer assignment for one of the servers — replace it
+            # wholesale (add-mcp takes the full spec each time, no merge semantics).
+            # A same-named non-MCP runnable is a collision, never an update target.
             if target_name != self.target and isinstance(updated_node.value, cst.Call):
                 resolved = resolve_runnable_name(updated_node.value)
                 for _var, runtime_name, kwargs in self.servers:
                     if resolved == runtime_name:
+                        if not _is_mcp_call(updated_node.value):
+                            raise _name_collision_error(runtime_name)
                         self._updated.add(runtime_name)
                         call_code, _ = _server_call_code(kwargs)
                         return updated_node.with_changes(value=cst.parse_expression(call_code))
@@ -349,12 +386,21 @@ class MCPAdder(cst.CSTTransformer):
                         name = resolve_runnable_name(el.value, self.assignments)
                         if name == runtime_name:
                             if isinstance(el.value, cst.Call):
-                                # Migrate inline Call → Name reference.
+                                if not _is_mcp_call(el.value):
+                                    raise _name_collision_error(runtime_name)
+                                # Migrate inline MCPServer Call → Name reference.
                                 updated_el = el.with_changes(value=new_ref)
                                 new_elements = [*arg.value.elements[:j], updated_el, *arg.value.elements[j + 1 :]]
                                 new_list = arg.value.with_changes(elements=new_elements)
                                 new_arg = arg.with_changes(value=new_list)
                                 return call.with_changes(args=[*call.args[:i], new_arg, *call.args[i + 1 :]])
+                            # Name reference: only an existing MCPServer assignment counts
+                            # as "already present" — anything else (bare function, Tool,
+                            # Agent, ...) with the same name is a collision.
+                            if isinstance(el.value, cst.Name):
+                                existing = self.assignments.get(el.value.value)
+                                if existing is None or not _is_mcp_call(existing):
+                                    raise _name_collision_error(runtime_name)
                             return call
 
                     new_element = cst.Element(value=new_ref)
