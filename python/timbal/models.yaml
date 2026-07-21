@@ -551,6 +551,15 @@ models:
   output_price: 0.3
   context_window: 32000
   capabilities: [tools]
+- id: google/gemini-3.6-flash
+  provider: google
+  display_name: Gemini 3.6 Flash
+  description: Workhorse Flash model with improved token efficiency, code generation, and multimodal reasoning for multi-step
+    agentic workflows.
+  input_price: 1.5
+  output_price: 7.5
+  context_window: 1048576
+  capabilities: [vision, audio, video, tools, reasoning]
 - id: google/gemini-3.5-flash
   provider: google
   display_name: Gemini 3.5 Flash
@@ -558,6 +567,15 @@ models:
     speed and lower cost than Gemini 3.1 Pro.
   input_price: 1.5
   output_price: 9.0
+  context_window: 1048576
+  capabilities: [vision, audio, video, tools, reasoning]
+- id: google/gemini-3.5-flash-lite
+  provider: google
+  display_name: Gemini 3.5 Flash Lite
+  description: Fastest, most cost-effective 3.5-class model for high-throughput agentic search, document processing, and
+    lightweight subagent workflows.
+  input_price: 0.3
+  output_price: 2.5
   context_window: 1048576
   capabilities: [vision, audio, video, tools, reasoning]
 - id: google/gemini-3.1-pro-preview
