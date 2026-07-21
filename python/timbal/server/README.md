@@ -38,9 +38,18 @@ If the **first** message is binary, it is queued as the first audio chunk (no se
 
 ### Playback acks (client → server)
 
-Optional but recommended: `{ "type": "playback", "played_ms": <number> }` — **cumulative milliseconds of TTS audio actually played** since the connection opened (audio dropped on `interrupted` does not count and must not be added later). Send one every ~250 ms while audio is playing, plus a final one when playback stops.
+Optional but strongly recommended: `{ "type": "playback", "played_ms": <number> }`. Send one every ~250 ms while audio is playing, plus a final one when playback stops. The server advertises this in `session_started` (`"playback_acks": "recommended"`).
 
-The server uses these to know exactly what the user *heard* when they barge in, so it can truncate the assistant's transcript entry and conversation memory to the heard prefix (see `interrupted.heard_text` below). Without acks the server falls back to a wall-clock estimate of gapless playback, which is close but can't account for client-side buffering delays. Malformed `playback` messages are ignored.
+**`played_ms` contract** (truncation correctness depends on it — treat as normative):
+
+- **Cumulative per session:** total milliseconds of TTS audio actually played since the WebSocket opened. Never reset it — not per turn, not per audio segment.
+- **Monotonic:** each ack must be `>=` the previous one. The server ignores acks that move backwards.
+- **Interrupted audio is excluded, forever:** when you receive `interrupted`, stop playback and drop your buffer; the dropped audio must never be counted in a later ack. Only add milliseconds while audio is audibly playing.
+- **Played, not received:** count what came out of the speaker (e.g. Web Audio scheduled time already elapsed), not bytes decoded or buffered.
+
+The server uses these to know exactly what the user *heard* when they barge in, so it can truncate the assistant's transcript entry and conversation memory to the heard prefix (see `interrupted.heard_text` below). Without acks the server falls back to a wall-clock estimate of gapless playback, which is close but can't account for client-side buffering delays — the first estimate-only barge-in logs a `voice_ws_truncation_degraded` warning server-side. Malformed `playback` messages are ignored.
+
+Whether acks were received is reported per turn in `metrics.playback_acks_received`, and interrupted turns carry `metrics.heard_bytes` (PCM bytes actually heard) so estimate-vs-ack drift is measurable from traces.
 
 ### Config overrides
 
@@ -74,7 +83,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 
 | `type`                  | Fields        | Meaning |
 |-------------------------|---------------|--------|
-| `session_started`       | —             | Voice session is live; safe to show “listening”. |
+| `session_started`       | `playback_acks` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. |
 | `transcript_partial`    | `text`        | Live STT (may change). |
 | `transcript_committed`  | `text`        | Final user transcript for the utterance. |
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |
@@ -136,12 +145,14 @@ Once per turn — after `agent_text_done`, and also when the turn is interrupted
     "turn_total_ms": 2101.7,
     "interrupted": false,
     "tts_segments": 3,
-    "audio_bytes": 96000
+    "audio_bytes": 96000,
+    "playback_acks_received": true,
+    "heard_bytes": null
   }
 }
 ```
 
-`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
+`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). `playback_acks_received` says whether the heard position was client-truth (acks) or the wall-clock estimate; interrupted turns set `heard_bytes` to the PCM bytes the user actually heard (`null` on uninterrupted turns). Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
 
 ### Frontend notes
 

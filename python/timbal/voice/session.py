@@ -1358,6 +1358,8 @@ class VoiceSession:
             interrupted=interrupted,
             tts_segments=self._turn_tts_segments,
             audio_bytes=self._turn_audio_bytes,
+            playback_acks_received=self.playback.ack_received,
+            heard_bytes=self._turn_heard_bytes if interrupted else None,
         )
 
     def _attach_metrics_to_trace(self, metrics: TurnMetrics) -> None:

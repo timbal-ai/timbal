@@ -236,6 +236,9 @@ class TestVoiceWsMetrics:
         assert m["turn_total_ms"] >= 0
         assert m["tts_segments"] >= 1
         assert m["audio_bytes"] > 0
+        # No acks were sent and the turn was not interrupted.
+        assert m["playback_acks_received"] is False
+        assert m["heard_bytes"] is None
 
 
 class TestVoiceWsPlaybackAck:
@@ -269,6 +272,28 @@ class TestVoiceWsPlaybackAck:
         assert "error" not in types
         assert types[-1] == "session_ended"
         assert "agent_text_done" in types
+
+    def test_session_started_advertises_playback_acks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert started["playback_acks"] == "recommended"
 
     def test_interrupted_message_carries_heard_text_field(
         self,

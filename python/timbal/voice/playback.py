@@ -46,6 +46,15 @@ class PlaybackTracker(ABC):
         """Optional client correction: cumulative milliseconds actually played this session."""
 
     @property
+    def ack_received(self) -> bool:
+        """True when the played position is client-truth, not a schedule estimate.
+
+        Estimate-only trackers return False until the first ack arrives; paced
+        transports (WebRTC) that know the position natively should return True.
+        """
+        return False
+
+    @property
     @abstractmethod
     def played_bytes(self) -> int:
         """Best estimate of total bytes played so far (session lifetime, discarded audio excluded)."""
@@ -104,6 +113,10 @@ class BufferedPlaybackTracker(PlaybackTracker):
         # played axis at the current position and end the schedule now.
         self._scheduled_bytes = self.played_bytes
         self._playing_until = self._clock()
+
+    @property
+    def ack_received(self) -> bool:
+        return self._last_ack is not None
 
     @property
     def played_bytes(self) -> int:

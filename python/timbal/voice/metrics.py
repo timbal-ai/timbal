@@ -39,6 +39,13 @@ class TurnMetrics(BaseModel):
     interrupted: bool
     tts_segments: int
     audio_bytes: int
+    playback_acks_received: bool = False
+    """True when the client reported ``played_ms`` acks this session — the heard
+    position is client-truth rather than the wall-clock schedule estimate."""
+    heard_bytes: int | None = None
+    """PCM bytes of this turn the user actually heard before an interruption
+    (``None`` for uninterrupted turns or when the position is unknown).
+    Compare against ``audio_bytes`` to measure estimate-vs-ack drift."""
 
 
 class TurnMetricsEvent(VoiceSessionEvent):

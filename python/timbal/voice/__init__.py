@@ -14,6 +14,11 @@ from .playback import (
     BufferedPlaybackTracker,
     PlaybackTracker,
 )
+from .realtime import (
+    RealtimeEvent,
+    RealtimeModel,
+    RealtimeSession,
+)
 from .session import (
     AgentTextDelta,
     AgentTextDone,
@@ -65,6 +70,9 @@ __all__ = [
     "PlaybackTracker",
     "ProviderTurnDetector",
     "PunctuationEouPredictor",
+    "RealtimeEvent",
+    "RealtimeModel",
+    "RealtimeSession",
     "SemanticTurnDetector",
     "SessionEnded",
     "SessionError",

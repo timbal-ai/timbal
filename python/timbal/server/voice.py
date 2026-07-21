@@ -252,10 +252,18 @@ async def voice_ws(ws: WebSocket) -> None:
                 return
             logger.warning("voice_ws_send_failed", error=str(e), msg_type=data.get("type"))
 
+    # One-time per session: an interruption without any playback acks means the
+    # heard-text truncation ran on the wall-clock estimate only.
+    warned_ack_degraded = False
+
     async def _handle(event: VoiceSessionEvent) -> None:
         """Forward session events to the browser over WebSocket."""
+        nonlocal warned_ack_degraded
         if isinstance(event, SessionStarted):
-            await _send_json({"type": "session_started"})
+            # ``playback_acks`` advertises that the server understands
+            # ``{"type": "playback", "played_ms": ...}`` and expects clients that
+            # play audio to send them (see server/README.md).
+            await _send_json({"type": "session_started", "playback_acks": "recommended"})
         elif isinstance(event, TranscriptPartial):
             await _send_json({"type": "transcript_partial", "text": event.text})
         elif isinstance(event, TranscriptCommitted):
@@ -274,6 +282,14 @@ async def voice_ws(ws: WebSocket) -> None:
         elif isinstance(event, TurnMetricsEvent):
             await _send_json({"type": "metrics", "metrics": event.metrics.model_dump()})
         elif isinstance(event, SessionInterrupted):
+            if not warned_ack_degraded and not session.playback.ack_received:
+                warned_ack_degraded = True
+                logger.warning(
+                    "voice_ws_truncation_degraded",
+                    hint="client sent no playback acks before a barge-in; heard-text "
+                    "truncation used the wall-clock estimate. Send "
+                    '{"type": "playback", "played_ms": ...} every ~250ms while audio plays.',
+                )
             await _send_json({"type": "interrupted", "heard_text": event.heard_text})
         elif isinstance(event, SessionError):
             await _send_json({"type": "error", "message": event.message})

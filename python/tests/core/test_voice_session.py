@@ -657,6 +657,12 @@ class TestTurnMetrics:
         assert len(session.metrics) == 2
         assert session.metrics[0].interrupted is True
         assert session.metrics[1].interrupted is False
+        # Interrupted turns expose the heard position; no acks were sent, so the
+        # position is the estimate and the flag says so.
+        assert session.metrics[0].heard_bytes is not None
+        assert session.metrics[0].heard_bytes >= 0
+        assert session.metrics[0].playback_acks_received is False
+        assert session.metrics[1].heard_bytes is None
 
 
 # ---------------------------------------------------------------------------
