@@ -92,7 +92,7 @@ See the [Quickstart](https://docs.timbal.ai/quickstart) for the full app flow (`
 | | |
 |---|---|
 | [Memory & compaction](https://docs.timbal.ai/agents/memory) | Persistent context with strategies to stay under the context window |
-| [Tools & MCP](https://docs.timbal.ai/agents/tools) | Built-in tool library, your own functions, any MCP server |
+| [Tools](https://docs.timbal.ai/agents/tools) & [MCP](https://docs.timbal.ai/agents/mcp) | Built-in tool library, your own functions, any MCP server |
 | [Structured output](https://docs.timbal.ai/agents/structured-output) | Typed Pydantic models instead of raw text |
 | [Skills](https://docs.timbal.ai/agents/skills) | Reusable tool packages the agent loads on demand |
 | [Tracing](https://docs.timbal.ai/core-concepts/tracing) | Full span traces, exportable over OTLP |
