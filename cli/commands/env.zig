@@ -118,6 +118,11 @@ pub const TimbalRemote = struct {
     }
 };
 
+/// Hosts we will send the profile Bearer token to for vars pull/push.
+fn isTimbalApiHost(host: []const u8) bool {
+    return std.mem.eql(u8, host, "api.timbal.ai") or std.mem.eql(u8, host, "api.dev.timbal.ai");
+}
+
 /// Parse a Timbal platform git remote URL.
 /// Accepts: https://api[.dev].timbal.ai/orgs/{org}/projects/{project}/git[/]
 pub fn parseTimbalRemoteUrl(allocator: std.mem.Allocator, url: []const u8, remote_name: []const u8) !?TimbalRemote {
@@ -160,7 +165,8 @@ pub fn parseTimbalRemoteUrl(allocator: std.mem.Allocator, url: []const u8, remot
     if (!std.mem.eql(u8, projects_seg, "projects")) return null;
     if (!std.mem.eql(u8, git_seg, "git")) return null;
     if (org_id.len == 0 or project_id.len == 0 or host.len == 0) return null;
-    if (!std.mem.endsWith(u8, host, "timbal.ai")) return null;
+    // Exact API hosts only — `endsWith("timbal.ai")` would accept lookalikes like notimbal.ai.
+    if (!isTimbalApiHost(host)) return null;
 
     const base_url = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ scheme, host });
     errdefer allocator.free(base_url);
@@ -361,28 +367,29 @@ fn needsQuoting(value: []const u8) bool {
     if (value.len == 0) return true;
     for (value) |c| {
         switch (c) {
-            ' ', '\t', '\n', '\r', '#', '"', '\'', '=', '\\' => return true,
+            ' ', '\t', '#', '"', '\'', '=', '\\' => return true,
             else => {},
         }
     }
     return false;
 }
 
-fn appendEscapedDoubleQuoted(buf: *std.ArrayList(u8), value: []const u8) !void {
-    try buf.append('"');
-    for (value) |c| {
-        switch (c) {
-            '\\' => try buf.appendSlice("\\\\"),
-            '"' => try buf.appendSlice("\\\""),
-            '\n' => try buf.appendSlice("\\n"),
-            '\r' => try buf.appendSlice("\\r"),
-            else => try buf.append(c),
-        }
-    }
-    try buf.append('"');
+/// Quote a value the way `timbal start` reads it: strip matching outer quotes only,
+/// no backslash escapes. Prefer double quotes; use single quotes when the value
+/// contains `"` but not `'`. Values with both quote styles are wrapped in `"` and
+/// rely on first/last-char stripping (same as start). Newlines are unsupported in
+/// this line-oriented format — callers should not expect multiline values to round-trip.
+fn appendQuotedValue(buf: *std.ArrayList(u8), value: []const u8) !void {
+    const has_dq = std.mem.indexOfScalar(u8, value, '"') != null;
+    const has_sq = std.mem.indexOfScalar(u8, value, '\'') != null;
+    const quote: u8 = if (has_dq and !has_sq) '\'' else '"';
+    try buf.append(quote);
+    try buf.appendSlice(value);
+    try buf.append(quote);
 }
 
 /// Serialize SyncVars to a .env file with type/description comment metadata.
+/// Format is compatible with `timbal start`'s .env loader (quote strip, no escapes).
 pub fn formatEnvFile(allocator: std.mem.Allocator, rev: []const u8, vars: []const SyncVar) ![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
@@ -409,8 +416,20 @@ pub fn formatEnvFile(allocator: std.mem.Allocator, rev: []const u8, vars: []cons
         }
         try buf.appendSlice(v.name);
         try buf.append('=');
-        if (needsQuoting(v.value)) {
-            try appendEscapedDoubleQuoted(&buf, v.value);
+        // Flatten newlines so the line-oriented .env stays start-compatible.
+        if (std.mem.indexOfAny(u8, v.value, "\n\r") != null) {
+            var flat = try allocator.alloc(u8, v.value.len);
+            defer allocator.free(flat);
+            for (v.value, 0..) |c, i| {
+                flat[i] = if (c == '\n' or c == '\r') ' ' else c;
+            }
+            if (needsQuoting(flat)) {
+                try appendQuotedValue(&buf, flat);
+            } else {
+                try buf.appendSlice(flat);
+            }
+        } else if (needsQuoting(v.value)) {
+            try appendQuotedValue(&buf, v.value);
         } else {
             try buf.appendSlice(v.value);
         }
@@ -419,27 +438,6 @@ pub fn formatEnvFile(allocator: std.mem.Allocator, rev: []const u8, vars: []cons
     }
 
     return buf.toOwnedSlice();
-}
-
-fn unescapeDoubleQuoted(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
-    var i: usize = 0;
-    while (i < value.len) : (i += 1) {
-        if (value[i] == '\\' and i + 1 < value.len) {
-            i += 1;
-            switch (value[i]) {
-                'n' => try out.append('\n'),
-                'r' => try out.append('\r'),
-                '\\' => try out.append('\\'),
-                '"' => try out.append('"'),
-                else => try out.append(value[i]),
-            }
-        } else {
-            try out.append(value[i]);
-        }
-    }
-    return out.toOwnedSlice();
 }
 
 /// Parse a local .env written by pull (or a plain KEY=VALUE file).
@@ -480,15 +478,16 @@ pub fn parseEnvFile(allocator: std.mem.Allocator, content: []const u8) !std.Arra
         const key = std.mem.trim(u8, line[0..eq], " \t");
         if (key.len == 0) continue;
 
+        // Match `timbal start`: strip matching outer quotes only; no unescape.
         var value_raw = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        var value: []u8 = undefined;
-        if (value_raw.len >= 2 and value_raw[0] == '"' and value_raw[value_raw.len - 1] == '"') {
-            value = try unescapeDoubleQuoted(allocator, value_raw[1 .. value_raw.len - 1]);
-        } else if (value_raw.len >= 2 and value_raw[0] == '\'' and value_raw[value_raw.len - 1] == '\'') {
-            value = try allocator.dupe(u8, value_raw[1 .. value_raw.len - 1]);
-        } else {
-            value = try allocator.dupe(u8, value_raw);
+        if (value_raw.len >= 2) {
+            const first = value_raw[0];
+            const last = value_raw[value_raw.len - 1];
+            if ((first == '"' and last == '"') or (first == '\'' and last == '\'')) {
+                value_raw = value_raw[1 .. value_raw.len - 1];
+            }
         }
+        const value = try allocator.dupe(u8, value_raw);
         errdefer allocator.free(value);
 
         const typ = if (pending_type) |t| blk: {
@@ -1018,6 +1017,10 @@ test "parseTimbalRemoteUrl accepts platform remotes" {
     try std.testing.expectEqualStrings("56", r2.project_id);
 
     try std.testing.expect(try parseTimbalRemoteUrl(allocator, "git@github.com:foo/bar.git", "origin") == null);
+    // Lookalike / non-API hosts must not receive the Bearer token.
+    try std.testing.expect(try parseTimbalRemoteUrl(allocator, "https://notimbal.ai/orgs/1/projects/1/git", "origin") == null);
+    try std.testing.expect(try parseTimbalRemoteUrl(allocator, "https://evil.timbal.ai/orgs/1/projects/1/git", "origin") == null);
+    try std.testing.expect(try parseTimbalRemoteUrl(allocator, "https://api.timbal.ai.evil.com/orgs/1/projects/1/git", "origin") == null);
 }
 
 test "resolveTimbalRemoteFromConfig prefers origin" {
@@ -1070,6 +1073,28 @@ test "parseEnvFile defaults type to plain" {
     try std.testing.expectEqual(@as(usize, 2), parsed.items.len);
     try std.testing.expectEqualStrings("plain", parsed.items[0].@"type");
     try std.testing.expectEqualStrings("x y", parsed.items[1].value);
+}
+
+test "formatEnvFile quoting is start-compatible (no backslash escapes)" {
+    const allocator = std.testing.allocator;
+    const vars = [_]SyncVar{
+        .{ .name = "PATH_WIN", .@"type" = "plain", .value = "C:\\Users\\x", .description = null },
+        .{ .name = "QUOTED", .@"type" = "secret", .value = "say \"hi\"", .description = null },
+        .{ .name = "BOTH", .@"type" = "plain", .value = "a\"b'c", .description = null },
+    };
+    const content = try formatEnvFile(allocator, "main", &vars);
+    defer allocator.free(content);
+
+    // Must not emit shell-style escapes that start's loader would leave literal.
+    try std.testing.expect(std.mem.indexOf(u8, content, "\\\\") == null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\\\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\\n") == null);
+
+    var parsed = try parseEnvFile(allocator, content);
+    defer freeSyncVars(allocator, &parsed);
+    try std.testing.expectEqualStrings("C:\\Users\\x", parsed.items[0].value);
+    try std.testing.expectEqualStrings("say \"hi\"", parsed.items[1].value);
+    try std.testing.expectEqualStrings("a\"b'c", parsed.items[2].value);
 }
 
 test "buildPushPayload includes rev and vars" {
