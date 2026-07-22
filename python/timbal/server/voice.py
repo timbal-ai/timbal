@@ -157,10 +157,19 @@ async def voice_ws(ws: WebSocket) -> None:
         while (remaining := deadline - time.monotonic()) > 0:
             first = await asyncio.wait_for(ws.receive(), timeout=remaining)
             if "text" in first and first["text"]:
-                data = json.loads(first["text"])
+                # Per-frame errors (invalid JSON, malformed audio payload) must
+                # not end the scan: a valid hello may still be in flight.
+                try:
+                    data = json.loads(first["text"])
+                except ValueError as e:
+                    logger.warning("voice_ws_bad_handshake_frame", error=str(e))
+                    continue
                 if isinstance(data, dict) and data.get("type") is not None:
                     if data.get("type") == "audio":
-                        await audio_queue.put(base64.b64decode(data["data"]))
+                        try:
+                            await audio_queue.put(base64.b64decode(data["data"]))
+                        except (KeyError, TypeError, ValueError) as e:
+                            logger.warning("voice_ws_bad_handshake_frame", error=str(e))
                     # Playback acks before any TTS audio carry no information.
                     continue
                 config = data if isinstance(data, dict) else {}

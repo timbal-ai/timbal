@@ -587,6 +587,31 @@ class TestVoiceWsClientTurnDetector:
         started = next(m for m in messages if m["type"] == "session_started")
         assert started["turn_detector"] == "ProviderTurnDetector"
 
+    def test_malformed_early_frames_do_not_end_handshake(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Invalid JSON or a broken audio payload before the hello must be
+        skipped, not abort the scan — the hello behind them still applies."""
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_text("{not valid json")
+                ws.send_json({"type": "audio"})  # missing "data"
+                ws.send_json({"type": "audio", "data": "!!!not-base64!!!"})
+                ws.send_json({"turn_detector": "provider"})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert started["turn_detector"] == "ProviderTurnDetector"
+
 
 class TestVoiceWsAudioTransport:
     """Verify audio bytes survive the base64 round-trip over WS."""
