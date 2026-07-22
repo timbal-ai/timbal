@@ -69,6 +69,7 @@ Only send keys you need; omitted keys keep server defaults.
 | `stt_extra`   | Object merged with default STT options (e.g. VAD). |
 | `tts_extra`   | Object merged with default TTS options. |
 | `turn_detector` | A mode name: `"heuristic"` (default), `"provider"` (trust STT/realtime endpointing), `"local"` (audio EOU — auto-loads the Smart Turn v3 ONNX model when `timbal[voice]` is installed, heuristic degradation otherwise; set `TIMBAL_SMART_TURN_CHECKPOINT=int8` to trade ~1pp accuracy for ~2x faster inference), `"lexical"` (punctuation HOLD), or `"raw"` (debug: no silence/noise/echo filtering — every STT commit becomes a turn, including the agent's own speech leaking through the mic; never use in production). The client JSON may only send a mode name string (the playground page has a dropdown for this); it takes precedence over the server value for that session. Server-side `runnable.voice_config` may additionally supply a zero-arg factory returning a `TurnDetector`, or an instance — instances are `clone()`d per WebSocket session so concurrent clients never share buffers or lifecycle; custom detectors with per-session mutable state should override `TurnDetector.clone()`. |
+| `vad_endpointing` | Bool. The **local VAD endpointing fast path**: Silero VAD (auto-downloaded with `timbal[voice]`, MIT) runs on the mic PCM; ~0.2s after you stop speaking, the audio EOU model (Smart Turn) scores the utterance and the EOU probability maps to a variable extra wait — confident-complete commits in ~0.3s of silence instead of waiting the STT provider's ~1.2s debounce; incomplete utterances compute a delay longer than the debounce so the provider commit + HOLD machinery win untouched. Default (key absent) is **auto**: active when the effective turn detector has an audio EOU model (i.e. `"local"` mode with the extra installed), off otherwise. Send `false` to force off, `true` to force on (logs a warning when unavailable). Turns committed by this path have `vad_endpointed: true` in [Turn metrics](#turn-metrics). |
 
 Example — align server with the browser capture rate (only if that rate is supported end-to-end):
 
@@ -84,7 +85,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 
 | `type`                  | Fields        | Meaning |
 |-------------------------|---------------|--------|
-| `session_started`       | `playback_acks`, `turn_detector` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`), so clients can verify their requested mode. |
+| `session_started`       | `playback_acks`, `turn_detector`, `vad_endpointing` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`), so clients can verify their requested mode. `vad_endpointing` is a bool: whether the local [VAD endpointing](#config-overrides) fast path actually armed for this session (not merely what was requested). |
 | `transcript_partial`    | `text`        | Live STT (may change). |
 | `transcript_committed`  | `text`        | Final user transcript for the utterance. |
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |
@@ -148,12 +149,13 @@ Once per turn — after `agent_text_done`, and also when the turn is interrupted
     "tts_segments": 3,
     "audio_bytes": 96000,
     "playback_acks_received": true,
-    "heard_bytes": null
+    "heard_bytes": null,
+    "vad_endpointed": false
   }
 }
 ```
 
-`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). `playback_acks_received` says whether the heard position was client-truth (acks) or the wall-clock estimate; interrupted turns set `heard_bytes` to the PCM bytes the user actually heard (`null` on uninterrupted turns). Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
+`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). `playback_acks_received` says whether the heard position was client-truth (acks) or the wall-clock estimate; interrupted turns set `heard_bytes` to the PCM bytes the user actually heard (`null` on uninterrupted turns). `vad_endpointed` is `true` when the turn's transcript was force-committed by the local [VAD endpointing](#config-overrides) fast path instead of the provider's silence debounce. Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
 
 ### Frontend notes
 

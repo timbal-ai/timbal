@@ -479,6 +479,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         Server tool_use (e.g. web_search) gets an inline error block; regular tool_use
         gets a new tool-role message appended.
         """
+        if not memory:
+            # A voice CONTINUE merge can pop every entry of a one-turn memory
+            # (fragment user + interrupted assistant) — nothing to fulfill.
+            return
         model_provider = str(self.model).split("/", 1)[0]
         # Iterate in reverse: if any non-tool_use content follows a server_tool_use,
         # the LLM already continued past it — no synthetic result needed.

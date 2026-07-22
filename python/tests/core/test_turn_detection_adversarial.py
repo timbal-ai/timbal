@@ -14,7 +14,6 @@ from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.voice.eou import AudioEouModel
 from timbal.voice.session import TranscriptEvent, VoiceSession, VoiceSessionEvent
-from timbal.voice.eou import PunctuationEouPredictor
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,
@@ -208,7 +207,9 @@ class TestLocalHoldMergeLiveFailure:
         )
         assert decision.action is CommitAction.NEW_TURN
         assert decision.reason == "hold_supersede"
-        assert decision.text.startswith("Stop.")
+        # Starts immediately, but the held fragment is preserved in the turn
+        # text (never drop transcribed user speech).
+        assert decision.text == "Hello. Uh, I was thinking about... Stop. Forget the previous question entirely please"
         await det.close()
 
 

@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -39,7 +40,20 @@ async def lifespan(
     app.state.runnable = runnable
     app.state.job_store = JobStore()
     app.state.voice_config = merge_voice_config(runnable)
-    yield
+    # Voice warmup off the boot path: pre-import the voice stack (and pre-load
+    # the local turn-detection models when server-configured) so the first
+    # voice session doesn't pay those costs. No-op-ish for non-voice usage.
+    from ..core.agent import Agent
+    from .voice import warmup_voice_stack
+
+    warmup_task = (
+        asyncio.create_task(warmup_voice_stack(app.state.voice_config)) if isinstance(runnable, Agent) else None
+    )
+    try:
+        yield
+    finally:
+        if warmup_task is not None and not warmup_task.done():
+            warmup_task.cancel()
 
 
 def create_app() -> FastAPI:

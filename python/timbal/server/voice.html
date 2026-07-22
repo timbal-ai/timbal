@@ -941,7 +941,7 @@ async function start() {
       case 'session_started':
         sessionReady = true;
         setConn('live', 'Listening', msg.turn_detector
-          ? `Speak naturally — turn detection: ${msg.turn_detector}.`
+          ? `Speak naturally — turn detection: ${msg.turn_detector}${msg.vad_endpointing ? ' + VAD endpointing' : ''}.`
           : 'Speak naturally — audio streams to your Timbal agent.');
         updateEmptyState();
         break;

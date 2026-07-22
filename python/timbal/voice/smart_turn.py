@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from functools import partial
+from functools import lru_cache, partial
 
 import numpy as np
 import onnxruntime as ort
@@ -49,6 +49,23 @@ from ._whisper_features import compute_whisper_log_mel_features
 from .eou import AudioEouModel
 
 logger = structlog.get_logger("timbal.voice.smart_turn")
+
+
+def _hf_download_cached_first(repo_id: str, filename: str) -> str:
+    """Resolve an HF Hub file from the local cache before touching the network.
+
+    ``hf_hub_download`` issues a HEAD request (etag check) even on cache hits —
+    a few hundred ms per *session* start, and a hard failure offline. Model
+    checkpoints are immutable for our purposes; prefer the cached copy.
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        return hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True)
+    except LocalEntryNotFoundError:
+        return hf_hub_download(repo_id=repo_id, filename=filename)
+
 
 _MODEL_SAMPLE_RATE = 16_000
 _AUDIO_SECONDS = 8
@@ -67,6 +84,34 @@ QUANTIZED_FILENAME = "smart-turn-v3.2-cpu.onnx"
 _TAIL_SILENCE_SECS = 0.2
 # Amplitude below this (|sample| of int16-normalized float) counts as silence.
 _SILENCE_AMPLITUDE = 0.006
+
+
+@lru_cache(maxsize=4)
+def _load_ort_session(path: str, cpu_count: int) -> ort.InferenceSession:
+    """One ort session per (checkpoint, thread count), shared process-wide.
+
+    ``InferenceSession.run`` is thread-safe and holds no per-call state, so
+    every ``SmartTurnEouModel`` instance (one per voice session) can share it —
+    previously each session re-loaded the ~50MB graph. Sharing also makes the
+    server-boot warmup effective: the pre-loaded session is the exact object
+    later sessions get.
+    """
+    logger.debug("smart_turn_loading_model", path=path)
+    so = ort.SessionOptions()
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    so.inter_op_num_threads = 1
+    so.intra_op_num_threads = cpu_count
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    session = ort.InferenceSession(path, sess_options=so)
+    # Warm the graph: the first ort run pays one-time allocations / kernel
+    # setup (~100ms+) — do it at load time (already off the event loop)
+    # instead of on the first real EOU score.
+    features = compute_whisper_log_mel_features(np.zeros(_MODEL_SAMPLES, dtype=np.float32))
+    session.run(None, {"input_features": np.expand_dims(features, axis=0)})
+    # INFO on purpose: "is the audio EOU model actually engaged?" is the
+    # first question when debugging turn-taking, and this fires once.
+    logger.info("smart_turn_model_loaded", path=path)
+    return session
 
 
 class SmartTurnEouModel(AudioEouModel):
@@ -134,20 +179,8 @@ class SmartTurnEouModel(AudioEouModel):
     def _load_session(self) -> ort.InferenceSession:
         path = self.model_path
         if path is None:
-            from huggingface_hub import hf_hub_download
-
-            path = hf_hub_download(repo_id=DEFAULT_REPO_ID, filename=self.checkpoint)
-        logger.debug("smart_turn_loading_model", path=str(path))
-        so = ort.SessionOptions()
-        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        so.inter_op_num_threads = 1
-        so.intra_op_num_threads = self.cpu_count
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        session = ort.InferenceSession(str(path), sess_options=so)
-        # INFO on purpose: "is the audio EOU model actually engaged?" is the
-        # first question when debugging turn-taking, and this fires once.
-        logger.info("smart_turn_model_loaded", path=str(path))
-        return session
+            path = _hf_download_cached_first(DEFAULT_REPO_ID, self.checkpoint)
+        return _load_ort_session(str(path), self.cpu_count)
 
     async def predict_complete(self, pcm: bytes, *, sample_rate: int) -> float:
         if self._session is None:

@@ -45,7 +45,10 @@ def default_voice_config_from_env() -> dict[str, Any]:
         "sample_rate": 16_000,
         "stt_extra": {
             "commit_strategy": "vad",
-            "min_speech_duration_ms": 300,
+            # 100ms is what ElevenLabs' own realtime examples use. 300ms made
+            # short replies ("work.", "yes.") transcribe as partials but never
+            # commit — the session then stalls until the user speaks again.
+            "min_speech_duration_ms": 100,
             "vad_silence_threshold_secs": 1.2,
             "vad_threshold": 0.4,
         },
@@ -91,6 +94,56 @@ def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, s
 
 
 _VOICE_HTML_META_TOKEN = "__TIMBAL_VOICE_RUNNABLE_META_JSON__"
+
+
+async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
+    """Background warmup at server boot so the first voice session starts fast.
+
+    Two tiers, both best-effort:
+
+    * **Imports** (always): ``timbal.voice`` + the ElevenLabs adapter pull in
+      websockets/pydantic machinery, and the ``timbal[voice]`` extra adds
+      numpy + onnxruntime — together ~1s of import time that otherwise lands
+      on the first WebSocket connection.
+    * **Models** (only when the *server-side* default ``turn_detector`` is a
+      "local" mode string): resolve the detector, load Smart Turn + Silero,
+      and run their warmup inference. Skipped otherwise — a client can still
+      pick "local" from the playground dropdown, in which case the load
+      happens at that session's startup (before "listening", off the
+      first-reply path).
+    """
+    loop = asyncio.get_running_loop()
+
+    def _import_stack() -> None:
+        import importlib
+
+        importlib.import_module("timbal.voice.elevenlabs")
+        try:
+            importlib.import_module("timbal.voice.smart_turn")
+            importlib.import_module("timbal.voice.vad")
+        except ImportError:
+            pass  # timbal[voice] extra not installed — heuristics only
+
+    try:
+        await loop.run_in_executor(None, _import_stack)
+    except Exception as e:
+        logger.debug("voice_warmup_import_failed", error=str(e))
+        return
+
+    td = voice_config.get("turn_detector")
+    if not (isinstance(td, str) and td.strip().lower() in ("local", "audio", "smart_turn")):
+        return
+    try:
+        from ..voice.turn_detection import LocalAudioTurnDetector, resolve_turn_detector
+        from ..voice.vad import SileroVad
+
+        detector = resolve_turn_detector(td)
+        if isinstance(detector, LocalAudioTurnDetector) and detector.audio_eou is not None:
+            await detector.audio_eou.start(sample_rate=16_000)
+        await SileroVad().start(sample_rate=16_000)
+        logger.info("voice_models_warmed")
+    except Exception as e:
+        logger.debug("voice_warmup_models_failed", error=str(e))
 
 
 @router.get("/")
@@ -224,7 +277,18 @@ async def voice_ws(ws: WebSocket) -> None:
         except (TypeError, ValueError) as e:
             logger.warning("voice_ws_bad_turn_detector", error=str(e))
     turn_detector_label = type(turn_detector).__name__ if turn_detector is not None else "HeuristicTurnDetector"
-    logger.info("voice_ws_session_config", turn_detector=turn_detector_label)
+
+    # Optional bool: force the local VAD endpointing fast path on/off. Default
+    # (absent / non-bool) is auto — on when the detector has an audio EOU model
+    # and timbal[voice] is installed. Client hello may override the server value.
+    vad_endpointing = merged.get("vad_endpointing")
+    if not isinstance(vad_endpointing, bool):
+        vad_endpointing = None
+    logger.info(
+        "voice_ws_session_config",
+        turn_detector=turn_detector_label,
+        vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
+    )
 
     # TODO(tool-filler): read a server-side `filler_phrases` voice_config key
     # (list of phrases or `(tool_name) -> str | None` callable) and pass it to
@@ -236,6 +300,7 @@ async def voice_ws(ws: WebSocket) -> None:
         audio_input=audio_in,
         audio_output=audio_out,
         turn_detector=turn_detector,
+        vad_endpointing=vad_endpointing,
     )
 
     async def _recv_loop() -> None:
@@ -310,6 +375,10 @@ async def voice_ws(ws: WebSocket) -> None:
                     "type": "session_started",
                     "playback_acks": "recommended",
                     "turn_detector": turn_detector_label,
+                    # The endpointer arms during session startup (before this
+                    # event is emitted), so this reflects the real state — not
+                    # the requested config.
+                    "vad_endpointing": session._endpointer is not None,
                 }
             )
         elif isinstance(event, TranscriptPartial):

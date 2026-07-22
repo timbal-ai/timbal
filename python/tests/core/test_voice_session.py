@@ -25,6 +25,7 @@ from timbal.voice.session import (
     TranscriptCommitted,
     TranscriptEvent,
     TranscriptPartial,
+    TTSStream,
     VoiceSession,
     VoiceSessionEvent,
     _strip_markdown,
@@ -128,6 +129,74 @@ class DelayedMockSTT(SpeechToText):
                 raise RuntimeError(item.text)
             if item.text:
                 yield item
+
+    async def close(self) -> None:
+        self._closed = True
+
+
+class MockTTSStream(TTSStream):
+    """In-memory TTSStream: each feed enqueues len(text)*bytes_per_char of PCM."""
+
+    def __init__(self, bytes_per_char: int = 10, chunk_delay: float = 0.0) -> None:
+        self.fed: list[str] = []
+        self.ended = False
+        self.aborted = False
+        self._bytes_per_char = bytes_per_char
+        self._chunk_delay = chunk_delay
+        self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def feed(self, text: str) -> None:
+        if self.ended or self.aborted:
+            return
+        self.fed.append(text)
+        data = b"\x00" * (len(text) * self._bytes_per_char)
+        # Emit in sub-chunks so tests can interrupt mid-drain.
+        step = 100
+        for i in range(0, len(data), step):
+            await self._queue.put(data[i : i + step])
+
+    async def end(self) -> None:
+        if self.ended or self.aborted:
+            return
+        self.ended = True
+        await self._queue.put(None)
+
+    async def abort(self) -> None:
+        self.aborted = True
+        self._queue.put_nowait(None)
+
+    async def audio(self) -> AsyncIterator[bytes]:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                return
+            if self._chunk_delay:
+                await asyncio.sleep(self._chunk_delay)
+            yield item
+
+
+class StreamingMockTTS(TextToSpeech):
+    """TTS advertising ``open_stream``; per-segment ``synthesize`` should never run."""
+
+    def __init__(self, bytes_per_char: int = 10, chunk_delay: float = 0.0) -> None:
+        self.streams: list[MockTTSStream] = []
+        self.synthesize_calls: list[str] = []
+        self._bytes_per_char = bytes_per_char
+        self._chunk_delay = chunk_delay
+        self._connected = False
+        self._closed = False
+
+    async def connect(self, config: AudioOutputConfig) -> None:
+        self._connected = True
+
+    def open_stream(self) -> MockTTSStream:
+        stream = MockTTSStream(bytes_per_char=self._bytes_per_char, chunk_delay=self._chunk_delay)
+        self.streams.append(stream)
+        return stream
+
+    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        self.synthesize_calls.append(text)
+        yield b"\x00" * 4
 
     async def close(self) -> None:
         self._closed = True
@@ -1086,7 +1155,13 @@ class TestInterruptionTruncation:
         # assistant message, so assistant-count-based TestModel would replay
         # response[0] for the merged turn.
         replies = iter([self.RESPONSE, "Second reply"])
-        agent = Agent(name="t", model=TestModel(handler=lambda _m: next(replies)), tools=[])
+        seen_messages: list[list] = []
+
+        def _handler(messages) -> str:
+            seen_messages.append(list(messages))
+            return next(replies)
+
+        agent = Agent(name="t", model=TestModel(handler=_handler), tools=[])
         stt = DelayedMockSTT()
         tts = SlowMockTTS(delay=0.03, chunk=b"\x00\x01" * 50, num_chunks=4)
         session = VoiceSession(
@@ -1128,9 +1203,17 @@ class TestInterruptionTruncation:
         assert [e.role for e in session.transcript] == ["user", "assistant"]
         assert session.transcript[0].text == combined
         assert session.transcript[1].text == "Second reply"
+        # The merged turn's LLM input must contain the combined utterance
+        # exactly once — the old memory *rewrite* (instead of pop) left it in
+        # both the parent memory and the new prompt.
+        merged_input = seen_messages[-1]
+        user_texts = [m.collect_text() for m in merged_input if m.role == "user"]
+        assert user_texts.count(combined) == 1, user_texts
 
     async def test_align_continue_memory_drops_heard_assistant(self) -> None:
-        """Unit: CONTINUE rewrite must pop assistant:heard and rewrite user."""
+        """Unit: CONTINUE cleanup must pop assistant:heard AND the fragment user
+        entry — the merged turn re-sends the combined text as its prompt, so a
+        rewritten (instead of popped) user entry ends up in the LLM input twice."""
         from timbal.state.context import RunContext
         from timbal.state.tracing.span import Span
         from timbal.types.content import TextContent
@@ -1152,14 +1235,8 @@ class TestInterruptionTruncation:
         ctx._trace[root.call_id] = root
         session._last_run_context = ctx
 
-        await session._align_continue_memory(
-            fragment_user_text="hello can",
-            combined_user_text="hello can you help me with something",
-        )
-        mem = root.memory
-        assert len(mem) == 1
-        assert mem[0].role == "user"
-        assert mem[0].collect_text() == "hello can you help me with something"
+        await session._align_continue_memory(fragment_user_text="hello can")
+        assert root.memory == []
 
     async def test_interrupt_cancels_orphan_turn_before_speaking(self) -> None:
         """``interrupt()`` must cancel a scheduled turn even if ``_is_speaking``
@@ -1307,3 +1384,174 @@ class TestProviderCleanup:
         await session.close()
         assert stt._closed
         assert tts._closed
+
+
+class _FakeEndpointer:
+    """Stands in for VadEndpointer: scripted speech-energy window."""
+
+    def __init__(self, speech_secs: float | None) -> None:
+        self.speech_secs = speech_secs
+
+    def speech_secs_in_window(self, window_secs: float) -> float | None:
+        return self.speech_secs
+
+    def push(self, chunk: bytes) -> None:
+        pass
+
+    def notify_committed(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+class TestVadBargeInVeto:
+    """STT hallucinates plausible phrases from silence (observed live:
+    'Not, not too bad, mate.' while nobody spoke) — they pass every text gate
+    but carry no mic energy. Partial barge-ins must be corroborated by the
+    local VAD when it's armed."""
+
+    def test_veto_matrix(self) -> None:
+        session, _, _ = _make_session()
+        # No endpointer (heuristic mode, no Silero) → never veto.
+        session._endpointer = None
+        assert session._vad_vetoes_barge_in("no stop that") is False
+        # VAD armed but unhealthy/starved (None) → no evidence, never veto.
+        session._endpointer = _FakeEndpointer(None)
+        assert session._vad_vetoes_barge_in("no stop that") is False
+        # Real speech energy present → allow the barge-in.
+        session._endpointer = _FakeEndpointer(1.0)
+        assert session._vad_vetoes_barge_in("no stop that") is False
+        # Armed, healthy, and the mic was silent → hallucination, veto.
+        session._endpointer = _FakeEndpointer(0.0)
+        assert session._vad_vetoes_barge_in("no stop that") is True
+
+    async def _run_barge_in_scenario(self, speech_secs: float | None) -> tuple[VoiceSession, list[VoiceSessionEvent]]:
+        agent = Agent(
+            name="t",
+            model=TestModel(responses=["This is a fairly long reply that keeps on playing for a while."]),
+            tools=[],
+        )
+        stt = DelayedMockSTT()
+        tts = SlowMockTTS(delay=0.05, num_chunks=6)
+        tracker = FakePlaybackTracker()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session._endpointer = _FakeEndpointer(speech_secs)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="hi there"))
+            while not any(isinstance(e, AudioOutput) for e in events):
+                await asyncio.sleep(0.01)
+            tracker.playing = True
+            # Multi-word partial mid-reply: passes all text gates.
+            await stt.inject(TranscriptEvent(type="partial", text="not not too bad mate"))
+            await asyncio.sleep(0.15)
+            # Playback done — otherwise session close() sees audio_playing and
+            # emits its own SessionInterrupted, polluting the assertion.
+            tracker.playing = False
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        return session, events
+
+    async def test_hallucinated_partial_does_not_interrupt(self) -> None:
+        session, events = await self._run_barge_in_scenario(speech_secs=0.0)
+        assert not any(isinstance(e, SessionInterrupted) for e in events)
+        # Reply survived intact.
+        assert session.transcript[-1].role == "assistant"
+        assert session.transcript[-1].text == "This is a fairly long reply that keeps on playing for a while."
+
+    async def test_real_speech_partial_still_interrupts(self) -> None:
+        _, events = await self._run_barge_in_scenario(speech_secs=1.0)
+        assert any(isinstance(e, SessionInterrupted) for e in events)
+
+
+class TestStreamingTTS:
+    """Providers with ``open_stream``: one context per reply, fed incrementally."""
+
+    RESPONSE = "Here is the first sentence of the reply. And here comes a second sentence to force another flush."
+
+    def _session(self, tts: StreamingMockTTS, responses: list[str] | None = None) -> VoiceSession:
+        agent = Agent(
+            name="t",
+            model=TestModel(responses=responses or [self.RESPONSE]),
+            tools=[],
+        )
+        return VoiceSession(agent=agent, stt=MockSTT(script=[TranscriptEvent(type="committed", text="hi")]), tts=tts)
+
+    async def test_single_stream_per_reply(self) -> None:
+        """All flushes of one reply feed the SAME stream (no per-segment
+        synthesize → no prosody seam), and the stream is properly ended."""
+        tts = StreamingMockTTS(bytes_per_char=10)
+        session = self._session(tts)
+        events = await _collect_events(session)
+
+        assert tts.synthesize_calls == []
+        assert len(tts.streams) == 1
+        stream = tts.streams[0]
+        assert stream.ended is True
+        assert stream.aborted is False
+        # Every flushed piece landed in the context, in order, covering the
+        # whole reply text.
+        assert len(stream.fed) >= 1
+        assert "".join(stream.fed) == self.RESPONSE
+        # Pump emitted the synthesized bytes as AudioOutput.
+        audio_bytes = sum(len(e.data) for e in events if isinstance(e, AudioOutput))
+        assert audio_bytes == len(self.RESPONSE) * 10
+        assert session.transcript[-1].text == self.RESPONSE
+        # Metrics carry the stream accounting.
+        metrics = [e.metrics for e in events if isinstance(e, TurnMetricsEvent)]
+        assert metrics and metrics[0].audio_bytes == audio_bytes
+        assert metrics[0].tts_segments == len(stream.fed)
+
+    async def test_interrupt_aborts_stream(self) -> None:
+        """Barge-in must close the streaming context and stop its pump."""
+        tts = StreamingMockTTS(bytes_per_char=10, chunk_delay=0.2)
+        agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE, "second"]), tools=[])
+        stt = DelayedMockSTT()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="hi"))
+            while not any(isinstance(e, AudioOutput) for e in events):
+                await asyncio.sleep(0.01)
+            await session.interrupt()
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert len(tts.streams) == 1
+        assert tts.streams[0].aborted is True
+        assert session._turn_tts_stream is None
+        assert session._turn_tts_pump is None
+        assert any(isinstance(e, SessionInterrupted) for e in events)

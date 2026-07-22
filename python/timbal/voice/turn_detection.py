@@ -252,6 +252,14 @@ def _is_same_user_utterance_refinement(active: str, new: str) -> bool:
     return False
 
 
+def _join_held(held: str, text: str) -> str:
+    """Held fragment + follow-up as one utterance (used by hold_supersede)."""
+    held = held.strip()
+    if not held:
+        return text
+    return held + " " + text
+
+
 def _looks_like_fresh_hold_utterance(text: str) -> bool:
     """True if ``text`` looks like its own utterance, not a VAD-split continuation.
 
@@ -281,6 +289,15 @@ class HeuristicTurnDetector(TurnDetector):
     """
 
     MIN_BARGE_IN_PARTIAL_CHARS = 4
+    # A single short partial while the assistant is speaking is far more often
+    # a mic blip / mis-transcribed speaker echo (e.g. "Nice.") than a real
+    # interruption — and a false barge-in cancels TTS mid-reply and truncates
+    # the committed transcript to what was heard (possibly nothing). Require a
+    # few words before interrupting on a *partial*; real short commands
+    # ("Stop.") still interrupt ~1s later via their *commit* (NEW_TURN path).
+    # Same knob as Pipecat's MinWordsInterruptionStrategy(min_words=3) and
+    # LiveKit's min_interruption_words.
+    MIN_BARGE_IN_PARTIAL_WORDS = 3
     HALLUCINATION_MIN_CHARS = 41
     EARLY_DUPLICATE_WINDOW_SECS = 1.5
     EARLY_DUPLICATE_MIN_CHARS = 5
@@ -294,7 +311,10 @@ class HeuristicTurnDetector(TurnDetector):
         is_noise = _is_noise(text)
         is_hesitation = _is_hesitation_only(text)
         is_echo = _likely_stt_echo(text, state.assistant_text) if not is_noise else False
-        too_short = len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS
+        too_short = (
+            len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS
+            or len(text.split()) < self.MIN_BARGE_IN_PARTIAL_WORDS
+        )
         if not is_noise and not is_hesitation and not is_echo and not too_short:
             return PartialDecision.BARGE_IN
         logger.debug(
@@ -348,7 +368,19 @@ class HeuristicTurnDetector(TurnDetector):
             ):
                 combined = state.active_user_text.rstrip(", ") + " " + text
                 return CommitDecision(action=CommitAction.HOLD, text=combined, reason="hold_merge")
-            return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
+            # Supersede = start the turn NOW, but never DROP the held fragment:
+            # it is speech the user actually said and was never answered. STT
+            # capitalizes every committed segment, so a mid-thought
+            # continuation after a forced/VAD split ("…thinking about" +
+            # "Something.") systematically looks "fresh" — discarding the
+            # fragment here loses half the utterance. Prepending is right for
+            # true supersedes too ("what's the weather… actually tell me a
+            # joke" reads as a natural self-correction).
+            return CommitDecision(
+                action=CommitAction.NEW_TURN,
+                text=_join_held(state.active_user_text, text),
+                reason="hold_supersede",
+            )
         if state.assistant_active and state.active_user_text:
             if _is_same_user_utterance_refinement(state.active_user_text, text):
                 return CommitDecision(action=CommitAction.IGNORE, text=text, reason="refinement")
@@ -414,7 +446,9 @@ class ProviderTurnDetector(TurnDetector):
             return PartialDecision.IGNORE
         if _likely_stt_echo(text, state.assistant_text):
             return PartialDecision.IGNORE
-        if len(text.strip()) < 4:
+        # Same min-words gate as HeuristicTurnDetector: one short partial while
+        # the assistant is speaking is more often a mic blip than a barge-in.
+        if len(text.strip()) < 4 or len(text.split()) < HeuristicTurnDetector.MIN_BARGE_IN_PARTIAL_WORDS:
             return PartialDecision.IGNORE
         return PartialDecision.BARGE_IN
 
@@ -480,9 +514,11 @@ class LexicalTurnDetector(HeuristicTurnDetector):
         ):
             p_new = await self.text_eou.predict_eou(text)
             if p_new >= self.completion_threshold:
+                # Start now, but keep the held fragment (see the parent's
+                # hold_supersede: never drop transcribed user speech).
                 return CommitDecision(
                     action=CommitAction.NEW_TURN,
-                    text=text,
+                    text=_join_held(state.active_user_text, text),
                     reason="lexical_hold_supersede",
                 )
 
@@ -620,20 +656,46 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             return b""
         return b"".join(self._pcm)
 
+    async def score_recent_audio(self) -> float | None:
+        """``P(complete)`` for the buffered mic window, or ``None``.
+
+        The VAD endpointing fast path (:class:`~timbal.voice.endpointing.VadEndpointer`)
+        calls this right after Silero detects speech-stop — before any STT
+        commit exists. Returns ``None`` when there is no audio EOU model, not
+        enough buffered signal (< ~0.5s), or inference fails; the endpointer
+        then does nothing and the provider debounce commits as usual.
+        """
+        if self.audio_eou is None:
+            return None
+        pcm = self._recent_pcm()
+        if len(pcm) < self._sample_rate:  # < ~0.5s of PCM16 — not enough signal
+            return None
+        try:
+            return await self.audio_eou.predict_complete(pcm, sample_rate=self._sample_rate)
+        except Exception as e:
+            logger.warning("audio_eou_predict_failed", error=str(e))
+            return None
+
     async def on_committed(self, text: str, state: TurnState) -> CommitDecision:
         decision = await super().on_committed(text, state)
         if decision.action is CommitAction.IGNORE:
             return decision
         if decision.action is CommitAction.CONTINUE_TURN:
             return decision
-        # Parent hold_merge of a self-contained commit → don't glue onto held text.
+        # Parent hold_merge of a self-contained commit → start the turn now
+        # instead of re-holding, but keep the held fragment in the turn text
+        # (never drop transcribed user speech; see parent hold_supersede).
         if (
             state.holding
             and decision.action is CommitAction.HOLD
             and decision.reason == "hold_merge"
             and _looks_like_fresh_hold_utterance(text)
         ):
-            decision = CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
+            decision = CommitDecision(
+                action=CommitAction.NEW_TURN,
+                text=_join_held(state.active_user_text, text),
+                reason="hold_supersede",
+            )
         # The parent's continuation gates (<3s, <30 chars) are tuned for mid-turn
         # VAD splits. While HOLDing, the audio model has explicitly judged the
         # held fragment incomplete — a non-fresh follow-up is the rest of that
