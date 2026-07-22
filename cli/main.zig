@@ -6,6 +6,7 @@ const add_cmd = @import("commands/add.zig");
 const create_cmd = @import("commands/create.zig");
 const configure_cmd = @import("commands/configure.zig");
 const credential_helper_cmd = @import("commands/credential_helper.zig");
+const env_cmd = @import("commands/env.zig");
 const start_cmd = @import("commands/start.zig");
 const upgrade_cmd = @import("commands/upgrade.zig");
 
@@ -25,6 +26,7 @@ fn printUsage() !void {
         "    \x1b[1;36mconfigure \x1b[0mConfigure Timbal credentials and settings\n" ++
         "    \x1b[1;36mcreate    \x1b[0mCreate a new project (interactive or use --type + --ui)\n" ++
         "    \x1b[1;36madd       \x1b[0mAdd a component to an existing project\n" ++
+        "    \x1b[1;36menv       \x1b[0mPull/push project environment variables\n" ++
         "    \x1b[1;36mstart     \x1b[0mStart a project (UI, API, agents, and workflows)\n" ++
         "    \x1b[1;36mupgrade   \x1b[0mUpgrade timbal to the latest version\n" ++
         "    \x1b[1;36mversion   \x1b[0mDisplay the current version\n" ++
@@ -70,6 +72,8 @@ fn dispatch(allocator: std.mem.Allocator, action: []const u8, args: []const []co
         try add_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "create")) {
         try create_cmd.run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, action, "env")) {
+        try env_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "start")) {
         try start_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "configure")) {
