@@ -22,7 +22,8 @@ Server-side env and keys (e.g. ElevenLabs, model provider for the agent) are an 
    - **one text frame** with JSON config (see [Config overrides](#config-overrides)), or  
    - **binary** PCM as the first frame (server uses defaults and treats that frame as audio), or  
    - nothing — the server waits up to 2s; if no frame arrives, it continues with defaults.  
-   If the first text frame is **not valid JSON**, the server logs a warning and continues with **empty** client overrides (defaults still apply).
+   The config hello is the only client JSON **without** a `"type"` field; typed protocol frames (`"playback"` acks, `"audio"`, `"mic_change"`) that race ahead of it are consumed as protocol messages — any number of them — until the hello arrives or the 2s deadline passes.  
+   Malformed early frames (invalid JSON, an `"audio"` frame with a missing/bad `data` payload) are logged and skipped — they do not end the handshake, so a valid hello sent afterward within the window still applies. If no hello arrives by the deadline, the server continues with **empty** client overrides (defaults still apply).
 3. After that, stream **microphone audio** until the socket is closed.
 
 If the client needs to set `sample_rate` or `language`, the **first** frame should be that JSON text message (unless they are fine with defaults and send binary first).
@@ -38,9 +39,18 @@ If the **first** message is binary, it is queued as the first audio chunk (no se
 
 ### Playback acks (client → server)
 
-Optional but recommended: `{ "type": "playback", "played_ms": <number> }` — **cumulative milliseconds of TTS audio actually played** since the connection opened (audio dropped on `interrupted` does not count and must not be added later). Send one every ~250 ms while audio is playing, plus a final one when playback stops.
+Optional but strongly recommended: `{ "type": "playback", "played_ms": <number> }`. Send one every ~250 ms while audio is playing, plus a final one when playback stops. The server advertises this in `session_started` (`"playback_acks": "recommended"`).
 
-The server uses these to know exactly what the user *heard* when they barge in, so it can truncate the assistant's transcript entry and conversation memory to the heard prefix (see `interrupted.heard_text` below). Without acks the server falls back to a wall-clock estimate of gapless playback, which is close but can't account for client-side buffering delays. Malformed `playback` messages are ignored.
+**`played_ms` contract** (truncation correctness depends on it — treat as normative):
+
+- **Cumulative per session:** total milliseconds of TTS audio actually played since the WebSocket opened. Never reset it — not per turn, not per audio segment.
+- **Monotonic:** each ack must be `>=` the previous one. The server ignores acks that move backwards.
+- **Interrupted audio is excluded, forever:** when you receive `interrupted`, stop playback and drop your buffer; the dropped audio must never be counted in a later ack. Only add milliseconds while audio is audibly playing.
+- **Played, not received:** count what came out of the speaker (e.g. Web Audio scheduled time already elapsed), not bytes decoded or buffered.
+
+The server uses these to know exactly what the user *heard* when they barge in, so it can truncate the assistant's transcript entry and conversation memory to the heard prefix (see `interrupted.heard_text` below). Without acks the server falls back to a wall-clock estimate of gapless playback, which is close but can't account for client-side buffering delays — the first estimate-only barge-in logs a `voice_ws_truncation_degraded` warning server-side. Malformed `playback` messages are ignored.
+
+Whether acks were received is reported per turn in `metrics.playback_acks_received`, and interrupted turns carry `metrics.heard_bytes` (PCM bytes actually heard) so estimate-vs-ack drift is measurable from traces.
 
 ### Config overrides
 
@@ -58,7 +68,7 @@ Only send keys you need; omitted keys keep server defaults.
 | `encoding`    | Default `"pcm_s16le"`. |
 | `stt_extra`   | Object merged with default STT options (e.g. VAD). |
 | `tts_extra`   | Object merged with default TTS options. |
-| `turn_detector` | Server-side only (not from the client JSON). A mode name (`"heuristic"` default, `"provider"` trust STT/realtime endpointing, `"local"` audio EOU via `push_audio` + injectable `AudioEouModel`, `"lexical"` optional punctuation HOLD), a zero-arg factory returning a `TurnDetector`, or an instance. Instances are `clone()`d per WebSocket session so concurrent clients never share buffers or lifecycle; custom detectors with per-session mutable state should override `TurnDetector.clone()`. |
+| `turn_detector` | A mode name: `"heuristic"` (default), `"provider"` (trust STT/realtime endpointing), `"local"` (audio EOU — auto-loads the Smart Turn v3 ONNX model when `timbal[voice]` is installed, heuristic degradation otherwise; set `TIMBAL_SMART_TURN_CHECKPOINT=int8` to trade ~1pp accuracy for ~2x faster inference), `"lexical"` (punctuation HOLD), or `"raw"` (debug: no silence/noise/echo filtering — every STT commit becomes a turn, including the agent's own speech leaking through the mic; never use in production). The client JSON may only send a mode name string (the playground page has a dropdown for this); it takes precedence over the server value for that session. Server-side `runnable.voice_config` may additionally supply a zero-arg factory returning a `TurnDetector`, or an instance — instances are `clone()`d per WebSocket session so concurrent clients never share buffers or lifecycle; custom detectors with per-session mutable state should override `TurnDetector.clone()`. |
 
 Example — align server with the browser capture rate (only if that rate is supported end-to-end):
 
@@ -74,7 +84,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 
 | `type`                  | Fields        | Meaning |
 |-------------------------|---------------|--------|
-| `session_started`       | —             | Voice session is live; safe to show “listening”. |
+| `session_started`       | `playback_acks`, `turn_detector` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`), so clients can verify their requested mode. |
 | `transcript_partial`    | `text`        | Live STT (may change). |
 | `transcript_committed`  | `text`        | Final user transcript for the utterance. |
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |
@@ -136,12 +146,14 @@ Once per turn — after `agent_text_done`, and also when the turn is interrupted
     "turn_total_ms": 2101.7,
     "interrupted": false,
     "tts_segments": 3,
-    "audio_bytes": 96000
+    "audio_bytes": 96000,
+    "playback_acks_received": true,
+    "heard_bytes": null
   }
 }
 ```
 
-`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
+`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). `playback_acks_received` says whether the heard position was client-truth (acks) or the wall-clock estimate; interrupted turns set `heard_bytes` to the PCM bytes the user actually heard (`null` on uninterrupted turns). Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
 
 ### Frontend notes
 

@@ -164,7 +164,7 @@
     50% { opacity: 0.5; transform: scale(0.85); }
   }
 
-  #mic-select {
+  #mic-select, #td-select {
     flex: 1;
     min-width: 0;
     font: inherit;
@@ -177,9 +177,13 @@
     outline: none;
     cursor: pointer;
   }
-  #mic-select:focus {
+  #mic-select:focus, #td-select:focus {
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(0,0,0,.07);
+  }
+  #td-select {
+    flex: 0 1 auto;
+    max-width: 46%;
   }
   .mic-viz {
     display: flex;
@@ -482,6 +486,14 @@
       </div>
       <div class="foot-row foot-row--mic">
         <select id="mic-select" aria-label="Microphone"><option value="">Loading devices…</option></select>
+        <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking">
+          <option value="">Turns: server default</option>
+          <option value="heuristic">Turns: heuristic</option>
+          <option value="provider">Turns: provider VAD</option>
+          <option value="local">Turns: local EOU</option>
+          <option value="lexical">Turns: lexical</option>
+          <option value="raw">Turns: raw (no filters)</option>
+        </select>
         <div id="mic-viz" class="mic-viz" aria-hidden="true">
           <div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div>
         </div>
@@ -505,7 +517,17 @@ const voiceEmpty = document.getElementById('voice-empty');
 const btnStop = document.getElementById('btn-stop');
 const btnReconnect = document.getElementById('btn-reconnect');
 const micSelect = document.getElementById('mic-select');
+const tdSelect = document.getElementById('td-select');
 const micViz = document.getElementById('mic-viz');
+
+const TD_STORAGE_KEY = 'timbal-voice-turn-detector';
+// Unknown stored values leave the select on '' (server default) automatically.
+tdSelect.value = localStorage.getItem(TD_STORAGE_KEY) || '';
+tdSelect.onchange = () => {
+  // A detector is fixed at session start, so apply by starting a new session.
+  localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
+  location.reload();
+};
 const micBars = () => [...micViz.querySelectorAll('.mic-bar')];
 
 function truncateMiddle(s, max) {
@@ -832,18 +854,25 @@ async function start() {
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
+    // The config hello MUST be the first frame on the socket — the server
+    // reads one frame as session config. stopAssistantAudio() below sends a
+    // playback ack, which used to race ahead and eat the config slot.
+    const sr = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    sessionSampleRate = sr;
+    const hello = { sample_rate: sr };
+    if (tdSelect.value) hello.turn_detector = tdSelect.value;
+    ws.send(JSON.stringify(hello));
     transcriptEl.innerHTML = '';
     window._assistantEl = null;
     window._lastAssistantEl = null;
+    window._turnBubbles = [];
+    window._replyDone = false;
     partialEl = null;
     resetPlaybackTracking();
     stopAssistantAudio();
     sessionReady = false;
     if (playbackAckTimer) clearInterval(playbackAckTimer);
     playbackAckTimer = setInterval(() => sendPlaybackAck(false), PLAYBACK_ACK_INTERVAL_MS);
-    const sr = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
-    sessionSampleRate = sr;
-    ws.send(JSON.stringify({ sample_rate: sr }));
     const tryArmMic = async () => {
       try {
         if (audioCtx?.state === 'suspended') await audioCtx.resume();
@@ -911,7 +940,9 @@ async function start() {
     switch (msg.type) {
       case 'session_started':
         sessionReady = true;
-        setConn('live', 'Listening', 'Speak naturally — audio streams to your Timbal agent.');
+        setConn('live', 'Listening', msg.turn_detector
+          ? `Speak naturally — turn detection: ${msg.turn_detector}.`
+          : 'Speak naturally — audio streams to your Timbal agent.');
         updateEmptyState();
         break;
       case 'transcript_partial':
@@ -923,7 +954,12 @@ async function start() {
         break;
       case 'agent_text_delta':
         setPartial(null);
-        if (!window._assistantEl) window._assistantEl = log('assistant', '');
+        // First delta after a finished reply starts a new turn's bubble set.
+        if (window._replyDone) { window._turnBubbles = []; window._replyDone = false; }
+        if (!window._assistantEl) {
+          window._assistantEl = log('assistant', '');
+          (window._turnBubbles = window._turnBubbles || []).push(window._assistantEl);
+        }
         window._assistantEl.textContent += msg.text;
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
         updateEmptyState();
@@ -933,6 +969,7 @@ async function start() {
         // still playing sends `interrupted.heard_text` after this point.
         window._lastAssistantEl = window._assistantEl;
         window._assistantEl = null;
+        window._replyDone = true;
         updateEmptyState();
         break;
       case 'audio':
@@ -941,14 +978,22 @@ async function start() {
       case 'interrupted': {
         // Align the displayed reply with what was actually spoken aloud — the
         // reply may already be "done" (barge-in during buffered playback).
-        const el = window._assistantEl || window._lastAssistantEl;
-        if (el && msg.heard_text !== undefined && msg.heard_text !== null) {
-          if (msg.heard_text) {
-            el.textContent = msg.heard_text;
-          } else {
-            el.remove();
+        // A mid-stream STT partial can split one reply across several bubbles
+        // (setPartial seals the in-flight bubble); rewrite the *whole* set,
+        // not just the last fragment.
+        if (msg.heard_text !== undefined && msg.heard_text !== null) {
+          const bubbles = (window._turnBubbles && window._turnBubbles.length)
+            ? window._turnBubbles
+            : [window._assistantEl || window._lastAssistantEl].filter(Boolean);
+          for (const el of bubbles.slice(1)) el.remove();
+          const first = bubbles[0];
+          if (first) {
+            if (msg.heard_text) first.textContent = msg.heard_text;
+            else first.remove();
           }
         }
+        window._turnBubbles = [];
+        window._replyDone = false;
         window._assistantEl = null;
         window._lastAssistantEl = null;
         stopAssistantAudio();

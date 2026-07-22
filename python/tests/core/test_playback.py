@@ -109,6 +109,12 @@ class TestAckMode:
         tr.on_playback_ack(300.0)  # out-of-order / stale — must not move backwards
         assert tr.played_bytes == int(0.8 * BPS)
 
+    def test_ack_received_flips_on_first_ack(self) -> None:
+        tr = BufferedPlaybackTracker(BPS, clock=FakeClock())
+        assert tr.ack_received is False
+        tr.on_playback_ack(0.0)
+        assert tr.ack_received is True
+
 
 class TestMapPlayedBytesToText:
     SEGMENTS = [("Hello there! ", 1000), ("How are you today?", 2000)]

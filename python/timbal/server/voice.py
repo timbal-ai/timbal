@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import os
+import time
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any
@@ -143,13 +144,38 @@ async def voice_ws(ws: WebSocket) -> None:
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
+    # Read the config hello. Protocol frames ("playback" acks, "audio",
+    # "mic_change") can race ahead of it; the hello is the only JSON message
+    # *without* a "type" field, so skip typed frames — however many arrive —
+    # until the hello shows up or the 2s deadline passes (a swallowed hello
+    # silently drops sample_rate / turn_detector overrides). A *binary* first
+    # frame means a client that streams raw PCM without a hello: start with
+    # defaults immediately instead of burning the deadline.
     config: dict = {}
+    deadline = time.monotonic() + 2.0
     try:
-        first = await asyncio.wait_for(ws.receive(), timeout=2.0)
-        if "text" in first and first["text"]:
-            config = json.loads(first["text"])
-        elif "bytes" in first and first["bytes"]:
-            await audio_queue.put(first["bytes"])
+        while (remaining := deadline - time.monotonic()) > 0:
+            first = await asyncio.wait_for(ws.receive(), timeout=remaining)
+            if "text" in first and first["text"]:
+                # Per-frame errors (invalid JSON, malformed audio payload) must
+                # not end the scan: a valid hello may still be in flight.
+                try:
+                    data = json.loads(first["text"])
+                except ValueError as e:
+                    logger.warning("voice_ws_bad_handshake_frame", error=str(e))
+                    continue
+                if isinstance(data, dict) and data.get("type") is not None:
+                    if data.get("type") == "audio":
+                        try:
+                            await audio_queue.put(base64.b64decode(data["data"]))
+                        except (KeyError, TypeError, ValueError) as e:
+                            logger.warning("voice_ws_bad_handshake_frame", error=str(e))
+                    # Playback acks before any TTS audio carry no information.
+                    continue
+                config = data if isinstance(data, dict) else {}
+            elif "bytes" in first and first["bytes"]:
+                await audio_queue.put(first["bytes"])
+            break
     except TimeoutError:
         pass
     except Exception as e:
@@ -176,14 +202,20 @@ async def voice_ws(ws: WebSocket) -> None:
         extra=merged.get("tts_extra", {}),
     )
 
-    # Server-side only (can't come over the wire): ``runnable.voice_config`` may
-    # supply a TurnDetector instance, factory, or a mode name ("heuristic"|
-    # "provider"|"local"|"lexical"). Read from *defaults* so client JSON can't
-    # override.
+    # ``runnable.voice_config`` may supply a TurnDetector instance, factory, or
+    # a mode name ("heuristic"|"provider"|"local"|"lexical"). The client JSON
+    # may additionally select a *mode name* (string only — useful for A/B
+    # testing detectors from the playground); instances and factories can never
+    # come over the wire.
     from ..voice.turn_detection import resolve_turn_detector
 
     turn_detector = None
     raw_td = defaults.get("turn_detector")
+    client_td = config.get("turn_detector")
+    if isinstance(client_td, str) and client_td.strip():
+        raw_td = client_td
+    elif client_td is not None and not isinstance(client_td, str):
+        logger.warning("voice_ws_bad_turn_detector", error="client turn_detector must be a mode name string")
     if raw_td is not None:
         try:
             # voice_config is process-wide; VoiceSession clones the resolved
@@ -191,7 +223,12 @@ async def voice_ws(ws: WebSocket) -> None:
             turn_detector = resolve_turn_detector(raw_td)
         except (TypeError, ValueError) as e:
             logger.warning("voice_ws_bad_turn_detector", error=str(e))
+    turn_detector_label = type(turn_detector).__name__ if turn_detector is not None else "HeuristicTurnDetector"
+    logger.info("voice_ws_session_config", turn_detector=turn_detector_label)
 
+    # TODO(tool-filler): read a server-side `filler_phrases` voice_config key
+    # (list of phrases or `(tool_name) -> str | None` callable) and pass it to
+    # `VoiceSession(filler=...)` once tool-call filler speech returns.
     session = VoiceSession(
         agent=runnable,
         stt=stt,
@@ -224,6 +261,11 @@ async def voice_ws(ws: WebSocket) -> None:
             pass
         finally:
             await audio_queue.put(b"")
+            # Client is gone (disconnect / receive error): end the session now.
+            # Without this the session lingers until the STT provider times out
+            # on silence (~15s with ElevenLabs), delaying teardown and leaking
+            # agent turns into the void. Idempotent when already closed.
+            await session.close()
 
     async def _mic_stream():
         """Yield PCM chunks from the browser mic (echo-cancelled by getUserMedia)."""
@@ -252,10 +294,24 @@ async def voice_ws(ws: WebSocket) -> None:
                 return
             logger.warning("voice_ws_send_failed", error=str(e), msg_type=data.get("type"))
 
+    # One-time per session: an interruption without any playback acks means the
+    # heard-text truncation ran on the wall-clock estimate only.
+    warned_ack_degraded = False
+
     async def _handle(event: VoiceSessionEvent) -> None:
         """Forward session events to the browser over WebSocket."""
+        nonlocal warned_ack_degraded
         if isinstance(event, SessionStarted):
-            await _send_json({"type": "session_started"})
+            # ``playback_acks`` advertises that the server understands
+            # ``{"type": "playback", "played_ms": ...}`` and expects clients that
+            # play audio to send them (see server/README.md).
+            await _send_json(
+                {
+                    "type": "session_started",
+                    "playback_acks": "recommended",
+                    "turn_detector": turn_detector_label,
+                }
+            )
         elif isinstance(event, TranscriptPartial):
             await _send_json({"type": "transcript_partial", "text": event.text})
         elif isinstance(event, TranscriptCommitted):
@@ -274,6 +330,14 @@ async def voice_ws(ws: WebSocket) -> None:
         elif isinstance(event, TurnMetricsEvent):
             await _send_json({"type": "metrics", "metrics": event.metrics.model_dump()})
         elif isinstance(event, SessionInterrupted):
+            if not warned_ack_degraded and not session.playback.ack_received:
+                warned_ack_degraded = True
+                logger.warning(
+                    "voice_ws_truncation_degraded",
+                    hint="client sent no playback acks before a barge-in; heard-text "
+                    "truncation used the wall-clock estimate. Send "
+                    '{"type": "playback", "played_ms": ...} every ~250ms while audio plays.',
+                )
             await _send_json({"type": "interrupted", "heard_text": event.heard_text})
         elif isinstance(event, SessionError):
             await _send_json({"type": "error", "message": event.message})
