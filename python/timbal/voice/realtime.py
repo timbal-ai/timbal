@@ -176,6 +176,11 @@ class RealtimeSession:
         # -- Per-turn state ---------------------------------------------------
         self._turn_index = 0
         self._turn_active = False
+        # True between a turn's normal completion (turn_done) and the next turn
+        # start / interruption: buffered audio may still be playing, and a
+        # barge-in in that window must truncate the already-committed entry
+        # (same contract as VoiceSession._turn_finalized_ok).
+        self._turn_finalized_ok = False
         self._turn_text = ""
         self._turn_audio_bytes = 0
         self._turn_played_baseline = 0
@@ -183,6 +188,12 @@ class RealtimeSession:
         self._turn_first_audio_at: float | None = None
         self._turn_eou_at: float | None = None
         self._turn_user_text = ""
+        # Cumulative bytes emitted on the *played axis* this session (audio
+        # discarded on interruption collapses out). The gapless client queue
+        # plays everything already on the axis before a new turn's audio, so
+        # this — not ``playback.played_bytes`` at turn start — is the correct
+        # per-turn baseline when the previous reply's tail is still draining.
+        self._axis_emitted_bytes = 0
 
         # -- Session recording --------------------------------------------------
         self._transcript: list[TranscriptEntry] = []
@@ -316,6 +327,7 @@ class RealtimeSession:
                 self._output_audio_chunks.append(event.data)
             await self._emit(AudioOutput(data=event.data))
             self.playback.on_audio_emitted(len(event.data))
+            self._axis_emitted_bytes += len(event.data)
         elif event.type == "turn_done":
             await self._finish_turn(final_text=event.text)
         elif event.type == "interrupted":
@@ -331,10 +343,15 @@ class RealtimeSession:
         if self._turn_active:
             return
         self._turn_active = True
+        self._turn_finalized_ok = False
         self._turn_index += 1
         self._turn_text = ""
         self._turn_audio_bytes = 0
-        self._turn_played_baseline = self.playback.played_bytes
+        # Baseline on the played axis where *this turn's* audio begins. The
+        # previous reply's tail may still be draining client-side, so
+        # ``playback.played_bytes`` (the playhead) would land inside the old
+        # turn's audio and count its tail as heard bytes of this turn.
+        self._turn_played_baseline = self._axis_emitted_bytes
         self._turn_started_at = time.monotonic()
         self._turn_first_audio_at = None
 
@@ -350,6 +367,10 @@ class RealtimeSession:
         await self._emit(AgentTextDone(text=text))
         await self._emit_turn_metrics(interrupted=False)
         self._turn_active = False
+        # Buffered audio may still be draining client-side; keep the turn's
+        # text/bytes/baseline intact so a barge-in in that window can still
+        # truncate the committed entry to the heard prefix.
+        self._turn_finalized_ok = True
         self._turn_eou_at = None
 
     async def _handle_interruption(self, *, notify_model: bool) -> None:
@@ -368,6 +389,17 @@ class RealtimeSession:
             if heard_text:
                 self._transcript.append(TranscriptEntry(role="assistant", text=heard_text))
             await self._emit_turn_metrics(interrupted=True, heard_bytes=heard_bytes)
+        elif self._turn_finalized_ok:
+            # The turn completed (turn_done: full reply committed, metrics
+            # emitted) but buffered audio was still playing: rewrite the
+            # committed entry in place to the heard prefix. Metrics for the
+            # turn already went out with interrupted=False — same contract as
+            # the cascaded session's post-completion truncation.
+            if self._transcript and self._transcript[-1].role == "assistant":
+                if heard_text:
+                    self._transcript[-1] = TranscriptEntry(role="assistant", text=heard_text)
+                else:
+                    self._transcript.pop()
         if notify_model:
             played_ms = heard_bytes / self._output_bps * 1000
             try:
@@ -375,6 +407,7 @@ class RealtimeSession:
             except Exception as e:
                 logger.warning("realtime_truncate_failed", error=str(e))
         self._turn_active = False
+        self._turn_finalized_ok = False
         self._turn_eou_at = None
         await self._emit(SessionInterrupted(heard_text=heard_text))
 
