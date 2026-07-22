@@ -726,6 +726,11 @@ class VoiceSession:
         when an in-flight reply must be stopped first (HOLD expiry is usually
         idle; CONTINUE/NEW_TURN paths interrupt before calling this).
         """
+        if self._closed:
+            # Final gate: callers await (detector, interrupt) between their own
+            # _closed checks and here; never start an agent turn after close().
+            logger.debug("stt_turn_dropped_session_closed", text_preview=final_text[:80])
+            return
         self._last_commit_at = time.monotonic()
         if replace_user_entry and self._transcript and self._transcript[-1].role == "user":
             self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
@@ -742,6 +747,8 @@ class VoiceSession:
         )
 
     async def _handle_committed(self, text: str) -> None:
+        if self._closed:
+            return
         state = self._turn_state()
         self._partials_since_last_commit = 0
         # Cancel the hold *timer* before awaiting the detector. Local audio EOU
@@ -764,6 +771,15 @@ class VoiceSession:
             **_trace_debug_fields(),
         )
         decision = await self.turn_detector.on_committed(text, state)
+        # The detector await yields to the event loop (local audio EOU runs on
+        # the executor; a cold model load can take seconds) and close() may land
+        # in that window — the server calls it the moment the client
+        # disconnects. Starting a turn now would fire an LLM call against
+        # closing providers and emit events nobody consumes; the hold-expiry
+        # task makes the same check before beginning a turn.
+        if self._closed:
+            logger.debug("stt_commit_dropped_session_closed", text_preview=text[:80])
+            return
         # INFO: one line per user utterance describing what the detector did —
         # the minimum needed to debug turn-taking without DEBUG-level firehose.
         if decision.action is CommitAction.IGNORE:

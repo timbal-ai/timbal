@@ -1230,6 +1230,76 @@ class TestInterruptionTruncation:
 # ---------------------------------------------------------------------------
 
 
+class TestCloseCommitRace:
+    """close() landing while a slow detector decision is in flight must not
+    start a new agent turn (the server closes the session the instant the
+    client disconnects; local audio EOU can hold ``on_committed`` for a while)."""
+
+    def _make(self, detector) -> tuple[VoiceSession, TestModel]:
+        model = TestModel(responses=["should never run"])
+        agent = Agent(name="t", model=model, tools=[])
+        session = VoiceSession(
+            agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector=detector
+        )
+        return session, model
+
+    async def test_slow_detector_commit_does_not_start_turn_after_close(self) -> None:
+        from timbal.voice.turn_detection import (
+            CommitAction,
+            CommitDecision,
+            PartialDecision,
+            TurnDetector,
+        )
+
+        gate = asyncio.Event()
+
+        class _SlowDetector(TurnDetector):
+            async def on_partial(self, text, state):
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):
+                await gate.wait()  # e.g. Smart Turn inference on the executor
+                return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="test")
+
+        session, model = self._make(_SlowDetector())
+
+        task = asyncio.create_task(session._handle_committed("hello there"))
+        await asyncio.sleep(0.01)  # detector is now mid-decision
+        await session.close()  # client disconnected
+        gate.set()
+        await asyncio.wait_for(task, 2)
+
+        assert session.transcript == []
+        assert session._current_turn_task is None
+        assert model.call_count == 0
+
+    async def test_commit_after_close_is_dropped_before_detector_runs(self) -> None:
+        from timbal.voice.turn_detection import (
+            CommitAction,
+            CommitDecision,
+            PartialDecision,
+            TurnDetector,
+        )
+
+        calls: list[str] = []
+
+        class _CountingDetector(TurnDetector):
+            async def on_partial(self, text, state):
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):
+                calls.append(text)
+                return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="test")
+
+        session, model = self._make(_CountingDetector())
+        await session.close()
+        await session._handle_committed("late commit")
+
+        assert calls == []  # no pointless EOU inference after teardown
+        assert session.transcript == []
+        assert model.call_count == 0
+
+
 class TestProviderCleanup:
     async def test_stt_and_tts_closed_after_session(self) -> None:
         session, stt, tts = _make_session(stt_script=[])
