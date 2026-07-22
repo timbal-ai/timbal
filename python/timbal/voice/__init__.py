@@ -46,11 +46,23 @@ from .turn_detection import (
     LocalAudioTurnDetector,
     PartialDecision,
     ProviderTurnDetector,
+    RawTurnDetector,
     SemanticTurnDetector,
     TurnDetector,
     TurnState,
     resolve_turn_detector,
 )
+
+
+def __getattr__(name: str):
+    # Lazy: importing smart_turn pulls numpy/onnxruntime (timbal[voice] extra),
+    # which must not be required just to import timbal.voice.
+    if name == "SmartTurnEouModel":
+        from .smart_turn import SmartTurnEouModel
+
+        return SmartTurnEouModel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "AgentTextDelta",
@@ -69,6 +81,7 @@ __all__ = [
     "PartialDecision",
     "PlaybackTracker",
     "ProviderTurnDetector",
+    "RawTurnDetector",
     "PunctuationEouPredictor",
     "RealtimeEvent",
     "RealtimeModel",
@@ -78,6 +91,7 @@ __all__ = [
     "SessionError",
     "SessionInterrupted",
     "SessionStarted",
+    "SmartTurnEouModel",
     "SpeechToText",
     "TextEouPredictor",
     "TextToSpeech",

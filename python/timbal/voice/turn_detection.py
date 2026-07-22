@@ -179,6 +179,30 @@ def _is_garbage_commit(text: str) -> bool:
     return False
 
 
+# Filled-pause vocalizations across the languages ElevenLabs Scribe commonly
+# transcribes ("uh", "um", Spanish "eh"...). Only real words are excluded:
+# "no", "sí", "ok", "ya" must never match.
+_HESITATION_TOKENS = frozenset(
+    {
+        "uh", "uhh", "uhhh", "um", "umm", "ummm", "uhm", "uhum",
+        "hm", "hmm", "hmmm", "mm", "mmm", "mhm", "mmhm",
+        "er", "erm", "eh", "ehh", "ehm", "em",
+        "ah", "ahh", "ahhh", "aah",
+    }
+)
+_HESITATION_WORD_RE = re.compile(r"[a-zà-öø-ÿ']+")
+
+
+def _is_hesitation_only(text: str) -> bool:
+    """True when the utterance is nothing but filled pauses ("Uh...", "Um, hmm").
+
+    Hesitations signal *more speech coming* — they must neither barge in on the
+    agent nor start a turn of their own ("Uh..." → agent replies to "Uh...").
+    """
+    words = _HESITATION_WORD_RE.findall(text.lower())
+    return bool(words) and all(w in _HESITATION_TOKENS for w in words)
+
+
 def _normalize_echo(s: str) -> str:
     return " ".join(s.lower().split())
 
@@ -268,15 +292,17 @@ class HeuristicTurnDetector(TurnDetector):
         if not state.audio_playing or not text:
             return PartialDecision.IGNORE
         is_noise = _is_noise(text)
+        is_hesitation = _is_hesitation_only(text)
         is_echo = _likely_stt_echo(text, state.assistant_text) if not is_noise else False
         too_short = len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS
-        if not is_noise and not is_echo and not too_short:
+        if not is_noise and not is_hesitation and not is_echo and not too_short:
             return PartialDecision.BARGE_IN
         logger.debug(
             "stt_partial_skipped",
             text_preview=text[:80],
             too_short=too_short,
             is_noise=is_noise,
+            is_hesitation=is_hesitation,
             is_echo=is_echo,
             audio_playing=state.audio_playing,
         )
@@ -287,13 +313,19 @@ class HeuristicTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="noise")
         if _is_garbage_commit(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
+        if _is_hesitation_only(text):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
         # A long commit with zero preceding partials while nothing is playing is
         # almost always an STT hallucination on silence. Uses assistant_active
         # only — pending HOLD must not flip that flag (see TurnState.holding).
+        # Also skip while HOLDing: the follow-up commit is the rest of an
+        # incomplete utterance (often arrives with few/no partials after a
+        # thinking pause) and must reach the hold_merge / hold_refinement path.
         if (
             state.partials_since_last_commit == 0
             and len(text) >= self.HALLUCINATION_MIN_CHARS
             and not state.assistant_active
+            and not state.holding
         ):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination")
         if state.assistant_active and _likely_stt_echo(text, state.assistant_text):
@@ -339,6 +371,28 @@ class HeuristicTurnDetector(TurnDetector):
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="new_turn")
 
 
+class RawTurnDetector(TurnDetector):
+    """No filtering at all — a debugging detector.
+
+    Every committed transcript starts a NEW_TURN and every non-empty partial
+    during playback barges in. None of the silence/noise/echo/refinement
+    heuristics run, so you see exactly what STT emits (including the agent's
+    own speech leaking back through the mic). Never use in production:
+    without echo suppression an open-speaker setup will happily talk to
+    itself in a loop — which is precisely what this mode makes visible.
+
+    Opt-in: ``resolve_turn_detector("raw")`` or the playground dropdown.
+    """
+
+    async def on_partial(self, text: str, state: TurnState) -> PartialDecision:
+        if state.audio_playing and text:
+            return PartialDecision.BARGE_IN
+        return PartialDecision.IGNORE
+
+    async def on_committed(self, text: str, state: TurnState) -> CommitDecision:  # noqa: ARG002
+        return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="raw")
+
+
 class ProviderTurnDetector(TurnDetector):
     """Trust the STT / realtime provider's endpointing.
 
@@ -356,7 +410,7 @@ class ProviderTurnDetector(TurnDetector):
         # a barge-in while audio is playing.
         if not state.audio_playing or not text:
             return PartialDecision.IGNORE
-        if _is_noise(text) or _is_garbage_commit(text):
+        if _is_noise(text) or _is_garbage_commit(text) or _is_hesitation_only(text):
             return PartialDecision.IGNORE
         if _likely_stt_echo(text, state.assistant_text):
             return PartialDecision.IGNORE
@@ -369,6 +423,8 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="noise")
         if _is_garbage_commit(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
+        if _is_hesitation_only(text):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
         if state.assistant_active and _likely_stt_echo(text, state.assistant_text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="provider")
@@ -490,8 +546,17 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
     """
 
     completion_threshold: float = 0.5
-    DEFAULT_HOLD_TIMEOUT_SECS = 2.0
-    AUDIO_WINDOW_SECS = 8.0
+    # Grace window after an incomplete-scored commit before the fragment runs
+    # anyway. LiveKit's equivalent (max_endpointing_delay) defaults to 6.0s of
+    # *total* silence after speech when their EOU model says "not done". The
+    # HOLD only arms after the STT VAD silence (~1.2s with the server default),
+    # so 4.8s here reproduces that 6s total thinking budget.
+    DEFAULT_HOLD_TIMEOUT_SECS = 4.8
+    # The model consumes the last 8s of *speech*; the EOU backend trims the
+    # trailing silence (STT commit debounce, hold pauses) before scoring, so
+    # buffer extra raw PCM to keep a full 8s of signal after the trim.
+    # 12s of 16kHz PCM16 is ~384KB per session.
+    AUDIO_WINDOW_SECS = 12.0
 
     def __init__(
         self,
@@ -569,6 +634,20 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             and _looks_like_fresh_hold_utterance(text)
         ):
             decision = CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
+        # The parent's continuation gates (<3s, <30 chars) are tuned for mid-turn
+        # VAD splits. While HOLDing, the audio model has explicitly judged the
+        # held fragment incomplete — a non-fresh follow-up is the rest of that
+        # thought no matter its length or how long the user paused (the hold
+        # window *is* the merge window). Merge and rescore the full utterance.
+        if (
+            state.holding
+            and state.active_user_text
+            and decision.reason == "hold_supersede"
+            and self.audio_eou is not None
+            and not _looks_like_fresh_hold_utterance(text)
+        ):
+            combined = state.active_user_text.rstrip(", ") + " " + text
+            decision = CommitDecision(action=CommitAction.HOLD, text=combined, reason="hold_merge")
         # Distinct utterance already replaced the hold — start immediately even
         # if the audio EOU still scores the previous window as incomplete.
         if decision.reason == "hold_supersede":
@@ -599,6 +678,16 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         except Exception as e:
             logger.warning("audio_eou_predict_failed", error=str(e))
             return decision
+        # INFO on purpose: the score is the whole point of "local" mode and
+        # fires at most once per STT commit — without it there is no way to
+        # tell "model said complete" apart from "hold expired" in server logs.
+        logger.info(
+            "audio_eou_score",
+            p=round(p, 3),
+            threshold=self.completion_threshold,
+            complete=p >= self.completion_threshold,
+            text_preview=candidate[:80],
+        )
         if p >= self.completion_threshold:
             return CommitDecision(
                 action=CommitAction.NEW_TURN,
@@ -621,10 +710,41 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         )
 
 
+def _default_audio_eou() -> AudioEouModel | None:
+    """Smart Turn v3 when ``timbal[voice]`` is installed, else ``None``.
+
+    A single shared instance: the ONNX session is stateless per call and the
+    model load is expensive, so every ``"local"`` detector (and its per-session
+    clones) reuses it.
+    """
+    global _DEFAULT_AUDIO_EOU
+    if _DEFAULT_AUDIO_EOU is not _AUDIO_EOU_UNSET:
+        return _DEFAULT_AUDIO_EOU
+    try:
+        from .smart_turn import SmartTurnEouModel
+    except ImportError:
+        logger.warning(
+            "smart_turn_unavailable",
+            hint="turn_detector='local' without timbal[voice]; degrading to heuristics. "
+            "Install with: pip install 'timbal[voice]'",
+        )
+        _DEFAULT_AUDIO_EOU = None
+        return None
+    _DEFAULT_AUDIO_EOU = SmartTurnEouModel()
+    return _DEFAULT_AUDIO_EOU
+
+
+_AUDIO_EOU_UNSET: Any = object()
+_DEFAULT_AUDIO_EOU: AudioEouModel | None = _AUDIO_EOU_UNSET
+
+
 def resolve_turn_detector(spec: Any = None) -> TurnDetector:
     """Build a :class:`TurnDetector` from a name, instance, factory, or ``None``.
 
-    Accepted names: ``heuristic`` (default), ``provider``, ``local``, ``lexical``.
+    Accepted names: ``heuristic`` (default), ``provider``, ``local``, ``lexical``,
+    ``raw`` (debug: no silence/noise/echo filtering at all).
+    ``local`` auto-loads the Smart Turn v3 :class:`~timbal.voice.eou.AudioEouModel`
+    when the ``timbal[voice]`` extra is installed (heuristic degradation otherwise).
     Instances are returned unchanged — callers that reuse one spec across
     concurrent sessions (server ``voice_config``) must :meth:`~TurnDetector.clone`
     per session, or pass a zero-arg factory callable instead.
@@ -640,13 +760,15 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
         if key in ("provider", "stt"):
             return ProviderTurnDetector()
         if key in ("local", "audio", "smart_turn"):
-            return LocalAudioTurnDetector()
+            return LocalAudioTurnDetector(audio_eou=_default_audio_eou())
         if key in ("lexical", "semantic", "punctuation"):
             return LexicalTurnDetector()
+        if key in ("raw", "none", "off"):
+            return RawTurnDetector()
         raise ValueError(
             f"Unknown turn_detector {spec!r}; expected one of "
-            "'heuristic', 'provider', 'local', 'lexical', a TurnDetector instance, "
-            "or a zero-arg factory returning one"
+            "'heuristic', 'provider', 'local', 'lexical', 'raw', a TurnDetector "
+            "instance, or a zero-arg factory returning one"
         )
     if callable(spec):
         built = spec()

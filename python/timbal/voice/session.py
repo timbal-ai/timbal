@@ -295,6 +295,9 @@ class TranscriptEntry(BaseModel):
     role: Literal["user", "assistant"]
     text: str
     timestamp: float = Field(default_factory=time.time)
+    # TODO(tool-filler): re-add `filler: bool = False` when tool-call filler
+    # speech returns, so transcript entries for spoken latency-masking phrases
+    # ("let me check that") are distinguishable from real reply text.
 
 
 class VoiceSession:
@@ -347,6 +350,10 @@ class VoiceSession:
         # a per-decision override. Heuristic/provider never HOLD, so this is inert
         # unless an opt-in detector (local / lexical) is used.
         self.hold_timeout_secs = hold_timeout_secs
+        # TODO(tool-filler): re-add the `filler` constructor param (phrases
+        # rotated across turns, or a `(tool_name) -> str | None` callable) to
+        # mask tool-call dead air with spoken filler. Removed for now to keep
+        # the session surface small while turn detection stabilizes.
 
         self._event_queue: asyncio.Queue[VoiceSessionEvent | None] = asyncio.Queue()
         self._cancel_turn = asyncio.Event()
@@ -355,6 +362,7 @@ class VoiceSession:
         self._closed = False
         self._held_user_text: str | None = None
         self._hold_task: asyncio.Task | None = None
+        self._hold_armed_timeout_secs: float | None = None
 
         # Tracks the RunContext from the last completed turn so the agent's
         # __call__ auto-chains parent_id for multi-turn memory.
@@ -370,6 +378,12 @@ class VoiceSession:
         self._turn_started_at: float = 0.0
         self._last_commit_at: float = 0.0
         self._partials_since_last_commit: int = 0
+        self._last_partial_at: float = 0.0
+        # A pending HOLD must not expire while the user is audibly mid-utterance
+        # (recent STT partial): the upcoming commit merges with / supersedes the
+        # hold. Must exceed the STT VAD silence threshold (~1.2s default) so the
+        # commit always lands before the extended expiry re-fires.
+        self._hold_partial_grace_secs = 2.0
 
         # Serial TTS runs off the agent ``async for`` critical path so we keep pulling
         # LLM/Agent events (and emit trace OUTPUT) while audio still synthesizes.
@@ -601,6 +615,8 @@ class VoiceSession:
                 if event.type == "partial":
                     text = event.text.strip()
                     self._partials_since_last_commit += 1
+                    if text:
+                        self._last_partial_at = time.monotonic()
                     await self._emit(TranscriptPartial(text=text))
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN:
@@ -655,12 +671,23 @@ class VoiceSession:
         """Defer starting a turn until more speech arrives or ``timeout_secs`` elapses."""
         self._cancel_hold()
         self._held_user_text = text
+        self._hold_armed_timeout_secs = timeout_secs
         self._last_commit_at = time.monotonic()
 
         async def _expire() -> None:
             me = asyncio.current_task()
             try:
-                await asyncio.sleep(timeout_secs)
+                remaining = timeout_secs
+                while True:
+                    await asyncio.sleep(remaining)
+                    # Never fire mid-utterance: a recent STT partial means the
+                    # user resumed speaking, and their commit is about to merge
+                    # with / supersede this hold. Fire only after real silence.
+                    since_partial = time.monotonic() - self._last_partial_at
+                    if since_partial < self._hold_partial_grace_secs:
+                        remaining = self._hold_partial_grace_secs - since_partial
+                        continue
+                    break
             except asyncio.CancelledError:
                 return
             # A refine/re-arm may have replaced us — do not wipe the new hold.
@@ -668,10 +695,11 @@ class VoiceSession:
                 return
             held = self._held_user_text
             self._held_user_text = None
+            self._hold_armed_timeout_secs = None
             if self._hold_task is me:
                 self._hold_task = None
             if held and not self._closed:
-                logger.debug(
+                logger.info(
                     "stt_hold_expired",
                     text_preview=held[:120],
                     timeout_secs=timeout_secs,
@@ -684,7 +712,7 @@ class VoiceSession:
                 await self._begin_user_turn(held, replace_user_entry=False)
 
         self._hold_task = asyncio.create_task(_expire())
-        logger.debug(
+        logger.info(
             "stt_hold_armed",
             text_preview=text[:120],
             timeout_secs=timeout_secs,
@@ -716,6 +744,13 @@ class VoiceSession:
     async def _handle_committed(self, text: str) -> None:
         state = self._turn_state()
         self._partials_since_last_commit = 0
+        # Cancel the hold *timer* before awaiting the detector. Local audio EOU
+        # yields to the event loop (executor), and a racing hold-expiry task can
+        # otherwise start a turn on the old fragment while we are mid-decision
+        # — then this path starts a second turn for the merge/continuation.
+        # Keep ``_held_user_text`` so ``state.holding`` / active text stay correct;
+        # HOLD re-arms below, NEW_TURN/CONTINUE clear it.
+        self._cancel_hold()
         logger.debug(
             "stt_committed_received",
             text_preview=text[:160],
@@ -729,16 +764,27 @@ class VoiceSession:
             **_trace_debug_fields(),
         )
         decision = await self.turn_detector.on_committed(text, state)
+        # INFO: one line per user utterance describing what the detector did —
+        # the minimum needed to debug turn-taking without DEBUG-level firehose.
         if decision.action is CommitAction.IGNORE:
-            logger.debug(
+            logger.info(
                 "stt_commit_ignored",
                 reason=decision.reason,
                 text_preview=text[:160],
             )
+            # Timer was cancelled at the top of this method; re-arm so a noise/
+            # hesitation commit mid-hold does not freeze the fragment forever.
+            if self._held_user_text is not None and (self._hold_task is None or self._hold_task.done()):
+                await self._arm_hold(
+                    self._held_user_text,
+                    self._hold_armed_timeout_secs
+                    if self._hold_armed_timeout_secs is not None
+                    else self.hold_timeout_secs,
+                )
             return
 
         final_text = decision.text or text
-        logger.debug(
+        logger.info(
             "stt_committed_accepted",
             action=decision.action.value,
             reason=decision.reason,
@@ -765,6 +811,7 @@ class VoiceSession:
         # entry (CONTINUE_TURN must see that fragment to pop it).
         self._cancel_hold()
         self._held_user_text = None
+        self._hold_armed_timeout_secs = None
         await self.interrupt()
         self._cancel_turn.clear()
 
@@ -892,6 +939,10 @@ class VoiceSession:
                         self._schedule_tts(flush_text)
                         text_buffer = tts_tail[len(flush_text) :]
 
+                # TODO(tool-filler): hook here on `DeltaEvent` with a `ToolUse`
+                # item — the earliest moment we know a tool call (dead air) is
+                # coming for streaming providers — to speak a filler phrase.
+
                 elif isinstance(event, OutputEvent):
                     # Outer Agent OUTPUT mirrors the LLM message; handling both would
                     # double-run reconcile / optional suffix TTS.
@@ -941,6 +992,11 @@ class VoiceSession:
                                     if not self._cancel_turn.is_set():
                                         turn_phase = "tts_synthesize_from_output"
                                         self._schedule_tts(suffix)
+                            # TODO(tool-filler): non-streaming providers (and
+                            # TestModel) surface tool calls only here, via
+                            # `out.stop_reason == "tool_use"` — second filler
+                            # hook point, after the text handling above so any
+                            # spoken text this turn suppresses the filler.
                             if not self._cancel_turn.is_set():
                                 # Prefer API ``Message`` text, then streamed ``full_response``, so a
                                 # Unicode/stream mismatch does not drop ``_pending_tts_after_scheduled``.
@@ -1128,6 +1184,17 @@ class VoiceSession:
             finally:
                 self._is_speaking = False
                 self._active_turn_user_text = ""
+
+    # TODO(tool-filler): reintroduce tool-call filler speech here. Design that
+    # worked (see git history / test_voice_filler.py): a `_maybe_speak_filler`
+    # that fires at most once per turn, only when nothing has been spoken yet
+    # (no TTS scheduled this turn, no audio still playing); the phrase is
+    # transcript-recorded with `filler=True` but never enters `full_response` /
+    # `_turn_assistant_text` (so no memory leak), and its TTS segment is
+    # recorded with empty text so barge-in truncation counts its bytes without
+    # attributing words the agent never said. Needs a `filler=True` synthesis
+    # path that bypasses `_turn_tts_scheduled_text` (not reply text — must not
+    # affect delta/OUTPUT reconciliation).
 
     # -- Internal: TTS ------------------------------------------------------
 

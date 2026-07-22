@@ -13,7 +13,7 @@ Modes:
   heuristic  — default; today's regex/similarity behavior
   provider   — trust ElevenLabs VAD commits (minimal filtering)
   lexical    — punctuation/dangling HOLD (noticeable mid-thought pauses)
-  local      — audio EOU path; without an AudioEouModel == heuristic
+  local      — audio EOU (Smart Turn v3 ONNX with `timbal[voice]`; else == heuristic)
 """
 
 from __future__ import annotations

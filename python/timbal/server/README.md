@@ -67,7 +67,7 @@ Only send keys you need; omitted keys keep server defaults.
 | `encoding`    | Default `"pcm_s16le"`. |
 | `stt_extra`   | Object merged with default STT options (e.g. VAD). |
 | `tts_extra`   | Object merged with default TTS options. |
-| `turn_detector` | Server-side only (not from the client JSON). A mode name (`"heuristic"` default, `"provider"` trust STT/realtime endpointing, `"local"` audio EOU via `push_audio` + injectable `AudioEouModel`, `"lexical"` optional punctuation HOLD), a zero-arg factory returning a `TurnDetector`, or an instance. Instances are `clone()`d per WebSocket session so concurrent clients never share buffers or lifecycle; custom detectors with per-session mutable state should override `TurnDetector.clone()`. |
+| `turn_detector` | A mode name: `"heuristic"` (default), `"provider"` (trust STT/realtime endpointing), `"local"` (audio EOU — auto-loads the Smart Turn v3 ONNX model when `timbal[voice]` is installed, heuristic degradation otherwise; set `TIMBAL_SMART_TURN_CHECKPOINT=int8` to trade ~1pp accuracy for ~2x faster inference), `"lexical"` (punctuation HOLD), or `"raw"` (debug: no silence/noise/echo filtering — every STT commit becomes a turn, including the agent's own speech leaking through the mic; never use in production). The client JSON may only send a mode name string (the playground page has a dropdown for this); it takes precedence over the server value for that session. Server-side `runnable.voice_config` may additionally supply a zero-arg factory returning a `TurnDetector`, or an instance — instances are `clone()`d per WebSocket session so concurrent clients never share buffers or lifecycle; custom detectors with per-session mutable state should override `TurnDetector.clone()`. |
 
 Example — align server with the browser capture rate (only if that rate is supported end-to-end):
 
@@ -83,7 +83,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 
 | `type`                  | Fields        | Meaning |
 |-------------------------|---------------|--------|
-| `session_started`       | `playback_acks` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. |
+| `session_started`       | `playback_acks`, `turn_detector` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`), so clients can verify their requested mode. |
 | `transcript_partial`    | `text`        | Live STT (may change). |
 | `transcript_committed`  | `text`        | Final user transcript for the utterance. |
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |

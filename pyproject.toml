@@ -60,11 +60,16 @@ server = [
   "uvicorn>=0.34.0",
   "websockets>=15.0.1",
 ]
+voice = [
+  "huggingface-hub>=0.28.0",
+  "onnxruntime>=1.20.0",
+]
 all = [
   "timbal[codegen]",
   "timbal[documents]",
   "timbal[evals]",
   "timbal[server]",
+  "timbal[voice]",
 ]
 
 [dependency-groups]

@@ -496,6 +496,70 @@ class TestVoiceWsTurnDetectorIsolation:
         assert started[0] is not started[1]
 
 
+class TestVoiceWsClientTurnDetector:
+    """The client hello may pick a turn-detector *mode name* per session."""
+
+    def _run_session(self, monkeypatch, tmp_path, hello: dict, server_td=None) -> dict:
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            if server_td is not None:
+                app.state.voice_config = {**(app.state.voice_config or {}), "turn_detector": server_td}
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json(hello)
+                messages = _collect_ws_messages(ws)
+        return next(m for m in messages if m["type"] == "session_started")
+
+    def test_client_mode_name_selects_detector(self, monkeypatch, tmp_path: Path) -> None:
+        started = self._run_session(monkeypatch, tmp_path, {"turn_detector": "provider"})
+        assert started["turn_detector"] == "ProviderTurnDetector"
+
+    def test_client_mode_overrides_server_default(self, monkeypatch, tmp_path: Path) -> None:
+        started = self._run_session(
+            monkeypatch, tmp_path, {"turn_detector": "lexical"}, server_td="provider"
+        )
+        assert started["turn_detector"] == "LexicalTurnDetector"
+
+    def test_default_is_heuristic_and_advertised(self, monkeypatch, tmp_path: Path) -> None:
+        started = self._run_session(monkeypatch, tmp_path, {})
+        assert started["turn_detector"] == "HeuristicTurnDetector"
+
+    def test_non_string_client_value_is_ignored(self, monkeypatch, tmp_path: Path) -> None:
+        started = self._run_session(monkeypatch, tmp_path, {"turn_detector": {"evil": True}})
+        assert started["turn_detector"] == "HeuristicTurnDetector"
+
+    def test_unknown_mode_name_falls_back_to_default(self, monkeypatch, tmp_path: Path) -> None:
+        started = self._run_session(monkeypatch, tmp_path, {"turn_detector": "quantum"})
+        assert started["turn_detector"] == "HeuristicTurnDetector"
+
+    def test_racing_playback_ack_does_not_eat_config(self, monkeypatch, tmp_path: Path) -> None:
+        """A playback ack sent before the hello must not be mistaken for config."""
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"type": "playback", "played_ms": 0})
+                ws.send_json({"turn_detector": "provider"})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert started["turn_detector"] == "ProviderTurnDetector"
+
+
 class TestVoiceWsAudioTransport:
     """Verify audio bytes survive the base64 round-trip over WS."""
 
