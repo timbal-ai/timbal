@@ -559,6 +559,34 @@ class TestVoiceWsClientTurnDetector:
         started = next(m for m in messages if m["type"] == "session_started")
         assert started["turn_detector"] == "ProviderTurnDetector"
 
+    def test_many_racing_protocol_frames_do_not_exhaust_handshake(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """The handshake must skip typed frames until the hello, not give up
+        after a fixed count — a burst of acks/mic_change silently dropped the
+        client's sample_rate / turn_detector overrides."""
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                for i in range(8):
+                    ws.send_json({"type": "playback", "played_ms": float(i)})
+                # A typed non-audio/playback frame must be skipped too, not
+                # mistaken for the config hello (the hello has no "type").
+                ws.send_json({"type": "mic_change"})
+                ws.send_json({"turn_detector": "provider"})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert started["turn_detector"] == "ProviderTurnDetector"
+
 
 class TestVoiceWsAudioTransport:
     """Verify audio bytes survive the base64 round-trip over WS."""

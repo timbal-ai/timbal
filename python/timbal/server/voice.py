@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import os
+import time
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any
@@ -143,19 +144,24 @@ async def voice_ws(ws: WebSocket) -> None:
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
-    # Read the config hello. Protocol frames ("playback" acks, "audio") can race
-    # ahead of it, so skip a few of those instead of mistaking one for the config
-    # (a swallowed hello silently drops sample_rate / turn_detector overrides).
+    # Read the config hello. Protocol frames ("playback" acks, "audio",
+    # "mic_change") can race ahead of it; the hello is the only JSON message
+    # *without* a "type" field, so skip typed frames — however many arrive —
+    # until the hello shows up or the 2s deadline passes (a swallowed hello
+    # silently drops sample_rate / turn_detector overrides). A *binary* first
+    # frame means a client that streams raw PCM without a hello: start with
+    # defaults immediately instead of burning the deadline.
     config: dict = {}
+    deadline = time.monotonic() + 2.0
     try:
-        for _ in range(5):
-            first = await asyncio.wait_for(ws.receive(), timeout=2.0)
+        while (remaining := deadline - time.monotonic()) > 0:
+            first = await asyncio.wait_for(ws.receive(), timeout=remaining)
             if "text" in first and first["text"]:
                 data = json.loads(first["text"])
-                if isinstance(data, dict) and data.get("type") in ("audio", "playback"):
+                if isinstance(data, dict) and data.get("type") is not None:
                     if data.get("type") == "audio":
                         await audio_queue.put(base64.b64decode(data["data"]))
-                    # A playback ack before any TTS audio carries no information.
+                    # Playback acks before any TTS audio carry no information.
                     continue
                 config = data if isinstance(data, dict) else {}
             elif "bytes" in first and first["bytes"]:

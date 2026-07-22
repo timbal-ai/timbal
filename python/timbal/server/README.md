@@ -22,6 +22,7 @@ Server-side env and keys (e.g. ElevenLabs, model provider for the agent) are an 
    - **one text frame** with JSON config (see [Config overrides](#config-overrides)), or  
    - **binary** PCM as the first frame (server uses defaults and treats that frame as audio), or  
    - nothing — the server waits up to 2s; if no frame arrives, it continues with defaults.  
+   The config hello is the only client JSON **without** a `"type"` field; typed protocol frames (`"playback"` acks, `"audio"`, `"mic_change"`) that race ahead of it are consumed as protocol messages — any number of them — until the hello arrives or the 2s deadline passes.  
    If the first text frame is **not valid JSON**, the server logs a warning and continues with **empty** client overrides (defaults still apply).
 3. After that, stream **microphone audio** until the socket is closed.
 
