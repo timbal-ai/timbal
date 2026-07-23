@@ -32,15 +32,20 @@ fn printUsage() !void {
         "    \x1b[1;36mpush \x1b[0mUpsert local .env vars into the env tracking --rev\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
-        "    \x1b[1;36m--rev <BRANCH>  \x1b[0mGit branch whose env to sync (default: current branch)\n" ++
-        "    \x1b[1;36m--default       \x1b[0mOmit rev; use the project's default-branch env\n" ++
+        "    \x1b[1;36m--rev <BRANCH>    \x1b[0mGit branch whose env to sync (default: current branch)\n" ++
+        "    \x1b[1;36m--default         \x1b[0mOmit rev; use the project's default-branch env\n" ++
         "    \x1b[1;36m-f\x1b[0m, \x1b[1;36m--file <PATH> \x1b[0mLocal env file (default: .env)\n" ++
+        "    \x1b[1;36m--force           \x1b[0mOverwrite an existing local env file on pull\n" ++
+        "    \x1b[1;36m--dry-run         \x1b[0mPush only: show what would be sent (values redacted)\n" ++
+        "    \x1b[1;36m--base-url <URL>  \x1b[0mOverride API host (https://api[.env].timbal.ai)\n" ++
         "\n" ++
         "\x1b[1;32mNotes:\n" ++
         "\x1b[0m    Org/project are resolved from the Timbal git remote in .git/config:\n" ++
-        "    https://api[.dev].timbal.ai/orgs/{org_id}/projects/{project_id}/git\n" ++
+        "    https://api[.env].timbal.ai/orgs/{org_id}/projects/{project_id}/git\n" ++
         "    Auth uses the configured profile API key (timbal configure).\n" ++
         "    Secrets are written in plaintext to the local file — keep it gitignored.\n" ++
+        "    Push is upsert-only: existing platform vars not in the file are left alone\n" ++
+        "    (no delete / replace-all). Reserved names (TIMBAL_PROJECT_SECRET, PORT) are skipped.\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");
@@ -119,27 +124,37 @@ pub const TimbalRemote = struct {
 };
 
 /// Hosts we will send the profile Bearer token to for vars pull/push.
+/// Allows `api.timbal.ai` and `api.<label>.timbal.ai` (e.g. dev, staging).
+/// Rejects lookalikes like `notimbal.ai` / `evil.timbal.ai` / `api.timbal.ai.evil.com`.
 fn isTimbalApiHost(host: []const u8) bool {
-    return std.mem.eql(u8, host, "api.timbal.ai") or std.mem.eql(u8, host, "api.dev.timbal.ai");
+    if (std.mem.eql(u8, host, "api.timbal.ai")) return true;
+
+    const prefix = "api.";
+    const suffix = ".timbal.ai";
+    if (!std.mem.startsWith(u8, host, prefix)) return false;
+    if (!std.mem.endsWith(u8, host, suffix)) return false;
+    if (host.len <= prefix.len + suffix.len) return false;
+
+    const label = host[prefix.len .. host.len - suffix.len];
+    if (label.len == 0) return false;
+    // Single DNS label only (`api.staging.timbal.ai`, not `api.foo.bar.timbal.ai`).
+    if (std.mem.indexOfScalar(u8, label, '.') != null) return false;
+    for (label) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '-';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 /// Parse a Timbal platform git remote URL.
-/// Accepts: https://api[.dev].timbal.ai/orgs/{org}/projects/{project}/git[/]
+/// Accepts: https://api[.env].timbal.ai/orgs/{org}/projects/{project}/git[/]
 pub fn parseTimbalRemoteUrl(allocator: std.mem.Allocator, url: []const u8, remote_name: []const u8) !?TimbalRemote {
     const trimmed = std.mem.trim(u8, url, " \t\r\n");
     if (trimmed.len == 0) return null;
 
-    var rest = trimmed;
-    var scheme: []const u8 = "https";
-    if (std.mem.startsWith(u8, rest, "https://")) {
-        scheme = "https";
-        rest = rest["https://".len..];
-    } else if (std.mem.startsWith(u8, rest, "http://")) {
-        scheme = "http";
-        rest = rest["http://".len..];
-    } else {
-        return null;
-    }
+    // HTTPS only — never send the profile Bearer token over cleartext.
+    if (!std.mem.startsWith(u8, trimmed, "https://")) return null;
+    var rest = trimmed["https://".len..];
 
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
     const host = rest[0..slash];
@@ -168,7 +183,7 @@ pub fn parseTimbalRemoteUrl(allocator: std.mem.Allocator, url: []const u8, remot
     // Exact API hosts only — `endsWith("timbal.ai")` would accept lookalikes like notimbal.ai.
     if (!isTimbalApiHost(host)) return null;
 
-    const base_url = try std.fmt.allocPrint(allocator, "{s}://{s}", .{ scheme, host });
+    const base_url = try std.fmt.allocPrint(allocator, "https://{s}", .{host});
     errdefer allocator.free(base_url);
 
     return TimbalRemote{
@@ -346,13 +361,13 @@ fn currentGitBranch(allocator: std.mem.Allocator) !?[]u8 {
 
 pub const SyncVar = struct {
     name: []const u8,
-    @"type": []const u8, // "plain" | "secret"
+    type: []const u8, // "plain" | "secret"
     value: []const u8,
     description: ?[]const u8 = null,
 
     pub fn deinit(self: *SyncVar, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
-        allocator.free(self.@"type");
+        allocator.free(self.type);
         allocator.free(self.value);
         if (self.description) |d| allocator.free(d);
     }
@@ -402,7 +417,7 @@ pub fn formatEnvFile(allocator: std.mem.Allocator, rev: []const u8, vars: []cons
 
     for (vars) |v| {
         try buf.appendSlice("# type: ");
-        try buf.appendSlice(v.@"type");
+        try buf.appendSlice(v.type);
         try buf.append('\n');
         if (v.description) |d| {
             if (d.len > 0) {
@@ -507,7 +522,7 @@ pub fn parseEnvFile(allocator: std.mem.Allocator, content: []const u8) !std.Arra
 
         try out.append(.{
             .name = try allocator.dupe(u8, key),
-            .@"type" = typ,
+            .type = typ,
             .value = value,
             .description = desc,
         });
@@ -527,7 +542,7 @@ const PullResponse = struct {
 
 const SyncVarJson = struct {
     name: []const u8,
-    @"type": []const u8,
+    type: []const u8,
     value: []const u8,
     description: ?[]const u8 = null,
 };
@@ -539,6 +554,54 @@ const PushResponse = struct {
     skipped: [][]const u8 = &.{},
 };
 
+fn printApiError(status: u16, body: []const u8, rev: ?[]const u8) void {
+    const stderr = std.io.getStdErr().writer();
+    if (status == 403) {
+        // Platform: no env tracks the branch, or missing projects.vars.manage.
+        const lower_buf_len = @min(body.len, 512);
+        var looks_like_branch = false;
+        if (lower_buf_len > 0) {
+            // Case-insensitive-ish scan for the common branch-tracking error.
+            if (std.ascii.indexOfIgnoreCase(body[0..lower_buf_len], "no env tracks branch") != null or
+                std.ascii.indexOfIgnoreCase(body[0..lower_buf_len], "tracks branch") != null)
+            {
+                looks_like_branch = true;
+            }
+        }
+        if (looks_like_branch) {
+            if (rev) |r| {
+                stderr.print(
+                    "Error: no project environment tracks branch '{s}'.\n" ++
+                        "Create an env for that branch in the Timbal UI, pass --rev <branch>, or use --default.\n",
+                    .{r},
+                ) catch {};
+            } else {
+                stderr.writeAll(
+                    "Error: no project environment tracks the requested branch.\n" ++
+                        "Create an env for that branch in the Timbal UI, pass --rev <branch>, or use --default.\n",
+                ) catch {};
+            }
+        } else {
+            stderr.writeAll(
+                "Error: forbidden (HTTP 403).\n" ++
+                    "Your API key/session needs `projects.vars.manage` on this project.\n" ++
+                    "Also check that an environment exists for the target branch (`--rev` / current branch).\n",
+            ) catch {};
+        }
+        if (body.len > 0) {
+            const snippet = if (body.len > 500) body[0..500] else body;
+            stderr.print("{s}\n", .{snippet}) catch {};
+        }
+        return;
+    }
+
+    stderr.print("Error: API returned HTTP {d}\n", .{status}) catch {};
+    if (body.len > 0) {
+        const snippet = if (body.len > 500) body[0..500] else body;
+        stderr.print("{s}\n", .{snippet}) catch {};
+    }
+}
+
 fn apiRequest(
     allocator: std.mem.Allocator,
     method: std.http.Method,
@@ -546,6 +609,7 @@ fn apiRequest(
     api_key: []const u8,
     payload: ?[]const u8,
     verbose: bool,
+    rev: ?[]const u8,
 ) ![]u8 {
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
@@ -587,12 +651,7 @@ fn apiRequest(
 
     const status = @intFromEnum(result.status);
     if (status < 200 or status >= 300) {
-        const stderr = std.io.getStdErr().writer();
-        try stderr.print("Error: API returned HTTP {d}\n", .{status});
-        if (body.items.len > 0) {
-            const snippet = if (body.items.len > 500) body.items[0..500] else body.items;
-            try stderr.print("{s}\n", .{snippet});
-        }
+        printApiError(status, body.items, rev);
         return error.HttpStatus;
     }
 
@@ -610,7 +669,7 @@ fn buildPushPayload(allocator: std.mem.Allocator, rev: ?[]const u8, vars: []cons
         try w.writeAll("{\"name\":");
         try std.json.stringify(v.name, .{}, w);
         try w.writeAll(",\"type\":");
-        try std.json.stringify(v.@"type", .{}, w);
+        try std.json.stringify(v.type, .{}, w);
         try w.writeAll(",\"value\":");
         try std.json.stringify(v.value, .{}, w);
         if (v.description) |d| {
@@ -649,10 +708,33 @@ const Options = struct {
     rev: ?[]const u8 = null, // explicit --rev
     use_default_rev: bool = false, // --default → omit rev
     file: []const u8 = ".env",
+    force: bool = false, // overwrite existing local file on pull
+    dry_run: bool = false, // push only: print plan, no HTTP
+    base_url: ?[]const u8 = null, // override API host from remote
     profile: ?[]const u8 = null,
     verbose: bool = false,
     quiet: bool = false,
 };
+
+fn isReservedVarName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "TIMBAL_PROJECT_SECRET") or std.mem.eql(u8, name, "PORT");
+}
+
+/// Normalize/validate `--base-url` (https + Timbal API host). Caller owns returned slice.
+fn normalizeBaseUrlOverride(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var url = std.mem.trim(u8, raw, " \t\r\n/");
+    if (std.mem.startsWith(u8, url, "https://")) {
+        url = url["https://".len..];
+    } else if (std.mem.startsWith(u8, url, "http://")) {
+        return error.InsecureBaseUrl;
+    }
+    // Strip any path the user pasted.
+    if (std.mem.indexOfScalar(u8, url, '/')) |idx| {
+        url = url[0..idx];
+    }
+    if (!isTimbalApiHost(url)) return error.InvalidBaseUrl;
+    return std.fmt.allocPrint(allocator, "https://{s}", .{url});
+}
 
 fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
     _ = allocator;
@@ -684,6 +766,10 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
             opts.verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             opts.quiet = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            opts.force = true;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            opts.dry_run = true;
         } else if (std.mem.eql(u8, arg, "--default")) {
             opts.use_default_rev = true;
         } else if (std.mem.eql(u8, arg, "--rev")) {
@@ -700,6 +786,13 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
                 std.process.exit(2);
             }
             opts.file = args[i];
+        } else if (std.mem.eql(u8, arg, "--base-url")) {
+            i += 1;
+            if (i >= args.len) {
+                try printUsageWithError("Error: --base-url requires a URL");
+                std.process.exit(2);
+            }
+            opts.base_url = args[i];
         } else if (std.mem.eql(u8, arg, "--profile")) {
             i += 1;
             if (i >= args.len) {
@@ -715,6 +808,14 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Options {
 
     if (opts.use_default_rev and opts.rev != null) {
         try printUsageWithError("Error: --rev and --default are mutually exclusive");
+        std.process.exit(2);
+    }
+    if (opts.dry_run and opts.action != .push) {
+        try printUsageWithError("Error: --dry-run is only valid with `timbal env push`");
+        std.process.exit(2);
+    }
+    if (opts.force and opts.action != .pull) {
+        try printUsageWithError("Error: --force is only valid with `timbal env pull`");
         std.process.exit(2);
     }
 
@@ -783,6 +884,21 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer remote.deinit(allocator);
 
+    if (opts.base_url) |raw| {
+        const overridden = normalizeBaseUrlOverride(allocator, raw) catch |err| {
+            switch (err) {
+                error.InsecureBaseUrl => try stderr.writeAll("Error: --base-url must be https.\n"),
+                error.InvalidBaseUrl => try stderr.writeAll(
+                    "Error: --base-url must be https://api.timbal.ai or https://api.<env>.timbal.ai\n",
+                ),
+                else => try stderr.print("Error: invalid --base-url: {}\n", .{err}),
+            }
+            std.process.exit(2);
+        };
+        allocator.free(remote.base_url);
+        remote.base_url = overridden;
+    }
+
     // Resolve rev
     var rev_owned: ?[]u8 = null;
     defer if (rev_owned) |r| allocator.free(r);
@@ -799,7 +915,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.process.exit(1);
     };
 
-    if (opts.verbose) {
+    if (opts.verbose or opts.dry_run) {
         try stderr.print("remote: {s} → org={s} project={s} base={s}\n", .{
             remote.remote_name,
             remote.org_id,
@@ -819,10 +935,86 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ repo_root, sep, opts.file });
     defer allocator.free(file_path);
 
+    try warnIfNotGitignored(allocator, repo_root, file_path, stderr);
+
     switch (opts.action) {
         .pull => try runPull(allocator, opts, remote, rev, api_key, file_path, stdout, stderr),
         .push => try runPush(allocator, opts, remote, rev, api_key, file_path, stdout, stderr),
     }
+}
+
+/// Warn when the local env file is not ignored by git (secrets dump risk).
+fn warnIfNotGitignored(
+    allocator: std.mem.Allocator,
+    repo_root: []const u8,
+    file_path: []const u8,
+    stderr: anytype,
+) !void {
+    // Prefer git's own ignore rules (covers root + nested .gitignore / excludes).
+    if (try gitCheckIgnore(allocator, repo_root, file_path)) |ignored| {
+        if (!ignored) {
+            try stderr.print(
+                "{s}Warning:{s} {s} is not gitignored. Pulled secrets could be committed.\n" ++
+                    "Add `.env` to .gitignore (or pass -f to a gitignored path).\n",
+                .{ Color.bold_yellow, Color.reset, file_path },
+            );
+        }
+        return;
+    }
+
+    // Fallback: scan repo-root .gitignore for a `.env` pattern.
+    const gi_path = try std.fmt.allocPrint(allocator, "{s}{s}.gitignore", .{ repo_root, sep });
+    defer allocator.free(gi_path);
+    const gi = fs.cwd().readFileAlloc(allocator, gi_path, 1024 * 1024) catch {
+        try stderr.print(
+            "{s}Warning:{s} no .gitignore found; ensure {s} is not committed (contains secrets).\n",
+            .{ Color.bold_yellow, Color.reset, file_path },
+        );
+        return;
+    };
+    defer allocator.free(gi);
+
+    if (!gitignoreMentionsEnv(gi)) {
+        try stderr.print(
+            "{s}Warning:{s} .gitignore does not mention `.env`; {s} may be committed with secrets.\n",
+            .{ Color.bold_yellow, Color.reset, file_path },
+        );
+    }
+}
+
+/// Returns true/false when `git check-ignore` works; null if git unavailable/errors.
+fn gitCheckIgnore(allocator: std.mem.Allocator, repo_root: []const u8, file_path: []const u8) !?bool {
+    var child = std.process.Child.init(&.{ "git", "-C", repo_root, "check-ignore", "-q", "--", file_path }, allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return null;
+    const term = child.wait() catch return null;
+    return switch (term) {
+        .Exited => |code| switch (code) {
+            0 => true, // ignored
+            1 => false, // not ignored
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn gitignoreMentionsEnv(content: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        // Common patterns that cover the default `.env` file.
+        if (std.mem.eql(u8, line, ".env") or
+            std.mem.eql(u8, line, "/.env") or
+            std.mem.eql(u8, line, "*.env") or
+            std.mem.eql(u8, line, ".env*") or
+            std.mem.eql(u8, line, "**/.env"))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn runPull(
@@ -835,6 +1027,17 @@ fn runPull(
     stdout: anytype,
     stderr: anytype,
 ) !void {
+    // Refuse to clobber an existing local file unless --force.
+    if (!opts.force) {
+        if (fs.cwd().access(file_path, .{})) |_| {
+            try stderr.print(
+                "Error: {s} already exists. Re-run with --force to overwrite.\n",
+                .{file_path},
+            );
+            std.process.exit(1);
+        } else |_| {}
+    }
+
     const url = if (rev) |r| blk: {
         const encoded = try urlEncodeQuery(allocator, r);
         defer allocator.free(encoded);
@@ -850,7 +1053,7 @@ fn runPull(
     );
     defer allocator.free(url);
 
-    const body = try apiRequest(allocator, .GET, url, api_key, null, opts.verbose);
+    const body = try apiRequest(allocator, .GET, url, api_key, null, opts.verbose, rev);
     defer allocator.free(body);
 
     const parsed = std.json.parseFromSlice(PullResponse, allocator, body, .{
@@ -868,7 +1071,7 @@ fn runPull(
     for (parsed.value.vars) |v| {
         try sync_vars.append(.{
             .name = try allocator.dupe(u8, v.name),
-            .@"type" = try allocator.dupe(u8, v.@"type"),
+            .type = try allocator.dupe(u8, v.type),
             .value = try allocator.dupe(u8, v.value),
             .description = if (v.description) |d| try allocator.dupe(u8, d) else null,
         });
@@ -931,14 +1134,11 @@ fn runPush(
 
     // Validate types
     for (sync_vars.items) |v| {
-        if (!std.mem.eql(u8, v.@"type", "plain") and !std.mem.eql(u8, v.@"type", "secret")) {
-            try stderr.print("Error: var '{s}' has invalid type '{s}' (expected plain|secret)\n", .{ v.name, v.@"type" });
+        if (!std.mem.eql(u8, v.type, "plain") and !std.mem.eql(u8, v.type, "secret")) {
+            try stderr.print("Error: var '{s}' has invalid type '{s}' (expected plain|secret)\n", .{ v.name, v.type });
             std.process.exit(1);
         }
     }
-
-    const payload = try buildPushPayload(allocator, rev, sync_vars.items);
-    defer allocator.free(payload);
 
     const url = try std.fmt.allocPrint(
         allocator,
@@ -947,7 +1147,30 @@ fn runPush(
     );
     defer allocator.free(url);
 
-    const body = try apiRequest(allocator, .POST, url, api_key, payload, opts.verbose);
+    if (opts.dry_run) {
+        try stdout.print("Dry run — would POST {s}\n", .{url});
+        if (rev) |r| {
+            try stdout.print("rev: {s}\n", .{r});
+        } else {
+            try stdout.writeAll("rev: (project default)\n");
+        }
+        try stdout.print("file: {s}\n", .{file_path});
+        try stdout.print("vars ({d}):\n", .{sync_vars.items.len});
+        for (sync_vars.items) |v| {
+            if (isReservedVarName(v.name)) {
+                try stdout.print("  {s} ({s})  → skipped (reserved)\n", .{ v.name, v.type });
+            } else {
+                try stdout.print("  {s} ({s})  value: <redacted>\n", .{ v.name, v.type });
+            }
+        }
+        try stdout.writeAll("No changes made.\n");
+        return;
+    }
+
+    const payload = try buildPushPayload(allocator, rev, sync_vars.items);
+    defer allocator.free(payload);
+
+    const body = try apiRequest(allocator, .POST, url, api_key, payload, opts.verbose, rev);
     defer allocator.free(body);
 
     const parsed = std.json.parseFromSlice(PushResponse, allocator, body, .{
@@ -1017,10 +1240,21 @@ test "parseTimbalRemoteUrl accepts platform remotes" {
     try std.testing.expectEqualStrings("56", r2.project_id);
 
     try std.testing.expect(try parseTimbalRemoteUrl(allocator, "git@github.com:foo/bar.git", "origin") == null);
+    try std.testing.expect(try parseTimbalRemoteUrl(allocator, "http://api.dev.timbal.ai/orgs/1/projects/1/git", "origin") == null);
+
+    var r3 = (try parseTimbalRemoteUrl(
+        allocator,
+        "https://api.staging.timbal.ai/orgs/1/projects/2/git",
+        "origin",
+    )).?;
+    defer r3.deinit(allocator);
+    try std.testing.expectEqualStrings("https://api.staging.timbal.ai", r3.base_url);
+
     // Lookalike / non-API hosts must not receive the Bearer token.
     try std.testing.expect(try parseTimbalRemoteUrl(allocator, "https://notimbal.ai/orgs/1/projects/1/git", "origin") == null);
     try std.testing.expect(try parseTimbalRemoteUrl(allocator, "https://evil.timbal.ai/orgs/1/projects/1/git", "origin") == null);
     try std.testing.expect(try parseTimbalRemoteUrl(allocator, "https://api.timbal.ai.evil.com/orgs/1/projects/1/git", "origin") == null);
+    try std.testing.expect(try parseTimbalRemoteUrl(allocator, "https://api.foo.bar.timbal.ai/orgs/1/projects/1/git", "origin") == null);
 }
 
 test "resolveTimbalRemoteFromConfig prefers origin" {
@@ -1045,9 +1279,9 @@ test "resolveTimbalRemoteFromConfig prefers origin" {
 test "env file round-trip preserves type and description" {
     const allocator = std.testing.allocator;
     const vars = [_]SyncVar{
-        .{ .name = "DATABASE_URL", .@"type" = "secret", .value = "postgres://u:p@h/db", .description = "Primary DB" },
-        .{ .name = "VITE_FOO", .@"type" = "plain", .value = "bar", .description = null },
-        .{ .name = "MSG", .@"type" = "plain", .value = "hello world", .description = "has spaces" },
+        .{ .name = "DATABASE_URL", .type = "secret", .value = "postgres://u:p@h/db", .description = "Primary DB" },
+        .{ .name = "VITE_FOO", .type = "plain", .value = "bar", .description = null },
+        .{ .name = "MSG", .type = "plain", .value = "hello world", .description = "has spaces" },
     };
     const content = try formatEnvFile(allocator, "main", &vars);
     defer allocator.free(content);
@@ -1057,11 +1291,11 @@ test "env file round-trip preserves type and description" {
 
     try std.testing.expectEqual(@as(usize, 3), parsed.items.len);
     try std.testing.expectEqualStrings("DATABASE_URL", parsed.items[0].name);
-    try std.testing.expectEqualStrings("secret", parsed.items[0].@"type");
+    try std.testing.expectEqualStrings("secret", parsed.items[0].type);
     try std.testing.expectEqualStrings("postgres://u:p@h/db", parsed.items[0].value);
     try std.testing.expectEqualStrings("Primary DB", parsed.items[0].description.?);
     try std.testing.expectEqualStrings("VITE_FOO", parsed.items[1].name);
-    try std.testing.expectEqualStrings("plain", parsed.items[1].@"type");
+    try std.testing.expectEqualStrings("plain", parsed.items[1].type);
     try std.testing.expectEqualStrings("bar", parsed.items[1].value);
     try std.testing.expectEqualStrings("hello world", parsed.items[2].value);
 }
@@ -1071,16 +1305,16 @@ test "parseEnvFile defaults type to plain" {
     var parsed = try parseEnvFile(allocator, "FOO=1\nBAR=\"x y\"\n");
     defer freeSyncVars(allocator, &parsed);
     try std.testing.expectEqual(@as(usize, 2), parsed.items.len);
-    try std.testing.expectEqualStrings("plain", parsed.items[0].@"type");
+    try std.testing.expectEqualStrings("plain", parsed.items[0].type);
     try std.testing.expectEqualStrings("x y", parsed.items[1].value);
 }
 
 test "formatEnvFile quoting is start-compatible (no backslash escapes)" {
     const allocator = std.testing.allocator;
     const vars = [_]SyncVar{
-        .{ .name = "PATH_WIN", .@"type" = "plain", .value = "C:\\Users\\x", .description = null },
-        .{ .name = "QUOTED", .@"type" = "secret", .value = "say \"hi\"", .description = null },
-        .{ .name = "BOTH", .@"type" = "plain", .value = "a\"b'c", .description = null },
+        .{ .name = "PATH_WIN", .type = "plain", .value = "C:\\Users\\x", .description = null },
+        .{ .name = "QUOTED", .type = "secret", .value = "say \"hi\"", .description = null },
+        .{ .name = "BOTH", .type = "plain", .value = "a\"b'c", .description = null },
     };
     const content = try formatEnvFile(allocator, "main", &vars);
     defer allocator.free(content);
@@ -1100,10 +1334,31 @@ test "formatEnvFile quoting is start-compatible (no backslash escapes)" {
 test "buildPushPayload includes rev and vars" {
     const allocator = std.testing.allocator;
     const vars = [_]SyncVar{
-        .{ .name = "A", .@"type" = "plain", .value = "1", .description = null },
+        .{ .name = "A", .type = "plain", .value = "1", .description = null },
     };
     const payload = try buildPushPayload(allocator, "main", &vars);
     defer allocator.free(payload);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"rev\":\"main\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"A\"") != null);
+}
+
+test "gitignoreMentionsEnv detects common patterns" {
+    try std.testing.expect(gitignoreMentionsEnv(".env\n"));
+    try std.testing.expect(gitignoreMentionsEnv("# comment\n*.env\n"));
+    try std.testing.expect(gitignoreMentionsEnv(".env*\n"));
+    try std.testing.expect(!gitignoreMentionsEnv("node_modules/\n.env.example\n"));
+}
+
+test "normalizeBaseUrlOverride accepts api hosts" {
+    const allocator = std.testing.allocator;
+    const a = try normalizeBaseUrlOverride(allocator, "https://api.staging.timbal.ai/");
+    defer allocator.free(a);
+    try std.testing.expectEqualStrings("https://api.staging.timbal.ai", a);
+
+    const b = try normalizeBaseUrlOverride(allocator, "api.dev.timbal.ai");
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings("https://api.dev.timbal.ai", b);
+
+    try std.testing.expectError(error.InsecureBaseUrl, normalizeBaseUrlOverride(allocator, "http://api.dev.timbal.ai"));
+    try std.testing.expectError(error.InvalidBaseUrl, normalizeBaseUrlOverride(allocator, "https://evil.timbal.ai"));
 }
