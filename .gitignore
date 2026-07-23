@@ -22,6 +22,10 @@ version.zig
 *.log*
 .DS_Store
 
+# RunPython tool isolated execution artifacts
+.timbal_run_venv/
+.timbal_run_*/
+
 # State savers artifacts
 *.jsonl
 !python/tests/types/files/examples/test.jsonl

@@ -557,6 +557,7 @@ if TYPE_CHECKING:
         ResendSendEmail,
         ResendUpdateEmail,
     )
+    from .run_python import RunPython
     from .salesforce import (
         SalesforceCreateCase,
         SalesforceCreateComment,
@@ -1334,6 +1335,7 @@ __all__ = [
     "QuiverAIListModels",
     "QuiverAIVectorizeSVG",
     "Read",
+    "RunPython",
     "ScraperAPIAmazonProduct",
     "ScraperAPIAmazonSearch",
     "ScraperAPIAsyncScrape",
@@ -2417,6 +2419,7 @@ _LAZY_IMPORTS = {
     "QuiverAIListModels": ".quiver_ai",
     "QuiverAIVectorizeSVG": ".quiver_ai",
     "Read": ".read",
+    "RunPython": ".run_python",
     "ScraperAPIAmazonProduct": ".scraperapi",
     "ScraperAPIAmazonSearch": ".scraperapi",
     "ScraperAPIAsyncScrape": ".scraperapi",
