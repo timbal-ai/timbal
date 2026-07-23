@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from .agent import Agent
     from .fallback_model import FallbackModel, ModelEntry
     from .mcp import MCPServer
+    from .mcp_oauth import OAuth
     from .memory_compaction import MemoryCompactor  # noqa: F401 - type alias
     from .skill import Skill
     from .test_model import TestModel
@@ -20,6 +21,7 @@ __all__ = [
     "FallbackModel",
     "MCPServer",
     "ModelEntry",
+    "OAuth",
     "Skill",
     "TestModel",
     "Tool",
@@ -32,6 +34,7 @@ _LAZY_IMPORTS = {
     "FallbackModel": ".fallback_model",
     "MCPServer": ".mcp",
     "ModelEntry": ".fallback_model",
+    "OAuth": ".mcp_oauth",
     "Skill": ".skill",
     "TestModel": ".test_model",
     "Tool": ".tool",
