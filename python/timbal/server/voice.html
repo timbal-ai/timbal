@@ -164,7 +164,7 @@
     50% { opacity: 0.5; transform: scale(0.85); }
   }
 
-  #mic-select, #td-select {
+  #mic-select, #td-select, #ns-select {
     flex: 1;
     min-width: 0;
     font: inherit;
@@ -177,13 +177,9 @@
     outline: none;
     cursor: pointer;
   }
-  #mic-select:focus, #td-select:focus {
+  #mic-select:focus, #td-select:focus, #ns-select:focus {
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(0,0,0,.07);
-  }
-  #td-select {
-    flex: 0 1 auto;
-    max-width: 46%;
   }
   .mic-viz {
     display: flex;
@@ -367,6 +363,16 @@
     flex: 1;
     min-width: 0;
   }
+  .foot-row--modes {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .foot-row--modes select {
+    flex: 1 1 0;
+    min-width: 0;
+  }
   .foot-actions {
     display: flex;
     align-items: center;
@@ -486,6 +492,11 @@
       </div>
       <div class="foot-row foot-row--mic">
         <select id="mic-select" aria-label="Microphone"><option value="">Loading devices…</option></select>
+        <div id="mic-viz" class="mic-viz" aria-hidden="true">
+          <div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div>
+        </div>
+      </div>
+      <div class="foot-row foot-row--modes">
         <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking">
           <option value="">Turns: server default</option>
           <option value="heuristic">Turns: heuristic</option>
@@ -494,9 +505,11 @@
           <option value="lexical">Turns: lexical</option>
           <option value="raw">Turns: raw (no filters)</option>
         </select>
-        <div id="mic-viz" class="mic-viz" aria-hidden="true">
-          <div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div>
-        </div>
+        <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — RNNoise runs in your browser (loaded from jsDelivr) before audio is sent; echo cancellation stays on in every mode">
+          <option value="browser">Noise: browser</option>
+          <option value="rnnoise">Noise: RNNoise</option>
+          <option value="off">Noise: off</option>
+        </select>
       </div>
       <p class="foot-warn">Audio is captured in your browser (microphone) and streamed to this server. Use a private session and only on sites you trust; anyone with access to this page may be able to use the same agent.</p>
     </div>
@@ -518,6 +531,7 @@ const btnStop = document.getElementById('btn-stop');
 const btnReconnect = document.getElementById('btn-reconnect');
 const micSelect = document.getElementById('mic-select');
 const tdSelect = document.getElementById('td-select');
+const nsSelect = document.getElementById('ns-select');
 const micViz = document.getElementById('mic-viz');
 
 const TD_STORAGE_KEY = 'timbal-voice-turn-detector';
@@ -526,6 +540,15 @@ tdSelect.value = localStorage.getItem(TD_STORAGE_KEY) || '';
 tdSelect.onchange = () => {
   // A detector is fixed at session start, so apply by starting a new session.
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
+  location.reload();
+};
+
+const NS_STORAGE_KEY = 'timbal-voice-noise-suppression';
+nsSelect.value = localStorage.getItem(NS_STORAGE_KEY) || 'browser';
+if (!nsSelect.value) nsSelect.value = 'browser'; // unknown stored value
+nsSelect.onchange = () => {
+  // The AudioContext rate and worklet graph are fixed at session start.
+  localStorage.setItem(NS_STORAGE_KEY, nsSelect.value);
   location.reload();
 };
 const micBars = () => [...micViz.querySelectorAll('.mic-bar')];
@@ -716,52 +739,188 @@ function pickPreferredMic(mics) {
   return mics.length ? mics[0].deviceId : undefined;
 }
 
+// ---- RNNoise (client-side neural noise suppression) ----------------------
+// Runs as a mic *preprocessor* inside the capture worklet, before PCM is sent
+// to the server — deliberately transport-agnostic (a WebRTC channel later
+// would reuse the same denoised track). Assets come from jsDelivr; any load
+// failure falls back to the browser's built-in suppressor for the session.
+const RNNOISE_CDN = 'https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist';
+/** RNNoise operates on 480-sample frames of 48 kHz audio (10 ms). */
+const RNNOISE_RATE = 48000;
+const RNNOISE_FRAME = 480;
+/** null = not fetched yet; false = fetch failed (don't retry this page load). */
+let rnnoiseAssets = null;
+/** True when the shared AudioContext was built for the RNNoise graph (48 kHz + glue in the worklet module). */
+let rnnoiseCtxActive = false;
+
+async function loadRnnoiseAssets() {
+  const withTimeout = (p) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('fetch timeout')), 6000)),
+  ]);
+  const [glue, wasm] = await Promise.all([
+    withTimeout(fetch(`${RNNOISE_CDN}/rnnoise.js`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    })),
+    withTimeout(fetch(`${RNNOISE_CDN}/rnnoise.wasm`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.arrayBuffer();
+    })),
+  ]);
+  return { glue, wasm };
+}
+
+/**
+ * Capture worklet module source. With `glue` (the emscripten factory
+ * `createRNNWasmModule`) prepended, the processor can denoise: it buffers
+ * 480-sample frames at the context rate (48 kHz), runs rnnoise_process_frame
+ * in-place, then decimates 3:1 (mean of 3 — cheap anti-alias; speech lives
+ * well under the resulting 8 kHz Nyquist) so the server keeps receiving the
+ * same 16 kHz PCM as the plain path. Until the wasm module resolves, frames
+ * pass through un-denoised at the same output rate, so the negotiated
+ * sample_rate never changes mid-session.
+ */
+function captureWorkletSource(glue) {
+  return (glue || '') + `
+    class Capture extends AudioWorkletProcessor {
+      constructor(options) {
+        super();
+        this._buf = [];
+        this._frame = [];
+        this._denoise = !!(options && options.processorOptions && options.processorOptions.denoise);
+        this._outRate = this._denoise ? sampleRate / 3 : sampleRate;
+        this._rn = null; // { mod, state, ptr } once the wasm module is ready
+        this.port.onmessage = (e) => {
+          const msg = e.data;
+          if (msg && msg.type === 'rnnoise-init') this._initRnnoise(msg.wasm);
+        };
+      }
+      _initRnnoise(wasmBytes) {
+        try {
+          createRNNWasmModule({ wasmBinary: new Uint8Array(wasmBytes) }).then((mod) => {
+            const state = mod._rnnoise_create();
+            const ptr = mod._malloc(${RNNOISE_FRAME} * 4);
+            this._rn = { mod, state, ptr };
+            this.port.postMessage({ type: 'rnnoise-ready' });
+          }).catch((err) => this.port.postMessage({ type: 'rnnoise-error', error: String(err) }));
+        } catch (err) {
+          this.port.postMessage({ type: 'rnnoise-error', error: String(err) });
+        }
+      }
+      _pushDenoised(ch) {
+        for (let i = 0; i < ch.length; i++) this._frame.push(ch[i]);
+        while (this._frame.length >= ${RNNOISE_FRAME}) {
+          const frame = this._frame.splice(0, ${RNNOISE_FRAME});
+          if (this._rn) {
+            const { mod, state, ptr } = this._rn;
+            const base = ptr >> 2;
+            // Re-read HEAPF32 around the call: wasm memory growth detaches old views.
+            let heap = mod.HEAPF32;
+            // RNNoise expects float samples in int16 range.
+            for (let j = 0; j < ${RNNOISE_FRAME}; j++) heap[base + j] = frame[j] * 32768;
+            mod._rnnoise_process_frame(state, ptr, ptr);
+            heap = mod.HEAPF32;
+            for (let j = 0; j < ${RNNOISE_FRAME}; j++) frame[j] = heap[base + j] / 32768;
+          }
+          for (let j = 0; j < ${RNNOISE_FRAME}; j += 3) {
+            this._buf.push((frame[j] + frame[j + 1] + frame[j + 2]) / 3);
+          }
+        }
+      }
+      process(inputs) {
+        const ch = inputs[0][0];
+        if (!ch) return true;
+        if (this._denoise) {
+          this._pushDenoised(ch);
+        } else {
+          for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
+        }
+        const needed = Math.floor(this._outRate * ${CHUNK_MS / 1000});
+        while (this._buf.length >= needed) {
+          const slice = this._buf.splice(0, needed);
+          const i16 = new Int16Array(slice.length);
+          for (let j = 0; j < slice.length; j++) {
+            let s = Math.max(-1, Math.min(1, slice[j]));
+            i16[j] = s < 0 ? s * 32768 : s * 32767;
+          }
+          this.port.postMessage(i16.buffer, [i16.buffer]);
+        }
+        return true;
+      }
+    }
+    registerProcessor('capture', Capture);
+  `;
+}
+
 async function startMic(deviceId) {
   if (currentSource) { currentSource.disconnect(); currentSource = null; }
   if (worklet) { worklet.disconnect(); worklet = null; }
   if (analyser) { analyser.disconnect(); analyser = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
 
+  const nsMode = nsSelect.value;
+  let useRnnoise = nsMode === 'rnnoise';
+  if (useRnnoise && rnnoiseAssets === null) {
+    try {
+      rnnoiseAssets = await loadRnnoiseAssets();
+    } catch (err) {
+      console.warn('RNNoise assets failed to load — falling back to browser noise suppression.', err);
+      rnnoiseAssets = false;
+    }
+  }
+  if (useRnnoise && !rnnoiseAssets) useRnnoise = false;
+  // The context (rate + worklet module) is created once per page; a mic change
+  // mid-session must keep matching it, whatever the current fetch state says.
+  if (audioCtx) useRnnoise = rnnoiseCtxActive;
+
   const constraints = {
     audio: {
-      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-      sampleRate: SAMPLE_RATE,
+      echoCancellation: true, // always: the barge-in echo gates assume the browser AEC is doing its job
+      // Never stack two suppressors — browser NS stays on only in 'browser'
+      // mode or as the fallback when RNNoise assets failed to load.
+      noiseSuppression: nsMode === 'browser' || (nsMode === 'rnnoise' && !useRnnoise),
+      autoGainControl: true,
+      sampleRate: useRnnoise ? RNNOISE_RATE : SAMPLE_RATE,
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
     }
   };
   micStream = await navigator.mediaDevices.getUserMedia(constraints);
 
   if (!audioCtx) {
-    audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-    await audioCtx.audioWorklet.addModule('data:text/javascript,' + encodeURIComponent(`
-      class Capture extends AudioWorkletProcessor {
-        constructor() { super(); this._buf = []; }
-        process(inputs) {
-          const ch = inputs[0][0];
-          if (!ch) return true;
-          for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
-          const needed = Math.floor(sampleRate * ${CHUNK_MS / 1000});
-          while (this._buf.length >= needed) {
-            const slice = this._buf.splice(0, needed);
-            const i16 = new Int16Array(slice.length);
-            for (let j = 0; j < slice.length; j++) {
-              let s = Math.max(-1, Math.min(1, slice[j]));
-              i16[j] = s < 0 ? s * 32768 : s * 32767;
-            }
-            this.port.postMessage(i16.buffer, [i16.buffer]);
-          }
-          return true;
-        }
-      }
-      registerProcessor('capture', Capture);
-    `));
+    audioCtx = new AudioContext({ sampleRate: useRnnoise ? RNNOISE_RATE : SAMPLE_RATE });
+    if (useRnnoise && Math.round(audioCtx.sampleRate) !== RNNOISE_RATE) {
+      // Decimating a non-48k context by 3 would yield a wire rate the STT
+      // provider rejects (e.g. 44100/3 = 14700). Rebuild the plain graph and
+      // restore the browser suppressor for this session.
+      console.warn(`RNNoise needs a 48 kHz AudioContext; got ${audioCtx.sampleRate} — falling back to browser noise suppression.`);
+      await audioCtx.close();
+      audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      useRnnoise = false;
+      try { await micStream.getAudioTracks()[0].applyConstraints({ noiseSuppression: true }); } catch (_) {}
+    }
+    rnnoiseCtxActive = useRnnoise;
+    await audioCtx.audioWorklet.addModule('data:text/javascript,'
+      + encodeURIComponent(captureWorkletSource(useRnnoise ? rnnoiseAssets.glue : '')));
   }
 
   currentSource = audioCtx.createMediaStreamSource(micStream);
-  worklet = new AudioWorkletNode(audioCtx, 'capture');
+  worklet = new AudioWorkletNode(audioCtx, 'capture', {
+    processorOptions: { denoise: rnnoiseCtxActive },
+  });
+  if (rnnoiseCtxActive) {
+    // Copy: the transferable is consumed per node, and mic changes make new nodes.
+    const wasmBytes = rnnoiseAssets.wasm.slice(0);
+    worklet.port.postMessage({ type: 'rnnoise-init', wasm: wasmBytes }, [wasmBytes]);
+  }
   worklet.port.onmessage = (e) => {
+    const d = e.data;
+    if (d && d.type === 'rnnoise-ready') { console.info('RNNoise active on mic input.'); return; }
+    if (d && d.type === 'rnnoise-error') {
+      console.warn('RNNoise failed in the audio worklet — mic continues un-denoised.', d.error);
+      return;
+    }
     if (!micAudioToWs || !ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(new Uint8Array(e.data));
+    ws.send(new Uint8Array(d));
   };
   currentSource.connect(worklet);
   const silent = audioCtx.createGain();
@@ -857,7 +1016,10 @@ async function start() {
     // The config hello MUST be the first frame on the socket — the server
     // reads one frame as session config. stopAssistantAudio() below sends a
     // playback ack, which used to race ahead and eat the config slot.
-    const sr = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    // Report the worklet's OUTPUT rate: the RNNoise graph runs the context at
+    // 48 kHz but decimates 3:1 before sending, so the wire rate is ctx/3.
+    const ctxRate = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    const sr = rnnoiseCtxActive ? Math.round(ctxRate / 3) : ctxRate;
     sessionSampleRate = sr;
     const hello = { sample_rate: sr };
     if (tdSelect.value) hello.turn_detector = tdSelect.value;
