@@ -663,9 +663,12 @@ fn buildPushPayload(allocator: std.mem.Allocator, rev: ?[]const u8, vars: []cons
     errdefer buf.deinit();
     var w = buf.writer();
 
+    // Omit reserved names so the POST body matches dry-run / platform skip behavior.
     try w.writeAll("{\"vars\":[");
-    for (vars, 0..) |v, i| {
-        if (i > 0) try w.writeAll(",");
+    var written: usize = 0;
+    for (vars) |v| {
+        if (isReservedVarName(v.name)) continue;
+        if (written > 0) try w.writeAll(",");
         try w.writeAll("{\"name\":");
         try std.json.stringify(v.name, .{}, w);
         try w.writeAll(",\"type\":");
@@ -677,6 +680,7 @@ fn buildPushPayload(allocator: std.mem.Allocator, rev: ?[]const u8, vars: []cons
             try std.json.stringify(d, .{}, w);
         }
         try w.writeAll("}");
+        written += 1;
     }
     try w.writeAll("]");
     if (rev) |r| {
@@ -1340,6 +1344,20 @@ test "buildPushPayload includes rev and vars" {
     defer allocator.free(payload);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"rev\":\"main\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"A\"") != null);
+}
+
+test "buildPushPayload omits reserved var names" {
+    const allocator = std.testing.allocator;
+    const vars = [_]SyncVar{
+        .{ .name = "PORT", .type = "plain", .value = "3000", .description = null },
+        .{ .name = "TIMBAL_PROJECT_SECRET", .type = "secret", .value = "x", .description = null },
+        .{ .name = "OK", .type = "plain", .value = "1", .description = null },
+    };
+    const payload = try buildPushPayload(allocator, "main", &vars);
+    defer allocator.free(payload);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"PORT\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"TIMBAL_PROJECT_SECRET\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"OK\"") != null);
 }
 
 test "gitignoreMentionsEnv detects common patterns" {
