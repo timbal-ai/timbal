@@ -137,6 +137,28 @@ class TestOnPartial:
         )
         assert decision is PartialDecision.IGNORE
 
+    async def test_single_short_word_partial_does_not_barge_in(self) -> None:
+        """A lone short partial ("Nice.") while the assistant speaks is a mic
+        blip / mis-transcribed speaker echo far more often than a barge-in —
+        a false positive cancels TTS and erases the reply (min-words gate,
+        same as Pipecat MinWordsInterruptionStrategy / LiveKit
+        min_interruption_words)."""
+        det = HeuristicTurnDetector()
+        for blip in ("Nice.", "Okay.", "What now"):
+            decision = await det.on_partial(
+                blip,
+                _state(audio_playing=True, assistant_active=True, assistant_text="I'm just a program"),
+            )
+            assert decision is PartialDecision.IGNORE, blip
+
+    async def test_three_word_partial_barges_in(self) -> None:
+        det = HeuristicTurnDetector()
+        decision = await det.on_partial(
+            "no stop that",
+            _state(audio_playing=True, assistant_active=True, assistant_text="I'm just a program"),
+        )
+        assert decision is PartialDecision.BARGE_IN
+
 
 class TestOnCommitted:
     async def test_plain_commit_starts_new_turn(self) -> None:
@@ -565,7 +587,7 @@ class TestHoldDecisions:
         assert decision.text == "I was wondering about the weather tomorrow"
 
     async def test_hold_does_not_merge_long_new_utterance(self) -> None:
-        """A separate long commit while holding must not be concatenated."""
+        """A separate long commit while holding starts NOW — but keeps the fragment."""
         det = HeuristicTurnDetector()
         new = "Actually what is the capital of France please tell me"
         assert len(new) >= HeuristicTurnDetector.CONTINUATION_MAX_CHARS
@@ -581,10 +603,10 @@ class TestHoldDecisions:
         )
         assert decision.action is CommitAction.NEW_TURN
         assert decision.reason == "hold_supersede"
-        assert decision.text == new
+        assert decision.text == "I was wondering about " + new
 
     async def test_heuristic_hold_supersedes_stop_command(self) -> None:
-        """Heuristic must not glue a self-contained short commit onto a HOLD."""
+        """A self-contained short commit starts the turn now — fragment preserved."""
         det = HeuristicTurnDetector()
         decision = await det.on_committed(
             "stop",
@@ -598,10 +620,10 @@ class TestHoldDecisions:
         )
         assert decision.action is CommitAction.NEW_TURN
         assert decision.reason == "hold_supersede"
-        assert decision.text == "stop"
+        assert decision.text == "I was wondering about stop"
 
     async def test_lexical_hold_supersedes_stop_command(self) -> None:
-        """Complete short command while holding must not produce garbled merge text."""
+        """Complete short command while holding starts now, fragment preserved."""
         det = LexicalTurnDetector()  # real punctuation EOU
         decision = await det.on_committed(
             "stop",
@@ -614,7 +636,7 @@ class TestHoldDecisions:
             ),
         )
         assert decision.action is CommitAction.NEW_TURN
-        assert decision.text == "stop"
+        assert decision.text == "I was wondering about stop"
         assert decision.reason == "hold_supersede"
 
     async def test_lexical_does_not_rehold_parent_supersede(self) -> None:
@@ -632,7 +654,7 @@ class TestHoldDecisions:
         )
         assert decision.action is CommitAction.NEW_TURN
         assert decision.reason == "hold_supersede"
-        assert decision.text == "stop"
+        assert decision.text == "I was wondering about stop"
 
     async def test_local_does_not_rehold_parent_supersede(self) -> None:
         """Incomplete audio must not convert hold_supersede back into HOLD."""
@@ -651,7 +673,7 @@ class TestHoldDecisions:
         )
         assert decision.action is CommitAction.NEW_TURN
         assert decision.reason == "hold_supersede"
-        assert decision.text == "stop"
+        assert decision.text == "I was wondering about stop"
         await det.close()
 
     async def test_hallucination_guard_skips_while_holding(self) -> None:
@@ -733,6 +755,29 @@ class TestLocalHoldMerge:
         assert decision.text.startswith("Hello. Uh, I was thinking about...")
         await det.close()
 
+    async def test_forced_split_continuation_preserves_fragment(self) -> None:
+        """Live failure: VAD endpointing split "…thinking about" / "Something.".
+
+        STT capitalizes each committed segment, so the continuation looks
+        "fresh" and supersedes the hold — the turn must still carry the full
+        utterance, not just "Something.".
+        """
+        det = await self._det(0.9)
+        decision = await det.on_committed(
+            "Something.",
+            _state(
+                holding=True,
+                active_user_text="Uh, I, I was thinking about...",
+                assistant_active=False,
+                seconds_since_last_commit=1.6,
+                partials_since_last_commit=2,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "hold_supersede"
+        assert decision.text == "Uh, I, I was thinking about... Something."
+        await det.close()
+
     async def test_fresh_utterance_still_supersedes(self) -> None:
         det = await self._det(0.9)
         decision = await det.on_committed(
@@ -741,7 +786,11 @@ class TestLocalHoldMerge:
         )
         assert decision.action is CommitAction.NEW_TURN
         assert decision.reason == "hold_supersede"
-        assert decision.text == "Stop. Forget it, new question entirely about something else okay"
+        # Immediate start; held fragment prepended, not dropped.
+        assert decision.text == (
+            "Hello. Uh, I was thinking about... "
+            "Stop. Forget it, new question entirely about something else okay"
+        )
         await det.close()
 
 

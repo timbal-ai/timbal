@@ -30,6 +30,7 @@ from .session import (
     SpeechToText,
     TextToSpeech,
     TranscriptEvent,
+    TTSStream,
 )
 
 logger = structlog.get_logger("timbal.voice.elevenlabs")
@@ -272,17 +273,38 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._active_contexts: set[str] = set()
         self._ctx_counter: int = 0
         self._last_ws_error: str | None = None
+        self._ws_lock = asyncio.Lock()
+        self._preconnect_task: asyncio.Task[None] | None = None
 
     async def connect(self, config: AudioOutputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         if not config.voice:
             raise ValueError("AudioOutputConfig.voice (ElevenLabs voice_id) is required.")
         self._out = config
+        # Pre-open the multi-context WS in the background so the first
+        # synthesize of the session doesn't pay the TCP+TLS+WS handshake
+        # (~0.5-1s of the first reply's audio latency). Failures are logged
+        # and ignored — the first synthesize retries via _ensure_ws anyway.
+        self._preconnect_task = asyncio.create_task(self._preconnect())
+
+    async def _preconnect(self) -> None:
+        try:
+            await self._ensure_ws()
+        except Exception as e:
+            logger.debug("el_tts_preconnect_failed", error=str(e))
 
     # -- persistent WS lifecycle --------------------------------------------
 
     async def _ensure_ws(self) -> None:
-        """Lazily open the multi-context WS if not already connected."""
+        """Lazily open the multi-context WS if not already connected.
+
+        Lock-guarded: the connect() pre-warm task and the first synthesize can
+        race here — without the lock they would open two sockets and leak one.
+        """
+        async with self._ws_lock:
+            await self._ensure_ws_locked()
+
+    async def _ensure_ws_locked(self) -> None:
         if self._ws is not None and self._ws_open:
             return
         if self._ws is not None:
@@ -392,6 +414,15 @@ class ElevenLabsStreamTTS(TextToSpeech):
 
     # -- public interface ---------------------------------------------------
 
+    def open_stream(self) -> _ElevenLabsTTSStream:
+        """One streaming *context* per agent reply.
+
+        Feeding every flush into a single context keeps prosody continuous —
+        one context per segment gives each fragment independent "final
+        sentence" intonation and an audible seam (the "choppy" feel).
+        """
+        return _ElevenLabsTTSStream(self)
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         if not self._api_key or not self._out:
             raise RuntimeError("Call connect() before synthesize().")
@@ -461,5 +492,114 @@ class ElevenLabsStreamTTS(TextToSpeech):
             )
 
     async def close(self) -> None:
+        if self._preconnect_task is not None and not self._preconnect_task.done():
+            self._preconnect_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._preconnect_task
+        self._preconnect_task = None
         await self._teardown_ws()
         self._out = None
+
+
+class _ElevenLabsTTSStream(TTSStream):
+    """One multi-context WS *context* fed incrementally over an agent reply.
+
+    Text chunks are appended server-side to the same context, so ElevenLabs
+    synthesizes them as one continuous utterance (``auto_mode`` generates at
+    sentence boundaries). Contrast with ``synthesize``, which opens a fresh
+    context per segment and gives each one independent final-sentence prosody.
+    """
+
+    def __init__(self, tts: ElevenLabsStreamTTS) -> None:
+        self._tts = tts
+        self._ctx_id: str | None = None
+        # Created eagerly so ``audio()`` can be iterated before the first feed
+        # opens the context (the session starts the pump task immediately).
+        self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        self._ended = False
+        self._aborted = False
+        self._chunks = 0
+
+    async def _open_context(self) -> None:
+        tts = self._tts
+        if not tts._api_key or not tts._out:
+            raise RuntimeError("Call connect() before open_stream().")
+        await tts._ensure_ws()
+        tts._ctx_counter += 1
+        self._ctx_id = f"ctx_{tts._ctx_counter}"
+        tts._audio_queues[self._ctx_id] = self._queue
+        tts._active_contexts.add(self._ctx_id)
+        logger.debug("el_tts_stream_context_opened", context_id=self._ctx_id)
+
+    async def feed(self, text: str) -> None:
+        if self._ended or self._aborted or not text.strip():
+            return
+        if self._ctx_id is None:
+            await self._open_context()
+        assert self._tts._ws is not None
+        logger.debug(
+            "el_tts_stream_feed",
+            context_id=self._ctx_id,
+            text_chars=len(text),
+            text_preview=text[:120],
+        )
+        await self._tts._ws.send(json.dumps({"text": text, "context_id": self._ctx_id}))
+
+    async def end(self) -> None:
+        if self._ended or self._aborted:
+            return
+        self._ended = True
+        if self._ctx_id is None:
+            # Nothing was ever fed — unblock audio() directly.
+            self._queue.put_nowait(None)
+            return
+        tts = self._tts
+        try:
+            assert tts._ws is not None
+            # close_context finishes generating audio for buffered text and
+            # then emits is_final, which terminates audio(). Flush first for
+            # parity with synthesize (harmless if auto_mode already flushed).
+            await tts._ws.send(json.dumps({"text": " ", "context_id": self._ctx_id, "flush": True}))
+            await tts._ws.send(json.dumps({"context_id": self._ctx_id, "close_context": True}))
+        except Exception as e:
+            logger.warning("el_tts_stream_end_failed", context_id=self._ctx_id, error=str(e))
+            self._queue.put_nowait(None)
+
+    async def abort(self) -> None:
+        if self._aborted:
+            return
+        self._aborted = True
+        tts = self._tts
+        if self._ctx_id is not None:
+            # Unroute first so in-flight audio for this context is dropped.
+            tts._audio_queues.pop(self._ctx_id, None)
+            tts._active_contexts.discard(self._ctx_id)
+            if tts._ws is not None and tts._ws_open:
+                with contextlib.suppress(Exception):
+                    await tts._ws.send(json.dumps({"context_id": self._ctx_id, "close_context": True}))
+        self._queue.put_nowait(None)
+
+    async def audio(self) -> AsyncIterator[bytes]:
+        try:
+            while True:
+                msg = await self._queue.get()
+                if msg is None:
+                    if self._chunks == 0 and not self._aborted and self._tts._last_ws_error:
+                        raise RuntimeError(f"ElevenLabs TTS closed: {self._tts._last_ws_error}")
+                    return
+                if msg.get("error"):
+                    raise RuntimeError(f"ElevenLabs TTS error: {msg.get('error')}")
+                if msg.get("audio"):
+                    self._chunks += 1
+                    yield base64.b64decode(msg["audio"])
+                if msg.get("is_final") or msg.get("isFinal"):
+                    return
+        finally:
+            if self._ctx_id is not None:
+                self._tts._audio_queues.pop(self._ctx_id, None)
+                self._tts._active_contexts.discard(self._ctx_id)
+            logger.debug(
+                "el_tts_stream_context_done",
+                context_id=self._ctx_id,
+                audio_chunks=self._chunks,
+            )

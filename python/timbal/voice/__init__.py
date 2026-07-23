@@ -1,5 +1,9 @@
 """timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, turn detection, metrics, and provider implementations."""
 
+from .endpointing import (
+    VadEndpointer,
+    endpointing_delay,
+)
 from .eou import (
     AudioEouModel,
     EouPredictor,
@@ -35,6 +39,7 @@ from .session import (
     TranscriptEntry,
     TranscriptEvent,
     TranscriptPartial,
+    TTSStream,
     VoiceSession,
     VoiceSessionEvent,
 )
@@ -55,12 +60,16 @@ from .turn_detection import (
 
 
 def __getattr__(name: str):
-    # Lazy: importing smart_turn pulls numpy/onnxruntime (timbal[voice] extra),
-    # which must not be required just to import timbal.voice.
+    # Lazy: importing smart_turn / vad pulls numpy/onnxruntime (timbal[voice]
+    # extra), which must not be required just to import timbal.voice.
     if name == "SmartTurnEouModel":
         from .smart_turn import SmartTurnEouModel
 
         return SmartTurnEouModel
+    if name == "SileroVad":
+        from .vad import SileroVad
+
+        return SileroVad
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -88,6 +97,7 @@ __all__ = [
     "RealtimeSession",
     "SemanticTurnDetector",
     "SessionEnded",
+    "SileroVad",
     "SessionError",
     "SessionInterrupted",
     "SessionStarted",
@@ -99,11 +109,14 @@ __all__ = [
     "TranscriptEntry",
     "TranscriptEvent",
     "TranscriptPartial",
+    "TTSStream",
     "TurnDetector",
     "TurnMetrics",
     "TurnMetricsEvent",
     "TurnState",
+    "VadEndpointer",
     "VoiceSession",
     "VoiceSessionEvent",
+    "endpointing_delay",
     "resolve_turn_detector",
 ]

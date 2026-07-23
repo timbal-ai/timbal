@@ -13,6 +13,7 @@ import asyncio
 import os
 import random
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import structlog
@@ -223,6 +224,37 @@ def _resolve_client(
     if config.client_type == "anthropic":
         return _get_client(AsyncAnthropic, api_key, base_url, "anthropic"), base_url
     return _get_client(AsyncOpenAI, api_key, base_url or config.default_base_url, provider), base_url
+
+
+async def warmup_llm_connection(model: str) -> None:
+    """Pre-establish the provider's HTTPS connection pool for ``model``.
+
+    The first LLM call of a process pays TCP+TLS(+HTTP/2) setup before any
+    token arrives — measured ~1.3s extra TTFT cold vs warm against
+    api.openai.com. This issues one lightweight authenticated GET
+    (``/models``) through the same cached SDK client the real calls will use,
+    so the pool is hot by the time the first request fires.
+
+    Best-effort and side-effect free: any failure (no API key, unsupported
+    endpoint on OpenAI-compatible providers, timeout) is logged at DEBUG and
+    ignored. Callers fire-and-forget (e.g. voice sessions at startup).
+    """
+    try:
+        provider, _ = model.split("/", 1)
+    except ValueError:
+        return
+    config = _PROVIDERS.get(provider)
+    if config is None:
+        return
+    try:
+        # _resolve_client only reads run_context.platform_config; don't create
+        # a real RunContext here (warmup must not touch tracing state).
+        ctx = SimpleNamespace(platform_config=None)
+        client, _ = _resolve_client(provider, config, None, None, ctx)
+        await asyncio.wait_for(client.models.list(), timeout=5.0)
+        logger.debug("llm_connection_warmed", model=model)
+    except Exception as e:
+        logger.debug("llm_warmup_skipped", model=model, error=str(e))
 
 
 # ---------------------------------------------------------------------------

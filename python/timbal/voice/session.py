@@ -46,6 +46,7 @@ from .turn_detection import (
 )
 
 if TYPE_CHECKING:
+    from .endpointing import VadEndpointer
     from .metrics import TurnMetrics
 
 logger = structlog.get_logger("timbal.voice.session")
@@ -266,6 +267,32 @@ class SpeechToText(ABC):
     async def close(self) -> None: ...
 
 
+class TTSStream(ABC):
+    """One streaming synthesis unit (e.g. an ElevenLabs *context*): text is fed
+    incrementally while audio is read concurrently from :meth:`audio`.
+
+    Contract:
+
+    * ``feed`` may be called any number of times (in order).
+    * ``end`` signals no more text; ``audio()`` finishes once the provider
+      drains the remaining synthesis.
+    * ``abort`` (barge-in) stops generation ASAP and unblocks ``audio()``.
+    * All methods are idempotent-safe after ``end``/``abort``.
+    """
+
+    @abstractmethod
+    async def feed(self, text: str) -> None: ...
+
+    @abstractmethod
+    async def end(self) -> None: ...
+
+    @abstractmethod
+    async def abort(self) -> None: ...
+
+    @abstractmethod
+    def audio(self) -> AsyncIterator[bytes]: ...
+
+
 class TextToSpeech(ABC):
     """Abstract TTS provider.
 
@@ -277,6 +304,19 @@ class TextToSpeech(ABC):
 
     @abstractmethod
     def synthesize(self, text: str) -> AsyncIterator[bytes]: ...
+
+    def open_stream(self) -> TTSStream | None:
+        """Optional capability: a per-reply streaming context.
+
+        Providers that support incremental text input with prosody continuity
+        (ElevenLabs multi-context WS) return a fresh :class:`TTSStream` per
+        call; the session then feeds each flush into ONE context instead of
+        synthesizing independent segments — independent segments each get
+        "final sentence" intonation and an audible seam between them.
+        Default ``None`` → the session falls back to per-segment
+        ``synthesize``.
+        """
+        return None
 
     @abstractmethod
     async def close(self) -> None: ...
@@ -331,6 +371,7 @@ class VoiceSession:
         playback_tracker: PlaybackTracker | None = None,
         record_audio: bool = False,
         hold_timeout_secs: float = 1.5,
+        vad_endpointing: bool | VadEndpointer | None = None,
     ):
         self.agent = agent
         self.stt = stt
@@ -350,6 +391,17 @@ class VoiceSession:
         # a per-decision override. Heuristic/provider never HOLD, so this is inert
         # unless an opt-in detector (local / lexical) is used.
         self.hold_timeout_secs = hold_timeout_secs
+        # VAD endpointing fast path (Silero speech-stop → audio EOU → stt.commit()).
+        # None = auto: on when the detector exposes an audio EOU model and the
+        # timbal[voice] extra is installed; False = off; True = on (warn when
+        # unavailable); a VadEndpointer instance = use as-is (custom knobs).
+        self._vad_endpointing = vad_endpointing
+        self._endpointer: VadEndpointer | None = None
+        # time.monotonic() of the last endpointer-forced stt.commit(); the next
+        # committed transcript within a short window is attributed to it.
+        self._endpoint_commit_sent_at: float | None = None
+        self._turn_vad_endpointed = False
+        self._llm_warmup_task: asyncio.Task[None] | None = None
         # TODO(tool-filler): re-add the `filler` constructor param (phrases
         # rotated across turns, or a `(tool_name) -> str | None` callable) to
         # mask tool-call dead air with spoken filler. Removed for now to keep
@@ -391,6 +443,12 @@ class VoiceSession:
         self._tts_tasks: set[asyncio.Task] = set()
         # Concatenation of all strings passed to ``_schedule_tts`` this turn (OUTPUT tail catch-up).
         self._turn_tts_scheduled_text: str = ""
+        # Streaming TTS (providers with ``open_stream``): one context per reply,
+        # fed incrementally, drained by one pump task. ``None`` → per-segment
+        # ``synthesize`` fallback.
+        self._turn_tts_stream: TTSStream | None = None
+        self._turn_tts_pump: asyncio.Task | None = None
+        self._turn_stream_record: list | None = None
 
         # Per-turn playback accounting for interruption truncation: played bytes
         # at turn start, spoken (text, bytes) records per TTS segment, and the
@@ -460,9 +518,11 @@ class VoiceSession:
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
         try:
+            self._start_llm_warmup()
             await self.stt.connect(self.audio_input)
             await self.tts.connect(self.audio_output)
             await self.turn_detector.start(self.audio_input)
+            await self._maybe_start_endpointer()
             await self._emit(SessionStarted())
 
             audio_task = asyncio.create_task(self._forward_audio(audio_in))
@@ -534,6 +594,9 @@ class VoiceSession:
             await asyncio.gather(*self._tts_tasks, return_exceptions=True)
         self._tts_tasks.clear()
         self._tts_tail = None
+        # Streaming TTS: closing the context stops generation server-side and
+        # unblocks the pump (which the turn task may be draining right now).
+        await self._abort_tts_stream()
         if has_turn:
             self._current_turn_task.cancel()
             try:
@@ -578,9 +641,18 @@ class VoiceSession:
         if was_active:
             # The cancelled turn's finally (or the in-place path above) computed
             # what the user actually heard.
-            await self._emit(SessionInterrupted(heard_text=self._last_interruption_heard_text))
+            heard = self._last_interruption_heard_text
+            await self._emit(SessionInterrupted(heard_text=heard))
             self._last_interruption_heard_text = None
-            logger.debug("session_interrupt_emitted", **_trace_debug_fields())
+            # INFO on purpose: this event makes the client rewrite (or remove,
+            # when heard_text is empty) the displayed reply — essential context
+            # when a reply "disappears" in the UI.
+            logger.info(
+                "session_interrupt_emitted",
+                heard_text_preview=(heard[:120] if heard else heard),
+                heard_bytes=self._turn_heard_bytes,
+                **_trace_debug_fields(),
+            )
 
     async def close(self) -> None:
         """Gracefully shut down the session."""
@@ -592,6 +664,129 @@ class VoiceSession:
         await self.interrupt(truncate_completed=False)
         await self._emit(None)  # sentinel stops the run() iterator
 
+    # -- Internal: first-reply warmup -----------------------------------------
+
+    def _start_llm_warmup(self) -> None:
+        """Fire-and-forget: pre-establish the LLM provider's connection pool.
+
+        The first turn of a session otherwise pays the provider's TCP+TLS
+        handshake inside its TTFT (measured: 1.84s cold vs 0.54s warm against
+        OpenAI). Only applies to string model specs — a ``TestModel`` (or any
+        custom model object) has no provider connection to warm.
+        """
+        model = getattr(self.agent, "model", None)
+        if not (isinstance(model, str) and "/" in model):
+            return
+
+        from ..core.llm_router import warmup_llm_connection
+
+        self._llm_warmup_task = asyncio.create_task(warmup_llm_connection(model))
+
+    # -- Internal: VAD endpointing fast path ---------------------------------
+
+    async def _maybe_start_endpointer(self) -> None:
+        """Arm the local VAD endpointing loop when the pieces exist.
+
+        Requires a turn detector exposing an audio EOU (``score_recent_audio``
+        with a non-None ``audio_eou``) and the ``timbal[voice]`` extra for
+        Silero. Silently stays off otherwise (warning when explicitly
+        requested). See :mod:`timbal.voice.endpointing`.
+        """
+        spec = self._vad_endpointing
+        if spec is False:
+            return
+        explicit = spec is not None
+        score_fn = getattr(self.turn_detector, "score_recent_audio", None)
+        audio_eou = getattr(self.turn_detector, "audio_eou", None)
+        if score_fn is None or audio_eou is None:
+            if explicit:
+                logger.warning(
+                    "vad_endpointing_unavailable",
+                    reason="turn detector has no audio EOU model",
+                    detector=type(self.turn_detector).__name__,
+                )
+            return
+        if spec is None or spec is True:
+            from .endpointing import VadEndpointer
+
+            endpointer = VadEndpointer()
+        else:
+            endpointer = spec
+        endpointer.bind(
+            score=score_fn,
+            commit=self._endpoint_commit,
+            should_commit=self._endpoint_should_commit,
+        )
+        try:
+            await endpointer.start(sample_rate=self.audio_input.sample_rate)
+        except ImportError as e:
+            log = logger.warning if explicit else logger.debug
+            log(
+                "vad_endpointing_unavailable",
+                reason="timbal[voice] extra not installed",
+                error=str(e),
+            )
+            return
+        except Exception as e:
+            logger.warning("vad_endpointer_start_failed", error=str(e))
+            return
+        self._endpointer = endpointer
+        logger.info(
+            "vad_endpointing_active",
+            stop_silence_secs=endpointer.stop_silence_secs,
+            max_delay_secs=endpointer.max_delay_secs,
+        )
+
+    def _endpoint_should_commit(self) -> bool:
+        """Gate for the endpointer: only force-commit real transcribed speech.
+
+        VAD alone can trigger on echo/noise the STT never heard; requiring a
+        partial newer than the last commit means ElevenLabs actually has words
+        in its buffer.
+        """
+        if self._closed:
+            return False
+        return self._last_partial_at > self._last_commit_at
+
+    async def _endpoint_commit(self) -> None:
+        self._endpoint_commit_sent_at = time.monotonic()
+        await self.stt.commit()
+
+    # Corroboration window for partial barge-ins: a real >=3-word interruption
+    # means >=~1s of actual speech shortly before the partial arrives, so the
+    # local VAD must have seen at least this much energy recently. STT can
+    # hallucinate plausible multi-word phrases from silence/room noise (Whisper
+    # -family behaviour) and those pass every *text* gate — but they carry no
+    # mic energy. Same idea as LiveKit's min_interruption_duration / Pipecat's
+    # volume-based interruption strategy.
+    MIN_BARGE_IN_VAD_SPEECH_SECS = 0.25
+    BARGE_IN_VAD_WINDOW_SECS = 2.0
+
+    def _vad_vetoes_barge_in(self, text: str) -> bool:
+        """True when the local VAD saw no real speech energy recently.
+
+        Only active when the endpointer (Silero on the mic feed) is armed and
+        healthy; otherwise returns False — never make the assistant
+        uninterruptible on missing evidence. Speaker echo DOES carry energy, so
+        this gate never vetoes echo; the text-similarity check handles that.
+        """
+        if self._endpointer is None:
+            return False
+        speech_secs = self._endpointer.speech_secs_in_window(self.BARGE_IN_VAD_WINDOW_SECS)
+        if speech_secs is None or speech_secs >= self.MIN_BARGE_IN_VAD_SPEECH_SECS:
+            return False
+        # INFO on purpose: a vetoed barge-in is invisible otherwise, and "why
+        # didn't it interrupt" / "why did it interrupt" are the two sides of
+        # the same debugging session.
+        logger.info(
+            "stt_partial_barge_in_vetoed",
+            reason="no_recent_vad_speech",
+            vad_speech_secs=round(speech_secs, 3),
+            text_preview=text[:80],
+            audio_playing=self._assistant_audio_playing,
+        )
+        return True
+
     # -- Internal: audio → STT ---------------------------------------------
 
     async def _forward_audio(self, audio_in: AsyncIterable[bytes]) -> None:
@@ -600,6 +795,8 @@ class VoiceSession:
                 if self._record_audio:
                     self._input_audio_chunks.append(chunk)
                 self.turn_detector.push_audio(chunk)
+                if self._endpointer is not None:
+                    self._endpointer.push(chunk)
                 await self.stt.push_audio(chunk)
         except asyncio.CancelledError:
             pass
@@ -619,8 +816,13 @@ class VoiceSession:
                         self._last_partial_at = time.monotonic()
                     await self._emit(TranscriptPartial(text=text))
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
+                    if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
+                        decision = PartialDecision.IGNORE
                     if decision is PartialDecision.BARGE_IN:
-                        logger.debug(
+                        # INFO on purpose: a barge-in cancels TTS and truncates the
+                        # committed reply — when debugging "the agent went silent /
+                        # the reply vanished", this is the first thing to look for.
+                        logger.info(
                             "stt_partial_barge_in",
                             text_preview=text[:80],
                             assistant_chars=len(self._turn_assistant_text),
@@ -719,7 +921,9 @@ class VoiceSession:
             **_trace_debug_fields(),
         )
 
-    async def _begin_user_turn(self, final_text: str, *, replace_user_entry: bool) -> None:
+    async def _begin_user_turn(
+        self, final_text: str, *, replace_user_entry: bool, vad_endpointed: bool = False
+    ) -> None:
         """Record ``final_text`` and start an agent turn.
 
         Caller is responsible for ``interrupt()`` / clearing ``_cancel_turn``
@@ -731,6 +935,7 @@ class VoiceSession:
             # _closed checks and here; never start an agent turn after close().
             logger.debug("stt_turn_dropped_session_closed", text_preview=final_text[:80])
             return
+        self._turn_vad_endpointed = vad_endpointed
         self._last_commit_at = time.monotonic()
         if replace_user_entry and self._transcript and self._transcript[-1].role == "user":
             self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
@@ -749,6 +954,23 @@ class VoiceSession:
     async def _handle_committed(self, text: str) -> None:
         if self._closed:
             return
+        # Any commit (endpointer-forced or provider debounce) makes a pending
+        # VAD endpoint stale — the STT segment it targeted is already closed.
+        if self._endpointer is not None:
+            self._endpointer.notify_committed()
+        vad_endpointed = (
+            self._endpoint_commit_sent_at is not None
+            and time.monotonic() - self._endpoint_commit_sent_at < 2.0
+        )
+        if vad_endpointed:
+            # INFO: the observable payoff of the fast path — how much sooner
+            # this commit landed than the provider's own debounce would have.
+            logger.info(
+                "vad_endpointed_commit",
+                commit_latency_ms=round((time.monotonic() - self._endpoint_commit_sent_at) * 1000, 1),
+                text_preview=text[:80],
+            )
+        self._endpoint_commit_sent_at = None
         state = self._turn_state()
         self._partials_since_last_commit = 0
         # Cancel the hold *timer* before awaiting the detector. Local audio EOU
@@ -849,12 +1071,9 @@ class VoiceSession:
             replace = bool(self._transcript and self._transcript[-1].role == "user")
             # Transcript cleanup alone is not enough — parent-chain memory still
             # has user:fragment + assistant:heard unless we mirror the rewrite.
-            await self._align_continue_memory(
-                fragment_user_text=state.active_user_text,
-                combined_user_text=final_text,
-            )
+            await self._align_continue_memory(fragment_user_text=state.active_user_text)
 
-        await self._begin_user_turn(final_text, replace_user_entry=replace)
+        await self._begin_user_turn(final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed)
 
     # -- Internal: agent turn → TTS ----------------------------------------
 
@@ -874,6 +1093,9 @@ class VoiceSession:
         self._turn_tts_segment_records = []
         self._turn_heard_bytes = None
         self._turn_finalized_ok = False
+        self._turn_tts_stream = None
+        self._turn_tts_pump = None
+        self._turn_stream_record = None
         agen = None
         # Where we were when cancel / finally ran (loop_exit is only set on break/else/exception;
         # CancelledError inside ``await _speak`` left the old code stuck at "not_started").
@@ -1119,6 +1341,10 @@ class VoiceSession:
                             )
                         except asyncio.CancelledError:
                             pass
+                    try:
+                        await asyncio.shield(self._abort_tts_stream())
+                    except asyncio.CancelledError:
+                        pass
                 self._tts_tasks.clear()
                 # Metrics: finalize and emit exactly once per turn attempt (interrupted included).
                 # Runs before ``agen.aclose()`` so interrupted turns still get final metrics
@@ -1224,6 +1450,23 @@ class VoiceSession:
         if not text:
             return
         self._turn_tts_scheduled_text += text
+        # First flush of the turn: providers with a streaming context (ElevenLabs
+        # multi-context WS) get ONE context per reply — every subsequent flush is
+        # *fed* into it instead of synthesized as an independent segment. Separate
+        # segments each get final-sentence intonation and an audible seam between
+        # them ("choppy" speech); one context keeps prosody continuous.
+        if self._turn_tts_stream is None and self._turn_tts_pump is None and not self._cancel_turn.is_set():
+            stream = self.tts.open_stream()
+            if stream is not None:
+                self._turn_tts_stream = stream
+                record: list = ["", 0]
+                self._turn_stream_record = record
+                self._turn_tts_segment_records.append(record)
+                if self._turn_tts_started_at is None:
+                    self._turn_tts_started_at = time.monotonic()
+                self._turn_tts_pump = asyncio.create_task(self._pump_tts_stream(stream, record))
+        stream = self._turn_tts_stream
+        record = self._turn_stream_record
         prev = self._tts_tail
 
         async def chain() -> None:
@@ -1234,6 +1477,19 @@ class VoiceSession:
                     pass
             if self._cancel_turn.is_set():
                 return
+            if stream is not None:
+                clean = _strip_markdown(text)
+                if not clean.strip():
+                    return
+                self._turn_tts_segments += 1
+                if record is not None:
+                    record[0] += clean
+                try:
+                    await stream.feed(clean)
+                except Exception as e:
+                    logger.error("tts_feed_error", error=str(e), text_preview=clean[:80], exc_info=True)
+                    await self._emit(SessionError(message=f"TTS failed: {e}"))
+                return
             await self._speak(text)
 
         t = asyncio.create_task(chain())
@@ -1242,13 +1498,103 @@ class VoiceSession:
         self._tts_tail = t
 
     async def _await_tts_chain(self) -> None:
-        """Wait for all segments scheduled with :meth:`_schedule_tts` for this turn."""
+        """Wait for all segments scheduled with :meth:`_schedule_tts` for this turn.
+
+        Streaming mode: after the last feed, close the context (``end``) and
+        drain the pump until the provider signals the reply is fully
+        synthesized.
+        """
         if self._tts_tail is not None and not self._tts_tail.done():
             try:
                 await self._tts_tail
             except (asyncio.CancelledError, Exception):
                 pass
         self._tts_tail = None
+        stream = self._turn_tts_stream
+        if stream is not None:
+            try:
+                await stream.end()
+            except Exception as e:
+                logger.debug("tts_stream_end_failed", error=str(e))
+        pump = self._turn_tts_pump
+        if pump is not None and not pump.done():
+            # Shielded: a barge-in cancels this turn task while we drain — the
+            # pump itself is stopped via interrupt() → _abort_tts_stream(),
+            # and this method (like the chain await above) swallows the
+            # cancellation so the turn's normal finalize path runs.
+            try:
+                await asyncio.wait_for(asyncio.shield(pump), timeout=30.0)
+            except TimeoutError:
+                logger.warning("tts_stream_drain_timeout")
+                await self._abort_tts_stream()
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._turn_tts_stream = None
+        self._turn_tts_pump = None
+
+    async def _pump_tts_stream(self, stream: TTSStream, record: list) -> None:
+        """Drain one streaming TTS context; mirrors ``_speak``'s accounting."""
+        chunk_count = 0
+        total_bytes = 0
+        try:
+            async for chunk in stream.audio():
+                if self._cancel_turn.is_set():
+                    # INFO on purpose: explains truncated audio_bytes in metrics.
+                    logger.info(
+                        "turn_tts_stream_break",
+                        chunks_sent=chunk_count,
+                        audio_bytes=total_bytes,
+                        cancel_turn_set=True,
+                        **_trace_debug_fields(),
+                    )
+                    break
+                chunk_count += 1
+                total_bytes += len(chunk)
+                if self._turn_first_audio_at is None:
+                    self._turn_first_audio_at = time.monotonic()
+                self._turn_audio_bytes += len(chunk)
+                if self._record_audio:
+                    self._output_audio_chunks.append(chunk)
+                record[1] += len(chunk)
+                await self._emit(AudioOutput(data=chunk))
+                self.playback.on_audio_emitted(len(chunk))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("tts_error", error=str(e), chunks_so_far=chunk_count, exc_info=True)
+            await self._emit(SessionError(message=f"TTS failed: {e}"))
+        else:
+            # INFO on purpose: chars-in vs bytes-out is the only signal that
+            # catches a TTS provider returning truncated audio.
+            logger.info(
+                "turn_tts_stream_end",
+                text_chars=len(record[0]),
+                text_preview=record[0][:120],
+                audio_chunks=chunk_count,
+                audio_bytes=total_bytes,
+                cancel_turn_set=self._cancel_turn.is_set(),
+                **_trace_debug_fields(),
+            )
+        finally:
+            self._turn_tts_ended_at = time.monotonic()
+
+    async def _abort_tts_stream(self) -> None:
+        """Barge-in / teardown: stop the streaming context and its pump task."""
+        stream = self._turn_tts_stream
+        pump = self._turn_tts_pump
+        self._turn_tts_stream = None
+        self._turn_tts_pump = None
+        if stream is not None:
+            try:
+                await stream.abort()
+            except Exception as e:
+                logger.debug("tts_stream_abort_failed", error=str(e))
+        if pump is not None and not pump.done():
+            pump.cancel()
+            try:
+                await pump
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _speak(self, text: str) -> None:
         text = _strip_markdown(text)
@@ -1269,7 +1615,8 @@ class VoiceSession:
         try:
             async for chunk in self.tts.synthesize(text):
                 if self._cancel_turn.is_set():
-                    logger.debug(
+                    # INFO on purpose: explains truncated audio_bytes in metrics.
+                    logger.info(
                         "turn_tts_synthesize_break",
                         chunks_sent=chunk_count,
                         audio_bytes=total_bytes,
@@ -1297,7 +1644,10 @@ class VoiceSession:
             )
             await self._emit(SessionError(message=f"TTS failed: {e}"))
         else:
-            logger.debug(
+            # INFO on purpose: chars-in vs bytes-out is the only signal that
+            # catches a TTS provider returning truncated audio (is_final too
+            # early) — at ~16kHz PCM expect very roughly >1.5KB per char.
+            logger.info(
                 "turn_tts_synthesize_end",
                 text_chars=len(text),
                 text_preview=text[:120],
@@ -1311,13 +1661,18 @@ class VoiceSession:
 
     # -- Internal: interruption truncation ------------------------------------
 
-    async def _align_continue_memory(self, *, fragment_user_text: str, combined_user_text: str) -> None:
+    async def _align_continue_memory(self, *, fragment_user_text: str) -> None:
         """Mirror CONTINUE_TURN transcript cleanup onto parent-chain memory.
 
         ``interrupt()`` truncation writes ``assistant:heard`` into
         ``_last_run_context`` memory. Transcript pops that entry before merging
-        the user line; without the same rewrite here the next turn still
+        the user line; without the same cleanup here the next turn still
         "remembers" answering the fragment.
+
+        The fragment *user* entry is popped too (not rewritten to the combined
+        text): the merged turn passes the combined text as its prompt, which
+        the agent appends to this memory — rewriting left the combined
+        utterance in the LLM input twice.
         """
         if not fragment_user_text:
             return
@@ -1336,10 +1691,7 @@ class VoiceSession:
                     last = root.memory[-1] if root.memory else None
         if last is not None and getattr(last, "role", None) == "user":
             if (last.collect_text() or "") == fragment_user_text:
-                root.memory[-1] = Message(
-                    role="user",
-                    content=[TextContent(text=combined_user_text)],
-                )
+                root.memory.pop()
         try:
             await asyncio.shield(ctx._save_trace())
         except asyncio.CancelledError:
@@ -1374,7 +1726,9 @@ class VoiceSession:
         heard_text = map_played_bytes_to_text(segments, heard_bytes)
         # "" means "nothing was heard"; None (never set) means "unknown".
         self._last_interruption_heard_text = heard_text
-        logger.debug(
+        # INFO on purpose: this rewrite decides what the transcript/memory keep
+        # of an interrupted reply (heard_chars == 0 erases it entirely).
+        logger.info(
             "turn_interruption_truncation",
             heard_bytes=heard_bytes,
             heard_chars=len(heard_text),
@@ -1443,6 +1797,7 @@ class VoiceSession:
             audio_bytes=self._turn_audio_bytes,
             playback_acks_received=self.playback.ack_received,
             heard_bytes=self._turn_heard_bytes if interrupted else None,
+            vad_endpointed=self._turn_vad_endpointed,
         )
 
     def _attach_metrics_to_trace(self, metrics: TurnMetrics) -> None:
@@ -1465,6 +1820,12 @@ class VoiceSession:
     async def _cleanup(self) -> None:
         self._cancel_hold()
         self._held_user_text = None
+        if self._llm_warmup_task is not None and not self._llm_warmup_task.done():
+            self._llm_warmup_task.cancel()
+        self._llm_warmup_task = None
+        if self._endpointer is not None:
+            await self._endpointer.close()
+            self._endpointer = None
         for t in list(self._tts_tasks):
             if not t.done():
                 t.cancel()
@@ -1472,6 +1833,7 @@ class VoiceSession:
             await asyncio.gather(*self._tts_tasks, return_exceptions=True)
         self._tts_tasks.clear()
         self._tts_tail = None
+        await self._abort_tts_stream()
         if self._current_turn_task and not self._current_turn_task.done():
             self._current_turn_task.cancel()
             try:

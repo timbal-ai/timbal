@@ -46,6 +46,10 @@ class TurnMetrics(BaseModel):
     """PCM bytes of this turn the user actually heard before an interruption
     (``None`` for uninterrupted turns or when the position is unknown).
     Compare against ``audio_bytes`` to measure estimate-vs-ack drift."""
+    vad_endpointed: bool = False
+    """True when this turn's committed transcript was forced by the local VAD
+    endpointing fast path (Silero + audio EOU) rather than the STT provider's
+    own silence debounce — the ``eou_to_*`` numbers then start earlier."""
 
 
 class TurnMetricsEvent(VoiceSessionEvent):

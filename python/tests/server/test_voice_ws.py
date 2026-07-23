@@ -294,6 +294,9 @@ class TestVoiceWsPlaybackAck:
 
         started = next(m for m in messages if m["type"] == "session_started")
         assert started["playback_acks"] == "recommended"
+        # Default heuristic detector has no audio EOU model → the local VAD
+        # endpointing fast path never arms, and session_started must say so.
+        assert started["vad_endpointing"] is False
 
     def test_interrupted_message_carries_heard_text_field(
         self,
