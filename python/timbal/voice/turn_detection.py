@@ -593,6 +593,24 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
     # trims trailing silence before scoring, so waiting longer reproduces the
     # same window and the same score.
     DEFAULT_HOLD_TIMEOUT_SECS = 3.0
+    # Confidence tier for the HOLD (LiveKit's min/max endpointing delay shape,
+    # with the transcript as the confidence signal): when the audio model says
+    # "incomplete" but the text looks finished (terminal punctuation — Smart
+    # Turn systematically under-scores short closers like "Thank you." /
+    # "No, no."), the hold shrinks to this. The audio model is never overruled
+    # outright — the disagreeing text just shortens how long it gets to be
+    # proven right. Both-signals-incomplete keeps the full timeout.
+    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 1.2
+    # The tier needs *confidently* finished text (terminal punctuation scores
+    # P_TERMINAL=0.95), not the predictor's complete-leaning neutral (0.60) —
+    # unpunctuated text must not shorten the hold.
+    TEXT_COMPLETE_TIER_THRESHOLD = 0.9
+    # Inverse tier: audio says complete but text looks mid-thought (hedges
+    # score P_HEDGE=0.2, dangling/continuing ~0.15). Don't NEW_TURN — short
+    # HOLD so a continuation ("…tell me a story") can merge. Neutral (0.60)
+    # must NOT trigger this, or every unpunctuated complete fires a hold.
+    TEXT_INCOMPLETE_TIER_THRESHOLD = 0.4
+    TEXT_INCOMPLETE_HOLD_TIMEOUT_SECS = 1.2
     # The model consumes the last 8s of *speech*; the EOU backend trims the
     # trailing silence (STT commit debounce, hold pauses) before scoring, so
     # buffer extra raw PCM to keep a full 8s of signal after the trim.
@@ -605,6 +623,8 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         *,
         completion_threshold: float | None = None,
         hold_timeout_secs: float | None = None,
+        text_complete_hold_timeout_secs: float | None = None,
+        text_incomplete_hold_timeout_secs: float | None = None,
         fallback_text_eou: TextEouPredictor | None = None,
     ) -> None:
         self.audio_eou = audio_eou
@@ -613,10 +633,20 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self.hold_timeout_secs = (
             hold_timeout_secs if hold_timeout_secs is not None else self.DEFAULT_HOLD_TIMEOUT_SECS
         )
-        # Used only when the buffered PCM is too short to score (fast commit at
-        # session start / mic audio not routed): a zero-dep lexical check so an
-        # obviously unfinished utterance still HOLDs instead of inheriting the
-        # heuristic NEW_TURN.
+        self.text_complete_hold_timeout_secs = (
+            text_complete_hold_timeout_secs
+            if text_complete_hold_timeout_secs is not None
+            else self.TEXT_COMPLETE_HOLD_TIMEOUT_SECS
+        )
+        self.text_incomplete_hold_timeout_secs = (
+            text_incomplete_hold_timeout_secs
+            if text_incomplete_hold_timeout_secs is not None
+            else self.TEXT_INCOMPLETE_HOLD_TIMEOUT_SECS
+        )
+        # Used when the buffered PCM is too short to score, and as the text
+        # confidence signal for both HOLD tiers (complete-text shortens;
+        # incomplete-text delays an audio-complete commit). Zero-dep lexical
+        # baseline — swap for a DistilBERT-class TextEouPredictor later.
         self.fallback_text_eou = fallback_text_eou or PunctuationEouPredictor()
         self._sample_rate = 16_000
         self._pcm: deque[bytes] = deque()
@@ -644,6 +674,8 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             audio_eou=self.audio_eou,
             completion_threshold=self.completion_threshold,
             hold_timeout_secs=self.hold_timeout_secs,
+            text_complete_hold_timeout_secs=self.text_complete_hold_timeout_secs,
+            text_incomplete_hold_timeout_secs=self.text_incomplete_hold_timeout_secs,
             fallback_text_eou=self.fallback_text_eou,
         )
 
@@ -756,6 +788,32 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             text_preview=candidate[:80],
         )
         if p >= self.completion_threshold:
+            # Inverse tier (see TEXT_INCOMPLETE_HOLD_TIMEOUT_SECS): audio says
+            # done but the transcript looks mid-thought — hold short so a
+            # continuation can merge. Never overrule into IGNORE; just delay.
+            try:
+                p_text = await self.fallback_text_eou.predict_eou(candidate)
+            except Exception as e:
+                logger.warning("text_eou_predict_failed", error=str(e))
+                p_text = None
+            if p_text is not None and p_text < self.TEXT_INCOMPLETE_TIER_THRESHOLD:
+                # Mid-agent barge-in that looks incomplete still merges via
+                # CONTINUE rather than parking a HOLD over the reply.
+                if state.active_user_text and state.assistant_active:
+                    combined = state.active_user_text.rstrip(", ") + " " + text
+                    return CommitDecision(
+                        action=CommitAction.CONTINUE_TURN,
+                        text=combined,
+                        reason="audio_complete_text_incomplete_continue",
+                    )
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=candidate,
+                    reason="audio_complete_text_incomplete",
+                    hold_timeout_secs=min(
+                        self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs
+                    ),
+                )
             return CommitDecision(
                 action=CommitAction.NEW_TURN,
                 text=candidate,
@@ -769,11 +827,23 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
                 text=combined,
                 reason="audio_continuation",
             )
+        # Confidence tier (see TEXT_COMPLETE_HOLD_TIMEOUT_SECS): a transcript
+        # that reads finished disagrees with the audio score — hold, but short.
+        timeout = self.hold_timeout_secs
+        reason = "audio_hold"
+        try:
+            p_text = await self.fallback_text_eou.predict_eou(candidate)
+        except Exception as e:
+            logger.warning("text_eou_predict_failed", error=str(e))
+            p_text = None
+        if p_text is not None and p_text >= self.TEXT_COMPLETE_TIER_THRESHOLD:
+            timeout = min(self.text_complete_hold_timeout_secs, self.hold_timeout_secs)
+            reason = "audio_hold_text_complete"
         return CommitDecision(
             action=CommitAction.HOLD,
             text=candidate,
-            reason="audio_hold",
-            hold_timeout_secs=self.hold_timeout_secs,
+            reason=reason,
+            hold_timeout_secs=timeout,
         )
 
 

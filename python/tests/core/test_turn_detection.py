@@ -386,7 +386,58 @@ class TestLocalAudioTurnDetector:
         decision = await det.on_committed("I was wondering", _state())
         assert decision.action is CommitAction.HOLD
         assert decision.reason == "audio_hold"
+        # Neutral (unpunctuated) text must not shorten the hold.
+        assert decision.hold_timeout_secs == det.hold_timeout_secs
         assert model.calls == 1
+        await det.close()
+
+    async def test_incomplete_audio_complete_text_short_hold(self) -> None:
+        """Confidence tier: Smart Turn under-scores short closers ("Thank you."
+        p=0.036 live) — terminal punctuation disagrees, so the hold shrinks to
+        the short tier instead of eating the full budget as dead air."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Thank you.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_hold_text_complete"
+        assert decision.hold_timeout_secs == det.text_complete_hold_timeout_secs
+        assert det.text_complete_hold_timeout_secs < det.hold_timeout_secs
+        # Per-session clones keep the knob.
+        assert det.clone().text_complete_hold_timeout_secs == det.text_complete_hold_timeout_secs
+        await det.close()
+
+    async def test_complete_audio_hedge_text_short_hold(self) -> None:
+        """Inverse tier: Smart Turn over-scores thinking pauses
+        ("Uh, I don't know." p=0.825 live) — hedge text disagrees, so HOLD
+        short instead of NEW_TURN immediately."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.9))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Uh, I don't know.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_complete_text_incomplete"
+        assert decision.hold_timeout_secs == det.text_incomplete_hold_timeout_secs
+        await det.close()
+
+    async def test_complete_audio_real_complete_still_new_turn(self) -> None:
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.9))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Tell me a story.", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+    async def test_incomplete_audio_ellipsis_full_hold(self) -> None:
+        """An STT ellipsis means the speaker trailed off — it must not count
+        as terminal punctuation for the short tier."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("I was thinking about...", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_hold"
+        assert decision.hold_timeout_secs == det.hold_timeout_secs
         await det.close()
 
     async def test_complete_audio_new_turn(self) -> None:

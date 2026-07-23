@@ -30,6 +30,12 @@ from timbal.voice.session import (
     VoiceSessionEvent,
     _strip_markdown,
 )
+from timbal.voice.turn_detection import (
+    CommitAction,
+    CommitDecision,
+    PartialDecision,
+    TurnDetector,
+)
 
 # ---------------------------------------------------------------------------
 # Mock STT / TTS
@@ -1555,3 +1561,202 @@ class TestStreamingTTS:
         assert session._turn_tts_stream is None
         assert session._turn_tts_pump is None
         assert any(isinstance(e, SessionInterrupted) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Tests: hold expiry timing (partial-grace anchor)
+# ---------------------------------------------------------------------------
+
+
+class _AlwaysHoldOnceDetector(TurnDetector):
+    """HOLDs the first fresh commit with a fixed short timeout; anything while
+    holding supersedes into a NEW_TURN (minimal detector for expiry timing)."""
+
+    def __init__(self, timeout_secs: float) -> None:
+        self._timeout_secs = timeout_secs
+
+    async def on_partial(self, text: str, state) -> PartialDecision:
+        return PartialDecision.IGNORE
+
+    async def on_committed(self, text: str, state) -> CommitDecision:
+        if state.holding:
+            return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="new_turn")
+        return CommitDecision(
+            action=CommitAction.HOLD, text=text, reason="hold", hold_timeout_secs=self._timeout_secs
+        )
+
+
+class TestHoldExpiryTiming:
+    async def _run_hold_scenario(
+        self,
+        *,
+        grace_secs: float,
+        timeout_secs: float,
+        partial_after_commit_delay: float | None,
+        run_timeout: float = 10.0,
+    ) -> tuple[float, VoiceSession]:
+        """Inject partial→commit (HOLD) and return seconds from commit to turn start."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=agent, stt=stt, tts=tts, turn_detector=_AlwaysHoldOnceDetector(timeout_secs)
+        )
+        session._hold_partial_grace_secs = grace_secs
+
+        events: list[VoiceSessionEvent] = []
+        elapsed = 0.0
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            nonlocal elapsed
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            # The fragment's own partial precedes its commit (STT ordering).
+            await stt.inject(TranscriptEvent(type="partial", text="Thank you"))
+            await stt.inject(TranscriptEvent(type="committed", text="Thank you."))
+            t0 = asyncio.get_event_loop().time()
+            if partial_after_commit_delay is not None:
+                await asyncio.sleep(partial_after_commit_delay)
+                # User resumed speaking mid-hold.
+                await stt.inject(TranscriptEvent(type="partial", text="and one more"))
+            while not any(isinstance(e, TranscriptCommitted) for e in events):
+                await asyncio.sleep(0.01)
+            elapsed = asyncio.get_event_loop().time() - t0
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=run_timeout)
+        return elapsed, session
+
+    async def test_pre_commit_partial_does_not_stretch_hold(self) -> None:
+        """Live bug: every commit is preceded by its own partials, so anchoring
+        the grace window on *any* recent partial floored each hold at the grace
+        window (~2s) instead of the armed timeout (1.2s tier)."""
+        elapsed, session = await self._run_hold_scenario(
+            grace_secs=5.0,  # deliberately huge: failure mode is unmissable
+            timeout_secs=0.2,
+            partial_after_commit_delay=None,
+        )
+        assert elapsed < 2.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
+        assert session.transcript[0].text == "Thank you."
+
+    async def test_post_arm_partial_extends_hold(self) -> None:
+        """A partial *after* the hold is armed means the user resumed speaking
+        — the expiry must wait out the grace window (no VAD in this harness →
+        extension is conservative)."""
+        elapsed, _ = await self._run_hold_scenario(
+            grace_secs=0.8,
+            timeout_secs=0.1,
+            partial_after_commit_delay=0.05,
+        )
+        # Must have waited past the bare timeout into the grace window.
+        assert elapsed > 0.5, f"hold expired after only {elapsed:.2f}s despite fresh partial"
+
+
+# ---------------------------------------------------------------------------
+# Tests: stale partial sweeper
+# ---------------------------------------------------------------------------
+
+
+class _StuckPartialSTT(DelayedMockSTT):
+    """STT that transcribes a partial but never commits it on its own — the
+    live 'quiet speech during playback' failure. ``commit()`` releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.commit_calls = 0
+        self.pending_text: str | None = None
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+        if self.pending_text is not None:
+            text, self.pending_text = self.pending_text, None
+            await self.inject(TranscriptEvent(type="committed", text=text))
+
+
+class TestStalePartialSweeper:
+    async def test_stuck_partial_is_force_committed(self) -> None:
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = _StuckPartialSTT()
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.2
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            stt.pending_text = "Cool."
+            await stt.inject(TranscriptEvent(type="partial", text="Cool."))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert stt.commit_calls >= 1
+        assert session.transcript[0].role == "user"
+        assert session.transcript[0].text == "Cool."
+
+    async def test_sweeper_does_not_refire_on_ignored_commit(self) -> None:
+        """An IGNOREd commit (noise) leaves _last_commit_at stale; the sweeper
+        must force at most one commit per stranded partial, not one per poll."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = _StuckPartialSTT()
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.15
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            # Hesitation-only: the resulting forced commit is IGNOREd by the
+            # heuristic detector, so no turn starts and no _last_commit_at bump.
+            stt.pending_text = "Mm-hmm."
+            await stt.inject(TranscriptEvent(type="partial", text="Mm-hmm."))
+            await asyncio.sleep(1.0)  # several poll+stale windows
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert stt.commit_calls == 1
+        assert all(entry.role != "user" for entry in session.transcript)

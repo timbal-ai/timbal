@@ -697,12 +697,10 @@ function setPartial(text) {
     updateEmptyState();
     return;
   }
-  // Seal any in-flight assistant bubble so live STT can't read as a
-  // continuation of the previous reply.
-  if (window._assistantEl) {
-    window._lastAssistantEl = window._assistantEl;
-    window._assistantEl = null;
-  }
+  // Do NOT seal the in-flight assistant bubble here: a stray mic partial
+  // (breath, echo blip) mid-reply would split one reply across two bubbles.
+  // The live caption is parked *after* the assistant bubble (appendChild
+  // below), so ordering stays readable while the reply keeps growing.
   if (!partialEl) {
     partialEl = log('partial', '');
   } else {

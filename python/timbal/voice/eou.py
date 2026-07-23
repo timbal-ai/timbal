@@ -95,30 +95,99 @@ _DANGLING_TOKENS = frozenset(
     }
 )
 
+# Thinking-pause / hedge phrases: often punctuated as complete by STT
+# ("Uh, I don't know.") but the speaker continues. Short single-token hedges
+# match only as the *entire* utterance; multi-word phrases also match as a
+# trailing clause ("well i don't know"). Swappable later for a DistilBERT /
+# Namo-class text EOU behind the same :class:`TextEouPredictor` interface.
+_SHORT_HEDGES = frozenset(
+    {
+        "uh", "um", "uhm", "hmm", "mm", "mhm", "mmhmm", "well", "so", "like",
+        "maybe", "perhaps", "idk", "pues", "este", "eh",
+    }
+)
+_PHRASE_HEDGES = frozenset(
+    {
+        "i don't know",
+        "i dont know",
+        "i do not know",
+        "not sure",
+        "i'm not sure",
+        "im not sure",
+        "i am not sure",
+        "let me think",
+        "i mean",
+        "you know",
+        "i guess",
+        "no se",
+        "no sé",
+        "a ver",
+        "no lo se",
+        "no lo sé",
+    }
+)
+_PUNCT_STRIP_RE = re.compile(r"[.?!…。？！,;:—–\-]+")
+
+
+def _normalize_utterance(text: str) -> str:
+    """Lowercase, strip punctuation to spaces, collapse whitespace, unify apostrophes."""
+    t = text.lower().strip()
+    for a in ("'", "'", "`"):
+        t = t.replace(a, "'")
+    t = _PUNCT_STRIP_RE.sub(" ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _looks_like_hedge(text: str) -> bool:
+    """True when the utterance is (or ends in) a thinking-pause hedge."""
+    norm = _normalize_utterance(text)
+    if not norm:
+        return False
+    if norm in _SHORT_HEDGES or norm in _PHRASE_HEDGES:
+        return True
+    for phrase in _PHRASE_HEDGES:
+        if norm.endswith(" " + phrase):
+            return True
+    return False
+
 
 class PunctuationEouPredictor(TextEouPredictor):
-    """Zero-dep lexical EOU: terminal punctuation + trailing dangling tokens.
+    """Zero-dep lexical EOU: punctuation, dangling tokens, and hedges.
 
     Scores (tunable via subclass attributes):
 
+    * thinking-pause hedge ("i don't know", bare "uh"/"well") → :attr:`P_HEDGE`
+      — wins over terminal punctuation (STT writes "Uh, I don't know.")
     * ends with terminal punctuation → :attr:`P_TERMINAL`
-    * ends with continuing punctuation → :attr:`P_CONTINUING`
+    * ends with continuing punctuation / ellipsis → :attr:`P_CONTINUING`
     * last word is a dangling conjunction/preposition/filler → :attr:`P_DANGLING`
     * otherwise → :attr:`P_NEUTRAL` (slightly complete-leaning; STT often drops
       the final period and over-merging is worse than under-merging)
 
-    English + Spanish dangling lists match the server's ``es`` default.
+    English + Spanish dangling lists match the server's ``es`` default. This
+    is the dumb baseline behind :class:`TextEouPredictor` — swap for a small
+    ONNX text classifier later without changing turn-detection wiring.
     """
 
     P_TERMINAL: float = 0.95
     P_CONTINUING: float = 0.15
     P_DANGLING: float = 0.15
+    P_HEDGE: float = 0.2
     P_NEUTRAL: float = 0.60
 
     async def predict_eou(self, text: str) -> float:
         stripped = text.strip()
         if not stripped:
             return 1.0
+        # Hedges before terminal punct: "Uh, I don't know." must not score
+        # complete just because STT stuck a period on a mid-thought pause.
+        if _looks_like_hedge(stripped):
+            return self.P_HEDGE
+        # Ellipsis before the terminal check: STT writes "..." / "…" exactly
+        # when the speaker trails off mid-thought — the opposite of terminal,
+        # despite ending in ".".
+        if stripped.endswith("...") or stripped.endswith("…"):
+            return self.P_CONTINUING
         last_char = stripped[-1]
         if last_char in _TERMINAL_PUNCT:
             return self.P_TERMINAL

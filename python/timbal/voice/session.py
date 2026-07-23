@@ -431,11 +431,29 @@ class VoiceSession:
         self._last_commit_at: float = 0.0
         self._partials_since_last_commit: int = 0
         self._last_partial_at: float = 0.0
+        # Latest non-empty STT partial text — fed to the VAD endpointer's
+        # optional text_score so a mid-thought hedge can bump the delay even
+        # before the provider commits.
+        self._latest_partial_text: str = ""
         # A pending HOLD must not expire while the user is audibly mid-utterance
         # (recent STT partial): the upcoming commit merges with / supersedes the
         # hold. Must exceed the STT VAD silence threshold (~1.2s default) so the
         # commit always lands before the extended expiry re-fires.
         self._hold_partial_grace_secs = 2.0
+        # When the last STT commit event arrived. Anchors the hold-expiry
+        # extension: only partials *newer* than the commit mean the user
+        # resumed speaking — the committed fragment's own trailing partial
+        # refinements must not stretch the hold.
+        self._commit_event_at: float = 0.0
+        # Watchdog for transcripts the provider never commits: STT can emit a
+        # partial (e.g. quiet speech ducked by AEC during assistant playback)
+        # whose VAD never registers an utterance — no commit ever fires and the
+        # words hang as a "…" caption forever. After this much silence past the
+        # last partial (comfortably beyond the provider's ~1.2s debounce, so it
+        # only fires when the provider clearly won't), force ``stt.commit()``.
+        self._stale_partial_commit_secs = 2.5
+        self._stale_partial_poll_secs = 0.5
+        self._stale_commit_sent_at = 0.0
 
         # Serial TTS runs off the agent ``async for`` critical path so we keep pulling
         # LLM/Agent events (and emit trace OUTPUT) while audio still synthesizes.
@@ -527,6 +545,7 @@ class VoiceSession:
 
             audio_task = asyncio.create_task(self._forward_audio(audio_in))
             stt_task = asyncio.create_task(self._process_stt_events())
+            sweep_task = asyncio.create_task(self._sweep_stale_partials())
 
             try:
                 while True:
@@ -535,10 +554,10 @@ class VoiceSession:
                         break
                     yield event
             finally:
-                for task in (audio_task, stt_task):
+                for task in (audio_task, stt_task, sweep_task):
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(audio_task, stt_task, return_exceptions=True)
+                await asyncio.gather(audio_task, stt_task, sweep_task, return_exceptions=True)
 
         except Exception as e:
             logger.error("voice_session_error", error=str(e), exc_info=True)
@@ -716,6 +735,7 @@ class VoiceSession:
             score=score_fn,
             commit=self._endpoint_commit,
             should_commit=self._endpoint_should_commit,
+            text_score=self._endpoint_text_score,
         )
         try:
             await endpointer.start(sample_rate=self.audio_input.sample_rate)
@@ -747,6 +767,24 @@ class VoiceSession:
         if self._closed:
             return False
         return self._last_partial_at > self._last_commit_at
+
+    async def _endpoint_text_score(self) -> float | None:
+        """``P(complete)`` for the latest STT partial, for VAD delay bumping.
+
+        Uses the turn detector's text EOU when present (``fallback_text_eou``
+        on :class:`~timbal.voice.LocalAudioTurnDetector`); otherwise the
+        shared :class:`~timbal.voice.PunctuationEouPredictor` baseline. Returns
+        ``None`` when there is no fresh partial — endpointer keeps the
+        audio-only delay.
+        """
+        if self._last_partial_at <= self._last_commit_at or not self._latest_partial_text:
+            return None
+        text_eou = getattr(self.turn_detector, "fallback_text_eou", None)
+        if text_eou is None:
+            from .eou import PunctuationEouPredictor
+
+            text_eou = PunctuationEouPredictor()
+        return await text_eou.predict_eou(self._latest_partial_text)
 
     async def _endpoint_commit(self) -> None:
         self._endpoint_commit_sent_at = time.monotonic()
@@ -787,6 +825,17 @@ class VoiceSession:
         )
         return True
 
+    def _vad_contradicts_recent_partial(self) -> bool:
+        """True when the local VAD is healthy and saw no real speech energy
+        recently — a fresh STT partial is then a hallucination, not the user
+        mid-utterance. Conservative on missing evidence (no endpointer /
+        starved VAD → ``False``), mirroring :meth:`_vad_vetoes_barge_in`.
+        """
+        if self._endpointer is None:
+            return False
+        speech_secs = self._endpointer.speech_secs_in_window(self.BARGE_IN_VAD_WINDOW_SECS)
+        return speech_secs is not None and speech_secs < self.MIN_BARGE_IN_VAD_SPEECH_SECS
+
     # -- Internal: audio → STT ---------------------------------------------
 
     async def _forward_audio(self, audio_in: AsyncIterable[bytes]) -> None:
@@ -804,6 +853,44 @@ class VoiceSession:
             logger.error("audio_forward_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"Audio input error: {e}"))
 
+    async def _sweep_stale_partials(self) -> None:
+        """Watchdog: force-commit transcripts the provider never commits.
+
+        Failure mode (seen live): the user speaks quietly while the assistant
+        is playing — AEC ducks the near-end audio, the STT still transcribes a
+        partial, but neither the provider VAD nor Silero registers an
+        utterance. No commit ever fires and the words hang as a "…" caption
+        until the session dies. When a partial has gone
+        ``_stale_partial_commit_secs`` with no commit and no newer partial,
+        force ``stt.commit()`` so the transcript flows through the normal
+        ``_handle_committed`` path (providers without manual commit no-op).
+        """
+        try:
+            while not self._closed:
+                await asyncio.sleep(self._stale_partial_poll_secs)
+                if self._closed:
+                    return
+                if self._last_partial_at <= self._last_commit_at:
+                    continue
+                # One forced commit per stranded partial: an IGNOREd commit
+                # does not bump _last_commit_at, so without this guard a noise
+                # partial would retrigger a commit every poll.
+                if self._last_partial_at <= self._stale_commit_sent_at:
+                    continue
+                stale_secs = time.monotonic() - self._last_partial_at
+                if stale_secs < self._stale_partial_commit_secs:
+                    continue
+                self._stale_commit_sent_at = time.monotonic()
+                # INFO on purpose: this is the only trace that a transcript was
+                # rescued from a provider that silently refused to commit.
+                logger.info("stt_stale_partial_commit", stale_secs=round(stale_secs, 1))
+                try:
+                    await self.stt.commit()
+                except Exception as e:
+                    logger.warning("stt_stale_partial_commit_failed", error=str(e))
+        except asyncio.CancelledError:
+            return
+
     # -- Internal: STT → turns ---------------------------------------------
 
     async def _process_stt_events(self) -> None:
@@ -814,6 +901,7 @@ class VoiceSession:
                     self._partials_since_last_commit += 1
                     if text:
                         self._last_partial_at = time.monotonic()
+                        self._latest_partial_text = text
                     await self._emit(TranscriptPartial(text=text))
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
@@ -876,17 +964,30 @@ class VoiceSession:
         self._hold_armed_timeout_secs = timeout_secs
         self._last_commit_at = time.monotonic()
 
+        # Anchor for "user resumed speaking": partials older than the commit
+        # event are the held fragment's own trailing refinements and must not
+        # stretch the hold (they otherwise floor every expiry at the grace
+        # window instead of ``timeout_secs``).
+        anchor = self._commit_event_at if self._commit_event_at > 0 else time.monotonic()
+
         async def _expire() -> None:
             me = asyncio.current_task()
             try:
                 remaining = timeout_secs
                 while True:
                     await asyncio.sleep(remaining)
-                    # Never fire mid-utterance: a recent STT partial means the
-                    # user resumed speaking, and their commit is about to merge
-                    # with / supersede this hold. Fire only after real silence.
+                    # Never fire mid-utterance: a *new* STT partial since the
+                    # commit means the user resumed speaking, and their commit
+                    # is about to merge with / supersede this hold. But require
+                    # mic energy to corroborate: STT partials can hallucinate
+                    # from silence (same failure as barge-ins) and would extend
+                    # the hold into dead air.
                     since_partial = time.monotonic() - self._last_partial_at
-                    if since_partial < self._hold_partial_grace_secs:
+                    if (
+                        self._last_partial_at > anchor
+                        and since_partial < self._hold_partial_grace_secs
+                        and not self._vad_contradicts_recent_partial()
+                    ):
                         remaining = self._hold_partial_grace_secs - since_partial
                         continue
                     break
@@ -954,6 +1055,7 @@ class VoiceSession:
     async def _handle_committed(self, text: str) -> None:
         if self._closed:
             return
+        self._commit_event_at = time.monotonic()
         # Any commit (endpointer-forced or provider debounce) makes a pending
         # VAD endpoint stale — the STT segment it targeted is already closed.
         if self._endpointer is not None:

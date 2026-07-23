@@ -77,15 +77,27 @@ def _endpointer(vad: FakeVad | None = None, **knobs) -> VadEndpointer:
 class _Recorder:
     """Bind targets that record calls and return scripted values."""
 
-    def __init__(self, *, p: float | None = 0.95, gate: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        p: float | None = 0.95,
+        gate: bool = True,
+        p_text: float | None = None,
+    ) -> None:
         self.p = p
         self.gate = gate
+        self.p_text = p_text
         self.score_calls = 0
         self.commit_calls = 0
+        self.text_score_calls = 0
 
     async def score(self) -> float | None:
         self.score_calls += 1
         return self.p
+
+    async def text_score(self) -> float | None:
+        self.text_score_calls += 1
+        return self.p_text
 
     async def commit(self) -> None:
         self.commit_calls += 1
@@ -95,7 +107,12 @@ class _Recorder:
 
 
 async def _started(ep: VadEndpointer, rec: _Recorder) -> VadEndpointer:
-    ep.bind(score=rec.score, commit=rec.commit, should_commit=rec.should_commit)
+    ep.bind(
+        score=rec.score,
+        commit=rec.commit,
+        should_commit=rec.should_commit,
+        text_score=rec.text_score if rec.p_text is not None else None,
+    )
     await ep.start(sample_rate=16_000)
     return ep
 
@@ -112,9 +129,11 @@ async def _settle(secs: float = 0.15) -> None:
 class TestEndpointingDelay:
     def test_confident_maps_to_min(self):
         assert endpointing_delay(1.0, min_delay=0.0, max_delay=3.0) == 0.0
+        assert endpointing_delay(1.0) == VadEndpointer.MIN_DELAY_SECS
 
     def test_zero_maps_to_max(self):
         assert endpointing_delay(0.0, min_delay=0.0, max_delay=3.0) == 3.0
+        assert endpointing_delay(0.0) == 3.0
 
     def test_monotonic_decreasing(self):
         delays = [endpointing_delay(p / 10) for p in range(11)]
@@ -128,10 +147,15 @@ class TestEndpointingDelay:
         # p below the completion threshold must compute a delay longer than
         # the ~1.2s ElevenLabs VAD debounce — the provider commit wins and the
         # existing HOLD machinery handles the incomplete utterance.
-        assert endpointing_delay(0.4) > 1.0
+        assert endpointing_delay(0.4, min_delay=0.0) > 1.0
 
-    def test_confident_is_fast(self):
-        assert endpointing_delay(0.95) < 0.05
+    def test_confident_respects_livekit_floor(self):
+        # LiveKit min_delay shape: even p≈1 never collapses to ~0.
+        assert endpointing_delay(0.95) >= VadEndpointer.MIN_DELAY_SECS - 1e-9
+        assert VadEndpointer.MIN_DELAY_SECS >= 0.4
+
+    def test_curve_still_fast_without_floor(self):
+        assert endpointing_delay(0.95, min_delay=0.0) < 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +225,28 @@ class TestVadEndpointer:
         await _settle(0.05)  # score happened, now sleeping the long delay
         assert rec.score_calls == 1
         ep.push(b"SS")  # user resumes → pending cancelled
+        await _settle(0.05)
+        assert rec.commit_calls == 0
+
+    async def test_text_incomplete_bumps_delay(self):
+        """Audio-complete + hedge text → delay floored at TEXT_INCOMPLETE_DELAY,
+        so a continuation can cancel before commit (live: "I don't know" → story)."""
+        rec = _Recorder(p=0.98, p_text=0.2)
+        ep = await _started(
+            _endpointer(
+                min_delay_secs=0.0,
+                max_delay_secs=0.05,
+                text_incomplete_delay_secs=0.4,
+            ),
+            rec,
+        )
+        ep.push(b"SSS")
+        ep.push(b"\x00\x00")
+        await _settle(0.1)  # past audio-only delay (0.05), still in text bump
+        assert rec.score_calls == 1
+        assert rec.text_score_calls == 1
+        assert rec.commit_calls == 0
+        ep.push(b"SS")  # continuation cancels during the bumped wait
         await _settle(0.05)
         assert rec.commit_calls == 0
 

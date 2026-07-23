@@ -51,23 +51,26 @@ _FRAME_SECS = 512 / 16_000
 def endpointing_delay(
     p: float,
     *,
-    min_delay: float = 0.0,
+    min_delay: float = 0.45,
     max_delay: float = 3.0,
     curve: float = 2.0,
 ) -> float:
     """Map EOU probability to extra silence to wait before force-committing.
 
     ``delay = min + (max - min) * (1 - p) ** curve`` — smooth, monotonic
-    decreasing in ``p``. With the defaults (fired ~0.3s after speech stop:
-    0.2s VAD silence + ~0.1s Smart Turn inference):
+    decreasing in ``p``. ``min_delay`` is a LiveKit-shaped floor: even a
+    confident-complete score still waits before force-committing, so a brief
+    thinking pause ("Uh, I don't know." → "tell me a story") can cancel the
+    pending endpoint via resumed speech. Defaults (fired ~0.3s after speech
+    stop: 0.2s VAD silence + ~0.1s Smart Turn inference):
 
     ========  =========  ==========================================
     p         delay      total silence before commit
     ========  =========  ==========================================
-    0.95      ~0.01s     ~0.3s   (confident: LiveKit-class response)
-    0.7       ~0.27s     ~0.6s
-    0.5       0.75s      ~1.05s  (unsure: still beats the provider)
-    <0.4      >1.1s      provider debounce (~1.2s) commits first —
+    0.95      0.45s      ~0.75s  (confident: LiveKit min_delay floor)
+    0.7       ~0.68s     ~1.0s
+    0.5       ~1.1s      ~1.4s   (unsure)
+    <0.4      >1.4s      provider debounce (~1.2s) often commits first —
                          incomplete utterances fall through to the
                          existing HOLD machinery untouched
     ========  =========  ==========================================
@@ -108,12 +111,19 @@ class VadEndpointer:
     SPEECH_RESUME_SECS = 0.064
     """Consecutive speech (2 frames) that cancels a pending endpoint — a single
     noise-spike frame must not kill a valid pending commit."""
-    MIN_DELAY_SECS = 0.0
+    MIN_DELAY_SECS = 0.45
+    """LiveKit-shaped floor: never force-commit instantly on high-p scores."""
     MAX_DELAY_SECS = 3.0
     DELAY_CURVE = 2.0
     """See :func:`endpointing_delay`."""
     MIN_COMMIT_INTERVAL_SECS = 2.0
     """Floor between force-commits (ElevenLabs throttles rapid commits)."""
+    TEXT_INCOMPLETE_DELAY_SECS = 1.2
+    """When the latest STT partial looks incomplete (hedge / trailing-off),
+    bump the delay to at least this — same short tier as the commit-path
+    inverse HOLD. Gives the continuation time to cancel the pending endpoint."""
+    TEXT_INCOMPLETE_THRESHOLD = 0.4
+    """``P(complete)`` below this from the text scorer → treat as incomplete."""
 
     def __init__(
         self,
@@ -126,6 +136,7 @@ class VadEndpointer:
         max_delay_secs: float | None = None,
         delay_curve: float | None = None,
         min_commit_interval_secs: float | None = None,
+        text_incomplete_delay_secs: float | None = None,
     ) -> None:
         self._vad = vad
         self.speech_threshold = speech_threshold if speech_threshold is not None else self.SPEECH_THRESHOLD
@@ -137,10 +148,16 @@ class VadEndpointer:
         self.min_commit_interval_secs = (
             min_commit_interval_secs if min_commit_interval_secs is not None else self.MIN_COMMIT_INTERVAL_SECS
         )
+        self.text_incomplete_delay_secs = (
+            text_incomplete_delay_secs
+            if text_incomplete_delay_secs is not None
+            else self.TEXT_INCOMPLETE_DELAY_SECS
+        )
 
         self._score: Callable[[], Awaitable[float | None]] | None = None
         self._commit: Callable[[], Awaitable[None]] | None = None
         self._should_commit: Callable[[], bool] | None = None
+        self._text_score: Callable[[], Awaitable[float | None]] | None = None
 
         self._started = False
         self._closed = False
@@ -168,11 +185,20 @@ class VadEndpointer:
         score: Callable[[], Awaitable[float | None]],
         commit: Callable[[], Awaitable[None]],
         should_commit: Callable[[], bool],
+        text_score: Callable[[], Awaitable[float | None]] | None = None,
     ) -> None:
-        """Attach the session callbacks. Must run before :meth:`start`."""
+        """Attach the session callbacks. Must run before :meth:`start`.
+
+        ``text_score`` is optional: when provided, returns ``P(complete)`` for
+        the latest STT partial (or ``None``). Used to bump the delay when the
+        transcript looks mid-thought even if the audio model is confident —
+        same LiveKit min/max shape, text as the confidence signal. Swappable
+        later for a DistilBERT-class text EOU without changing this wiring.
+        """
         self._score = score
         self._commit = commit
         self._should_commit = should_commit
+        self._text_score = text_score
 
     async def start(self, *, sample_rate: int) -> None:
         """Load Silero (downloading/instantiating off the event loop) and arm.
@@ -287,6 +313,18 @@ class VadEndpointer:
                 max_delay=self.max_delay_secs,
                 curve=self.delay_curve,
             )
+            text_bumped = False
+            p_text: float | None = None
+            if self._text_score is not None:
+                try:
+                    p_text = await self._text_score()
+                except Exception as e:
+                    logger.warning("vad_text_score_failed", error=str(e))
+                    p_text = None
+                if p_text is not None and p_text < self.TEXT_INCOMPLETE_THRESHOLD:
+                    bumped = max(delay, self.text_incomplete_delay_secs)
+                    text_bumped = bumped > delay
+                    delay = bumped
             # INFO on purpose: fires once per speech-stop and is the whole
             # observable behaviour of the endpointing fast path.
             logger.info(
@@ -294,6 +332,8 @@ class VadEndpointer:
                 p=round(p, 3),
                 delay_secs=round(delay, 3),
                 score_ms=round((time.monotonic() - t0) * 1000, 1),
+                p_text=round(p_text, 3) if p_text is not None else None,
+                text_incomplete_bump=text_bumped,
             )
             remaining = delay - (time.monotonic() - t0)
             if remaining > 0:

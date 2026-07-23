@@ -18,12 +18,14 @@ class TestPunctuationEouPredictor:
 
     async def test_terminal_punctuation_complete(self) -> None:
         p = PunctuationEouPredictor()
-        for text in ("Tell me a story.", "How are you?", "Stop!", "Vale…", "¿Qué tal?"):
+        for text in ("Tell me a story.", "How are you?", "Stop!", "¿Qué tal?"):
             assert await p.predict_eou(text) == p.P_TERMINAL
 
     async def test_continuing_punctuation_incomplete(self) -> None:
         p = PunctuationEouPredictor()
-        for text in ("I want to say,", "First this;", "Listen —"):
+        # Ellipsis included: STT writes "…" / "..." when the speaker audibly
+        # trails off mid-thought — the opposite of terminal, despite the dots.
+        for text in ("I want to say,", "First this;", "Listen —", "Vale…", "I was thinking about..."):
             assert await p.predict_eou(text) == p.P_CONTINUING
 
     async def test_trailing_dangling_token_incomplete_english(self) -> None:
@@ -66,3 +68,24 @@ class TestPunctuationEouPredictor:
         p = PunctuationEouPredictor()
         await p.start()
         await p.close()
+
+    async def test_hedge_beats_terminal_punctuation(self) -> None:
+        """Live failure: STT writes "Uh, I don't know." with a period; audio
+        EOU agrees complete — hedges must score incomplete anyway."""
+        p = PunctuationEouPredictor()
+        for text in (
+            "Uh, I don't know.",
+            "I don't know.",
+            "I'm not sure.",
+            "uh",
+            "Well",
+            "No sé.",
+            "Let me think.",
+        ):
+            assert await p.predict_eou(text) == p.P_HEDGE, text
+            assert await p.predict_eou(text) < 0.4
+
+    async def test_hedge_does_not_match_real_completes(self) -> None:
+        p = PunctuationEouPredictor()
+        for text in ("Tell me a story.", "Quite incredible.", "Yeah, sure. Anything else?"):
+            assert await p.predict_eou(text) == p.P_TERMINAL, text
