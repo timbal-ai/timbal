@@ -20,6 +20,7 @@ from pydantic import Field, PrivateAttr, computed_field, model_validator
 from ..types.content import FileContent, TextContent
 from ..types.file import File
 from ..types.message import Message
+from .mcp_oauth import OAuth
 from .runnable import Runnable
 from .tool import Tool
 from .tool_set import ToolSet
@@ -99,6 +100,15 @@ class MCPServer(ToolSet):
 
         MCPServer(transport="stdio", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "."])
         MCPServer(transport="http", url="https://api.timbal.ai/mcp")
+
+    HTTP servers that require user login support OAuth 2.0 out of the box:
+
+        MCPServer(transport="http", url="https://mcp.example.com/mcp", auth="oauth")
+        MCPServer(transport="http", url="https://mcp.example.com/mcp", auth=OAuth(scopes="read write"))
+
+    On the first 401 response the user's browser opens at the server's
+    authorization portal; tokens are persisted under ``~/.timbal/mcp_oauth/``
+    and refreshed automatically on subsequent runs.
     """
 
     name: str | None = None
@@ -119,6 +129,15 @@ class MCPServer(ToolSet):
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
+    auth: OAuth | Literal["oauth"] | None = None
+    """OAuth 2.0 configuration for HTTP servers that require user login.
+
+    Pass ``"oauth"`` for the default browser-based flow, or an :class:`OAuth`
+    instance to customize scopes, callback port, token storage, etc. When the
+    server responds 401, the OAuth portal opens in the user's browser and the
+    resulting tokens are stored and refreshed automatically.
+    """
+
     _session: Any | None = PrivateAttr(default=None)
     _tools_cache: list[Runnable] | None = PrivateAttr(default=None)
     _context: Any | None = PrivateAttr(default=None)
@@ -135,9 +154,13 @@ class MCPServer(ToolSet):
         if self.transport == "stdio":
             if not self.command:
                 raise ValueError("'command' is required for stdio transport")
+            if self.auth is not None:
+                raise ValueError("'auth' is only supported for http transport")
         elif self.transport == "http":
             if not self.url:
                 raise ValueError("'url' is required for http transport")
+        if self.auth == "oauth":
+            self.auth = OAuth()
         return self
 
     @asynccontextmanager
@@ -157,7 +180,16 @@ class MCPServer(ToolSet):
     @asynccontextmanager
     async def _connect_http(self):
         assert self.url is not None
-        async with httpx.AsyncClient(headers=self.headers if self.headers else None) as http_client:
+        auth = self.auth.build_provider(self.url) if isinstance(self.auth, OAuth) else None
+        # Mirror the MCP SDK's recommended client defaults (30s timeout,
+        # follow_redirects) — OAuth discovery/authorization endpoints often redirect.
+        http_client = httpx.AsyncClient(
+            headers=self.headers if self.headers else None,
+            auth=auth,
+            timeout=httpx.Timeout(30.0),
+            follow_redirects=True,
+        )
+        async with http_client:
             async with streamable_http_client(self.url, http_client=http_client) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
