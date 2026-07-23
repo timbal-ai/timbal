@@ -959,14 +959,15 @@ fn warnIfNotGitignored(
         if (!ignored) {
             try stderr.print(
                 "{s}Warning:{s} {s} is not gitignored. Pulled secrets could be committed.\n" ++
-                    "Add `.env` to .gitignore (or pass -f to a gitignored path).\n",
+                    "Add this path (or a matching pattern) to .gitignore.\n",
                 .{ Color.bold_yellow, Color.reset, file_path },
             );
         }
         return;
     }
 
-    // Fallback: scan repo-root .gitignore for a `.env` pattern.
+    // Fallback: scan repo-root .gitignore for a pattern that covers *this* file
+    // (a bare `.env` entry must not silence warnings for `-f secrets.env`).
     const gi_path = try std.fmt.allocPrint(allocator, "{s}{s}.gitignore", .{ repo_root, sep });
     defer allocator.free(gi_path);
     const gi = fs.cwd().readFileAlloc(allocator, gi_path, 1024 * 1024) catch {
@@ -978,10 +979,12 @@ fn warnIfNotGitignored(
     };
     defer allocator.free(gi);
 
-    if (!gitignoreMentionsEnv(gi)) {
+    const base = fs.path.basename(file_path);
+    if (!gitignoreCoversBasename(gi, base)) {
         try stderr.print(
-            "{s}Warning:{s} .gitignore does not mention `.env`; {s} may be committed with secrets.\n",
-            .{ Color.bold_yellow, Color.reset, file_path },
+            "{s}Warning:{s} {s} does not appear gitignored; secrets may be committed.\n" ++
+                "Add `{s}` (or a matching pattern) to .gitignore.\n",
+            .{ Color.bold_yellow, Color.reset, file_path, base },
         );
     }
 }
@@ -1003,20 +1006,46 @@ fn gitCheckIgnore(allocator: std.mem.Allocator, repo_root: []const u8, file_path
     };
 }
 
-fn gitignoreMentionsEnv(content: []const u8) bool {
+/// Best-effort match of common .gitignore patterns against a basename.
+/// Only used when `git check-ignore` is unavailable.
+fn gitignorePatternMatches(pattern_raw: []const u8, basename: []const u8) bool {
+    var pattern = std.mem.trim(u8, pattern_raw, " \t");
+    if (pattern.len == 0 or pattern[0] == '!') return false;
+    // Drop directory-only marker and leading path noise we care about for basenames.
+    if (std.mem.endsWith(u8, pattern, "/")) pattern = pattern[0 .. pattern.len - 1];
+    if (std.mem.startsWith(u8, pattern, "./")) pattern = pattern[2..];
+    if (std.mem.startsWith(u8, pattern, "/")) pattern = pattern[1..];
+    if (std.mem.startsWith(u8, pattern, "**/")) pattern = pattern[3..];
+    // If a remaining slash is present, only the final segment can match a basename.
+    if (std.mem.lastIndexOfScalar(u8, pattern, '/')) |idx| {
+        pattern = pattern[idx + 1 ..];
+    }
+    if (pattern.len == 0) return false;
+
+    if (std.mem.eql(u8, pattern, basename)) return true;
+    if (std.mem.eql(u8, pattern, "*")) return true;
+
+    // prefix*
+    if (std.mem.endsWith(u8, pattern, "*") and !std.mem.startsWith(u8, pattern, "*")) {
+        const prefix = pattern[0 .. pattern.len - 1];
+        if (std.mem.indexOfScalar(u8, prefix, '*') != null) return false;
+        return std.mem.startsWith(u8, basename, prefix);
+    }
+    // *suffix
+    if (std.mem.startsWith(u8, pattern, "*") and !std.mem.endsWith(u8, pattern, "*")) {
+        const suffix = pattern[1..];
+        if (std.mem.indexOfScalar(u8, suffix, '*') != null) return false;
+        return std.mem.endsWith(u8, basename, suffix);
+    }
+    return false;
+}
+
+fn gitignoreCoversBasename(content: []const u8, basename: []const u8) bool {
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
-        // Common patterns that cover the default `.env` file.
-        if (std.mem.eql(u8, line, ".env") or
-            std.mem.eql(u8, line, "/.env") or
-            std.mem.eql(u8, line, "*.env") or
-            std.mem.eql(u8, line, ".env*") or
-            std.mem.eql(u8, line, "**/.env"))
-        {
-            return true;
-        }
+        if (gitignorePatternMatches(line, basename)) return true;
     }
     return false;
 }
@@ -1094,12 +1123,25 @@ fn runPull(
         };
     }
 
-    const file = fs.cwd().createFile(file_path, .{}) catch |err| {
+    // --force: remove first so recreate can't fail/`PathAlreadyExists` on odd platforms,
+    // then create with explicit truncate.
+    if (opts.force) {
+        fs.cwd().deleteFile(file_path) catch |err| {
+            if (err != error.FileNotFound) {
+                try stderr.print("Error: could not replace {s}: {}\n", .{ file_path, err });
+                std.process.exit(1);
+            }
+        };
+    }
+
+    const file = fs.cwd().createFile(file_path, .{ .truncate = true }) catch |err| {
         try stderr.print("Error: could not write {s}: {}\n", .{ file_path, err });
         std.process.exit(1);
     };
     defer file.close();
     try file.writeAll(content);
+    // Ensure no stale tail remains if truncate was ignored by the platform.
+    file.setEndPos(content.len) catch {};
 
     if (!opts.quiet) {
         try stdout.print(
@@ -1144,6 +1186,11 @@ fn runPush(
         }
     }
 
+    var pushable: usize = 0;
+    for (sync_vars.items) |v| {
+        if (!isReservedVarName(v.name)) pushable += 1;
+    }
+
     const url = try std.fmt.allocPrint(
         allocator,
         "{s}/orgs/{s}/projects/{s}/vars/push",
@@ -1167,8 +1214,23 @@ fn runPush(
                 try stdout.print("  {s} ({s})  value: <redacted>\n", .{ v.name, v.type });
             }
         }
+        if (pushable == 0) {
+            try stderr.print(
+                "Error: nothing to push — {s} only contains reserved names (PORT, TIMBAL_PROJECT_SECRET).\n",
+                .{file_path},
+            );
+            std.process.exit(1);
+        }
         try stdout.writeAll("No changes made.\n");
         return;
+    }
+
+    if (pushable == 0) {
+        try stderr.print(
+            "Error: nothing to push — {s} only contains reserved names (PORT, TIMBAL_PROJECT_SECRET).\n",
+            .{file_path},
+        );
+        std.process.exit(1);
     }
 
     const payload = try buildPushPayload(allocator, rev, sync_vars.items);
@@ -1360,11 +1422,13 @@ test "buildPushPayload omits reserved var names" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"OK\"") != null);
 }
 
-test "gitignoreMentionsEnv detects common patterns" {
-    try std.testing.expect(gitignoreMentionsEnv(".env\n"));
-    try std.testing.expect(gitignoreMentionsEnv("# comment\n*.env\n"));
-    try std.testing.expect(gitignoreMentionsEnv(".env*\n"));
-    try std.testing.expect(!gitignoreMentionsEnv("node_modules/\n.env.example\n"));
+test "gitignoreCoversBasename matches the actual file" {
+    try std.testing.expect(gitignoreCoversBasename(".env\n", ".env"));
+    try std.testing.expect(gitignoreCoversBasename("*.env\n", "secrets.env"));
+    try std.testing.expect(gitignoreCoversBasename(".env*\n", ".env.local"));
+    // A bare `.env` entry must not cover a custom -f path.
+    try std.testing.expect(!gitignoreCoversBasename(".env\n", "secrets.env"));
+    try std.testing.expect(!gitignoreCoversBasename("node_modules/\n", ".env"));
 }
 
 test "normalizeBaseUrlOverride accepts api hosts" {
