@@ -1113,7 +1113,27 @@ fn runPull(
     const content = try formatEnvFile(allocator, parsed.value.rev, sync_vars.items);
     defer allocator.free(content);
 
-    // Ensure parent dir exists for -f nested paths.
+    try persistPulledEnvFile(allocator, file_path, content, opts.force, stderr);
+
+    if (!opts.quiet) {
+        try stdout.print(
+            "{s}✓{s} Pulled {d} var(s) for rev {s}{s}{s} → {s}\n",
+            .{ Color.bold_green, Color.reset, sync_vars.items.len, Color.bold_cyan, parsed.value.rev, Color.reset, file_path },
+        );
+    }
+}
+
+/// Persist pulled env contents safely:
+/// - without --force: O_EXCL create so a file that appears after the pre-check cannot be truncated
+/// - with --force: write a temp file fully, then rename over the destination so a failed write
+///   cannot destroy the previous local file
+fn persistPulledEnvFile(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    content: []const u8,
+    force: bool,
+    stderr: anytype,
+) !void {
     if (fs.path.dirname(file_path)) |dir| {
         fs.cwd().makePath(dir) catch |err| {
             if (err != error.PathAlreadyExists) {
@@ -1123,32 +1143,76 @@ fn runPull(
         };
     }
 
-    // --force: remove first so recreate can't fail/`PathAlreadyExists` on odd platforms,
-    // then create with explicit truncate.
-    if (opts.force) {
-        fs.cwd().deleteFile(file_path) catch |err| {
-            if (err != error.FileNotFound) {
-                try stderr.print("Error: could not replace {s}: {}\n", .{ file_path, err });
+    if (!force) {
+        // exclusive create closes the TOCTOU window: a file created during the HTTP pull
+        // cannot be truncated by a non-force pull.
+        const file = fs.cwd().createFile(file_path, .{ .exclusive = true }) catch |err| {
+            if (err == error.PathAlreadyExists) {
+                try stderr.print(
+                    "Error: {s} already exists. Re-run with --force to overwrite.\n",
+                    .{file_path},
+                );
                 std.process.exit(1);
             }
+            try stderr.print("Error: could not write {s}: {}\n", .{ file_path, err });
+            std.process.exit(1);
         };
+        defer file.close();
+        file.writeAll(content) catch |err| {
+            // Best-effort cleanup of a partial new file; there was no prior content to preserve.
+            fs.cwd().deleteFile(file_path) catch {};
+            try stderr.print("Error: could not write {s}: {}\n", .{ file_path, err });
+            std.process.exit(1);
+        };
+        file.setEndPos(content.len) catch {};
+        return;
     }
 
-    const file = fs.cwd().createFile(file_path, .{ .truncate = true }) catch |err| {
-        try stderr.print("Error: could not write {s}: {}\n", .{ file_path, err });
+    // --force: never delete the destination until the new contents are safely on disk.
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.timbal-pull.tmp", .{file_path});
+    defer allocator.free(tmp_path);
+
+    {
+        const tmp = fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch |err| {
+            try stderr.print("Error: could not write temp file {s}: {}\n", .{ tmp_path, err });
+            std.process.exit(1);
+        };
+        var tmp_ok = false;
+        defer {
+            tmp.close();
+            if (!tmp_ok) fs.cwd().deleteFile(tmp_path) catch {};
+        }
+        tmp.writeAll(content) catch |err| {
+            try stderr.print("Error: could not write temp file {s}: {}\n", .{ tmp_path, err });
+            std.process.exit(1);
+        };
+        tmp.setEndPos(content.len) catch {};
+        tmp_ok = true;
+    }
+
+    fs.cwd().rename(tmp_path, file_path) catch |err| {
+        // POSIX rename replaces atomically. Windows often cannot rename onto an existing path —
+        // only then delete the destination after the temp write succeeded.
+        if (err == error.PathAlreadyExists) {
+            fs.cwd().deleteFile(file_path) catch |del_err| {
+                fs.cwd().deleteFile(tmp_path) catch {};
+                try stderr.print("Error: could not replace {s}: {}\n", .{ file_path, del_err });
+                std.process.exit(1);
+            };
+            fs.cwd().rename(tmp_path, file_path) catch |ren_err| {
+                // Destination is gone; leave the temp file so the pulled content is recoverable.
+                try stderr.print(
+                    "Error: failed to move pulled vars into {s}: {}\nPulled content left at {s}\n",
+                    .{ file_path, ren_err, tmp_path },
+                );
+                std.process.exit(1);
+            };
+            return;
+        }
+        fs.cwd().deleteFile(tmp_path) catch {};
+        try stderr.print("Error: could not replace {s}: {}\n", .{ file_path, err });
         std.process.exit(1);
     };
-    defer file.close();
-    try file.writeAll(content);
-    // Ensure no stale tail remains if truncate was ignored by the platform.
-    file.setEndPos(content.len) catch {};
-
-    if (!opts.quiet) {
-        try stdout.print(
-            "{s}✓{s} Pulled {d} var(s) for rev {s}{s}{s} → {s}\n",
-            .{ Color.bold_green, Color.reset, sync_vars.items.len, Color.bold_cyan, parsed.value.rev, Color.reset, file_path },
-        );
-    }
 }
 
 fn runPush(
