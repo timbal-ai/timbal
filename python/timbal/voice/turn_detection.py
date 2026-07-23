@@ -583,11 +583,16 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
 
     completion_threshold: float = 0.5
     # Grace window after an incomplete-scored commit before the fragment runs
-    # anyway. LiveKit's equivalent (max_endpointing_delay) defaults to 6.0s of
-    # *total* silence after speech when their EOU model says "not done". The
-    # HOLD only arms after the STT VAD silence (~1.2s with the server default),
-    # so 4.8s here reproduces that 6s total thinking budget.
-    DEFAULT_HOLD_TIMEOUT_SECS = 4.8
+    # anyway. Reference points: LiveKit's max_endpointing_delay is 6.0s of
+    # *total* silence when their EOU model says "not done"; Pipecat's
+    # smart-turn fallback (stop_secs) is 3.0s of continued silence. The HOLD
+    # only arms after the STT VAD silence (~1.2s with the server default), so
+    # 3.0s here gives ~4.2s total — between the two. This is also the full
+    # price of a *wrong* "incomplete" score (e.g. Smart Turn on a bare
+    # "Thank you."), and no re-score can rescue those mid-hold: the backend
+    # trims trailing silence before scoring, so waiting longer reproduces the
+    # same window and the same score.
+    DEFAULT_HOLD_TIMEOUT_SECS = 3.0
     # The model consumes the last 8s of *speech*; the EOU backend trims the
     # trailing silence (STT commit debounce, hold pauses) before scoring, so
     # buffer extra raw PCM to keep a full 8s of signal after the trim.
