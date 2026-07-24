@@ -282,6 +282,24 @@ def _looks_like_fresh_hold_utterance(text: str) -> bool:
     return True
 
 
+_TERMINAL_END_CHARS = frozenset(".?!。？！")
+
+
+def _looks_like_finished_utterance(text: str) -> bool:
+    """True when ``text`` ends with terminal punctuation (not an ellipsis trail-off).
+
+    Used to refuse CONTINUE-merge of short STT crumbs onto an already-complete
+    turn ("…killer." + "No." → cancel+restart). Ellipsis / bare mid-thought
+    fragments stay "unfinished" so VAD splits can still CONTINUE.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.endswith("...") or stripped.endswith("…"):
+        return False
+    return stripped[-1] in _TERMINAL_END_CHARS
+
+
 class HeuristicTurnDetector(TurnDetector):
     """Default detector: the regex/similarity heuristics tuned for ElevenLabs Scribe.
 
@@ -304,6 +322,12 @@ class HeuristicTurnDetector(TurnDetector):
     EARLY_DUPLICATE_RATIO = 0.58
     CONTINUATION_WINDOW_SECS = 3.0
     CONTINUATION_MAX_CHARS = 30
+    # After a finished commit has already started a turn, Scribe often emits a
+    # trailing crumb ("No.", "He", "Okay.") within tens of ms. CONTINUE-merging
+    # those cancels the LLM for a frankenstein — IGNORE ultra-early crumbs;
+    # later short barge-ins ("Stop.") still fall through to NEW_TURN.
+    TRAILING_CRUMB_WINDOW_SECS = 0.4
+    TRAILING_CRUMB_MAX_WORDS = 2
 
     async def on_partial(self, text: str, state: TurnState) -> PartialDecision:
         if not state.audio_playing or not text:
@@ -398,8 +422,40 @@ class HeuristicTurnDetector(TurnDetector):
                 state.seconds_since_last_commit < self.CONTINUATION_WINDOW_SECS
                 and len(text) < self.CONTINUATION_MAX_CHARS
             ):
-                combined = state.active_user_text.rstrip(", ") + " " + text
-                return CommitDecision(action=CommitAction.CONTINUE_TURN, text=combined, reason="continuation")
+                # Active already looks finished + trailer looks like its own
+                # utterance → not a VAD mid-phrase split. Ultra-early crumbs
+                # are STT ghosts (live: "…killer." then "No." at +55ms);
+                # anything later is a real short barge-in → NEW_TURN below.
+                if _looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(
+                    text
+                ):
+                    words = _WORD_RE.findall(text)
+                    if (
+                        state.seconds_since_last_commit < self.TRAILING_CRUMB_WINDOW_SECS
+                        and len(words) <= self.TRAILING_CRUMB_MAX_WORDS
+                    ):
+                        # Question-final trailers after a finished active are usually
+                        # VAD splits ("¿qué tal?" + "estás?"), not Scribe ghosts
+                        # ("…killer." + "No."). Ghost crumbs are statement/ack-shaped.
+                        if text.rstrip().endswith(("?", "？")):
+                            combined = state.active_user_text.rstrip(", ") + " " + text
+                            return CommitDecision(
+                                action=CommitAction.CONTINUE_TURN,
+                                text=combined,
+                                reason="continuation",
+                            )
+                        return CommitDecision(
+                            action=CommitAction.IGNORE,
+                            text=text,
+                            reason="trailing_crumb",
+                        )
+                else:
+                    combined = state.active_user_text.rstrip(", ") + " " + text
+                    return CommitDecision(
+                        action=CommitAction.CONTINUE_TURN,
+                        text=combined,
+                        reason="continuation",
+                    )
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="new_turn")
 
 
@@ -583,11 +639,36 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
 
     completion_threshold: float = 0.5
     # Grace window after an incomplete-scored commit before the fragment runs
-    # anyway. LiveKit's equivalent (max_endpointing_delay) defaults to 6.0s of
-    # *total* silence after speech when their EOU model says "not done". The
-    # HOLD only arms after the STT VAD silence (~1.2s with the server default),
-    # so 4.8s here reproduces that 6s total thinking budget.
-    DEFAULT_HOLD_TIMEOUT_SECS = 4.8
+    # anyway. Reference points: LiveKit's max_endpointing_delay is 6.0s of
+    # *total* silence when their EOU model says "not done"; Pipecat's
+    # smart-turn fallback (stop_secs) is 3.0s of continued silence. The HOLD
+    # only arms after the STT VAD silence (~1.2s with the server default), so
+    # 3.0s here gives ~4.2s total — between the two. This is also the full
+    # price of a *wrong* "incomplete" score (e.g. Smart Turn on a bare
+    # "Thank you."), and no re-score can rescue those mid-hold: the backend
+    # trims trailing silence before scoring, so waiting longer reproduces the
+    # same window and the same score.
+    DEFAULT_HOLD_TIMEOUT_SECS = 3.0
+    # Confidence tier for the HOLD (LiveKit's min/max endpointing delay shape,
+    # with the transcript as the confidence signal): when the audio model says
+    # "incomplete" but the text looks finished (terminal punctuation — Smart
+    # Turn systematically under-scores short closers like "Thank you." /
+    # "I am David." / "Quite good."), the hold shrinks to this. Keep it short:
+    # the VAD endpointer has usually already paid ~0.5–3s of silence delay
+    # before the commit, so a second 1.2s tax felt like dead air on every
+    # finished utterance Smart Turn under-scored. Both-signals-incomplete
+    # keeps the full timeout.
+    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 0.35
+    # The tier needs *confidently* finished text (terminal punctuation scores
+    # P_TERMINAL=0.95), not the predictor's complete-leaning neutral (0.60) —
+    # unpunctuated text must not shorten the hold.
+    TEXT_COMPLETE_TIER_THRESHOLD = 0.9
+    # Inverse tier: audio says complete but text looks mid-thought (hedges
+    # score P_HEDGE=0.2, dangling/continuing ~0.15). Don't NEW_TURN — short
+    # HOLD so a continuation ("…tell me a story") can merge. Neutral (0.60)
+    # must NOT trigger this, or every unpunctuated complete fires a hold.
+    TEXT_INCOMPLETE_TIER_THRESHOLD = 0.4
+    TEXT_INCOMPLETE_HOLD_TIMEOUT_SECS = 1.2
     # The model consumes the last 8s of *speech*; the EOU backend trims the
     # trailing silence (STT commit debounce, hold pauses) before scoring, so
     # buffer extra raw PCM to keep a full 8s of signal after the trim.
@@ -600,6 +681,8 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         *,
         completion_threshold: float | None = None,
         hold_timeout_secs: float | None = None,
+        text_complete_hold_timeout_secs: float | None = None,
+        text_incomplete_hold_timeout_secs: float | None = None,
         fallback_text_eou: TextEouPredictor | None = None,
     ) -> None:
         self.audio_eou = audio_eou
@@ -608,15 +691,47 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self.hold_timeout_secs = (
             hold_timeout_secs if hold_timeout_secs is not None else self.DEFAULT_HOLD_TIMEOUT_SECS
         )
-        # Used only when the buffered PCM is too short to score (fast commit at
-        # session start / mic audio not routed): a zero-dep lexical check so an
-        # obviously unfinished utterance still HOLDs instead of inheriting the
-        # heuristic NEW_TURN.
+        self.text_complete_hold_timeout_secs = (
+            text_complete_hold_timeout_secs
+            if text_complete_hold_timeout_secs is not None
+            else self.TEXT_COMPLETE_HOLD_TIMEOUT_SECS
+        )
+        self.text_incomplete_hold_timeout_secs = (
+            text_incomplete_hold_timeout_secs
+            if text_incomplete_hold_timeout_secs is not None
+            else self.TEXT_INCOMPLETE_HOLD_TIMEOUT_SECS
+        )
+        # Used when the buffered PCM is too short to score, and as the text
+        # confidence signal for both HOLD tiers (complete-text shortens;
+        # incomplete-text delays an audio-complete commit). Default is the
+        # zero-dep lexical baseline; ``resolve_turn_detector("local")`` injects
+        # Namo when ``timbal[voice]`` is installed.
         self.fallback_text_eou = fallback_text_eou or PunctuationEouPredictor()
+        # Namo under-scores many finished questions (~0.0 on "How are you?" /
+        # "What's two plus two?"). Lexical gate corroborates so we only pay the
+        # incomplete-text tax when both agree the user is mid-thought.
+        self._lexical_gate = PunctuationEouPredictor()
         self._sample_rate = 16_000
         self._pcm: deque[bytes] = deque()
         self._pcm_bytes = 0
         self._max_pcm_bytes = 0
+
+    async def effective_text_eou(self, text: str) -> float:
+        """``P(complete)`` for HOLD tiers / VAD delay — Namo with lexical rescue.
+
+        Namo under-scores many finished questions (~0.0 on "How are you?").
+        Only lift the score when the lexical baseline is *confidently* complete
+        (terminal punct ≥ :attr:`TEXT_COMPLETE_TIER_THRESHOLD`) — a blunt
+        ``max(namo, lexical)`` would also promote neutral unpunctuated
+        mid-thoughts (lexical ~0.60) over the incomplete tier and neuter Namo.
+        """
+        p = await self.fallback_text_eou.predict_eou(text)
+        if isinstance(self.fallback_text_eou, PunctuationEouPredictor):
+            return p
+        p_lex = await self._lexical_gate.predict_eou(text)
+        if p_lex >= self.TEXT_COMPLETE_TIER_THRESHOLD:
+            return max(p, p_lex)
+        return p
 
     async def start(self, config: AudioInputConfig) -> None:
         self._sample_rate = int(getattr(config, "sample_rate", None) or 16_000)
@@ -626,10 +741,12 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self._pcm_bytes = 0
         if self.audio_eou is not None:
             await self.audio_eou.start(sample_rate=self._sample_rate)
+        await self.fallback_text_eou.start()
 
     async def close(self) -> None:
         if self.audio_eou is not None:
             await self.audio_eou.close()
+        await self.fallback_text_eou.close()
         self._pcm.clear()
         self._pcm_bytes = 0
 
@@ -639,6 +756,8 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             audio_eou=self.audio_eou,
             completion_threshold=self.completion_threshold,
             hold_timeout_secs=self.hold_timeout_secs,
+            text_complete_hold_timeout_secs=self.text_complete_hold_timeout_secs,
+            text_incomplete_hold_timeout_secs=self.text_incomplete_hold_timeout_secs,
             fallback_text_eou=self.fallback_text_eou,
         )
 
@@ -681,6 +800,17 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         if decision.action is CommitAction.IGNORE:
             return decision
         if decision.action is CommitAction.CONTINUE_TURN:
+            return decision
+        # Mid-reply barge-in the parent already classified as NEW_TURN (finished
+        # active + fresh trailer past the crumb window). Do not rescore into HOLD
+        # — session defers HOLD during TTS, which would mute the interrupt.
+        if (
+            decision.action is CommitAction.NEW_TURN
+            and state.assistant_active
+            and state.active_user_text
+            and _looks_like_finished_utterance(state.active_user_text)
+            and _looks_like_fresh_hold_utterance(text)
+        ):
             return decision
         # Parent hold_merge of a self-contained commit → start the turn now
         # instead of re-holding, but keep the held fragment in the turn text
@@ -726,7 +856,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             # score the text lexically so an incomplete fast commit still HOLDs.
             if decision.action is not CommitAction.NEW_TURN:
                 return decision
-            p_text = await self.fallback_text_eou.predict_eou(candidate)
+            p_text = await self.effective_text_eou(candidate)
             if p_text >= self.completion_threshold:
                 return decision
             return CommitDecision(
@@ -751,24 +881,79 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             text_preview=candidate[:80],
         )
         if p >= self.completion_threshold:
+            # Inverse tier (see TEXT_INCOMPLETE_HOLD_TIMEOUT_SECS): audio says
+            # done but the transcript looks mid-thought — hold short so a
+            # continuation can merge. Never overrule into IGNORE; just delay.
+            try:
+                p_text = await self.effective_text_eou(candidate)
+            except Exception as e:
+                logger.warning("text_eou_predict_failed", error=str(e))
+                p_text = None
+            if p_text is not None and p_text < self.TEXT_INCOMPLETE_TIER_THRESHOLD:
+                # Mid-agent barge-in that looks incomplete still merges via
+                # CONTINUE rather than parking a HOLD over the reply — but not
+                # onto a finished active + fresh trailer (STT crumb / barge-in).
+                if (
+                    state.active_user_text
+                    and state.assistant_active
+                    and not (
+                        _looks_like_finished_utterance(state.active_user_text)
+                        and _looks_like_fresh_hold_utterance(text)
+                    )
+                ):
+                    combined = state.active_user_text.rstrip(", ") + " " + text
+                    return CommitDecision(
+                        action=CommitAction.CONTINUE_TURN,
+                        text=combined,
+                        reason="audio_complete_text_incomplete_continue",
+                    )
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=candidate,
+                    reason="audio_complete_text_incomplete",
+                    hold_timeout_secs=min(
+                        self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs
+                    ),
+                )
             return CommitDecision(
                 action=CommitAction.NEW_TURN,
                 text=candidate,
                 reason="audio_complete" if state.holding else (decision.reason or "new_turn"),
             )
         # Incomplete: mid-agent-turn → merge+restart; else HOLD (session debounce).
-        if state.active_user_text and state.assistant_active:
+        # Skip merge when the active turn already looks finished and the trailer
+        # is a fresh utterance — Heuristic's trailing_crumb / NEW_TURN path.
+        if (
+            state.active_user_text
+            and state.assistant_active
+            and not (
+                _looks_like_finished_utterance(state.active_user_text)
+                and _looks_like_fresh_hold_utterance(text)
+            )
+        ):
             combined = state.active_user_text.rstrip(", ") + " " + text
             return CommitDecision(
                 action=CommitAction.CONTINUE_TURN,
                 text=combined,
                 reason="audio_continuation",
             )
+        # Confidence tier (see TEXT_COMPLETE_HOLD_TIMEOUT_SECS): a transcript
+        # that reads finished disagrees with the audio score — hold, but short.
+        timeout = self.hold_timeout_secs
+        reason = "audio_hold"
+        try:
+            p_text = await self.effective_text_eou(candidate)
+        except Exception as e:
+            logger.warning("text_eou_predict_failed", error=str(e))
+            p_text = None
+        if p_text is not None and p_text >= self.TEXT_COMPLETE_TIER_THRESHOLD:
+            timeout = min(self.text_complete_hold_timeout_secs, self.hold_timeout_secs)
+            reason = "audio_hold_text_complete"
         return CommitDecision(
             action=CommitAction.HOLD,
             text=candidate,
-            reason="audio_hold",
-            hold_timeout_secs=self.hold_timeout_secs,
+            reason=reason,
+            hold_timeout_secs=timeout,
         )
 
 
@@ -796,8 +981,31 @@ def _default_audio_eou() -> AudioEouModel | None:
     return _DEFAULT_AUDIO_EOU
 
 
+def _default_text_eou() -> TextEouPredictor:
+    """Namo English DistilBERT when ``timbal[voice]`` is installed, else punctuation.
+
+    Shared process-wide (same rationale as :func:`_default_audio_eou`).
+    """
+    global _DEFAULT_TEXT_EOU
+    if _DEFAULT_TEXT_EOU is not _TEXT_EOU_UNSET:
+        return _DEFAULT_TEXT_EOU
+    try:
+        from .namo import NamoTextEouPredictor
+    except ImportError:
+        logger.debug(
+            "namo_text_eou_unavailable",
+            hint="falling back to PunctuationEouPredictor; install timbal[voice] for Namo",
+        )
+        _DEFAULT_TEXT_EOU = PunctuationEouPredictor()
+        return _DEFAULT_TEXT_EOU
+    _DEFAULT_TEXT_EOU = NamoTextEouPredictor()
+    return _DEFAULT_TEXT_EOU
+
+
 _AUDIO_EOU_UNSET: Any = object()
 _DEFAULT_AUDIO_EOU: AudioEouModel | None = _AUDIO_EOU_UNSET
+_TEXT_EOU_UNSET: Any = object()
+_DEFAULT_TEXT_EOU: TextEouPredictor | Any = _TEXT_EOU_UNSET
 
 
 def resolve_turn_detector(spec: Any = None) -> TurnDetector:
@@ -805,11 +1013,12 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
 
     Accepted names: ``heuristic`` (default), ``provider``, ``local``, ``lexical``,
     ``raw`` (debug: no silence/noise/echo filtering at all).
-    ``local`` auto-loads the Smart Turn v3 :class:`~timbal.voice.eou.AudioEouModel`
-    when the ``timbal[voice]`` extra is installed (heuristic degradation otherwise).
-    Instances are returned unchanged — callers that reuse one spec across
-    concurrent sessions (server ``voice_config``) must :meth:`~TurnDetector.clone`
-    per session, or pass a zero-arg factory callable instead.
+    ``local`` auto-loads Smart Turn (audio) + Namo (text) when the
+    ``timbal[voice]`` extra is installed (heuristic / punctuation degradation
+    otherwise). Instances are returned unchanged — callers that reuse one spec
+    across concurrent sessions (server ``voice_config``) must
+    :meth:`~TurnDetector.clone` per session, or pass a zero-arg factory
+    callable instead.
     """
     if spec is None:
         return HeuristicTurnDetector()
@@ -822,9 +1031,12 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
         if key in ("provider", "stt"):
             return ProviderTurnDetector()
         if key in ("local", "audio", "smart_turn"):
-            return LocalAudioTurnDetector(audio_eou=_default_audio_eou())
+            return LocalAudioTurnDetector(
+                audio_eou=_default_audio_eou(),
+                fallback_text_eou=_default_text_eou(),
+            )
         if key in ("lexical", "semantic", "punctuation"):
-            return LexicalTurnDetector()
+            return LexicalTurnDetector(text_eou=_default_text_eou())
         if key in ("raw", "none", "off"):
             return RawTurnDetector()
         raise ValueError(

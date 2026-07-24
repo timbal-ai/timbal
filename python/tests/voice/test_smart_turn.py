@@ -197,6 +197,7 @@ class TestSmartTurnEouModel:
 class TestResolveLocalMode:
     def _reset_default_cache(self):
         turn_detection_module._DEFAULT_AUDIO_EOU = turn_detection_module._AUDIO_EOU_UNSET
+        turn_detection_module._DEFAULT_TEXT_EOU = turn_detection_module._TEXT_EOU_UNSET
 
     def test_local_gets_smart_turn_model(self):
         self._reset_default_cache()

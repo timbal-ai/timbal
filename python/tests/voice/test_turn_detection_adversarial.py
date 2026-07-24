@@ -25,8 +25,8 @@ from timbal.voice.turn_detection import (
     _looks_like_fresh_hold_utterance,
 )
 
+from .test_session import DelayedMockSTT, MockTTS
 from .test_turn_detection import _FixedAudioEou, _state
-from .test_voice_session import DelayedMockSTT, MockTTS
 
 # ---------------------------------------------------------------------------
 # Pure helpers — edge cases that have bitten us / look sharp

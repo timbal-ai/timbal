@@ -31,7 +31,7 @@ from timbal.voice.turn_detection import (
     resolve_turn_detector,
 )
 
-from .test_voice_session import MockSTT, MockTTS
+from .test_session import MockSTT, MockTTS
 
 # ---------------------------------------------------------------------------
 # Moved heuristic functions (ported from test_voice_session_stt_refinement.py)
@@ -243,6 +243,70 @@ class TestOnCommitted:
         assert decision.text == "Hola, ¿qué tal estás?"
         assert decision.reason == "continuation"
 
+    async def test_trailing_crumb_on_finished_turn_is_ignored(self) -> None:
+        """Scribe ghost after a finished commit must not CONTINUE-cancel the LLM.
+
+        Live: commit "…killer." → LLM START → "No." at +55ms → CONTINUE merge
+        restarted the turn on a frankenstein prompt.
+        """
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "No.",
+            _state(
+                assistant_active=True,
+                active_user_text="Yeah, that guy was a real killer.",
+                seconds_since_turn_start=0.1,
+                seconds_since_last_commit=0.055,
+            ),
+        )
+        assert decision.action is CommitAction.IGNORE
+        assert decision.reason == "trailing_crumb"
+
+    async def test_late_short_barge_in_on_finished_turn_is_new_turn(self) -> None:
+        """Past the crumb window, a short fresh interrupt is a real barge-in."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "Stop.",
+            _state(
+                assistant_active=True,
+                active_user_text="Yeah, that guy was a real killer.",
+                seconds_since_turn_start=1.5,
+                seconds_since_last_commit=1.0,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.text == "Stop."
+
+    async def test_question_split_after_finished_question_still_continues(self) -> None:
+        """VAD can punctuate mid-question; don't drop the second half as a crumb."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "estás?",
+            _state(
+                assistant_active=True,
+                active_user_text="Hola, ¿qué tal?",
+                seconds_since_turn_start=1.0,
+                seconds_since_last_commit=0.2,
+            ),
+        )
+        assert decision.action is CommitAction.CONTINUE_TURN
+        assert decision.text == "Hola, ¿qué tal? estás?"
+
+    async def test_lowercase_glue_still_continues_unfinished_active(self) -> None:
+        """Single-word lowercase trailers stay CONTINUE when active is unfinished."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "weather?",
+            _state(
+                assistant_active=True,
+                active_user_text="Tell me about the",
+                seconds_since_turn_start=1.0,
+                seconds_since_last_commit=0.2,
+            ),
+        )
+        assert decision.action is CommitAction.CONTINUE_TURN
+        assert decision.reason == "continuation"
+
     async def test_long_new_query_during_turn_is_new_turn(self) -> None:
         det = HeuristicTurnDetector()
         decision = await det.on_committed(
@@ -386,7 +450,128 @@ class TestLocalAudioTurnDetector:
         decision = await det.on_committed("I was wondering", _state())
         assert decision.action is CommitAction.HOLD
         assert decision.reason == "audio_hold"
+        # Neutral (unpunctuated) text must not shorten the hold.
+        assert decision.hold_timeout_secs == det.hold_timeout_secs
         assert model.calls == 1
+        await det.close()
+
+    async def test_late_barge_in_on_finished_turn_not_held(self) -> None:
+        """Parent NEW_TURN for finished+fresh must survive incomplete Smart Turn.
+
+        Otherwise session HOLDs during TTS and the barge-in never interrupts.
+        """
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed(
+            "Stop.",
+            _state(
+                assistant_active=True,
+                active_user_text="Yeah, that guy was a real killer.",
+                seconds_since_turn_start=1.5,
+                seconds_since_last_commit=1.0,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.text == "Stop."
+        await det.close()
+
+    async def test_incomplete_audio_complete_text_short_hold(self) -> None:
+        """Confidence tier: Smart Turn under-scores short closers ("Thank you."
+        p=0.036 live) — terminal punctuation disagrees, so the hold shrinks to
+        the short tier instead of eating the full budget as dead air.
+
+        Keep this well under the incomplete-text HOLD (1.2s): VAD has usually
+        already waited, and a second 1.2s tax is the cold-start "slow" feel.
+        """
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Thank you.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_hold_text_complete"
+        assert decision.hold_timeout_secs == det.text_complete_hold_timeout_secs
+        assert det.text_complete_hold_timeout_secs == 0.35
+        assert det.text_complete_hold_timeout_secs < det.text_incomplete_hold_timeout_secs
+        assert det.text_complete_hold_timeout_secs < det.hold_timeout_secs
+        # Per-session clones keep the knob.
+        assert det.clone().text_complete_hold_timeout_secs == det.text_complete_hold_timeout_secs
+        await det.close()
+
+    async def test_complete_audio_hedge_text_short_hold(self) -> None:
+        """Inverse tier: Smart Turn over-scores thinking pauses
+        ("Uh, I don't know." p=0.825 live) — hedge text disagrees, so HOLD
+        short instead of NEW_TURN immediately."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.9))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Uh, I don't know.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_complete_text_incomplete"
+        assert decision.hold_timeout_secs == det.text_incomplete_hold_timeout_secs
+        await det.close()
+
+    async def test_complete_audio_real_complete_still_new_turn(self) -> None:
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.9))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Tell me a story.", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+    async def test_complete_audio_question_despite_namo_zero(self) -> None:
+        """Namo often scores finished questions ~0 — lexical gate must skip the
+        1.2s incomplete HOLD (live cold-start: "How are you?" / "What's 2+2?")."""
+        det = LocalAudioTurnDetector(
+            audio_eou=_FixedAudioEou(0.98),
+            fallback_text_eou=_FixedTextEou(0.0),
+        )
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Hello, hello. How are you?", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        decision = await det.on_committed("What's two plus two?", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+    async def test_complete_audio_hedge_still_holds_with_namo_zero(self) -> None:
+        """Lexical hedge (~0.2) + Namo 0 → still incomplete tier HOLD."""
+        det = LocalAudioTurnDetector(
+            audio_eou=_FixedAudioEou(0.9),
+            fallback_text_eou=_FixedTextEou(0.0),
+        )
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Uh, I don't know.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_complete_text_incomplete"
+        await det.close()
+
+    async def test_complete_audio_neutral_midthought_keeps_namo_incomplete(self) -> None:
+        """Unpunctuated mid-thought: lexical ~0.60 must NOT rescue Namo 0."""
+        det = LocalAudioTurnDetector(
+            audio_eou=_FixedAudioEou(0.9),
+            fallback_text_eou=_FixedTextEou(0.0),
+        )
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed(
+            "I was thinking about something my dad told me", _state()
+        )
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_complete_text_incomplete"
+        await det.close()
+
+    async def test_incomplete_audio_ellipsis_full_hold(self) -> None:
+        """An STT ellipsis means the speaker trailed off — it must not count
+        as terminal punctuation for the short tier."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("I was thinking about...", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_hold"
+        assert decision.hold_timeout_secs == det.hold_timeout_secs
         await det.close()
 
     async def test_complete_audio_new_turn(self) -> None:
@@ -796,11 +981,17 @@ class TestLocalHoldMerge:
 
 class TestHoldInSession:
     async def test_hold_expiry_deferred_while_user_speaking(self) -> None:
-        """A pending HOLD must not fire mid-utterance (recent STT partials)."""
+        """HOLD must stay armed while STT partials keep being *processed*.
+
+        Grace keys off ``_last_partial_at`` after the session drains the event
+        (``inject`` only enqueues). Wait for ``_latest_partial_text`` — not
+        ``_last_partial_at > before``: Windows monotonic can return the same
+        tick for consecutive partials, so the timestamp predicate hangs.
+        """
         import asyncio
         import time
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldOnce(TurnDetector):
             def __init__(self) -> None:
@@ -813,34 +1004,77 @@ class TestHoldInSession:
                 self.n += 1
                 if self.n == 1:
                     return CommitDecision(
-                        action=CommitAction.HOLD, text=text, reason="test_hold", hold_timeout_secs=0.1
+                        action=CommitAction.HOLD, text=text, reason="test_hold", hold_timeout_secs=0.5
                     )
                 return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="test")
 
+        hold_timeout = 0.5
+        grace = 0.5
+        refresh_every = 0.05  # well under hold_timeout / grace
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = DelayedMockSTT()
         session = VoiceSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector=_HoldOnce())
-        session._hold_partial_grace_secs = 0.3
+        session._hold_partial_grace_secs = grace
 
         events: list[VoiceSessionEvent] = []
-        turn_started_at: list[float] = []
-        partials_end: list[float] = []
+        refreshes_while_held = 0
 
         async def _empty():
             return
             yield  # noqa: RET504
 
+        async def _wait_until(pred, *, timeout: float = 2.0, msg: str = "condition") -> None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if pred():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError(f"timed out waiting for {msg}")
+
+        async def _inject_processed_partial(text: str) -> None:
+            await stt.inject(TranscriptEvent(type="partial", text=text))
+            await _wait_until(
+                lambda t=text: session._latest_partial_text == t,
+                msg=f"partial processed ({text!r})",
+            )
+
         async def _drive() -> None:
-            while not any(getattr(e, "type", None) == "session_started" for e in events):
-                await asyncio.sleep(0.01)
+            nonlocal refreshes_while_held
+            await _wait_until(
+                lambda: any(getattr(e, "type", None) == "session_started" for e in events),
+                msg="session_started",
+            )
             await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
-            # Keep "speaking" well past the 0.1s hold timeout.
-            for _ in range(6):
-                await stt.inject(TranscriptEvent(type="partial", text="the weather"))
-                await asyncio.sleep(0.1)
-            partials_end.append(time.monotonic())
-            while not any(getattr(e, "type", None) == "agent_text_done" for e in events):
-                await asyncio.sleep(0.01)
+            await _wait_until(lambda: session._held_user_text is not None, msg="HOLD armed")
+            # Extend immediately — do not wait on _last_commit_at (expiry bumps it).
+            await _inject_processed_partial("the weather")
+            assert session._held_user_text is not None
+
+            # Keep refreshing past the nominal hold timeout.
+            deadline = time.monotonic() + hold_timeout + 0.25
+            i = 0
+            while time.monotonic() < deadline:
+                await _inject_processed_partial(f"the weather {i}")
+                assert session._held_user_text is not None, (
+                    f"HOLD expired while partials were still being processed (iter {i})"
+                )
+                refreshes_while_held += 1
+                await asyncio.sleep(refresh_every)
+                i += 1
+
+            assert refreshes_while_held >= 3
+            assert session._held_user_text is not None
+
+            # Stop refreshing — hold should expire into a turn.
+            await _wait_until(
+                lambda: any(getattr(e, "type", None) == "transcript_committed" for e in events),
+                timeout=grace + 1.5,
+                msg="hold expiry → transcript_committed",
+            )
+            await _wait_until(
+                lambda: any(getattr(e, "type", None) == "agent_text_done" for e in events),
+                msg="agent_text_done",
+            )
             await stt.finish()
 
         async def _run() -> None:
@@ -848,22 +1082,18 @@ class TestHoldInSession:
                 driver = asyncio.create_task(_drive())
                 async for ev in stream:
                     events.append(ev)
-                    if getattr(ev, "type", None) == "transcript_committed":
-                        turn_started_at.append(time.monotonic())
                 await driver
 
-        await asyncio.wait_for(_run(), timeout=5)
-        assert turn_started_at, "hold never expired into a turn"
-        # The turn must have started only after the partial stream went quiet,
-        # not at the nominal 0.1s timeout (partials spanned ~0.6s).
-        assert partials_end, "driver never finished injecting partials"
-        assert turn_started_at[0] >= partials_end[0] - 0.15
+        await asyncio.wait_for(_run(), timeout=12)
+        assert refreshes_while_held >= 3
+        assert any(getattr(e, "type", None) == "transcript_committed" for e in events)
+        assert session._held_user_text is None
 
     async def test_hold_timeout_starts_turn(self) -> None:
         """HOLD must not start the agent until the hold timer expires."""
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldOnce(TurnDetector):
             def __init__(self) -> None:
@@ -919,11 +1149,13 @@ class TestHoldInSession:
         assert any(e.type == "agent_text_done" for e in events)
         assert session.transcript[0].text == "I was wondering about"
 
-    async def test_hold_interrupts_playing_audio(self) -> None:
-        """HOLD while TTS is still buffered must interrupt like NEW_TURN."""
+    async def test_hold_defers_while_audio_playing(self) -> None:
+        """HOLD while TTS is still buffered arms the fragment but does not
+        interrupt — chopping the reply for a deferred commit was wiping
+        greetings on echo-ish ``Hello, hello.`` commits."""
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT, FakePlaybackTracker
+        from .test_session import DelayedMockSTT, FakePlaybackTracker
 
         class _AlwaysHold(TurnDetector):
             async def on_partial(self, text, state):  # noqa: ARG002
@@ -950,7 +1182,6 @@ class TestHoldInSession:
             hold_timeout_secs=5.0,
         )
         events: list[VoiceSessionEvent] = []
-        held_during: list[str | None] = []
 
         async def _empty():
             return
@@ -961,10 +1192,16 @@ class TestHoldInSession:
                 await asyncio.sleep(0.01)
             await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
             for _ in range(50):
-                if tracker.interrupt_calls > 0 and session._held_user_text:
-                    held_during.append(session._held_user_text)
+                if session._held_user_text == "I was wondering about":
                     break
                 await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("HOLD never armed while audio playing")
+            # Assert *before* finish: session.close() interrupts when the
+            # tracker still reports playing (unrelated to HOLD deferral).
+            assert tracker.interrupt_calls == 0
+            assert not any(e.type == "interrupted" for e in events)
+            tracker.playing = False
             await stt.finish()
 
         async def _run() -> None:
@@ -975,15 +1212,12 @@ class TestHoldInSession:
                 await driver
 
         await asyncio.wait_for(_run(), timeout=5)
-        assert tracker.interrupt_calls >= 1
-        assert held_during == ["I was wondering about"]
-        assert any(e.type == "interrupted" for e in events)
 
     async def test_hold_refinement_updates_session_fragment(self) -> None:
         """Longer STT re-commit while HOLDing must replace the held fragment."""
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldRefine(TurnDetector):
             async def on_partial(self, text, state):  # noqa: ARG002
@@ -1073,7 +1307,7 @@ class TestHoldInSession:
         """
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldThenRefine(TurnDetector):
             def __init__(self) -> None:

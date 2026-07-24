@@ -32,9 +32,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.agent import Agent
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
-from ..types.content import TextContent
+from ..types.content import TextContent, ToolUseContent
 from ..types.events import OutputEvent
-from ..types.events.delta import DeltaEvent, Text, TextDelta
+from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
 from ..types.message import Message
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
 from .turn_detection import (
@@ -42,6 +42,7 @@ from .turn_detection import (
     PartialDecision,
     TurnDetector,
     TurnState,
+    _is_same_user_utterance_refinement,
     resolve_turn_detector,
 )
 
@@ -167,6 +168,8 @@ class TranscriptPartial(VoiceSessionEvent):
 class TranscriptCommitted(VoiceSessionEvent):
     type: Literal["transcript_committed"] = "transcript_committed"
     text: str
+    # True → rewrite last user bubble (CONTINUE_TURN merge), don't append another.
+    replace: bool = False
 
 
 class AgentTextDelta(VoiceSessionEvent):
@@ -176,6 +179,13 @@ class AgentTextDelta(VoiceSessionEvent):
 
 class AgentTextDone(VoiceSessionEvent):
     type: Literal["agent_text_done"] = "agent_text_done"
+    text: str
+
+
+class AgentStatus(VoiceSessionEvent):
+    """Non-transcript status for the UI (e.g. tool calls while the mic is idle)."""
+
+    type: Literal["agent_status"] = "agent_status"
     text: str
 
 
@@ -372,10 +382,14 @@ class VoiceSession:
         record_audio: bool = False,
         hold_timeout_secs: float = 1.5,
         vad_endpointing: bool | VadEndpointer | None = None,
+        model: str | None = None,
     ):
         self.agent = agent
         self.stt = stt
         self.tts = tts
+        # Optional per-session LLM override (playground model picker). Passed
+        # through to ``agent(prompt=..., model=...)`` — does not mutate the Agent.
+        self.model = model.strip() if isinstance(model, str) and model.strip() else None
         # Always clone: the session owns the detector's start/push_audio/close
         # lifecycle, and the spec may be a shared instance (server voice_config)
         # or a factory returning a singleton. Inspect ``session.turn_detector``,
@@ -431,11 +445,29 @@ class VoiceSession:
         self._last_commit_at: float = 0.0
         self._partials_since_last_commit: int = 0
         self._last_partial_at: float = 0.0
+        # Latest non-empty STT partial text — fed to the VAD endpointer's
+        # optional text_score so a mid-thought hedge can bump the delay even
+        # before the provider commits.
+        self._latest_partial_text: str = ""
         # A pending HOLD must not expire while the user is audibly mid-utterance
         # (recent STT partial): the upcoming commit merges with / supersedes the
         # hold. Must exceed the STT VAD silence threshold (~1.2s default) so the
         # commit always lands before the extended expiry re-fires.
         self._hold_partial_grace_secs = 2.0
+        # When the last STT commit event arrived. Anchors the hold-expiry
+        # extension: only partials *newer* than the commit mean the user
+        # resumed speaking — the committed fragment's own trailing partial
+        # refinements must not stretch the hold.
+        self._commit_event_at: float = 0.0
+        # Watchdog for transcripts the provider never commits: STT can emit a
+        # partial (e.g. quiet speech ducked by AEC during assistant playback)
+        # whose VAD never registers an utterance — no commit ever fires and the
+        # words hang as a "…" caption forever. After this much silence past the
+        # last partial (comfortably beyond the provider's ~1.2s debounce, so it
+        # only fires when the provider clearly won't), force ``stt.commit()``.
+        self._stale_partial_commit_secs = 2.5
+        self._stale_partial_poll_secs = 0.5
+        self._stale_commit_sent_at = 0.0
 
         # Serial TTS runs off the agent ``async for`` critical path so we keep pulling
         # LLM/Agent events (and emit trace OUTPUT) while audio still synthesizes.
@@ -527,6 +559,7 @@ class VoiceSession:
 
             audio_task = asyncio.create_task(self._forward_audio(audio_in))
             stt_task = asyncio.create_task(self._process_stt_events())
+            sweep_task = asyncio.create_task(self._sweep_stale_partials())
 
             try:
                 while True:
@@ -535,10 +568,10 @@ class VoiceSession:
                         break
                     yield event
             finally:
-                for task in (audio_task, stt_task):
+                for task in (audio_task, stt_task, sweep_task):
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(audio_task, stt_task, return_exceptions=True)
+                await asyncio.gather(audio_task, stt_task, sweep_task, return_exceptions=True)
 
         except Exception as e:
             logger.error("voice_session_error", error=str(e), exc_info=True)
@@ -603,6 +636,11 @@ class VoiceSession:
                 await self._current_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # Long replies synthesize faster than the WS can drain: dozens of
+        # AudioOutput frames sit in ``_event_queue``. Drop them *before*
+        # SessionInterrupted so the client is not still scheduling backlog PCM
+        # for seconds after a barge-in.
+        dropped_audio = self._drop_queued_audio_output() if was_active else 0
         if (
             was_active
             and self._turn_finalized_ok
@@ -651,6 +689,7 @@ class VoiceSession:
                 "session_interrupt_emitted",
                 heard_text_preview=(heard[:120] if heard else heard),
                 heard_bytes=self._turn_heard_bytes,
+                dropped_queued_audio=dropped_audio,
                 **_trace_debug_fields(),
             )
 
@@ -674,7 +713,10 @@ class VoiceSession:
         OpenAI). Only applies to string model specs — a ``TestModel`` (or any
         custom model object) has no provider connection to warm.
         """
-        model = getattr(self.agent, "model", None)
+        # Prefer the per-session override (playground model picker) — turns use
+        # ``self.model`` the same way. Warming ``agent.model`` alone misses the
+        # provider the first reply will actually hit.
+        model = self.model or getattr(self.agent, "model", None)
         if not (isinstance(model, str) and "/" in model):
             return
 
@@ -716,6 +758,7 @@ class VoiceSession:
             score=score_fn,
             commit=self._endpoint_commit,
             should_commit=self._endpoint_should_commit,
+            text_score=self._endpoint_text_score,
         )
         try:
             await endpointer.start(sample_rate=self.audio_input.sample_rate)
@@ -747,6 +790,27 @@ class VoiceSession:
         if self._closed:
             return False
         return self._last_partial_at > self._last_commit_at
+
+    async def _endpoint_text_score(self) -> float | None:
+        """``P(complete)`` for the latest STT partial, for VAD delay bumping.
+
+        Prefers :meth:`~timbal.voice.LocalAudioTurnDetector.effective_text_eou`
+        (Namo blended with lexical) so finished questions don't inflate the
+        incomplete-text delay when the model under-scores. Falls back to raw
+        ``fallback_text_eou`` / punctuation baseline. Returns ``None`` when
+        there is no fresh partial — endpointer keeps the audio-only delay.
+        """
+        if self._last_partial_at <= self._last_commit_at or not self._latest_partial_text:
+            return None
+        effective = getattr(self.turn_detector, "effective_text_eou", None)
+        if callable(effective):
+            return await effective(self._latest_partial_text)
+        text_eou = getattr(self.turn_detector, "fallback_text_eou", None)
+        if text_eou is None:
+            from .eou import PunctuationEouPredictor
+
+            text_eou = PunctuationEouPredictor()
+        return await text_eou.predict_eou(self._latest_partial_text)
 
     async def _endpoint_commit(self) -> None:
         self._endpoint_commit_sent_at = time.monotonic()
@@ -787,6 +851,37 @@ class VoiceSession:
         )
         return True
 
+    def _vad_contradicts_recent_partial(self) -> bool:
+        """True when the local VAD is healthy and saw no real speech energy
+        recently — a fresh STT partial is then a hallucination, not the user
+        mid-utterance. Conservative on missing evidence (no endpointer /
+        starved VAD → ``False``), mirroring :meth:`_vad_vetoes_barge_in`.
+        """
+        if self._endpointer is None:
+            return False
+        speech_secs = self._endpointer.speech_secs_in_window(self.BARGE_IN_VAD_WINDOW_SECS)
+        return speech_secs is not None and speech_secs < self.MIN_BARGE_IN_VAD_SPEECH_SECS
+
+    def _vad_confirms_speech_since(self, since_monotonic: float) -> bool:
+        """True when Silero saw real speech *after* ``since_monotonic``.
+
+        HOLD expiry used to call :meth:`_vad_contradicts_recent_partial`, whose
+        2s lookback still contains the utterance that armed the hold — so any
+        late STT refinement after commit "confirmed" speech and floored every
+        short text-complete HOLD at the 2s grace window (live: armed 0.35s,
+        expired ~2.0s). Missing VAD → ``False`` (don't stretch; a real resume
+        still supersedes via COMMIT). No endpointer → ``True`` so unit tests
+        without Silero keep the partial-extends-hold behavior.
+        """
+        if self._endpointer is None:
+            return True
+        window = time.monotonic() - since_monotonic
+        if window <= 0:
+            return False
+        window = min(window, self.BARGE_IN_VAD_WINDOW_SECS)
+        speech_secs = self._endpointer.speech_secs_in_window(window)
+        return speech_secs is not None and speech_secs >= self.MIN_BARGE_IN_VAD_SPEECH_SECS
+
     # -- Internal: audio → STT ---------------------------------------------
 
     async def _forward_audio(self, audio_in: AsyncIterable[bytes]) -> None:
@@ -804,6 +899,63 @@ class VoiceSession:
             logger.error("audio_forward_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"Audio input error: {e}"))
 
+    async def _sweep_stale_partials(self) -> None:
+        """Watchdog: force-commit transcripts the provider never commits.
+
+        Failure mode (seen live): the user speaks quietly while the assistant
+        is playing — AEC ducks the near-end audio, the STT still transcribes a
+        partial, but neither the provider VAD nor Silero registers an
+        utterance. No commit ever fires and the words hang as a "…" caption
+        until the session dies. When a partial has gone
+        ``_stale_partial_commit_secs`` with no commit and no newer partial,
+        force ``stt.commit()`` so the transcript flows through the normal
+        ``_handle_committed`` path.
+
+        Providers whose ``commit()`` is a no-op (Deepgram Flux) never answer
+        that nudge. After a short grace for Finalize-capable providers, we
+        synthesize a committed event from the stranded partial text so the
+        caption cannot hang forever.
+        """
+        try:
+            while not self._closed:
+                await asyncio.sleep(self._stale_partial_poll_secs)
+                if self._closed:
+                    return
+                if self._last_partial_at <= self._last_commit_at:
+                    continue
+                # One forced commit per stranded partial: an IGNOREd commit
+                # does not bump _last_commit_at, so without this guard a noise
+                # partial would retrigger a commit every poll.
+                if self._last_partial_at <= self._stale_commit_sent_at:
+                    continue
+                stale_secs = time.monotonic() - self._last_partial_at
+                if stale_secs < self._stale_partial_commit_secs:
+                    continue
+                self._stale_commit_sent_at = time.monotonic()
+                stranded = self._latest_partial_text
+                # INFO on purpose: this is the only trace that a transcript was
+                # rescued from a provider that silently refused to commit.
+                logger.info("stt_stale_partial_commit", stale_secs=round(stale_secs, 1))
+                try:
+                    await self.stt.commit()
+                except Exception as e:
+                    logger.warning("stt_stale_partial_commit_failed", error=str(e))
+                # Give Finalize-capable providers a beat to emit committed.
+                await asyncio.sleep(0.4)
+                if self._closed or not stranded:
+                    continue
+                if (
+                    self._latest_partial_text == stranded
+                    and self._last_partial_at > self._last_commit_at
+                ):
+                    logger.info(
+                        "stt_stale_partial_synthesized",
+                        text_preview=stranded[:80],
+                    )
+                    await self._handle_committed(stranded)
+        except asyncio.CancelledError:
+            return
+
     # -- Internal: STT → turns ---------------------------------------------
 
     async def _process_stt_events(self) -> None:
@@ -814,10 +966,15 @@ class VoiceSession:
                     self._partials_since_last_commit += 1
                     if text:
                         self._last_partial_at = time.monotonic()
-                    await self._emit(TranscriptPartial(text=text))
+                        self._latest_partial_text = text
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
+                        # Hallucinated multi-word partials during TTS (no mic
+                        # energy) — do not flash them in the playground caption.
+                        # (_vad_vetoes_barge_in already logs stt_partial_barge_in_vetoed.)
                         decision = PartialDecision.IGNORE
+                    else:
+                        await self._emit(TranscriptPartial(text=text))
                     if decision is PartialDecision.BARGE_IN:
                         # INFO on purpose: a barge-in cancels TTS and truncates the
                         # committed reply — when debugging "the agent went silent /
@@ -876,18 +1033,36 @@ class VoiceSession:
         self._hold_armed_timeout_secs = timeout_secs
         self._last_commit_at = time.monotonic()
 
+        # Anchor for "user resumed speaking": partials older than the commit
+        # event are the held fragment's own trailing refinements and must not
+        # stretch the hold (they otherwise floor every expiry at the grace
+        # window instead of ``timeout_secs``).
+        anchor = self._commit_event_at if self._commit_event_at > 0 else time.monotonic()
+
         async def _expire() -> None:
             me = asyncio.current_task()
             try:
                 remaining = timeout_secs
                 while True:
                     await asyncio.sleep(remaining)
-                    # Never fire mid-utterance: a recent STT partial means the
-                    # user resumed speaking, and their commit is about to merge
-                    # with / supersede this hold. Fire only after real silence.
+                    # Never fire mid-utterance: a *new* STT partial since the
+                    # commit means the user resumed speaking, and their commit
+                    # is about to merge with / supersede this hold. Require
+                    # post-commit mic energy — not "any speech in the last 2s",
+                    # which still includes the held utterance itself and used
+                    # to stretch every short HOLD out to the grace window.
                     since_partial = time.monotonic() - self._last_partial_at
-                    if since_partial < self._hold_partial_grace_secs:
+                    if (
+                        self._last_partial_at > anchor
+                        and since_partial < self._hold_partial_grace_secs
+                        and self._vad_confirms_speech_since(anchor)
+                    ):
                         remaining = self._hold_partial_grace_secs - since_partial
+                        logger.debug(
+                            "stt_hold_extended",
+                            remaining=round(remaining, 3),
+                            timeout_secs=timeout_secs,
+                        )
                         continue
                     break
             except asyncio.CancelledError:
@@ -901,6 +1076,22 @@ class VoiceSession:
             if self._hold_task is me:
                 self._hold_task = None
             if held and not self._closed:
+                # A HOLD exists because the fragment looked incomplete. If it is
+                # still just a dangling token ("I", "the", "and") when the timer
+                # fires, promoting it to a user turn invents ghost replies
+                # (live: force-committed "I" → "The capital of France is Paris.").
+                from .eou import _DANGLING_TOKENS, _WORD_RE
+
+                words = _WORD_RE.findall(held)
+                if len(words) == 1 and words[0].lower() in _DANGLING_TOKENS:
+                    logger.info(
+                        "stt_hold_expired_dropped",
+                        text_preview=held[:120],
+                        timeout_secs=timeout_secs,
+                        reason="dangling_token",
+                        **_trace_debug_fields(),
+                    )
+                    return
                 logger.info(
                     "stt_hold_expired",
                     text_preview=held[:120],
@@ -941,7 +1132,8 @@ class VoiceSession:
             self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
         else:
             self._transcript.append(TranscriptEntry(role="user", text=final_text))
-        await self._emit(TranscriptCommitted(text=final_text))
+            replace_user_entry = False
+        await self._emit(TranscriptCommitted(text=final_text, replace=replace_user_entry))
         self._active_turn_user_text = final_text
         self._turn_eou_at = time.monotonic()
         self._current_turn_task = asyncio.create_task(self._run_turn(final_text))
@@ -954,6 +1146,7 @@ class VoiceSession:
     async def _handle_committed(self, text: str) -> None:
         if self._closed:
             return
+        self._commit_event_at = time.monotonic()
         # Any commit (endpointer-forced or provider debounce) makes a pending
         # VAD endpoint stale — the STT segment it targeted is already closed.
         if self._endpointer is not None:
@@ -971,6 +1164,28 @@ class VoiceSession:
                 text_preview=text[:80],
             )
         self._endpoint_commit_sent_at = None
+        # Late twin of a commit we already accepted (Flux EndOfTurn after a
+        # session-synthesized stale rescue, or provider double-final). The
+        # active-turn refinement gate misses this once the reply has finished
+        # and ``_active_turn_user_text`` is cleared — only then should this
+        # fire. Mid-turn / HOLD commits that look like refinements
+        # ("hello can" → "hello can you help…") must reach the detector so
+        # CONTINUE_TURN / merge can run.
+        if (
+            not self._active_turn_user_text
+            and self._held_user_text is None
+            and self._transcript
+            and self._transcript[-1].role == "user"
+            and time.monotonic() - self._last_commit_at < 3.0
+            and _is_same_user_utterance_refinement(self._transcript[-1].text, text)
+        ):
+            logger.info(
+                "stt_commit_ignored",
+                reason="late_duplicate",
+                text_preview=text[:160],
+            )
+            self._partials_since_last_commit = 0
+            return
         state = self._turn_state()
         self._partials_since_last_commit = 0
         # Cancel the hold *timer* before awaiting the detector. Local audio EOU
@@ -1032,11 +1247,19 @@ class VoiceSession:
         )
 
         if decision.action is CommitAction.HOLD:
-            # Stop any still-playing TTS (common right after agent_text_done).
-            # NEW_TURN / CONTINUE_TURN always interrupt first; HOLD must too or
-            # assistant audio keeps talking over the deferred user fragment.
-            await self.interrupt()
-            self._cancel_turn.clear()
+            # HOLD = "not sure yet" — do NOT chop an audible reply for a
+            # deferred fragment (echo-ish "Hello, hello." mid-TTS was wiping
+            # greetings). Partials that meant barge-in already interrupted.
+            # NEW_TURN / hold expiry / CONTINUE interrupt when the turn starts.
+            if self._assistant_audio_playing:
+                logger.info(
+                    "stt_hold_defer_during_tts",
+                    text_preview=final_text[:80],
+                    reason=decision.reason,
+                )
+            else:
+                await self.interrupt()
+                self._cancel_turn.clear()
             # Detector returns the full utterance to hold (refine/merge already applied).
             timeout = (
                 decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs
@@ -1119,7 +1342,10 @@ class VoiceSession:
 
             turn_phase = "creating_agent_generator"
             msg = Message(role="user", content=[TextContent(text=user_text)])
-            agen = self.agent(prompt=msg)
+            agent_kwargs: dict[str, Any] = {"prompt": msg}
+            if self.model:
+                agent_kwargs["model"] = self.model
+            agen = self.agent(**agent_kwargs)
             async for event in agen:
                 turn_phase = "awaiting_agent_event"
                 if self._cancel_turn.is_set():
@@ -1131,6 +1357,12 @@ class VoiceSession:
                         **_trace_debug_fields(),
                     )
                     break
+
+                if isinstance(event, DeltaEvent) and isinstance(event.item, ToolUse) and event.item.name:
+                    # Dead air while a tool runs — surface it so the playground
+                    # doesn't look hung (live: get_datetime slept 3–5s with no UI).
+                    await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
+                    continue
 
                 if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta | Text):
                     # Google (and others) often emit a full ``Text`` block first, then ``TextDelta`` tails.
@@ -1235,6 +1467,12 @@ class VoiceSession:
                             # `out.stop_reason == "tool_use"` — second filler
                             # hook point, after the text handling above so any
                             # spoken text this turn suppresses the filler.
+                            # Backup UI status when the provider only surfaces
+                            # tool calls on the final Message (no ToolUse delta).
+                            for block in out.content:
+                                if isinstance(block, ToolUseContent) and block.name:
+                                    await self._emit(AgentStatus(text=f"Calling {block.name}…"))
+                                    break
                             if not self._cancel_turn.is_set():
                                 # Prefer API ``Message`` text, then streamed ``full_response``, so a
                                 # Unicode/stream mismatch does not drop ``_pending_tts_after_scheduled``.
@@ -1816,6 +2054,29 @@ class VoiceSession:
 
     async def _emit(self, event: VoiceSessionEvent | None) -> None:
         await self._event_queue.put(event)
+
+    def _drop_queued_audio_output(self) -> int:
+        """Remove pending :class:`AudioOutput` frames so interrupt is not delayed.
+
+        TTS can enqueue megabytes of PCM before the consumer (WS send) catches
+        up. Barge-in must surface ``SessionInterrupted`` immediately; unplayed
+        queued audio is discarded the same way the client clears its buffer.
+        Non-audio events stay in order.
+        """
+        kept: list[VoiceSessionEvent | None] = []
+        dropped = 0
+        while True:
+            try:
+                event = self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(event, AudioOutput):
+                dropped += 1
+                continue
+            kept.append(event)
+        for event in kept:
+            self._event_queue.put_nowait(event)
+        return dropped
 
     async def _cleanup(self) -> None:
         self._cancel_hold()

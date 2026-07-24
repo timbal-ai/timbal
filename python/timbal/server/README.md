@@ -60,7 +60,8 @@ Only send keys you need; omitted keys keep server defaults.
 
 | Key           | Description |
 |---------------|-------------|
-| `stt_model`   | Speech-to-text model id (ElevenLabs realtime). |
+| `stt_provider` | `"elevenlabs"` (default), `"deepgram-flux"`, or `"deepgram-nova"` (bare `"deepgram"` routes by `stt_model`, defaulting to Flux). Deepgram needs `DEEPGRAM_API_KEY` on the server. Flux (`/v2/listen`) does model-native end-of-turn detection: the session auto-selects the `provider` turn detector (explicit `turn_detector` still wins) and disables local VAD endpointing. Nova-3 (`/v1/listen`) is plain ASR — Timbal turn detection and VAD endpointing work exactly as with ElevenLabs. Env default: `TIMBAL_STT_PROVIDER`. |
+| `stt_model`   | Speech-to-text model id (ElevenLabs realtime `scribe_*`, Deepgram `flux-general-en`/`flux-general-multi`/`nova-3*`). Model ids that don't belong to the selected provider are ignored (provider default used). |
 | `tts_model`   | Text-to-speech model id. |
 | `voice`       | ElevenLabs voice id string. |
 | `language`    | e.g. `"es"`. |
@@ -85,7 +86,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 
 | `type`                  | Fields        | Meaning |
 |-------------------------|---------------|--------|
-| `session_started`       | `playback_acks`, `turn_detector`, `vad_endpointing` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`), so clients can verify their requested mode. `vad_endpointing` is a bool: whether the local [VAD endpointing](#config-overrides) fast path actually armed for this session (not merely what was requested). |
+| `session_started`       | `playback_acks`, `stt_provider`, `stt_model`, `model`, `turn_detector`, `vad_endpointing` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `stt_provider` is the config id actually in effect (`elevenlabs` / `deepgram-flux` / `deepgram-nova`), not the Python class name. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`). `vad_endpointing` is a bool: whether the local [VAD endpointing](#config-overrides) fast path actually armed for this session (not merely what was requested). |
 | `transcript_partial`    | `text`        | Live STT (may change). |
 | `transcript_committed`  | `text`        | Final user transcript for the utterance. |
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |
