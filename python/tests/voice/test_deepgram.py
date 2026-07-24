@@ -265,6 +265,11 @@ class TestResolveStt:
         assert effective_stt_model(DeepgramFluxSTT(), "flux-general-en") == "flux-general-en"
         assert effective_stt_model(DeepgramNovaSTT(), "scribe_v2_realtime") == DEFAULT_NOVA_MODEL
         assert effective_stt_model(DeepgramNovaSTT(), "nova-3-general") == "nova-3-general"
+        # Unknown-provider fallback → ElevenLabs must not keep a Flux/Nova id.
+        assert effective_stt_model(ElevenLabsRealtimeSTT(), "flux-general-multi") is None
+        assert effective_stt_model(ElevenLabsRealtimeSTT(), "nova-3") is None
+        assert effective_stt_model(ElevenLabsRealtimeSTT(), "scribe_v2_realtime") == "scribe_v2_realtime"
+        assert effective_stt_model(ElevenLabsRealtimeSTT(), None) is None
 
     def test_unknown_provider_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown STT provider"):

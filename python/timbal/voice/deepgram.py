@@ -425,6 +425,11 @@ def effective_stt_model(provider_instance: SpeechToText, requested: str | None) 
         if not m or is_flux_model(m) or m.startswith(("scribe", "eleven")):
             return DEFAULT_NOVA_MODEL
         return requested
+    # ElevenLabs (and any non-Deepgram STT): never pass flux/nova ids through —
+    # e.g. unknown-provider fallback keeps the merged model string otherwise.
+    m = (requested or "").strip().lower()
+    if not m or is_flux_model(m) or m.startswith("nova"):
+        return None
     return requested
 
 

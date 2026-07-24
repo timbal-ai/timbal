@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
+import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.voice.metrics import TurnMetricsEvent
@@ -418,6 +419,53 @@ class TestAudioRecording:
                 pass
 
         assert session.input_audio == b""
+
+
+# ---------------------------------------------------------------------------
+# Tests: LLM connection warmup
+# ---------------------------------------------------------------------------
+
+
+class TestLlmWarmup:
+    async def test_warmup_uses_session_model_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Playground per-session model must warm that provider, not agent.model."""
+        warmed: list[str] = []
+
+        async def _fake_warmup(model: str) -> None:
+            warmed.append(model)
+
+        monkeypatch.setattr("timbal.core.llm_router.warmup_llm_connection", _fake_warmup)
+        agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
+        session = VoiceSession(
+            agent=agent,
+            stt=MockSTT(),
+            tts=MockTTS(),
+            model="openai/gpt-4o-mini",
+        )
+        session._start_llm_warmup()
+        assert session._llm_warmup_task is not None
+        await session._llm_warmup_task
+        assert warmed == ["openai/gpt-4o-mini"]
+
+    async def test_warmup_falls_back_to_agent_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        warmed: list[str] = []
+
+        async def _fake_warmup(model: str) -> None:
+            warmed.append(model)
+
+        monkeypatch.setattr("timbal.core.llm_router.warmup_llm_connection", _fake_warmup)
+        agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session._start_llm_warmup()
+        assert session._llm_warmup_task is not None
+        await session._llm_warmup_task
+        assert warmed == ["groq/llama-3.1-8b-instant"]
+
+    def test_warmup_skips_test_model(self) -> None:
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session._start_llm_warmup()
+        assert session._llm_warmup_task is None
 
 
 # ---------------------------------------------------------------------------

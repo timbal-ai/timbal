@@ -713,7 +713,10 @@ class VoiceSession:
         OpenAI). Only applies to string model specs — a ``TestModel`` (or any
         custom model object) has no provider connection to warm.
         """
-        model = getattr(self.agent, "model", None)
+        # Prefer the per-session override (playground model picker) — turns use
+        # ``self.model`` the same way. Warming ``agent.model`` alone misses the
+        # provider the first reply will actually hit.
+        model = self.model or getattr(self.agent, "model", None)
         if not (isinstance(model, str) and "/" in model):
             return
 
@@ -1164,9 +1167,14 @@ class VoiceSession:
         # Late twin of a commit we already accepted (Flux EndOfTurn after a
         # session-synthesized stale rescue, or provider double-final). The
         # active-turn refinement gate misses this once the reply has finished
-        # and ``_active_turn_user_text`` is cleared.
+        # and ``_active_turn_user_text`` is cleared — only then should this
+        # fire. Mid-turn / HOLD commits that look like refinements
+        # ("hello can" → "hello can you help…") must reach the detector so
+        # CONTINUE_TURN / merge can run.
         if (
-            self._transcript
+            not self._active_turn_user_text
+            and self._held_user_text is None
+            and self._transcript
             and self._transcript[-1].role == "user"
             and time.monotonic() - self._last_commit_at < 3.0
             and _is_same_user_utterance_refinement(self._transcript[-1].text, text)

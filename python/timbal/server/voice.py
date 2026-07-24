@@ -268,14 +268,25 @@ async def voice_ws(ws: WebSocket) -> None:
     defaults: dict = getattr(ws.app.state, "voice_config", None) or {}
     merged = merge_client_voice_overrides(defaults, config)
 
+    stt_provider = merged.get("stt_provider")
+    stt_model_requested = merged.get("stt_model")
     try:
-        stt = resolve_stt(merged.get("stt_provider"), model=merged.get("stt_model"))
+        stt = resolve_stt(stt_provider, model=stt_model_requested)
     except ValueError as e:
-        logger.warning("voice_ws_bad_stt_provider", error=str(e))
+        logger.warning(
+            "voice_ws_bad_stt_provider",
+            error=str(e),
+            requested_provider=stt_provider,
+            requested_model=stt_model_requested,
+        )
+        # Fallback must not keep a Flux/Nova model id on the ElevenLabs wire,
+        # or the client/config log will claim Deepgram while Scribe runs.
         stt = resolve_stt("elevenlabs")
+        stt_provider = "elevenlabs"
+        stt_model_requested = None
     stt_is_flux = isinstance(stt, DeepgramFluxSTT)
     stt_label = type(stt).__name__
-    stt_model = effective_stt_model(stt, merged.get("stt_model"))
+    stt_model = effective_stt_model(stt, stt_model_requested)
     tts = ElevenLabsStreamTTS()
 
     stt_extra = dict(merged.get("stt_extra", {}))
@@ -358,7 +369,7 @@ async def voice_ws(ws: WebSocket) -> None:
     logger.info(
         "voice_ws_session_config",
         stt=stt_label,
-        stt_provider=merged.get("stt_provider"),
+        stt_provider=stt_provider,
         stt_model=stt_model,
         stt_model_requested=merged.get("stt_model"),
         model=llm_model,
