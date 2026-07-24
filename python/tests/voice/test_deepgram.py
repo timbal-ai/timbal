@@ -6,6 +6,7 @@ event queue is drained, mirroring how the receive loop feeds ``events()``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from urllib.parse import parse_qs, urlparse
 
@@ -15,6 +16,7 @@ from timbal.voice.deepgram import (
     DEFAULT_NOVA_MODEL,
     DeepgramFluxSTT,
     DeepgramNovaSTT,
+    _AUDIO_FLUSH_BYTES,
     effective_stt_model,
     is_flux_model,
     resolve_stt,
@@ -48,6 +50,62 @@ class _FakeWs:
 
     async def send(self, payload) -> None:
         self.sent.append(payload)
+
+
+class _SlowFakeWs:
+    """WS that yields during send so concurrent callers can race without a lock."""
+
+    def __init__(self) -> None:
+        self.sent: list = []
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def send(self, payload) -> None:
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.02)
+        self.sent.append(payload)
+        self.in_flight -= 1
+
+
+class TestWireSendSerialization:
+    async def test_threshold_push_and_flush_serialize_sends(self) -> None:
+        """push_audio and _flush_audio must not await ``_ws.send`` concurrently.
+
+        Regression: buffer lock used to release before send, so the flush loop
+        and a threshold push could interleave PCM frames on one socket.
+        """
+        stt = DeepgramNovaSTT()
+        ws = _SlowFakeWs()
+        stt._ws = ws
+        frame = b"\xab" * _AUDIO_FLUSH_BYTES
+
+        async def _pushes() -> None:
+            await stt.push_audio(frame)
+            await stt.push_audio(frame)
+
+        async def _flushes() -> None:
+            for _ in range(6):
+                await stt._flush_audio()
+                await asyncio.sleep(0.005)
+
+        await asyncio.gather(_pushes(), _flushes())
+        assert ws.max_in_flight == 1
+        assert ws.sent == [frame, frame]
+
+    async def test_flush_drains_remainder_after_threshold_push(self) -> None:
+        stt = DeepgramFluxSTT()
+        ws = _FakeWs()
+        stt._ws = ws
+        frame = b"\x11" * _AUDIO_FLUSH_BYTES
+        remainder = b"\x22" * 100
+        await stt.push_audio(frame + remainder)
+        assert ws.sent == [frame + remainder]  # one threshold send of all buffered
+        # Small chunk under threshold sits until flush.
+        await stt.push_audio(b"\x33" * 50)
+        assert len(ws.sent) == 1
+        await stt._flush_audio()
+        assert ws.sent[-1] == b"\x33" * 50
 
 
 class TestFluxEventMapping:

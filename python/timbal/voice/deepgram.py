@@ -96,7 +96,12 @@ class _DeepgramSTTBase(SpeechToText):
         self._api_key: str | None = None
         self._ws: Any = None
         self._buf = bytearray()
-        self._buf_lock = asyncio.Lock()
+        # Covers buffer mutation *and* ``_ws.send``: ``push_audio`` (threshold
+        # flush) and ``_flush_loop`` both drain PCM onto the socket; without a
+        # single lock those awaits interleave and Deepgram can see out-of-order
+        # or concurrent frames. Control frames (KeepAlive / Finalize / Close)
+        # share it too.
+        self._wire_lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._flusher: asyncio.Task[None] | None = None
         self._receiver: asyncio.Task[None] | None = None
@@ -129,25 +134,25 @@ class _DeepgramSTTBase(SpeechToText):
         """
         if not chunk:
             return
-        raw: bytes | None = None
-        async with self._buf_lock:
+        async with self._wire_lock:
             self._buf.extend(chunk)
-            if len(self._buf) >= _AUDIO_FLUSH_BYTES:
-                raw = bytes(self._buf)
-                self._buf.clear()
-        if raw is not None and self._ws is not None:
+            if len(self._buf) < _AUDIO_FLUSH_BYTES or self._ws is None:
+                return
+            raw = bytes(self._buf)
+            self._buf.clear()
             try:
                 await self._ws.send(raw)
             except ConnectionClosed:
                 pass
 
     async def _flush_audio(self) -> None:
-        if self._ws is None:
-            return
-        async with self._buf_lock:
+        async with self._wire_lock:
+            if self._ws is None:
+                return
             raw = bytes(self._buf)
             self._buf.clear()
-        if raw:
+            if not raw:
+                return
             try:
                 await self._ws.send(raw)
             except ConnectionClosed:
@@ -202,7 +207,9 @@ class _DeepgramSTTBase(SpeechToText):
                 yield item
 
     async def _send_json(self, payload: dict[str, Any]) -> None:
-        if self._ws is not None:
+        async with self._wire_lock:
+            if self._ws is None:
+                return
             with contextlib.suppress(Exception):
                 await self._ws.send(json.dumps(payload))
 
