@@ -31,7 +31,7 @@ from timbal.voice.turn_detection import (
     resolve_turn_detector,
 )
 
-from .test_voice_session import MockSTT, MockTTS
+from .test_session import MockSTT, MockTTS
 
 # ---------------------------------------------------------------------------
 # Moved heuristic functions (ported from test_voice_session_stt_refinement.py)
@@ -900,7 +900,7 @@ class TestHoldInSession:
         import asyncio
         import time
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldOnce(TurnDetector):
             def __init__(self) -> None:
@@ -963,7 +963,7 @@ class TestHoldInSession:
         """HOLD must not start the agent until the hold timer expires."""
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldOnce(TurnDetector):
             def __init__(self) -> None:
@@ -1025,7 +1025,7 @@ class TestHoldInSession:
         greetings on echo-ish ``Hello, hello.`` commits."""
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT, FakePlaybackTracker
+        from .test_session import DelayedMockSTT, FakePlaybackTracker
 
         class _AlwaysHold(TurnDetector):
             async def on_partial(self, text, state):  # noqa: ARG002
@@ -1087,7 +1087,7 @@ class TestHoldInSession:
         """Longer STT re-commit while HOLDing must replace the held fragment."""
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldRefine(TurnDetector):
             async def on_partial(self, text, state):  # noqa: ARG002
@@ -1177,7 +1177,7 @@ class TestHoldInSession:
         """
         import asyncio
 
-        from .test_voice_session import DelayedMockSTT
+        from .test_session import DelayedMockSTT
 
         class _HoldThenRefine(TurnDetector):
             def __init__(self) -> None:
