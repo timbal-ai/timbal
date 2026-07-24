@@ -405,31 +405,47 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
-  .btn-stop {
+  .btn-session {
     flex-shrink: 0;
     width: 2.5rem;
     height: 2.5rem;
     padding: 0;
     border: none;
     border-radius: 10px;
-    background: var(--danger);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   }
-  .btn-stop:hover:not(:disabled) {
-    background: #b91c1c;
-  }
-  .btn-stop:focus-visible {
+  .btn-session:focus-visible {
     outline: 2px solid var(--primary);
     outline-offset: 2px;
   }
-  .btn-stop-icon {
+  .btn-session[data-mode="stop"] {
+    background: var(--danger);
+  }
+  .btn-session[data-mode="stop"]:hover:not(:disabled) {
+    background: #b91c1c;
+  }
+  .btn-session[data-mode="start"] {
+    background: var(--primary);
+  }
+  .btn-session[data-mode="start"]:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+  .btn-session-icon--stop {
     width: 11px;
     height: 11px;
     border-radius: 2px;
     background: var(--primary-fg);
+  }
+  .btn-session-icon--start {
+    width: 0;
+    height: 0;
+    margin-left: 2px;
+    border-style: solid;
+    border-width: 7px 0 7px 12px;
+    border-color: transparent transparent transparent var(--primary-fg);
   }
   button.primary {
     background: var(--primary);
@@ -476,17 +492,17 @@
     </div>
     <div class="foot">
       <div class="foot-row foot-row--top">
-        <div id="foot-status" class="foot-status" data-state="connecting">
+        <div id="foot-status" class="foot-status" data-state="ended">
           <span class="foot-status-dot" aria-hidden="true"></span>
           <div class="foot-status-lines">
-            <span id="foot-status-title" class="foot-status-title">Getting ready</span>
-            <span id="foot-status-detail" class="foot-status-detail">Microphone and server connection…</span>
+            <span id="foot-status-title" class="foot-status-title">Ready</span>
+            <span id="foot-status-detail" class="foot-status-detail">Connecting…</span>
           </div>
         </div>
         <div class="foot-actions">
           <button type="button" id="btn-reconnect" class="primary">Reload page</button>
-          <button type="button" id="btn-stop" class="btn-stop" disabled aria-label="End session">
-            <span class="btn-stop-icon" aria-hidden="true"></span>
+          <button type="button" id="btn-session" class="btn-session" data-mode="start" aria-label="Start session" title="Start a new voice session">
+            <span class="btn-session-icon btn-session-icon--start" aria-hidden="true"></span>
           </button>
         </div>
       </div>
@@ -497,15 +513,15 @@
         </div>
       </div>
       <div class="foot-row foot-row--modes">
-        <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking">
+        <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking. Applied on the next Start.">
           <option value="">Turns: server default</option>
           <option value="heuristic">Turns: heuristic</option>
           <option value="provider">Turns: provider VAD</option>
-          <option value="local">Turns: local EOU</option>
-          <option value="lexical">Turns: lexical</option>
+          <option value="local">Turns: Smart Turn + Namo</option>
+          <option value="lexical">Turns: Namo text</option>
           <option value="raw">Turns: raw (no filters)</option>
         </select>
-        <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — RNNoise runs in your browser (loaded from jsDelivr) before audio is sent; echo cancellation stays on in every mode">
+        <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.">
           <option value="browser">Noise: browser</option>
           <option value="rnnoise">Noise: RNNoise</option>
           <option value="off">Noise: off</option>
@@ -527,7 +543,7 @@ const footStatusTitle = document.getElementById('foot-status-title');
 const footStatusDetail = document.getElementById('foot-status-detail');
 const transcriptEl = document.getElementById('transcript');
 const voiceEmpty = document.getElementById('voice-empty');
-const btnStop = document.getElementById('btn-stop');
+const btnSession = document.getElementById('btn-session');
 const btnReconnect = document.getElementById('btn-reconnect');
 const micSelect = document.getElementById('mic-select');
 const tdSelect = document.getElementById('td-select');
@@ -538,19 +554,28 @@ const TD_STORAGE_KEY = 'timbal-voice-turn-detector';
 // Unknown stored values leave the select on '' (server default) automatically.
 tdSelect.value = localStorage.getItem(TD_STORAGE_KEY) || '';
 tdSelect.onchange = () => {
-  // A detector is fixed at session start, so apply by starting a new session.
+  // Applied on the next Start (no reload) — modes are fixed per WebSocket hello.
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
-  location.reload();
 };
 
 const NS_STORAGE_KEY = 'timbal-voice-noise-suppression';
 nsSelect.value = localStorage.getItem(NS_STORAGE_KEY) || 'browser';
 if (!nsSelect.value) nsSelect.value = 'browser'; // unknown stored value
 nsSelect.onchange = () => {
-  // The AudioContext rate and worklet graph are fixed at session start.
+  // Applied on the next Start — AudioContext rate / worklet are rebuilt then.
   localStorage.setItem(NS_STORAGE_KEY, nsSelect.value);
-  location.reload();
 };
+
+function setSessionButton(mode) {
+  const start = mode === 'start';
+  btnSession.dataset.mode = start ? 'start' : 'stop';
+  btnSession.disabled = false;
+  btnSession.setAttribute('aria-label', start ? 'Start session' : 'End session');
+  btnSession.title = start ? 'Start a new voice session' : 'End session';
+  btnSession.innerHTML = start
+    ? '<span class="btn-session-icon btn-session-icon--start" aria-hidden="true"></span>'
+    : '<span class="btn-session-icon btn-session-icon--stop" aria-hidden="true"></span>';
+}
 const micBars = () => [...micViz.querySelectorAll('.mic-bar')];
 
 function truncateMiddle(s, max) {
@@ -657,7 +682,10 @@ function setConn(state, title, detail) {
   footStatusDetail.textContent = detail;
   cardEl.classList.toggle('card--inactive', state === 'ended' || state === 'error');
   cardEl.classList.toggle('card--live', state === 'live');
-  btnReconnect.classList.toggle('visible', state === 'ended' || state === 'error');
+  // Hard failures only — normal stop/disconnect uses Start for a new session.
+  btnReconnect.classList.toggle('visible', state === 'error');
+  if (state === 'ended' || state === 'error') setSessionButton('start');
+  else if (state === 'live' || state === 'connecting') setSessionButton('stop');
 }
 
 function updateEmptyState() {
@@ -990,17 +1018,88 @@ function playPCM(b64) {
 
 btnReconnect.onclick = () => location.reload();
 
+let sessionBusy = false;
+/** Bumped on every teardown so an in-flight `start()` can't resurrect a dead session. */
+let startGen = 0;
+
+async function endSession({ userInitiated = false, silent = false } = {}) {
+  startGen += 1;
+  userEndedSession = userInitiated;
+  stopAssistantAudio();
+  if (playbackAckTimer) { clearInterval(playbackAckTimer); playbackAckTimer = null; }
+  micAudioToWs = false;
+  sessionReady = false;
+  micViz.classList.remove('active');
+  if (ws) {
+    const sock = ws;
+    ws = null;
+    sock.onclose = null;
+    sock.onerror = null;
+    sock.onmessage = null;
+    try { sock.close(); } catch (_) {}
+  }
+  if (worklet) { try { worklet.disconnect(); } catch (_) {} worklet = null; }
+  if (currentSource) { try { currentSource.disconnect(); } catch (_) {} currentSource = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx) {
+    try { await audioCtx.close(); } catch (_) {}
+    audioCtx = null;
+    rnnoiseCtxActive = false;
+  }
+  analyser = null;
+  if (meterRAF) { cancelAnimationFrame(meterRAF); meterRAF = null; }
+  setSessionButton('start');
+  if (!silent) {
+    if (userInitiated) {
+      setConn('ended', 'Session ended', 'Click Start for a new session.');
+    } else {
+      setConn('ended', 'Disconnected', 'Click Start for a new session.');
+    }
+  }
+  updateEmptyState();
+}
+
+async function startSession() {
+  if (sessionBusy) return;
+  sessionBusy = true;
+  btnSession.disabled = true;
+  try {
+    // Always a fresh session: tear down mic/WS/graph, then open a new one.
+    await endSession({ userInitiated: false, silent: true });
+    userEndedSession = false;
+    await start();
+  } catch (err) {
+    console.error(err);
+    setSessionButton('start');
+    setConn('error', 'Could not start', err?.message || 'Microphone or connection failed.');
+  } finally {
+    sessionBusy = false;
+    btnSession.disabled = false;
+  }
+}
+
+btnSession.onclick = () => {
+  if (btnSession.dataset.mode === 'stop') {
+    void endSession({ userInitiated: true });
+    return;
+  }
+  void startSession();
+};
+
 async function start() {
+  const gen = startGen;
   setConn('connecting', 'Getting ready', 'Microphone and server connection…');
   userEndedSession = false;
   sessionReady = false;
 
   await startMic();
+  if (gen !== startGen) return;
   const mics = await populateDevices();
   const preferred = pickPreferredMic(mics);
   const activeId = micStream?.getAudioTracks()[0]?.getSettings().deviceId;
   if (preferred && preferred !== activeId) {
     await startMic(preferred);
+    if (gen !== startGen) return;
     await populateDevices();
   }
 
@@ -1009,8 +1108,14 @@ async function start() {
   micAudioToWs = false;
   ws = new WebSocket(`${proto}://${location.host}/voice/ws`);
   ws.binaryType = 'arraybuffer';
+  if (gen !== startGen) {
+    try { ws.close(); } catch (_) {}
+    ws = null;
+    return;
+  }
 
   ws.onopen = () => {
+    if (gen !== startGen) return;
     // The config hello MUST be the first frame on the socket — the server
     // reads one frame as session config. stopAssistantAudio() below sends a
     // playback ack, which used to race ahead and eat the config slot.
@@ -1061,26 +1166,25 @@ async function start() {
       window.addEventListener('keydown', kick);
     })();
     setConn('live', 'Connected', 'Waiting for voice session…');
-    btnStop.disabled = false;
     updateEmptyState();
   };
 
   ws.onclose = (ev) => {
     micAudioToWs = false;
-    btnStop.disabled = true;
     if (playbackAckTimer) { clearInterval(playbackAckTimer); playbackAckTimer = null; }
     sessionReady = false;
     micViz.classList.remove('active');
+    // Teardown from endSession/startSession already nulled `ws` — ignore.
     if (connVisual === 'ended' || connVisual === 'error') {
       updateEmptyState();
       return;
     }
     if (userEndedSession) {
-      setConn('ended', 'Session ended', 'You stopped the session. Reload to start again.');
+      setConn('ended', 'Session ended', 'Click Start for a new session.');
     } else {
       setConn('ended', 'Disconnected', ev.wasClean
-        ? 'The connection closed. Reload if you want another session.'
-        : 'Connection dropped — check the server and reload.');
+        ? 'Connection closed. Click Start for a new session.'
+        : 'Connection dropped — check the server, then click Start.');
     }
     updateEmptyState();
   };
@@ -1110,6 +1214,23 @@ async function start() {
         break;
       case 'transcript_committed':
         setPartial(null);
+        // Seal the prior assistant turn. interrupt() for a not-yet-spoken
+        // CONTINUE rewrite arrives after this commit's predecessor already
+        // sealed — without sealing here, an empty heard_text interrupt can
+        // wipe the *previous* completed reply (still in _turnBubbles).
+        window._turnBubbles = [];
+        window._replyDone = true;
+        window._assistantEl = null;
+        if (msg.replace) {
+          const users = transcriptEl.querySelectorAll('.msg.user');
+          const last = users[users.length - 1];
+          if (last) {
+            last.textContent = msg.text;
+            transcriptEl.scrollTop = transcriptEl.scrollHeight;
+            updateEmptyState();
+            break;
+          }
+        }
         log('user', msg.text);
         break;
       case 'agent_text_delta':
@@ -1141,7 +1262,13 @@ async function start() {
         // A mid-stream STT partial can split one reply across several bubbles
         // (setPartial seals the in-flight bubble); rewrite the *whole* set,
         // not just the last fragment.
-        if (msg.heard_text !== undefined && msg.heard_text !== null) {
+        //
+        // Skip when nothing is in flight for *this* turn: CONTINUE can interrupt
+        // a just-started LLM call (heard="") and must not delete the prior
+        // completed assistant bubble still referenced by _lastAssistantEl.
+        const inFlight = Boolean(window._assistantEl)
+          || (window._turnBubbles && window._turnBubbles.length && !window._replyDone);
+        if (msg.heard_text !== undefined && msg.heard_text !== null && (inFlight || msg.heard_text)) {
           const bubbles = (window._turnBubbles && window._turnBubbles.length)
             ? window._turnBubbles
             : [window._assistantEl || window._lastAssistantEl].filter(Boolean);
@@ -1167,21 +1294,18 @@ async function start() {
         window._sessionTranscript = msg.entries;
         break;
       case 'session_ended':
-        setConn('ended', 'Session ended', 'The agent closed this voice session.');
+        setConn('ended', 'Session ended', 'Click Start for a new session.');
         break;
     }
   };
 }
 
-btnStop.onclick = () => {
-  userEndedSession = true;
-  stopAssistantAudio();
-  if (ws) ws.close();
-  micStream?.getTracks().forEach(t => t.stop());
-};
-
 initRunnableStrip();
-start();
+setSessionButton('start');
+setConn('connecting', 'Getting ready', 'Microphone and server connection…');
+cardEl.classList.add('card--inactive');
+// Auto-start on load — no idle play click. Start remains after Stop for a new session.
+void startSession();
 </script>
 </body>
 </html>

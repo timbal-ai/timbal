@@ -27,7 +27,7 @@ _MODE = os.environ.get("TIMBAL_VOICE_TURN_DETECTOR", "heuristic").strip().lower(
 
 agent = Agent(
     name="voice_turn_modes",
-    model=os.environ.get("TIMBAL_VOICE_DEMO_MODEL", "openai/gpt-4o-mini"),
+    model=os.environ.get("TIMBAL_VOICE_DEMO_MODEL", "groq/llama-3.1-8b-instant"),
     system_prompt=(
         "You are a concise voice assistant. Keep replies to 1–2 short sentences. "
         f"(turn_detector mode: {_MODE})"

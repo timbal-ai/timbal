@@ -60,12 +60,17 @@ from .turn_detection import (
 
 
 def __getattr__(name: str):
-    # Lazy: importing smart_turn / vad pulls numpy/onnxruntime (timbal[voice]
-    # extra), which must not be required just to import timbal.voice.
+    # Lazy: importing smart_turn / namo / vad pulls numpy/onnxruntime /
+    # transformers (timbal[voice] extra), which must not be required just to
+    # import timbal.voice.
     if name == "SmartTurnEouModel":
         from .smart_turn import SmartTurnEouModel
 
         return SmartTurnEouModel
+    if name == "NamoTextEouPredictor":
+        from .namo import NamoTextEouPredictor
+
+        return NamoTextEouPredictor
     if name == "SileroVad":
         from .vad import SileroVad
 
@@ -87,6 +92,7 @@ __all__ = [
     "HeuristicTurnDetector",
     "LexicalTurnDetector",
     "LocalAudioTurnDetector",
+    "NamoTextEouPredictor",
     "PartialDecision",
     "PlaybackTracker",
     "ProviderTurnDetector",

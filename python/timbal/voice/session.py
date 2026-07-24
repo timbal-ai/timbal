@@ -167,6 +167,8 @@ class TranscriptPartial(VoiceSessionEvent):
 class TranscriptCommitted(VoiceSessionEvent):
     type: Literal["transcript_committed"] = "transcript_committed"
     text: str
+    # True → rewrite last user bubble (CONTINUE_TURN merge), don't append another.
+    replace: bool = False
 
 
 class AgentTextDelta(VoiceSessionEvent):
@@ -771,14 +773,17 @@ class VoiceSession:
     async def _endpoint_text_score(self) -> float | None:
         """``P(complete)`` for the latest STT partial, for VAD delay bumping.
 
-        Uses the turn detector's text EOU when present (``fallback_text_eou``
-        on :class:`~timbal.voice.LocalAudioTurnDetector`); otherwise the
-        shared :class:`~timbal.voice.PunctuationEouPredictor` baseline. Returns
-        ``None`` when there is no fresh partial — endpointer keeps the
-        audio-only delay.
+        Prefers :meth:`~timbal.voice.LocalAudioTurnDetector.effective_text_eou`
+        (Namo blended with lexical) so finished questions don't inflate the
+        incomplete-text delay when the model under-scores. Falls back to raw
+        ``fallback_text_eou`` / punctuation baseline. Returns ``None`` when
+        there is no fresh partial — endpointer keeps the audio-only delay.
         """
         if self._last_partial_at <= self._last_commit_at or not self._latest_partial_text:
             return None
+        effective = getattr(self.turn_detector, "effective_text_eou", None)
+        if callable(effective):
+            return await effective(self._latest_partial_text)
         text_eou = getattr(self.turn_detector, "fallback_text_eou", None)
         if text_eou is None:
             from .eou import PunctuationEouPredictor
@@ -835,6 +840,26 @@ class VoiceSession:
             return False
         speech_secs = self._endpointer.speech_secs_in_window(self.BARGE_IN_VAD_WINDOW_SECS)
         return speech_secs is not None and speech_secs < self.MIN_BARGE_IN_VAD_SPEECH_SECS
+
+    def _vad_confirms_speech_since(self, since_monotonic: float) -> bool:
+        """True when Silero saw real speech *after* ``since_monotonic``.
+
+        HOLD expiry used to call :meth:`_vad_contradicts_recent_partial`, whose
+        2s lookback still contains the utterance that armed the hold — so any
+        late STT refinement after commit "confirmed" speech and floored every
+        short text-complete HOLD at the 2s grace window (live: armed 0.35s,
+        expired ~2.0s). Missing VAD → ``False`` (don't stretch; a real resume
+        still supersedes via COMMIT). No endpointer → ``True`` so unit tests
+        without Silero keep the partial-extends-hold behavior.
+        """
+        if self._endpointer is None:
+            return True
+        window = time.monotonic() - since_monotonic
+        if window <= 0:
+            return False
+        window = min(window, self.BARGE_IN_VAD_WINDOW_SECS)
+        speech_secs = self._endpointer.speech_secs_in_window(window)
+        return speech_secs is not None and speech_secs >= self.MIN_BARGE_IN_VAD_SPEECH_SECS
 
     # -- Internal: audio → STT ---------------------------------------------
 
@@ -978,17 +1003,22 @@ class VoiceSession:
                     await asyncio.sleep(remaining)
                     # Never fire mid-utterance: a *new* STT partial since the
                     # commit means the user resumed speaking, and their commit
-                    # is about to merge with / supersede this hold. But require
-                    # mic energy to corroborate: STT partials can hallucinate
-                    # from silence (same failure as barge-ins) and would extend
-                    # the hold into dead air.
+                    # is about to merge with / supersede this hold. Require
+                    # post-commit mic energy — not "any speech in the last 2s",
+                    # which still includes the held utterance itself and used
+                    # to stretch every short HOLD out to the grace window.
                     since_partial = time.monotonic() - self._last_partial_at
                     if (
                         self._last_partial_at > anchor
                         and since_partial < self._hold_partial_grace_secs
-                        and not self._vad_contradicts_recent_partial()
+                        and self._vad_confirms_speech_since(anchor)
                     ):
                         remaining = self._hold_partial_grace_secs - since_partial
+                        logger.debug(
+                            "stt_hold_extended",
+                            remaining=round(remaining, 3),
+                            timeout_secs=timeout_secs,
+                        )
                         continue
                     break
             except asyncio.CancelledError:
@@ -1042,7 +1072,8 @@ class VoiceSession:
             self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
         else:
             self._transcript.append(TranscriptEntry(role="user", text=final_text))
-        await self._emit(TranscriptCommitted(text=final_text))
+            replace_user_entry = False
+        await self._emit(TranscriptCommitted(text=final_text, replace=replace_user_entry))
         self._active_turn_user_text = final_text
         self._turn_eou_at = time.monotonic()
         self._current_turn_task = asyncio.create_task(self._run_turn(final_text))
@@ -1134,11 +1165,19 @@ class VoiceSession:
         )
 
         if decision.action is CommitAction.HOLD:
-            # Stop any still-playing TTS (common right after agent_text_done).
-            # NEW_TURN / CONTINUE_TURN always interrupt first; HOLD must too or
-            # assistant audio keeps talking over the deferred user fragment.
-            await self.interrupt()
-            self._cancel_turn.clear()
+            # HOLD = "not sure yet" — do NOT chop an audible reply for a
+            # deferred fragment (echo-ish "Hello, hello." mid-TTS was wiping
+            # greetings). Partials that meant barge-in already interrupted.
+            # NEW_TURN / hold expiry / CONTINUE interrupt when the turn starts.
+            if self._assistant_audio_playing:
+                logger.info(
+                    "stt_hold_defer_during_tts",
+                    text_preview=final_text[:80],
+                    reason=decision.reason,
+                )
+            else:
+                await self.interrupt()
+                self._cancel_turn.clear()
             # Detector returns the full utterance to hold (refine/merge already applied).
             timeout = (
                 decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs

@@ -384,7 +384,10 @@ async def voice_ws(ws: WebSocket) -> None:
         elif isinstance(event, TranscriptPartial):
             await _send_json({"type": "transcript_partial", "text": event.text})
         elif isinstance(event, TranscriptCommitted):
-            await _send_json({"type": "transcript_committed", "text": event.text})
+            payload: dict = {"type": "transcript_committed", "text": event.text}
+            if event.replace:
+                payload["replace"] = True
+            await _send_json(payload)
         elif isinstance(event, AgentTextDelta):
             await _send_json({"type": "agent_text_delta", "text": event.text})
         elif isinstance(event, AgentTextDone):

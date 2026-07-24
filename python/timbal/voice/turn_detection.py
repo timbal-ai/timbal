@@ -597,10 +597,12 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
     # with the transcript as the confidence signal): when the audio model says
     # "incomplete" but the text looks finished (terminal punctuation — Smart
     # Turn systematically under-scores short closers like "Thank you." /
-    # "No, no."), the hold shrinks to this. The audio model is never overruled
-    # outright — the disagreeing text just shortens how long it gets to be
-    # proven right. Both-signals-incomplete keeps the full timeout.
-    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 1.2
+    # "I am David." / "Quite good."), the hold shrinks to this. Keep it short:
+    # the VAD endpointer has usually already paid ~0.5–3s of silence delay
+    # before the commit, so a second 1.2s tax felt like dead air on every
+    # finished utterance Smart Turn under-scored. Both-signals-incomplete
+    # keeps the full timeout.
+    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 0.35
     # The tier needs *confidently* finished text (terminal punctuation scores
     # P_TERMINAL=0.95), not the predictor's complete-leaning neutral (0.60) —
     # unpunctuated text must not shorten the hold.
@@ -645,13 +647,35 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         )
         # Used when the buffered PCM is too short to score, and as the text
         # confidence signal for both HOLD tiers (complete-text shortens;
-        # incomplete-text delays an audio-complete commit). Zero-dep lexical
-        # baseline — swap for a DistilBERT-class TextEouPredictor later.
+        # incomplete-text delays an audio-complete commit). Default is the
+        # zero-dep lexical baseline; ``resolve_turn_detector("local")`` injects
+        # Namo when ``timbal[voice]`` is installed.
         self.fallback_text_eou = fallback_text_eou or PunctuationEouPredictor()
+        # Namo under-scores many finished questions (~0.0 on "How are you?" /
+        # "What's two plus two?"). Lexical gate corroborates so we only pay the
+        # incomplete-text tax when both agree the user is mid-thought.
+        self._lexical_gate = PunctuationEouPredictor()
         self._sample_rate = 16_000
         self._pcm: deque[bytes] = deque()
         self._pcm_bytes = 0
         self._max_pcm_bytes = 0
+
+    async def effective_text_eou(self, text: str) -> float:
+        """``P(complete)`` for HOLD tiers / VAD delay — Namo with lexical rescue.
+
+        Namo under-scores many finished questions (~0.0 on "How are you?").
+        Only lift the score when the lexical baseline is *confidently* complete
+        (terminal punct ≥ :attr:`TEXT_COMPLETE_TIER_THRESHOLD`) — a blunt
+        ``max(namo, lexical)`` would also promote neutral unpunctuated
+        mid-thoughts (lexical ~0.60) over the incomplete tier and neuter Namo.
+        """
+        p = await self.fallback_text_eou.predict_eou(text)
+        if isinstance(self.fallback_text_eou, PunctuationEouPredictor):
+            return p
+        p_lex = await self._lexical_gate.predict_eou(text)
+        if p_lex >= self.TEXT_COMPLETE_TIER_THRESHOLD:
+            return max(p, p_lex)
+        return p
 
     async def start(self, config: AudioInputConfig) -> None:
         self._sample_rate = int(getattr(config, "sample_rate", None) or 16_000)
@@ -661,10 +685,12 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self._pcm_bytes = 0
         if self.audio_eou is not None:
             await self.audio_eou.start(sample_rate=self._sample_rate)
+        await self.fallback_text_eou.start()
 
     async def close(self) -> None:
         if self.audio_eou is not None:
             await self.audio_eou.close()
+        await self.fallback_text_eou.close()
         self._pcm.clear()
         self._pcm_bytes = 0
 
@@ -763,7 +789,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             # score the text lexically so an incomplete fast commit still HOLDs.
             if decision.action is not CommitAction.NEW_TURN:
                 return decision
-            p_text = await self.fallback_text_eou.predict_eou(candidate)
+            p_text = await self.effective_text_eou(candidate)
             if p_text >= self.completion_threshold:
                 return decision
             return CommitDecision(
@@ -792,7 +818,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             # done but the transcript looks mid-thought — hold short so a
             # continuation can merge. Never overrule into IGNORE; just delay.
             try:
-                p_text = await self.fallback_text_eou.predict_eou(candidate)
+                p_text = await self.effective_text_eou(candidate)
             except Exception as e:
                 logger.warning("text_eou_predict_failed", error=str(e))
                 p_text = None
@@ -832,7 +858,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         timeout = self.hold_timeout_secs
         reason = "audio_hold"
         try:
-            p_text = await self.fallback_text_eou.predict_eou(candidate)
+            p_text = await self.effective_text_eou(candidate)
         except Exception as e:
             logger.warning("text_eou_predict_failed", error=str(e))
             p_text = None
@@ -871,8 +897,31 @@ def _default_audio_eou() -> AudioEouModel | None:
     return _DEFAULT_AUDIO_EOU
 
 
+def _default_text_eou() -> TextEouPredictor:
+    """Namo English DistilBERT when ``timbal[voice]`` is installed, else punctuation.
+
+    Shared process-wide (same rationale as :func:`_default_audio_eou`).
+    """
+    global _DEFAULT_TEXT_EOU
+    if _DEFAULT_TEXT_EOU is not _TEXT_EOU_UNSET:
+        return _DEFAULT_TEXT_EOU
+    try:
+        from .namo import NamoTextEouPredictor
+    except ImportError:
+        logger.debug(
+            "namo_text_eou_unavailable",
+            hint="falling back to PunctuationEouPredictor; install timbal[voice] for Namo",
+        )
+        _DEFAULT_TEXT_EOU = PunctuationEouPredictor()
+        return _DEFAULT_TEXT_EOU
+    _DEFAULT_TEXT_EOU = NamoTextEouPredictor()
+    return _DEFAULT_TEXT_EOU
+
+
 _AUDIO_EOU_UNSET: Any = object()
 _DEFAULT_AUDIO_EOU: AudioEouModel | None = _AUDIO_EOU_UNSET
+_TEXT_EOU_UNSET: Any = object()
+_DEFAULT_TEXT_EOU: TextEouPredictor | Any = _TEXT_EOU_UNSET
 
 
 def resolve_turn_detector(spec: Any = None) -> TurnDetector:
@@ -880,11 +929,12 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
 
     Accepted names: ``heuristic`` (default), ``provider``, ``local``, ``lexical``,
     ``raw`` (debug: no silence/noise/echo filtering at all).
-    ``local`` auto-loads the Smart Turn v3 :class:`~timbal.voice.eou.AudioEouModel`
-    when the ``timbal[voice]`` extra is installed (heuristic degradation otherwise).
-    Instances are returned unchanged — callers that reuse one spec across
-    concurrent sessions (server ``voice_config``) must :meth:`~TurnDetector.clone`
-    per session, or pass a zero-arg factory callable instead.
+    ``local`` auto-loads Smart Turn (audio) + Namo (text) when the
+    ``timbal[voice]`` extra is installed (heuristic / punctuation degradation
+    otherwise). Instances are returned unchanged — callers that reuse one spec
+    across concurrent sessions (server ``voice_config``) must
+    :meth:`~TurnDetector.clone` per session, or pass a zero-arg factory
+    callable instead.
     """
     if spec is None:
         return HeuristicTurnDetector()
@@ -897,9 +947,12 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
         if key in ("provider", "stt"):
             return ProviderTurnDetector()
         if key in ("local", "audio", "smart_turn"):
-            return LocalAudioTurnDetector(audio_eou=_default_audio_eou())
+            return LocalAudioTurnDetector(
+                audio_eou=_default_audio_eou(),
+                fallback_text_eou=_default_text_eou(),
+            )
         if key in ("lexical", "semantic", "punctuation"):
-            return LexicalTurnDetector()
+            return LexicalTurnDetector(text_eou=_default_text_eou())
         if key in ("raw", "none", "off"):
             return RawTurnDetector()
         raise ValueError(

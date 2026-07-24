@@ -63,6 +63,7 @@ server = [
 voice = [
   "huggingface-hub>=0.28.0",
   "onnxruntime>=1.20.0",
+  "transformers>=4.40.0",
 ]
 all = [
   "timbal[codegen]",

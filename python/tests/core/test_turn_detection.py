@@ -394,7 +394,11 @@ class TestLocalAudioTurnDetector:
     async def test_incomplete_audio_complete_text_short_hold(self) -> None:
         """Confidence tier: Smart Turn under-scores short closers ("Thank you."
         p=0.036 live) — terminal punctuation disagrees, so the hold shrinks to
-        the short tier instead of eating the full budget as dead air."""
+        the short tier instead of eating the full budget as dead air.
+
+        Keep this well under the incomplete-text HOLD (1.2s): VAD has usually
+        already waited, and a second 1.2s tax is the cold-start "slow" feel.
+        """
         det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
         await det.start(type("C", (), {"sample_rate": 16000})())
         det.push_audio(b"\x00\x01" * 8000)
@@ -402,6 +406,8 @@ class TestLocalAudioTurnDetector:
         assert decision.action is CommitAction.HOLD
         assert decision.reason == "audio_hold_text_complete"
         assert decision.hold_timeout_secs == det.text_complete_hold_timeout_secs
+        assert det.text_complete_hold_timeout_secs == 0.35
+        assert det.text_complete_hold_timeout_secs < det.text_incomplete_hold_timeout_secs
         assert det.text_complete_hold_timeout_secs < det.hold_timeout_secs
         # Per-session clones keep the knob.
         assert det.clone().text_complete_hold_timeout_secs == det.text_complete_hold_timeout_secs
@@ -426,6 +432,49 @@ class TestLocalAudioTurnDetector:
         det.push_audio(b"\x00\x01" * 8000)
         decision = await det.on_committed("Tell me a story.", _state())
         assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+    async def test_complete_audio_question_despite_namo_zero(self) -> None:
+        """Namo often scores finished questions ~0 — lexical gate must skip the
+        1.2s incomplete HOLD (live cold-start: "How are you?" / "What's 2+2?")."""
+        det = LocalAudioTurnDetector(
+            audio_eou=_FixedAudioEou(0.98),
+            fallback_text_eou=_FixedTextEou(0.0),
+        )
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Hello, hello. How are you?", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        decision = await det.on_committed("What's two plus two?", _state())
+        assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+    async def test_complete_audio_hedge_still_holds_with_namo_zero(self) -> None:
+        """Lexical hedge (~0.2) + Namo 0 → still incomplete tier HOLD."""
+        det = LocalAudioTurnDetector(
+            audio_eou=_FixedAudioEou(0.9),
+            fallback_text_eou=_FixedTextEou(0.0),
+        )
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Uh, I don't know.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_complete_text_incomplete"
+        await det.close()
+
+    async def test_complete_audio_neutral_midthought_keeps_namo_incomplete(self) -> None:
+        """Unpunctuated mid-thought: lexical ~0.60 must NOT rescue Namo 0."""
+        det = LocalAudioTurnDetector(
+            audio_eou=_FixedAudioEou(0.9),
+            fallback_text_eou=_FixedTextEou(0.0),
+        )
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed(
+            "I was thinking about something my dad told me", _state()
+        )
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "audio_complete_text_incomplete"
         await det.close()
 
     async def test_incomplete_audio_ellipsis_full_hold(self) -> None:
@@ -970,8 +1019,10 @@ class TestHoldInSession:
         assert any(e.type == "agent_text_done" for e in events)
         assert session.transcript[0].text == "I was wondering about"
 
-    async def test_hold_interrupts_playing_audio(self) -> None:
-        """HOLD while TTS is still buffered must interrupt like NEW_TURN."""
+    async def test_hold_defers_while_audio_playing(self) -> None:
+        """HOLD while TTS is still buffered arms the fragment but does not
+        interrupt — chopping the reply for a deferred commit was wiping
+        greetings on echo-ish ``Hello, hello.`` commits."""
         import asyncio
 
         from .test_voice_session import DelayedMockSTT, FakePlaybackTracker
@@ -1001,7 +1052,6 @@ class TestHoldInSession:
             hold_timeout_secs=5.0,
         )
         events: list[VoiceSessionEvent] = []
-        held_during: list[str | None] = []
 
         async def _empty():
             return
@@ -1012,10 +1062,16 @@ class TestHoldInSession:
                 await asyncio.sleep(0.01)
             await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
             for _ in range(50):
-                if tracker.interrupt_calls > 0 and session._held_user_text:
-                    held_during.append(session._held_user_text)
+                if session._held_user_text == "I was wondering about":
                     break
                 await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("HOLD never armed while audio playing")
+            # Assert *before* finish: session.close() interrupts when the
+            # tracker still reports playing (unrelated to HOLD deferral).
+            assert tracker.interrupt_calls == 0
+            assert not any(e.type == "interrupted" for e in events)
+            tracker.playing = False
             await stt.finish()
 
         async def _run() -> None:
@@ -1026,9 +1082,6 @@ class TestHoldInSession:
                 await driver
 
         await asyncio.wait_for(_run(), timeout=5)
-        assert tracker.interrupt_calls >= 1
-        assert held_during == ["I was wondering about"]
-        assert any(e.type == "interrupted" for e in events)
 
     async def test_hold_refinement_updates_session_fragment(self) -> None:
         """Longer STT re-commit while HOLDing must replace the held fragment."""

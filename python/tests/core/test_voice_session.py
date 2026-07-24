@@ -1209,6 +1209,12 @@ class TestInterruptionTruncation:
         assert [e.role for e in session.transcript] == ["user", "assistant"]
         assert session.transcript[0].text == combined
         assert session.transcript[1].text == "Second reply"
+        committed = [e for e in events if isinstance(e, TranscriptCommitted)]
+        assert len(committed) == 2
+        assert committed[0].replace is False
+        assert committed[0].text == fragment
+        assert committed[1].replace is True
+        assert committed[1].text == combined
         # The merged turn's LLM input must contain the combined utterance
         # exactly once — the old memory *rewrite* (instead of pop) left it in
         # both the parent memory and the new prompt.
@@ -1243,6 +1249,80 @@ class TestInterruptionTruncation:
 
         await session._align_continue_memory(fragment_user_text="hello can")
         assert root.memory == []
+
+    async def test_hold_during_tts_does_not_truncate_reply(self) -> None:
+        """HOLD while the client is still playing must defer — not amputate the
+        greeting for an echo-ish fragment (session log: Hello! How can I…)."""
+
+        class _HoldThenExpire(TurnDetector):
+            async def on_partial(self, text, state):  # noqa: ARG002
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):  # noqa: ARG002
+                if state.holding:
+                    return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=text,
+                    reason="audio_hold",
+                    hold_timeout_secs=0.15,
+                )
+
+        tracker = FakePlaybackTracker()
+        agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE, "Second"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = SlowMockTTS(delay=0.02, chunk=b"\x00\x01" * 50, num_chunks=4)
+        session = VoiceSession(
+            agent=agent,
+            stt=stt,
+            tts=tts,
+            turn_detector=_HoldThenExpire(),
+            playback_tracker=tracker,
+        )
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Julia."))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            # Client still has queued TTS — HOLD must not emit interrupt/truncate.
+            tracker.playing = True
+            tracker.played = 80
+            await stt.inject(TranscriptEvent(type="committed", text="Hello, hello."))
+            await asyncio.sleep(0.05)
+            interrupts = [e for e in events if isinstance(e, SessionInterrupted)]
+            assert interrupts == [], "HOLD during TTS must not interrupt"
+            # Full reply still in transcript (not truncated to a heard prefix).
+            assistants = [e for e in session.transcript if e.role == "assistant"]
+            assert assistants and assistants[0].text == self.RESPONSE
+            tracker.playing = False
+            # Let hold expire → turn for the held fragment.
+            for _ in range(200):
+                if sum(1 for e in events if isinstance(e, AgentTextDone)) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("second turn never finished after hold expiry")
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        assert sum(1 for e in events if isinstance(e, AgentTextDone)) >= 2
+        # First assistant entry survived the HOLD (may later be joined by turn 2).
+        assert session.transcript[1].role == "assistant"
+        assert session.transcript[1].text == self.RESPONSE
 
     async def test_interrupt_cancels_orphan_turn_before_speaking(self) -> None:
         """``interrupt()`` must cancel a scheduled turn even if ``_is_speaking``
@@ -1594,6 +1674,7 @@ class TestHoldExpiryTiming:
         timeout_secs: float,
         partial_after_commit_delay: float | None,
         run_timeout: float = 10.0,
+        endpointer: object | None = None,
     ) -> tuple[float, VoiceSession]:
         """Inject partial→commit (HOLD) and return seconds from commit to turn start."""
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
@@ -1603,6 +1684,8 @@ class TestHoldExpiryTiming:
             agent=agent, stt=stt, tts=tts, turn_detector=_AlwaysHoldOnceDetector(timeout_secs)
         )
         session._hold_partial_grace_secs = grace_secs
+        if endpointer is not None:
+            session._endpointer = endpointer  # type: ignore[assignment]
 
         events: list[VoiceSessionEvent] = []
         elapsed = 0.0
@@ -1663,6 +1746,34 @@ class TestHoldExpiryTiming:
         )
         # Must have waited past the bare timeout into the grace window.
         assert elapsed > 0.5, f"hold expired after only {elapsed:.2f}s despite fresh partial"
+
+    async def test_pre_commit_speech_does_not_stretch_via_vad_lookback(self) -> None:
+        """Live bug: Silero's 2s lookback still contains the held utterance, so
+        ``not vad_contradicts`` was always true after commit — any late STT
+        refinement floored a 0.35s text-complete HOLD at the 2s grace window.
+        """
+
+        class _StaleSpeechEP:
+            """Reports speech only in wide windows (pre-commit residue)."""
+
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.5 if window_secs >= 1.0 else 0.0
+
+            def notify_committed(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        elapsed, _ = await self._run_hold_scenario(
+            grace_secs=2.0,
+            timeout_secs=0.2,
+            partial_after_commit_delay=0.05,
+            endpointer=_StaleSpeechEP(),
+        )
+        assert elapsed < 0.8, (
+            f"hold expiry took {elapsed:.2f}s — pre-commit VAD speech stretched the grace"
+        )
 
 
 # ---------------------------------------------------------------------------
