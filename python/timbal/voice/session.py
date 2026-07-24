@@ -32,9 +32,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.agent import Agent
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
-from ..types.content import TextContent
+from ..types.content import TextContent, ToolUseContent
 from ..types.events import OutputEvent
-from ..types.events.delta import DeltaEvent, Text, TextDelta
+from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
 from ..types.message import Message
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
 from .turn_detection import (
@@ -42,6 +42,7 @@ from .turn_detection import (
     PartialDecision,
     TurnDetector,
     TurnState,
+    _is_same_user_utterance_refinement,
     resolve_turn_detector,
 )
 
@@ -178,6 +179,13 @@ class AgentTextDelta(VoiceSessionEvent):
 
 class AgentTextDone(VoiceSessionEvent):
     type: Literal["agent_text_done"] = "agent_text_done"
+    text: str
+
+
+class AgentStatus(VoiceSessionEvent):
+    """Non-transcript status for the UI (e.g. tool calls while the mic is idle)."""
+
+    type: Literal["agent_status"] = "agent_status"
     text: str
 
 
@@ -374,10 +382,14 @@ class VoiceSession:
         record_audio: bool = False,
         hold_timeout_secs: float = 1.5,
         vad_endpointing: bool | VadEndpointer | None = None,
+        model: str | None = None,
     ):
         self.agent = agent
         self.stt = stt
         self.tts = tts
+        # Optional per-session LLM override (playground model picker). Passed
+        # through to ``agent(prompt=..., model=...)`` — does not mutate the Agent.
+        self.model = model.strip() if isinstance(model, str) and model.strip() else None
         # Always clone: the session owns the detector's start/push_audio/close
         # lifecycle, and the spec may be a shared instance (server voice_config)
         # or a factory returning a singleton. Inspect ``session.turn_detector``,
@@ -624,6 +636,11 @@ class VoiceSession:
                 await self._current_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # Long replies synthesize faster than the WS can drain: dozens of
+        # AudioOutput frames sit in ``_event_queue``. Drop them *before*
+        # SessionInterrupted so the client is not still scheduling backlog PCM
+        # for seconds after a barge-in.
+        dropped_audio = self._drop_queued_audio_output() if was_active else 0
         if (
             was_active
             and self._turn_finalized_ok
@@ -672,6 +689,7 @@ class VoiceSession:
                 "session_interrupt_emitted",
                 heard_text_preview=(heard[:120] if heard else heard),
                 heard_bytes=self._turn_heard_bytes,
+                dropped_queued_audio=dropped_audio,
                 **_trace_debug_fields(),
             )
 
@@ -888,7 +906,12 @@ class VoiceSession:
         until the session dies. When a partial has gone
         ``_stale_partial_commit_secs`` with no commit and no newer partial,
         force ``stt.commit()`` so the transcript flows through the normal
-        ``_handle_committed`` path (providers without manual commit no-op).
+        ``_handle_committed`` path.
+
+        Providers whose ``commit()`` is a no-op (Deepgram Flux) never answer
+        that nudge. After a short grace for Finalize-capable providers, we
+        synthesize a committed event from the stranded partial text so the
+        caption cannot hang forever.
         """
         try:
             while not self._closed:
@@ -906,6 +929,7 @@ class VoiceSession:
                 if stale_secs < self._stale_partial_commit_secs:
                     continue
                 self._stale_commit_sent_at = time.monotonic()
+                stranded = self._latest_partial_text
                 # INFO on purpose: this is the only trace that a transcript was
                 # rescued from a provider that silently refused to commit.
                 logger.info("stt_stale_partial_commit", stale_secs=round(stale_secs, 1))
@@ -913,6 +937,19 @@ class VoiceSession:
                     await self.stt.commit()
                 except Exception as e:
                     logger.warning("stt_stale_partial_commit_failed", error=str(e))
+                # Give Finalize-capable providers a beat to emit committed.
+                await asyncio.sleep(0.4)
+                if self._closed or not stranded:
+                    continue
+                if (
+                    self._latest_partial_text == stranded
+                    and self._last_partial_at > self._last_commit_at
+                ):
+                    logger.info(
+                        "stt_stale_partial_synthesized",
+                        text_preview=stranded[:80],
+                    )
+                    await self._handle_committed(stranded)
         except asyncio.CancelledError:
             return
 
@@ -1036,6 +1073,22 @@ class VoiceSession:
             if self._hold_task is me:
                 self._hold_task = None
             if held and not self._closed:
+                # A HOLD exists because the fragment looked incomplete. If it is
+                # still just a dangling token ("I", "the", "and") when the timer
+                # fires, promoting it to a user turn invents ghost replies
+                # (live: force-committed "I" → "The capital of France is Paris.").
+                from .eou import _DANGLING_TOKENS, _WORD_RE
+
+                words = _WORD_RE.findall(held)
+                if len(words) == 1 and words[0].lower() in _DANGLING_TOKENS:
+                    logger.info(
+                        "stt_hold_expired_dropped",
+                        text_preview=held[:120],
+                        timeout_secs=timeout_secs,
+                        reason="dangling_token",
+                        **_trace_debug_fields(),
+                    )
+                    return
                 logger.info(
                     "stt_hold_expired",
                     text_preview=held[:120],
@@ -1108,6 +1161,23 @@ class VoiceSession:
                 text_preview=text[:80],
             )
         self._endpoint_commit_sent_at = None
+        # Late twin of a commit we already accepted (Flux EndOfTurn after a
+        # session-synthesized stale rescue, or provider double-final). The
+        # active-turn refinement gate misses this once the reply has finished
+        # and ``_active_turn_user_text`` is cleared.
+        if (
+            self._transcript
+            and self._transcript[-1].role == "user"
+            and time.monotonic() - self._last_commit_at < 3.0
+            and _is_same_user_utterance_refinement(self._transcript[-1].text, text)
+        ):
+            logger.info(
+                "stt_commit_ignored",
+                reason="late_duplicate",
+                text_preview=text[:160],
+            )
+            self._partials_since_last_commit = 0
+            return
         state = self._turn_state()
         self._partials_since_last_commit = 0
         # Cancel the hold *timer* before awaiting the detector. Local audio EOU
@@ -1264,7 +1334,10 @@ class VoiceSession:
 
             turn_phase = "creating_agent_generator"
             msg = Message(role="user", content=[TextContent(text=user_text)])
-            agen = self.agent(prompt=msg)
+            agent_kwargs: dict[str, Any] = {"prompt": msg}
+            if self.model:
+                agent_kwargs["model"] = self.model
+            agen = self.agent(**agent_kwargs)
             async for event in agen:
                 turn_phase = "awaiting_agent_event"
                 if self._cancel_turn.is_set():
@@ -1276,6 +1349,12 @@ class VoiceSession:
                         **_trace_debug_fields(),
                     )
                     break
+
+                if isinstance(event, DeltaEvent) and isinstance(event.item, ToolUse) and event.item.name:
+                    # Dead air while a tool runs — surface it so the playground
+                    # doesn't look hung (live: get_datetime slept 3–5s with no UI).
+                    await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
+                    continue
 
                 if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta | Text):
                     # Google (and others) often emit a full ``Text`` block first, then ``TextDelta`` tails.
@@ -1380,6 +1459,12 @@ class VoiceSession:
                             # `out.stop_reason == "tool_use"` — second filler
                             # hook point, after the text handling above so any
                             # spoken text this turn suppresses the filler.
+                            # Backup UI status when the provider only surfaces
+                            # tool calls on the final Message (no ToolUse delta).
+                            for block in out.content:
+                                if isinstance(block, ToolUseContent) and block.name:
+                                    await self._emit(AgentStatus(text=f"Calling {block.name}…"))
+                                    break
                             if not self._cancel_turn.is_set():
                                 # Prefer API ``Message`` text, then streamed ``full_response``, so a
                                 # Unicode/stream mismatch does not drop ``_pending_tts_after_scheduled``.
@@ -1961,6 +2046,29 @@ class VoiceSession:
 
     async def _emit(self, event: VoiceSessionEvent | None) -> None:
         await self._event_queue.put(event)
+
+    def _drop_queued_audio_output(self) -> int:
+        """Remove pending :class:`AudioOutput` frames so interrupt is not delayed.
+
+        TTS can enqueue megabytes of PCM before the consumer (WS send) catches
+        up. Barge-in must surface ``SessionInterrupted`` immediately; unplayed
+        queued audio is discarded the same way the client clears its buffer.
+        Non-audio events stay in order.
+        """
+        kept: list[VoiceSessionEvent | None] = []
+        dropped = 0
+        while True:
+            try:
+                event = self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(event, AudioOutput):
+                dropped += 1
+                continue
+            kept.append(event)
+        for event in kept:
+            self._event_queue.put_nowait(event)
+        return dropped
 
     async def _cleanup(self) -> None:
         self._cancel_hold()

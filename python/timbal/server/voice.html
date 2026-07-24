@@ -38,16 +38,95 @@
     -webkit-font-smoothing: antialiased;
   }
   .shell {
-    max-width: 480px;
+    max-width: 1160px;
     margin: 0 auto;
     height: 100%;
     max-height: 100dvh;
     min-height: 0;
-    padding: 1.5rem 1rem 2rem;
+    padding: 1.5rem 1rem 1.5rem;
     display: flex;
     flex-direction: column;
     gap: 1rem;
     overflow: hidden;
+  }
+  .layout {
+    flex: 1;
+    display: flex;
+    gap: 1rem;
+    min-height: 0;
+  }
+  .panel {
+    flex: 0 0 250px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .panel-title {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .field-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .panel select {
+    width: 100%;
+    min-width: 0;
+    font: inherit;
+    font-size: 0.8125rem;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.65rem;
+    outline: none;
+    cursor: pointer;
+  }
+  .panel select:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(0,0,0,.07);
+  }
+  .model-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+  .model-count {
+    font-size: 0.65625rem;
+    color: var(--text-muted);
+    margin-top: -0.15rem;
+  }
+  .panel-note {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+    margin-top: auto;
+    padding-top: 0.65rem;
+    border-top: 1px solid var(--border);
+  }
+  @media (max-width: 900px) {
+    body { overflow: auto; }
+    .shell { max-height: none; height: auto; }
+    .layout { flex-direction: column; overflow: visible; }
+    .panel { flex: none; width: auto; overflow: visible; }
+    .card { order: -1; min-height: 60dvh; }
+    .panel-note { margin-top: 0; }
   }
   .top {
     display: flex;
@@ -100,9 +179,8 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.35rem;
-    padding: 0.75rem 1rem;
+    padding-bottom: 0.75rem;
     border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, #fafafa 0%, var(--surface) 100%);
   }
   .conn-version {
     font-size: 0.75rem;
@@ -164,31 +242,20 @@
     50% { opacity: 0.5; transform: scale(0.85); }
   }
 
-  #mic-select, #td-select, #ns-select {
-    flex: 1;
-    min-width: 0;
-    font: inherit;
-    font-size: 0.8125rem;
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0.5rem 0.65rem;
-    outline: none;
-    cursor: pointer;
+  .mic-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.5rem;
   }
-  #mic-select:focus, #td-select:focus, #ns-select:focus {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(0,0,0,.07);
-  }
+  .mic-row .field { flex: 1; min-width: 0; }
   .mic-viz {
     display: flex;
     align-items: flex-end;
     justify-content: center;
     gap: 3px;
     height: 28px;
-    flex: 0 0 56px;
-    padding-bottom: 2px;
+    flex: 0 0 40px;
+    padding-bottom: 5px;
   }
   .mic-bar {
     width: 4px;
@@ -234,30 +301,6 @@
     pointer-events: none;
   }
   #voice-empty[hidden] { display: none !important; }
-  .orb-wrap {
-    width: 72px;
-    height: 72px;
-    margin-bottom: 1rem;
-    position: relative;
-  }
-  .orb {
-    position: absolute;
-    inset: 12px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 30% 30%, #fafafa, #e4e4e7);
-    border: 1px solid var(--border);
-  }
-  .card.card--live #voice-empty .orb-wrap .ring {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    border: 2px solid var(--success-soft);
-    animation: ring-pulse 2s ease-out infinite;
-  }
-  @keyframes ring-pulse {
-    0% { transform: scale(0.85); opacity: 0.8; }
-    100% { transform: scale(1.35); opacity: 0; }
-  }
   .empty-title {
     font-size: 0.9375rem;
     font-weight: 600;
@@ -268,8 +311,20 @@
     font-size: 0.8125rem;
     color: var(--text-muted);
     margin-top: 0.35rem;
-    max-width: 240px;
+    max-width: 280px;
     line-height: 1.4;
+  }
+  .msg.status {
+    margin: 0.35rem auto 0.65rem;
+    max-width: 90%;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-style: italic;
+    padding: 0.35rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.03);
+    border: 1px solid var(--border);
   }
 
   .msg { margin-bottom: 0.65rem; max-width: 90%; }
@@ -352,26 +407,6 @@
     font-size: 0.75rem;
     color: var(--text-muted);
     line-height: 1.35;
-  }
-  .foot-row--mic {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-  }
-  .foot-row--mic #mic-select {
-    flex: 1;
-    min-width: 0;
-  }
-  .foot-row--modes {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-  }
-  .foot-row--modes select {
-    flex: 1 1 0;
-    min-width: 0;
   }
   .foot-actions {
     display: flex;
@@ -471,71 +506,111 @@
     </div>
   </header>
 
-  <main id="card" class="card">
-    <div id="conn-strip" class="conn-strip">
-      <span id="conn-version" class="conn-version"></span>
-      <div id="conn-agent" class="conn-agent" hidden>
-        <div id="conn-runnable-title" class="conn-runnable-title"></div>
-        <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
-      </div>
-    </div>
-    <div class="transcript-wrap">
-      <div id="voice-empty">
-        <div class="orb-wrap">
-          <div class="ring"></div>
-          <div class="orb"></div>
+  <div class="layout">
+    <aside class="panel" aria-label="Agent configuration">
+      <h2 class="panel-title">Agent</h2>
+      <div id="conn-strip" class="conn-strip">
+        <span id="conn-version" class="conn-version"></span>
+        <div id="conn-agent" class="conn-agent" hidden>
+          <div id="conn-runnable-title" class="conn-runnable-title"></div>
+          <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
         </div>
-        <p class="empty-title">Listening</p>
-        <p class="empty-sub">When you’re connected, speak normally. Transcripts and replies show up here.</p>
       </div>
-      <div id="transcript" role="log" aria-live="polite" aria-relevant="additions"></div>
-    </div>
-    <div class="foot">
-      <div class="foot-row foot-row--top">
-        <div id="foot-status" class="foot-status" data-state="ended">
-          <span class="foot-status-dot" aria-hidden="true"></span>
-          <div class="foot-status-lines">
-            <span id="foot-status-title" class="foot-status-title">Ready</span>
-            <span id="foot-status-detail" class="foot-status-detail">Connecting…</span>
+      <div class="model-picker" title="Agent LLM — applied on the next Start. Needs the matching provider API key on the server.">
+        <label class="field">
+          <span class="field-label">Provider</span>
+          <select id="model-provider-select" aria-label="LLM provider">
+            <option value="">All providers</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Model</span>
+          <select id="model-select" aria-label="LLM model">
+            <option value="">Agent default</option>
+          </select>
+        </label>
+        <span id="model-count" class="model-count"></span>
+      </div>
+      <p class="panel-note">Changes apply on the next session Start. Model overrides need the matching provider API key on the server.</p>
+    </aside>
+
+    <main id="card" class="card">
+      <div class="transcript-wrap">
+        <div id="voice-empty">
+          <p class="empty-title">Listening</p>
+          <p class="empty-sub">Speak normally. Transcripts, tool calls, and replies show up here.</p>
+        </div>
+        <div id="transcript" role="log" aria-live="polite" aria-relevant="additions"></div>
+      </div>
+      <div class="foot">
+        <div class="foot-row foot-row--top">
+          <div id="foot-status" class="foot-status" data-state="ended">
+            <span class="foot-status-dot" aria-hidden="true"></span>
+            <div class="foot-status-lines">
+              <span id="foot-status-title" class="foot-status-title">Ready</span>
+              <span id="foot-status-detail" class="foot-status-detail">Connecting…</span>
+            </div>
+          </div>
+          <div class="foot-actions">
+            <button type="button" id="btn-reconnect" class="primary">Reload page</button>
+            <button type="button" id="btn-session" class="btn-session" data-mode="start" aria-label="Start session" title="Start a new voice session">
+              <span class="btn-session-icon btn-session-icon--start" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
-        <div class="foot-actions">
-          <button type="button" id="btn-reconnect" class="primary">Reload page</button>
-          <button type="button" id="btn-session" class="btn-session" data-mode="start" aria-label="Start session" title="Start a new voice session">
-            <span class="btn-session-icon btn-session-icon--start" aria-hidden="true"></span>
-          </button>
-        </div>
+        <p class="foot-warn">Audio is captured in your browser (microphone) and streamed to this server. Use a private session and only on sites you trust; anyone with access to this page may be able to use the same agent.</p>
       </div>
-      <div class="foot-row foot-row--mic">
-        <select id="mic-select" aria-label="Microphone"><option value="">Loading devices…</option></select>
+    </main>
+
+    <aside class="panel" aria-label="Voice session configuration">
+      <h2 class="panel-title">Voice session</h2>
+      <div class="mic-row">
+        <label class="field">
+          <span class="field-label">Microphone</span>
+          <select id="mic-select" aria-label="Microphone"><option value="">Loading devices…</option></select>
+        </label>
         <div id="mic-viz" class="mic-viz" aria-hidden="true">
           <div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div>
         </div>
       </div>
-      <div class="foot-row foot-row--modes">
-        <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking. Applied on the next Start.">
-          <option value="">Turns: server default</option>
-          <option value="heuristic">Turns: heuristic</option>
-          <option value="provider">Turns: provider VAD</option>
-          <option value="local">Turns: Smart Turn + Namo</option>
-          <option value="lexical">Turns: Namo text</option>
-          <option value="raw">Turns: raw (no filters)</option>
-        </select>
+      <label class="field">
+        <span class="field-label">Noise suppression</span>
         <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.">
-          <option value="browser">Noise: browser</option>
-          <option value="rnnoise">Noise: RNNoise</option>
-          <option value="off">Noise: off</option>
+          <option value="browser">Browser</option>
+          <option value="rnnoise">RNNoise</option>
+          <option value="off">Off</option>
         </select>
-      </div>
-      <p class="foot-warn">Audio is captured in your browser (microphone) and streamed to this server. Use a private session and only on sites you trust; anyone with access to this page may be able to use the same agent.</p>
-    </div>
-  </main>
+      </label>
+      <label class="field">
+        <span class="field-label">Speech-to-text</span>
+        <select id="stt-select" aria-label="STT provider" title="Speech-to-text provider — applied on the next Start. Deepgram needs DEEPGRAM_API_KEY on the server.">
+          <option value="">Server default</option>
+          <option value="elevenlabs">ElevenLabs Scribe</option>
+          <option value="deepgram-flux">Deepgram Flux</option>
+          <option value="deepgram-nova">Deepgram Nova-3</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Turn detection</span>
+        <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking. Applied on the next Start.">
+          <option value="">Server default</option>
+          <option value="heuristic">Heuristic</option>
+          <option value="provider">Provider VAD</option>
+          <option value="local">Smart Turn + Namo</option>
+          <option value="lexical">Namo text</option>
+          <option value="raw">Raw (no filters)</option>
+        </select>
+      </label>
+      <p class="panel-note">Echo cancellation stays on in every mode. Settings apply on the next Start.</p>
+    </aside>
+  </div>
 
 </div>
 <script type="application/json" id="timbal-voice-runnable-meta">__TIMBAL_VOICE_RUNNABLE_META_JSON__</script>
 <script>
 const SAMPLE_RATE = 16000;
-const CHUNK_MS = 100;
+// Flux wants ~80ms frames; Nova/Scribe are fine at the same cadence.
+const CHUNK_MS = 80;
 
 const cardEl = document.getElementById('card');
 const footStatus = document.getElementById('foot-status');
@@ -557,6 +632,128 @@ tdSelect.onchange = () => {
   // Applied on the next Start (no reload) — modes are fixed per WebSocket hello.
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
 };
+
+const sttSelect = document.getElementById('stt-select');
+const STT_STORAGE_KEY = 'timbal-voice-stt-provider';
+sttSelect.value = localStorage.getItem(STT_STORAGE_KEY) || '';
+function syncTdForStt() {
+  // Flux owns end-of-turn — Smart Turn / Namo would only run after Flux
+  // already committed, which feels like "wait until you shut up".
+  if (sttSelect.value === 'deepgram-flux') {
+    const incompatible = !tdSelect.value || ['local', 'lexical'].includes(tdSelect.value);
+    if (incompatible) {
+      tdSelect.value = 'provider';
+      localStorage.setItem(TD_STORAGE_KEY, 'provider');
+    }
+  }
+}
+sttSelect.onchange = () => {
+  // Applied on the next Start — the provider is fixed per WebSocket hello.
+  localStorage.setItem(STT_STORAGE_KEY, sttSelect.value);
+  syncTdForStt();
+};
+syncTdForStt();
+
+const modelSelect = document.getElementById('model-select');
+const modelProviderSelect = document.getElementById('model-provider-select');
+const modelCountEl = document.getElementById('model-count');
+const MODEL_STORAGE_KEY = 'timbal-voice-llm-model';
+const PROVIDER_LABELS = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  google: 'Google',
+  togetherai: 'Together AI',
+  xai: 'xAI',
+  groq: 'Groq',
+  fireworks: 'Fireworks',
+  xiaomi: 'Xiaomi',
+  byteplus: 'BytePlus',
+  cerebras: 'Cerebras',
+  sambanova: 'SambaNova',
+  moonshot: 'Moonshot',
+};
+/** @type {{id: string, provider: string, display_name: string}[]} */
+let MODEL_CATALOG = [];
+
+function providerLabel(p) {
+  return PROVIDER_LABELS[p] || (p ? p.charAt(0).toUpperCase() + p.slice(1) : p);
+}
+
+function initModelPicker(models, agentDefault) {
+  MODEL_CATALOG = Array.isArray(models) ? models : [];
+  const providers = [...new Set(MODEL_CATALOG.map((m) => m.provider))].sort((a, b) =>
+    providerLabel(a).localeCompare(providerLabel(b)),
+  );
+  modelProviderSelect.innerHTML = '<option value="">All providers</option>';
+  for (const p of providers) {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = providerLabel(p);
+    modelProviderSelect.appendChild(opt);
+  }
+
+  const stored = localStorage.getItem(MODEL_STORAGE_KEY) || '';
+  if (stored && stored.includes('/')) {
+    modelProviderSelect.value = stored.split('/', 1)[0];
+  }
+  renderModelOptions(stored, agentDefault);
+
+  modelProviderSelect.onchange = () => {
+    renderModelOptions(modelSelect.value, agentDefault);
+  };
+  modelSelect.onchange = () => {
+    localStorage.setItem(MODEL_STORAGE_KEY, modelSelect.value);
+    // Sync provider step when a concrete model is chosen.
+    if (modelSelect.value && modelSelect.value.includes('/')) {
+      const p = modelSelect.value.split('/', 1)[0];
+      if (modelProviderSelect.value && modelProviderSelect.value !== p) {
+        modelProviderSelect.value = p;
+        renderModelOptions(modelSelect.value, agentDefault);
+      }
+    }
+  };
+}
+
+function renderModelOptions(preferred, agentDefault) {
+  const provider = modelProviderSelect.value;
+  let list = MODEL_CATALOG;
+  if (provider) list = list.filter((m) => m.provider === provider);
+
+  const defaultLabel = agentDefault
+    ? `Agent default (${agentDefault})`
+    : 'Agent default';
+  modelSelect.innerHTML = '';
+  const defOpt = document.createElement('option');
+  defOpt.value = '';
+  defOpt.textContent = defaultLabel;
+  modelSelect.appendChild(defOpt);
+
+  for (const m of list) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    // When browsing all providers, prefix so names don't collide visually.
+    opt.textContent = provider ? m.display_name : `${providerLabel(m.provider)} · ${m.display_name}`;
+    opt.title = m.id;
+    modelSelect.appendChild(opt);
+  }
+
+  // Preserve selection: preferred → stored → empty. Unknown ids stay selectable.
+  const want = preferred || '';
+  if (want && ![...modelSelect.options].some((o) => o.value === want)) {
+    const opt = document.createElement('option');
+    opt.value = want;
+    opt.textContent = want;
+    opt.title = want;
+    modelSelect.appendChild(opt);
+  }
+  modelSelect.value = [...modelSelect.options].some((o) => o.value === want) ? want : '';
+  if (modelCountEl) {
+    const total = MODEL_CATALOG.length;
+    modelCountEl.textContent = provider
+      ? `${list.length} of ${total} models`
+      : `${total} models`;
+  }
+}
 
 const NS_STORAGE_KEY = 'timbal-voice-noise-suppression';
 nsSelect.value = localStorage.getItem(NS_STORAGE_KEY) || 'browser';
@@ -597,8 +794,10 @@ function initRunnableStrip() {
   try {
     meta = JSON.parse(raw.textContent);
   } catch {
+    initModelPicker([], '');
     return;
   }
+  initModelPicker(meta.models || [], (meta.model || '').trim());
   const v = (meta.version || '').trim();
   verEl.textContent = v ? `Timbal ${v}` : 'Timbal';
   const spec = (meta.import_spec || '').trim();
@@ -636,6 +835,8 @@ let playedAccumMs = 0;
 let lastPlaybackAckMs = -1;
 let playbackAckTimer = null;
 const PLAYBACK_ACK_INTERVAL_MS = 250;
+/** After barge-in, ignore audio frames still in flight on the WS (server also drops its queue). */
+let suppressAssistantAudio = false;
 
 /** Cumulative ms of TTS audio actually played this session. */
 function computePlayedMs() {
@@ -719,6 +920,7 @@ function log(cls, text) {
 }
 
 let partialEl = null;
+let statusEl = null;
 function setPartial(text) {
   if (!text) {
     if (partialEl) { partialEl.remove(); partialEl = null; }
@@ -736,6 +938,18 @@ function setPartial(text) {
     transcriptEl.appendChild(partialEl);
   }
   partialEl.textContent = '… ' + text;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  updateEmptyState();
+}
+function setStatus(text) {
+  if (!text) {
+    if (statusEl) { statusEl.remove(); statusEl = null; }
+    updateEmptyState();
+    return;
+  }
+  if (!statusEl) statusEl = log('status', '');
+  else transcriptEl.appendChild(statusEl);
+  statusEl.textContent = text;
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   updateEmptyState();
 }
@@ -993,7 +1207,7 @@ navigator.mediaDevices.addEventListener('devicechange', async () => {
 });
 
 function playPCM(b64) {
-  if (!audioCtx) return;
+  if (!audioCtx || suppressAssistantAudio) return;
   if (audioCtx.state === 'suspended') void audioCtx.resume();
   const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   const i16 = new Int16Array(raw.buffer);
@@ -1126,6 +1340,8 @@ async function start() {
     sessionSampleRate = sr;
     const hello = { sample_rate: sr };
     if (tdSelect.value) hello.turn_detector = tdSelect.value;
+    if (sttSelect.value) hello.stt_provider = sttSelect.value;
+    if (modelSelect.value) hello.model = modelSelect.value;
     ws.send(JSON.stringify(hello));
     transcriptEl.innerHTML = '';
     window._assistantEl = null;
@@ -1133,7 +1349,10 @@ async function start() {
     window._turnBubbles = [];
     window._replyDone = false;
     partialEl = null;
+    statusEl = null;
+    setConn('live', 'Starting…', 'Loading STT / turn models (first session can take a few seconds)…');
     resetPlaybackTracking();
+    suppressAssistantAudio = false;
     stopAssistantAudio();
     sessionReady = false;
     if (playbackAckTimer) clearInterval(playbackAckTimer);
@@ -1204,16 +1423,29 @@ async function start() {
     switch (msg.type) {
       case 'session_started':
         sessionReady = true;
-        setConn('live', 'Listening', msg.turn_detector
-          ? `Speak naturally — turn detection: ${msg.turn_detector}${msg.vad_endpointing ? ' + VAD endpointing' : ''}.`
-          : 'Speak naturally — audio streams to your Timbal agent.');
+        {
+          const bits = [];
+          if (msg.model) bits.push(msg.model);
+          if (msg.stt_provider) bits.push(`STT ${msg.stt_provider}${msg.stt_model ? `/${msg.stt_model}` : ''}`);
+          if (msg.turn_detector) bits.push(msg.turn_detector);
+          if (msg.vad_endpointing) bits.push('VAD endpointing');
+          setConn('live', 'Listening', bits.length
+            ? `Speak naturally — ${bits.join(' · ')}.`
+            : 'Speak naturally — audio streams to your Timbal agent.');
+        }
         updateEmptyState();
         break;
       case 'transcript_partial':
         setPartial(msg.text);
         break;
+      case 'agent_status':
+        setStatus(msg.text || '');
+        break;
       case 'transcript_committed':
         setPartial(null);
+        setStatus(null);
+        // New user turn — allow TTS again (barge-in may have suppressed audio).
+        suppressAssistantAudio = false;
         // Seal the prior assistant turn. interrupt() for a not-yet-spoken
         // CONTINUE rewrite arrives after this commit's predecessor already
         // sealed — without sealing here, an empty heard_text interrupt can
@@ -1235,6 +1467,8 @@ async function start() {
         break;
       case 'agent_text_delta':
         setPartial(null);
+        setStatus(null);
+        suppressAssistantAudio = false;
         // First delta after a finished reply starts a new turn's bubble set.
         if (window._replyDone) { window._turnBubbles = []; window._replyDone = false; }
         if (!window._assistantEl) {
@@ -1283,6 +1517,7 @@ async function start() {
         window._replyDone = false;
         window._assistantEl = null;
         window._lastAssistantEl = null;
+        suppressAssistantAudio = true;
         stopAssistantAudio();
         updateEmptyState();
         break;

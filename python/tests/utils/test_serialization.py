@@ -169,6 +169,16 @@ class TestCoerceToDict:
         assert coerce_to_dict("") == {}
         assert coerce_to_dict("   ") == {}
 
+    def test_nullish_no_arg_tool_inputs(self):
+        # Groq / OpenAI-compat often emit null for tools with zero parameters.
+        assert coerce_to_dict(None) == {}
+        assert coerce_to_dict("null") == {}
+        assert coerce_to_dict("None") == {}
+        assert coerce_to_dict("NULL") == {}
+
+    def test_json_null_literal_returns_empty_dict(self):
+        assert coerce_to_dict("null") == {}
+
     def test_literal_eval_fallback(self):
         # Python dict literal that isn't valid JSON (single quotes)
         assert coerce_to_dict("{'a': 1}") == {"a": 1}
@@ -176,6 +186,10 @@ class TestCoerceToDict:
     def test_unparseable_string_raises(self):
         with pytest.raises(ValueError, match="Cannot coerce value to dict"):
             coerce_to_dict("not a dict at all!")
+
+    def test_non_dict_json_raises(self):
+        with pytest.raises(ValueError, match="Cannot coerce value to dict"):
+            coerce_to_dict("[1, 2, 3]")
 
     def test_non_string_non_dict_raises(self):
         with pytest.raises(ValueError, match="Cannot coerce value to dict"):

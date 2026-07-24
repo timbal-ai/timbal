@@ -60,7 +60,8 @@ Only send keys you need; omitted keys keep server defaults.
 
 | Key           | Description |
 |---------------|-------------|
-| `stt_model`   | Speech-to-text model id (ElevenLabs realtime). |
+| `stt_provider` | `"elevenlabs"` (default), `"deepgram-flux"`, or `"deepgram-nova"` (bare `"deepgram"` routes by `stt_model`, defaulting to Flux). Deepgram needs `DEEPGRAM_API_KEY` on the server. Flux (`/v2/listen`) does model-native end-of-turn detection: the session auto-selects the `provider` turn detector (explicit `turn_detector` still wins) and disables local VAD endpointing. Nova-3 (`/v1/listen`) is plain ASR — Timbal turn detection and VAD endpointing work exactly as with ElevenLabs. Env default: `TIMBAL_STT_PROVIDER`. |
+| `stt_model`   | Speech-to-text model id (ElevenLabs realtime `scribe_*`, Deepgram `flux-general-en`/`flux-general-multi`/`nova-3*`). Model ids that don't belong to the selected provider are ignored (provider default used). |
 | `tts_model`   | Text-to-speech model id. |
 | `voice`       | ElevenLabs voice id string. |
 | `language`    | e.g. `"es"`. |

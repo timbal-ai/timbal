@@ -899,6 +899,26 @@ class TestInterruptionTruncation:
         # Second turn's reply is intact.
         assert assistant_entries[1].text == "Second reply"
 
+    async def test_interrupt_drops_queued_audio_before_interrupted_event(self) -> None:
+        """TTS can enqueue far more AudioOutput than the WS drains. Barge-in must
+        not wait behind that backlog or long replies keep playing after interrupt."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        await session._emit(AudioOutput(data=b"\x00" * 64))
+        await session._emit(AudioOutput(data=b"\x01" * 64))
+        await session._emit(AgentTextDone(text="already spoken"))
+        await session._emit(AudioOutput(data=b"\x02" * 64))
+        dropped = session._drop_queued_audio_output()
+        assert dropped == 3
+        remaining: list[VoiceSessionEvent] = []
+        while True:
+            try:
+                remaining.append(session._event_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        assert len(remaining) == 1
+        assert isinstance(remaining[0], AgentTextDone)
+
     async def test_completed_turn_barge_in_resaves_serialized_trace(self) -> None:
         """Regression: interrupt() after AgentTextDone must re-persist the
         truncated memory. Serializing providers already saved the full reply in
@@ -1785,6 +1805,39 @@ class TestHoldExpiryTiming:
             f"hold expiry took {elapsed:.2f}s — pre-commit VAD speech stretched the grace"
         )
 
+    async def test_dangling_token_hold_is_dropped_on_expiry(self) -> None:
+        """Live bug: stale-force-committed \"I\" HOLDs for 3s then becomes a
+        user turn and the LLM invents a reply. Dangling tokens must die here."""
+        agent = Agent(name="t", model=TestModel(responses=["should not run"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=agent, stt=stt, tts=tts, turn_detector=_AlwaysHoldOnceDetector(0.15)
+        )
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="I"))
+            await asyncio.sleep(0.5)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        assert all(entry.role != "user" for entry in session.transcript)
+        assert not any(isinstance(e, AgentTextDone) for e in events)
+
 
 # ---------------------------------------------------------------------------
 # Tests: stale partial sweeper
@@ -1881,3 +1934,39 @@ class TestStalePartialSweeper:
 
         assert stt.commit_calls == 1
         assert all(entry.role != "user" for entry in session.transcript)
+
+    async def test_noop_commit_provider_synthesizes_stranded_partial(self) -> None:
+        """Flux-style STT: commit() is a no-op, so the sweeper must promote the
+        stranded partial itself or the UI caption hangs forever."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.15
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="partial", text="What are you doing?"))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert session.transcript[0].role == "user"
+        assert session.transcript[0].text == "What are you doing?"

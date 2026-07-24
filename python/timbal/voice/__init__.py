@@ -24,6 +24,7 @@ from .realtime import (
     RealtimeSession,
 )
 from .session import (
+    AgentStatus,
     AgentTextDelta,
     AgentTextDone,
     AudioInputConfig,
@@ -63,6 +64,14 @@ def __getattr__(name: str):
     # Lazy: importing smart_turn / namo / vad pulls numpy/onnxruntime /
     # transformers (timbal[voice] extra), which must not be required just to
     # import timbal.voice.
+    if name in ("DeepgramFluxSTT", "DeepgramNovaSTT", "resolve_stt"):
+        from . import deepgram
+
+        return getattr(deepgram, name)
+    if name == "ElevenLabsRealtimeSTT":
+        from .elevenlabs import ElevenLabsRealtimeSTT
+
+        return ElevenLabsRealtimeSTT
     if name == "SmartTurnEouModel":
         from .smart_turn import SmartTurnEouModel
 
@@ -79,6 +88,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "AgentStatus",
     "AgentTextDelta",
     "AgentTextDone",
     "AudioEouModel",
@@ -88,6 +98,9 @@ __all__ = [
     "BufferedPlaybackTracker",
     "CommitAction",
     "CommitDecision",
+    "DeepgramFluxSTT",
+    "DeepgramNovaSTT",
+    "ElevenLabsRealtimeSTT",
     "EouPredictor",
     "HeuristicTurnDetector",
     "LexicalTurnDetector",
@@ -124,5 +137,6 @@ __all__ = [
     "VoiceSession",
     "VoiceSessionEvent",
     "endpointing_delay",
+    "resolve_stt",
     "resolve_turn_detector",
 ]

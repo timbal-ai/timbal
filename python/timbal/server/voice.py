@@ -38,6 +38,7 @@ _DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 def default_voice_config_from_env() -> dict[str, Any]:
     """STT/TTS defaults for ``/voice/ws`` (ElevenLabs). Override with env or ``runnable.voice_config``."""
     return {
+        "stt_provider": os.environ.get("TIMBAL_STT_PROVIDER", "elevenlabs"),
         "stt_model": os.environ.get("TIMBAL_STT_MODEL", "scribe_v2_realtime"),
         "tts_model": os.environ.get("TIMBAL_TTS_MODEL", "eleven_flash_v2_5"),
         "voice": (os.environ.get("ELEVENLABS_VOICE_ID") or os.environ.get("TIMBAL_VOICE_ID") or _DEFAULT_VOICE_ID),
@@ -81,7 +82,7 @@ def merge_client_voice_overrides(server_defaults: dict[str, Any], client: dict[s
     return {**server_defaults, **{k: v for k, v in client.items() if v is not None}}
 
 
-def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, str]:
+def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, Any]:
     """Serializable identity for the voice UI (same object as ``/run``)."""
     name = str(getattr(runnable, "name", "") or "").strip()
     kind = ""
@@ -90,7 +91,26 @@ def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, s
         kind = str(md["type"])
     if not kind:
         kind = type(runnable).__name__
-    return {"name": name, "kind": kind, "import_spec": (import_spec or "").strip()}
+    model = getattr(runnable, "model", None)
+    model_s = str(model).strip() if isinstance(model, str) else ""
+    # Slim catalog for the playground model picker (from models.yaml via codegen).
+    from ..codegen.model_discovery import get_models
+
+    models = [
+        {
+            "id": m["id"],
+            "provider": m["provider"],
+            "display_name": m.get("display_name") or m["id"].split("/", 1)[-1],
+        }
+        for m in get_models()
+    ]
+    return {
+        "name": name,
+        "kind": kind,
+        "import_spec": (import_spec or "").strip(),
+        "model": model_s,
+        "models": models,
+    }
 
 
 _VOICE_HTML_META_TOKEN = "__TIMBAL_VOICE_RUNNABLE_META_JSON__"
@@ -101,16 +121,15 @@ async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
 
     Two tiers, both best-effort:
 
-    * **Imports** (always): ``timbal.voice`` + the ElevenLabs adapter pull in
-      websockets/pydantic machinery, and the ``timbal[voice]`` extra adds
-      numpy + onnxruntime — together ~1s of import time that otherwise lands
+    * **Imports** (always): voice adapters (ElevenLabs + Deepgram) and the
+      ``timbal[voice]`` extra (numpy/onnxruntime) — ~1s that otherwise lands
       on the first WebSocket connection.
-    * **Models** (only when the *server-side* default ``turn_detector`` is a
-      "local" mode string): resolve the detector, load Smart Turn + Silero,
-      and run their warmup inference. Skipped otherwise — a client can still
-      pick "local" from the playground dropdown, in which case the load
-      happens at that session's startup (before "listening", off the
-      first-reply path).
+    * **Models**: load Smart Turn + Namo + Silero when the server default
+      turn detector is local (mode string **or** a ``LocalAudioTurnDetector``
+      instance — demos often set the resolved instance on ``voice_config``).
+      Eager-loads those ONNX models whenever the voice extra is installed so
+      playground users who pick "Smart Turn" on first Start don't eat the
+      HuggingFace cold path mid-handshake.
     """
     loop = asyncio.get_running_loop()
 
@@ -118,8 +137,10 @@ async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
         import importlib
 
         importlib.import_module("timbal.voice.elevenlabs")
+        importlib.import_module("timbal.voice.deepgram")
         try:
             importlib.import_module("timbal.voice.smart_turn")
+            importlib.import_module("timbal.voice.namo")
             importlib.import_module("timbal.voice.vad")
         except ImportError:
             pass  # timbal[voice] extra not installed — heuristics only
@@ -130,18 +151,26 @@ async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
         logger.debug("voice_warmup_import_failed", error=str(e))
         return
 
-    td = voice_config.get("turn_detector")
-    if not (isinstance(td, str) and td.strip().lower() in ("local", "audio", "smart_turn")):
-        return
     try:
         from ..voice.turn_detection import LocalAudioTurnDetector, resolve_turn_detector
         from ..voice.vad import SileroVad
 
-        detector = resolve_turn_detector(td)
-        if isinstance(detector, LocalAudioTurnDetector) and detector.audio_eou is not None:
-            await detector.audio_eou.start(sample_rate=16_000)
-        await SileroVad().start(sample_rate=16_000)
-        logger.info("voice_models_warmed")
+        td = voice_config.get("turn_detector")
+        detector = None
+        if isinstance(td, LocalAudioTurnDetector):
+            detector = td
+        elif isinstance(td, str) and td.strip().lower() in ("local", "audio", "smart_turn"):
+            detector = resolve_turn_detector(td)
+        elif td is None:
+            # Playground often switches to Smart Turn on first Start — warm it.
+            detector = resolve_turn_detector("local")
+
+        if isinstance(detector, LocalAudioTurnDetector):
+            from ..voice.session import AudioInputConfig
+
+            await detector.start(AudioInputConfig(sample_rate=16_000))
+            await SileroVad().start(sample_rate=16_000)
+            logger.info("voice_models_warmed")
     except Exception as e:
         logger.debug("voice_warmup_models_failed", error=str(e))
 
@@ -169,6 +198,7 @@ async def voice_page(request: Request) -> HTMLResponse:
 async def voice_ws(ws: WebSocket) -> None:
     from ..core.agent import Agent
     from ..voice import (
+        AgentStatus,
         AgentTextDelta,
         AgentTextDone,
         AudioInputConfig,
@@ -184,7 +214,8 @@ async def voice_ws(ws: WebSocket) -> None:
         VoiceSession,
         VoiceSessionEvent,
     )
-    from ..voice.elevenlabs import ElevenLabsRealtimeSTT, ElevenLabsStreamTTS
+    from ..voice.deepgram import DeepgramFluxSTT, effective_stt_model, resolve_stt
+    from ..voice.elevenlabs import ElevenLabsStreamTTS
 
     await ws.accept()
     logger.info("voice_ws_connected")
@@ -237,15 +268,27 @@ async def voice_ws(ws: WebSocket) -> None:
     defaults: dict = getattr(ws.app.state, "voice_config", None) or {}
     merged = merge_client_voice_overrides(defaults, config)
 
-    stt = ElevenLabsRealtimeSTT()
+    try:
+        stt = resolve_stt(merged.get("stt_provider"), model=merged.get("stt_model"))
+    except ValueError as e:
+        logger.warning("voice_ws_bad_stt_provider", error=str(e))
+        stt = resolve_stt("elevenlabs")
+    stt_is_flux = isinstance(stt, DeepgramFluxSTT)
+    stt_label = type(stt).__name__
+    stt_model = effective_stt_model(stt, merged.get("stt_model"))
     tts = ElevenLabsStreamTTS()
 
+    stt_extra = dict(merged.get("stt_extra", {}))
+    if stt_is_flux:
+        # Scribe-tuned VAD knobs don't apply to Flux's turn machine.
+        for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
+            stt_extra.pop(k, None)
     audio_in = AudioInputConfig(
-        model=merged.get("stt_model"),
+        model=stt_model,
         language=merged.get("language"),
         sample_rate=merged.get("sample_rate", 16_000),
         encoding=merged.get("encoding", "pcm_s16le"),
-        extra=merged.get("stt_extra", {}),
+        extra=stt_extra,
     )
     audio_out = AudioOutputConfig(
         model=merged.get("tts_model"),
@@ -269,6 +312,19 @@ async def voice_ws(ws: WebSocket) -> None:
         raw_td = client_td
     elif client_td is not None and not isinstance(client_td, str):
         logger.warning("voice_ws_bad_turn_detector", error="client turn_detector must be a mode name string")
+    if stt_is_flux:
+        # Flux owns EOU (~260ms). Local/lexical run *after* EndOfTurn and add
+        # a second HOLD tax; they also disable the useful Provider path. Force
+        # provider unless the client explicitly picked heuristic/raw/provider.
+        td_mode = raw_td.strip().lower() if isinstance(raw_td, str) else None
+        if td_mode is None or td_mode in ("local", "audio", "smart_turn", "lexical"):
+            if td_mode is not None:
+                logger.info(
+                    "voice_ws_flux_overrides_turn_detector",
+                    requested=raw_td,
+                    using="provider",
+                )
+            raw_td = "provider"
     if raw_td is not None:
         try:
             # voice_config is process-wide; VoiceSession clones the resolved
@@ -284,8 +340,28 @@ async def voice_ws(ws: WebSocket) -> None:
     vad_endpointing = merged.get("vad_endpointing")
     if not isinstance(vad_endpointing, bool):
         vad_endpointing = None
+    if stt_is_flux:
+        # Flux has no force-commit (commit() is a no-op); the Silero fast path
+        # would just burn CPU scoring audio it can never act on.
+        vad_endpointing = False
+
+    # Playground / client may override the Agent's LLM for this session only.
+    raw_model = merged.get("model")
+    model_override = (
+        raw_model.strip()
+        if isinstance(raw_model, str) and "/" in raw_model.strip()
+        else None
+    )
+    llm_model = model_override or (
+        str(runnable.model) if isinstance(getattr(runnable, "model", None), str) else None
+    )
     logger.info(
         "voice_ws_session_config",
+        stt=stt_label,
+        stt_provider=merged.get("stt_provider"),
+        stt_model=stt_model,
+        stt_model_requested=merged.get("stt_model"),
+        model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
     )
@@ -301,6 +377,7 @@ async def voice_ws(ws: WebSocket) -> None:
         audio_output=audio_out,
         turn_detector=turn_detector,
         vad_endpointing=vad_endpointing,
+        model=model_override,
     )
 
     async def _recv_loop() -> None:
@@ -374,6 +451,9 @@ async def voice_ws(ws: WebSocket) -> None:
                 {
                     "type": "session_started",
                     "playback_acks": "recommended",
+                    "stt_provider": stt_label,
+                    "stt_model": stt_model,
+                    "model": llm_model,
                     "turn_detector": turn_detector_label,
                     # The endpointer arms during session startup (before this
                     # event is emitted), so this reflects the real state — not
@@ -388,6 +468,8 @@ async def voice_ws(ws: WebSocket) -> None:
             if event.replace:
                 payload["replace"] = True
             await _send_json(payload)
+        elif isinstance(event, AgentStatus):
+            await _send_json({"type": "agent_status", "text": event.text})
         elif isinstance(event, AgentTextDelta):
             await _send_json({"type": "agent_text_delta", "text": event.text})
         elif isinstance(event, AgentTextDone):
