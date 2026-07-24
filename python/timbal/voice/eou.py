@@ -138,15 +138,32 @@ def _normalize_utterance(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _prefix_is_filler(prefix: str) -> bool:
+    """True when ``prefix`` is only short hedges / dangling fillers (or empty)."""
+    if not prefix:
+        return True
+    return all(w in _SHORT_HEDGES or w in _DANGLING_TOKENS for w in prefix.split())
+
+
 def _looks_like_hedge(text: str) -> bool:
-    """True when the utterance is (or ends in) a thinking-pause hedge."""
+    """True when the utterance is (or trails off into) a thinking-pause hedge.
+
+    Whole-utterance hedges ("I don't know.", bare "uh") always match.
+    Trailing phrase hedges ("… I mean", "… you know") only match when the
+    prefix is filler — otherwise finished requests like "I want you to know."
+    / "Know what I mean?" would score incomplete after punctuation is stripped.
+    """
     norm = _normalize_utterance(text)
     if not norm:
         return False
     if norm in _SHORT_HEDGES or norm in _PHRASE_HEDGES:
         return True
     for phrase in _PHRASE_HEDGES:
-        if norm.endswith(" " + phrase):
+        suffix = " " + phrase
+        if not norm.endswith(suffix):
+            continue
+        prefix = norm[: -len(suffix)].strip()
+        if _prefix_is_filler(prefix):
             return True
     return False
 
@@ -156,8 +173,10 @@ class PunctuationEouPredictor(TextEouPredictor):
 
     Scores (tunable via subclass attributes):
 
-    * thinking-pause hedge ("i don't know", bare "uh"/"well") → :attr:`P_HEDGE`
-      — wins over terminal punctuation (STT writes "Uh, I don't know.")
+    * thinking-pause hedge ("i don't know", bare "uh"/"well", filler+"I mean")
+      → :attr:`P_HEDGE` — wins over terminal punctuation (STT writes
+      "Uh, I don't know.") but not over finished sentences that merely end
+      with the same words ("I want you to know.")
     * ends with terminal punctuation → :attr:`P_TERMINAL`
     * ends with continuing punctuation / ellipsis → :attr:`P_CONTINUING`
     * last word is a dangling conjunction/preposition/filler → :attr:`P_DANGLING`

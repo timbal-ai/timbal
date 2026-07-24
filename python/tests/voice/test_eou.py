@@ -87,5 +87,21 @@ class TestPunctuationEouPredictor:
 
     async def test_hedge_does_not_match_real_completes(self) -> None:
         p = PunctuationEouPredictor()
-        for text in ("Tell me a story.", "Quite incredible.", "Yeah, sure. Anything else?"):
+        for text in (
+            "Tell me a story.",
+            "Quite incredible.",
+            "Yeah, sure. Anything else?",
+            # Contentful prefixes ending in hedge phrases must keep terminal
+            # scores — punctuation is stripped before the hedge match.
+            "I want you to know.",
+            "Tell me what you mean.",
+            "Know what I mean?",
+            "Do you know?",
+        ):
             assert await p.predict_eou(text) == p.P_TERMINAL, text
+
+    async def test_trailing_filler_hedge_still_incomplete(self) -> None:
+        """Filler + trailing phrase hedge stays incomplete (with/without punct)."""
+        p = PunctuationEouPredictor()
+        for text in ("so I mean", "uh you know", "Well, I mean.", "and you know"):
+            assert await p.predict_eou(text) == p.P_HEDGE, text
