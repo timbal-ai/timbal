@@ -984,10 +984,10 @@ class TestHoldInSession:
         """HOLD must stay armed while STT partials keep being *processed*.
 
         Grace keys off ``_last_partial_at`` after the session drains the event
-        (``inject`` only enqueues). Keep refreshing on a cadence ≪ hold timeout
-        and seed the first partial immediately after arm — a 100ms hold plus
-        ``sleep(timeout)`` between sparse partials races the expire task on
-        slow Windows CI before ``_last_partial_at`` advances.
+        (``inject`` only enqueues). Do **not** wait on
+        ``_last_partial_at > _last_commit_at``: hold expiry / turn start bumps
+        ``_last_commit_at`` and that predicate races false on slow Windows CI.
+        Seed + refresh by watching ``_last_partial_at`` advance from a snapshot.
         """
         import asyncio
         import time
@@ -1005,11 +1005,11 @@ class TestHoldInSession:
                 self.n += 1
                 if self.n == 1:
                     return CommitDecision(
-                        action=CommitAction.HOLD, text=text, reason="test_hold", hold_timeout_secs=0.25
+                        action=CommitAction.HOLD, text=text, reason="test_hold", hold_timeout_secs=0.5
                     )
                 return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="test")
 
-        hold_timeout = 0.25
+        hold_timeout = 0.5
         grace = 0.5
         refresh_every = 0.05  # well under hold_timeout / grace
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
@@ -1032,32 +1032,31 @@ class TestHoldInSession:
                 await asyncio.sleep(0.01)
             raise AssertionError(f"timed out waiting for {msg}")
 
+        async def _inject_processed_partial(text: str) -> None:
+            before = session._last_partial_at
+            await stt.inject(TranscriptEvent(type="partial", text=text))
+            await _wait_until(
+                lambda b=before: session._last_partial_at > b,
+                msg=f"partial processed ({text!r})",
+            )
+
         async def _drive() -> None:
             nonlocal refreshes_while_held
             await _wait_until(
                 lambda: any(getattr(e, "type", None) == "session_started" for e in events),
                 msg="session_started",
             )
-            # Queue commit + first resume partial together so the expire task
-            # cannot fire in the arm→first-partial gap on a loaded runner.
             await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
-            await stt.inject(TranscriptEvent(type="partial", text="the weather"))
             await _wait_until(lambda: session._held_user_text is not None, msg="HOLD armed")
-            await _wait_until(
-                lambda: session._last_partial_at > session._last_commit_at,
-                msg="post-commit partial processed",
-            )
+            # Extend immediately — do not wait on _last_commit_at (expiry bumps it).
+            await _inject_processed_partial("the weather")
+            assert session._held_user_text is not None
 
             # Keep refreshing past the nominal hold timeout.
-            deadline = time.monotonic() + hold_timeout + 0.2
+            deadline = time.monotonic() + hold_timeout + 0.25
             i = 0
             while time.monotonic() < deadline:
-                before = session._last_partial_at
-                await stt.inject(TranscriptEvent(type="partial", text=f"the weather {i}"))
-                await _wait_until(
-                    lambda b=before: session._last_partial_at > b,
-                    msg=f"partial {i} processed",
-                )
+                await _inject_processed_partial(f"the weather {i}")
                 assert session._held_user_text is not None, (
                     f"HOLD expired while partials were still being processed (iter {i})"
                 )
@@ -1087,7 +1086,7 @@ class TestHoldInSession:
                     events.append(ev)
                 await driver
 
-        await asyncio.wait_for(_run(), timeout=10)
+        await asyncio.wait_for(_run(), timeout=12)
         assert refreshes_while_held >= 3
         assert any(getattr(e, "type", None) == "transcript_committed" for e in events)
         assert session._held_user_text is None
