@@ -984,10 +984,9 @@ class TestHoldInSession:
         """HOLD must stay armed while STT partials keep being *processed*.
 
         Grace keys off ``_last_partial_at`` after the session drains the event
-        (``inject`` only enqueues). Do **not** wait on
-        ``_last_partial_at > _last_commit_at``: hold expiry / turn start bumps
-        ``_last_commit_at`` and that predicate races false on slow Windows CI.
-        Seed + refresh by watching ``_last_partial_at`` advance from a snapshot.
+        (``inject`` only enqueues). Wait for ``_latest_partial_text`` — not
+        ``_last_partial_at > before``: Windows monotonic can return the same
+        tick for consecutive partials, so the timestamp predicate hangs.
         """
         import asyncio
         import time
@@ -1033,10 +1032,9 @@ class TestHoldInSession:
             raise AssertionError(f"timed out waiting for {msg}")
 
         async def _inject_processed_partial(text: str) -> None:
-            before = session._last_partial_at
             await stt.inject(TranscriptEvent(type="partial", text=text))
             await _wait_until(
-                lambda b=before: session._last_partial_at > b,
+                lambda t=text: session._latest_partial_text == t,
                 msg=f"partial processed ({text!r})",
             )
 
