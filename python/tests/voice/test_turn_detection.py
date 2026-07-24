@@ -243,6 +243,70 @@ class TestOnCommitted:
         assert decision.text == "Hola, ¿qué tal estás?"
         assert decision.reason == "continuation"
 
+    async def test_trailing_crumb_on_finished_turn_is_ignored(self) -> None:
+        """Scribe ghost after a finished commit must not CONTINUE-cancel the LLM.
+
+        Live: commit "…killer." → LLM START → "No." at +55ms → CONTINUE merge
+        restarted the turn on a frankenstein prompt.
+        """
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "No.",
+            _state(
+                assistant_active=True,
+                active_user_text="Yeah, that guy was a real killer.",
+                seconds_since_turn_start=0.1,
+                seconds_since_last_commit=0.055,
+            ),
+        )
+        assert decision.action is CommitAction.IGNORE
+        assert decision.reason == "trailing_crumb"
+
+    async def test_late_short_barge_in_on_finished_turn_is_new_turn(self) -> None:
+        """Past the crumb window, a short fresh interrupt is a real barge-in."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "Stop.",
+            _state(
+                assistant_active=True,
+                active_user_text="Yeah, that guy was a real killer.",
+                seconds_since_turn_start=1.5,
+                seconds_since_last_commit=1.0,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.text == "Stop."
+
+    async def test_question_split_after_finished_question_still_continues(self) -> None:
+        """VAD can punctuate mid-question; don't drop the second half as a crumb."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "estás?",
+            _state(
+                assistant_active=True,
+                active_user_text="Hola, ¿qué tal?",
+                seconds_since_turn_start=1.0,
+                seconds_since_last_commit=0.2,
+            ),
+        )
+        assert decision.action is CommitAction.CONTINUE_TURN
+        assert decision.text == "Hola, ¿qué tal? estás?"
+
+    async def test_lowercase_glue_still_continues_unfinished_active(self) -> None:
+        """Single-word lowercase trailers stay CONTINUE when active is unfinished."""
+        det = HeuristicTurnDetector()
+        decision = await det.on_committed(
+            "weather?",
+            _state(
+                assistant_active=True,
+                active_user_text="Tell me about the",
+                seconds_since_turn_start=1.0,
+                seconds_since_last_commit=0.2,
+            ),
+        )
+        assert decision.action is CommitAction.CONTINUE_TURN
+        assert decision.reason == "continuation"
+
     async def test_long_new_query_during_turn_is_new_turn(self) -> None:
         det = HeuristicTurnDetector()
         decision = await det.on_committed(
@@ -389,6 +453,27 @@ class TestLocalAudioTurnDetector:
         # Neutral (unpunctuated) text must not shorten the hold.
         assert decision.hold_timeout_secs == det.hold_timeout_secs
         assert model.calls == 1
+        await det.close()
+
+    async def test_late_barge_in_on_finished_turn_not_held(self) -> None:
+        """Parent NEW_TURN for finished+fresh must survive incomplete Smart Turn.
+
+        Otherwise session HOLDs during TTS and the barge-in never interrupts.
+        """
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed(
+            "Stop.",
+            _state(
+                assistant_active=True,
+                active_user_text="Yeah, that guy was a real killer.",
+                seconds_since_turn_start=1.5,
+                seconds_since_last_commit=1.0,
+            ),
+        )
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.text == "Stop."
         await det.close()
 
     async def test_incomplete_audio_complete_text_short_hold(self) -> None:

@@ -927,10 +927,14 @@ class VoiceSession:
                     if text:
                         self._last_partial_at = time.monotonic()
                         self._latest_partial_text = text
-                    await self._emit(TranscriptPartial(text=text))
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
+                        # Hallucinated multi-word partials during TTS (no mic
+                        # energy) — do not flash them in the playground caption.
+                        # (_vad_vetoes_barge_in already logs stt_partial_barge_in_vetoed.)
                         decision = PartialDecision.IGNORE
+                    else:
+                        await self._emit(TranscriptPartial(text=text))
                     if decision is PartialDecision.BARGE_IN:
                         # INFO on purpose: a barge-in cancels TTS and truncates the
                         # committed reply — when debugging "the agent went silent /

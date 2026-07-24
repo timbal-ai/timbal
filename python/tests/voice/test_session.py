@@ -1561,10 +1561,20 @@ class TestVadBargeInVeto:
         # Reply survived intact.
         assert session.transcript[-1].role == "assistant"
         assert session.transcript[-1].text == "This is a fairly long reply that keeps on playing for a while."
+        # Vetoed barge-in partials must not flash in the playground caption.
+        vetoed = [
+            e
+            for e in events
+            if isinstance(e, TranscriptPartial) and "not not too bad" in e.text.lower()
+        ]
+        assert vetoed == []
 
     async def test_real_speech_partial_still_interrupts(self) -> None:
         _, events = await self._run_barge_in_scenario(speech_secs=1.0)
         assert any(isinstance(e, SessionInterrupted) for e in events)
+        assert any(
+            isinstance(e, TranscriptPartial) and "not not too bad" in e.text.lower() for e in events
+        )
 
 
 class TestStreamingTTS:

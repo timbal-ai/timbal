@@ -282,6 +282,24 @@ def _looks_like_fresh_hold_utterance(text: str) -> bool:
     return True
 
 
+_TERMINAL_END_CHARS = frozenset(".?!。？！")
+
+
+def _looks_like_finished_utterance(text: str) -> bool:
+    """True when ``text`` ends with terminal punctuation (not an ellipsis trail-off).
+
+    Used to refuse CONTINUE-merge of short STT crumbs onto an already-complete
+    turn ("…killer." + "No." → cancel+restart). Ellipsis / bare mid-thought
+    fragments stay "unfinished" so VAD splits can still CONTINUE.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.endswith("...") or stripped.endswith("…"):
+        return False
+    return stripped[-1] in _TERMINAL_END_CHARS
+
+
 class HeuristicTurnDetector(TurnDetector):
     """Default detector: the regex/similarity heuristics tuned for ElevenLabs Scribe.
 
@@ -304,6 +322,12 @@ class HeuristicTurnDetector(TurnDetector):
     EARLY_DUPLICATE_RATIO = 0.58
     CONTINUATION_WINDOW_SECS = 3.0
     CONTINUATION_MAX_CHARS = 30
+    # After a finished commit has already started a turn, Scribe often emits a
+    # trailing crumb ("No.", "He", "Okay.") within tens of ms. CONTINUE-merging
+    # those cancels the LLM for a frankenstein — IGNORE ultra-early crumbs;
+    # later short barge-ins ("Stop.") still fall through to NEW_TURN.
+    TRAILING_CRUMB_WINDOW_SECS = 0.4
+    TRAILING_CRUMB_MAX_WORDS = 2
 
     async def on_partial(self, text: str, state: TurnState) -> PartialDecision:
         if not state.audio_playing or not text:
@@ -398,8 +422,40 @@ class HeuristicTurnDetector(TurnDetector):
                 state.seconds_since_last_commit < self.CONTINUATION_WINDOW_SECS
                 and len(text) < self.CONTINUATION_MAX_CHARS
             ):
-                combined = state.active_user_text.rstrip(", ") + " " + text
-                return CommitDecision(action=CommitAction.CONTINUE_TURN, text=combined, reason="continuation")
+                # Active already looks finished + trailer looks like its own
+                # utterance → not a VAD mid-phrase split. Ultra-early crumbs
+                # are STT ghosts (live: "…killer." then "No." at +55ms);
+                # anything later is a real short barge-in → NEW_TURN below.
+                if _looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(
+                    text
+                ):
+                    words = _WORD_RE.findall(text)
+                    if (
+                        state.seconds_since_last_commit < self.TRAILING_CRUMB_WINDOW_SECS
+                        and len(words) <= self.TRAILING_CRUMB_MAX_WORDS
+                    ):
+                        # Question-final trailers after a finished active are usually
+                        # VAD splits ("¿qué tal?" + "estás?"), not Scribe ghosts
+                        # ("…killer." + "No."). Ghost crumbs are statement/ack-shaped.
+                        if text.rstrip().endswith(("?", "？")):
+                            combined = state.active_user_text.rstrip(", ") + " " + text
+                            return CommitDecision(
+                                action=CommitAction.CONTINUE_TURN,
+                                text=combined,
+                                reason="continuation",
+                            )
+                        return CommitDecision(
+                            action=CommitAction.IGNORE,
+                            text=text,
+                            reason="trailing_crumb",
+                        )
+                else:
+                    combined = state.active_user_text.rstrip(", ") + " " + text
+                    return CommitDecision(
+                        action=CommitAction.CONTINUE_TURN,
+                        text=combined,
+                        reason="continuation",
+                    )
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="new_turn")
 
 
@@ -745,6 +801,17 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             return decision
         if decision.action is CommitAction.CONTINUE_TURN:
             return decision
+        # Mid-reply barge-in the parent already classified as NEW_TURN (finished
+        # active + fresh trailer past the crumb window). Do not rescore into HOLD
+        # — session defers HOLD during TTS, which would mute the interrupt.
+        if (
+            decision.action is CommitAction.NEW_TURN
+            and state.assistant_active
+            and state.active_user_text
+            and _looks_like_finished_utterance(state.active_user_text)
+            and _looks_like_fresh_hold_utterance(text)
+        ):
+            return decision
         # Parent hold_merge of a self-contained commit → start the turn now
         # instead of re-holding, but keep the held fragment in the turn text
         # (never drop transcribed user speech; see parent hold_supersede).
@@ -824,8 +891,16 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
                 p_text = None
             if p_text is not None and p_text < self.TEXT_INCOMPLETE_TIER_THRESHOLD:
                 # Mid-agent barge-in that looks incomplete still merges via
-                # CONTINUE rather than parking a HOLD over the reply.
-                if state.active_user_text and state.assistant_active:
+                # CONTINUE rather than parking a HOLD over the reply — but not
+                # onto a finished active + fresh trailer (STT crumb / barge-in).
+                if (
+                    state.active_user_text
+                    and state.assistant_active
+                    and not (
+                        _looks_like_finished_utterance(state.active_user_text)
+                        and _looks_like_fresh_hold_utterance(text)
+                    )
+                ):
                     combined = state.active_user_text.rstrip(", ") + " " + text
                     return CommitDecision(
                         action=CommitAction.CONTINUE_TURN,
@@ -846,7 +921,16 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
                 reason="audio_complete" if state.holding else (decision.reason or "new_turn"),
             )
         # Incomplete: mid-agent-turn → merge+restart; else HOLD (session debounce).
-        if state.active_user_text and state.assistant_active:
+        # Skip merge when the active turn already looks finished and the trailer
+        # is a fresh utterance — Heuristic's trailing_crumb / NEW_TURN path.
+        if (
+            state.active_user_text
+            and state.assistant_active
+            and not (
+                _looks_like_finished_utterance(state.active_user_text)
+                and _looks_like_fresh_hold_utterance(text)
+            )
+        ):
             combined = state.active_user_text.rstrip(", ") + " " + text
             return CommitDecision(
                 action=CommitAction.CONTINUE_TURN,
