@@ -64,7 +64,7 @@ def __getattr__(name: str):
     # Lazy: importing smart_turn / namo / vad pulls numpy/onnxruntime /
     # transformers (timbal[voice] extra), which must not be required just to
     # import timbal.voice.
-    if name in ("DeepgramFluxSTT", "DeepgramNovaSTT", "resolve_stt"):
+    if name in ("DeepgramFluxSTT", "DeepgramNovaSTT", "resolve_stt", "stt_provider_id"):
         from . import deepgram
 
         return getattr(deepgram, name)
@@ -139,4 +139,5 @@ __all__ = [
     "endpointing_delay",
     "resolve_stt",
     "resolve_turn_detector",
+    "stt_provider_id",
 ]

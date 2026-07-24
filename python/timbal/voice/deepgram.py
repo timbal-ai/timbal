@@ -433,6 +433,19 @@ def effective_stt_model(provider_instance: SpeechToText, requested: str | None) 
     return requested
 
 
+def stt_provider_id(provider_instance: SpeechToText) -> str:
+    """Config-style provider id for the running STT instance.
+
+    Matches playground / ``voice_config`` values (``elevenlabs``,
+    ``deepgram-flux``, ``deepgram-nova``) — not the Python class name.
+    """
+    if isinstance(provider_instance, DeepgramFluxSTT):
+        return "deepgram-flux"
+    if isinstance(provider_instance, DeepgramNovaSTT):
+        return "deepgram-nova"
+    return "elevenlabs"
+
+
 def resolve_stt(
     provider: str | None = None,
     *,

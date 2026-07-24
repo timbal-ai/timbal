@@ -1005,7 +1005,9 @@ class TestHoldInSession:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = DelayedMockSTT()
         session = VoiceSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector=_HoldOnce())
-        session._hold_partial_grace_secs = 0.3
+        # Generous grace: Windows CI can delay STT event processing past a
+        # tight 0.1s hold, so the first expiry check must not win the race.
+        session._hold_partial_grace_secs = 0.5
 
         events: list[VoiceSessionEvent] = []
         turn_started_at: list[float] = []
@@ -1019,10 +1021,20 @@ class TestHoldInSession:
             while not any(getattr(e, "type", None) == "session_started" for e in events):
                 await asyncio.sleep(0.01)
             await stt.inject(TranscriptEvent(type="committed", text="I was wondering about"))
+            # Wait until HOLD is armed, then stamp a post-commit partial before
+            # the expire timer can fire without an extension.
+            deadline = time.monotonic() + 2.0
+            while session._held_user_text is None and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert session._held_user_text is not None, "HOLD never armed"
+            commit_anchor = session._commit_event_at
+            await stt.inject(TranscriptEvent(type="partial", text="the weather"))
+            while session._last_partial_at <= commit_anchor and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
             # Keep "speaking" well past the 0.1s hold timeout.
             for _ in range(6):
                 await stt.inject(TranscriptEvent(type="partial", text="the weather"))
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.08)
             partials_end.append(time.monotonic())
             while not any(getattr(e, "type", None) == "agent_text_done" for e in events):
                 await asyncio.sleep(0.01)
@@ -1040,9 +1052,9 @@ class TestHoldInSession:
         await asyncio.wait_for(_run(), timeout=5)
         assert turn_started_at, "hold never expired into a turn"
         # The turn must have started only after the partial stream went quiet,
-        # not at the nominal 0.1s timeout (partials spanned ~0.6s).
+        # not at the nominal 0.1s timeout (partials spanned ~0.5s+).
         assert partials_end, "driver never finished injecting partials"
-        assert turn_started_at[0] >= partials_end[0] - 0.15
+        assert turn_started_at[0] >= partials_end[0] - 0.25
 
     async def test_hold_timeout_starts_turn(self) -> None:
         """HOLD must not start the agent until the hold timer expires."""

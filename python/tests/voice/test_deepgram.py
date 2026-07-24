@@ -18,6 +18,7 @@ from timbal.voice.deepgram import (
     effective_stt_model,
     is_flux_model,
     resolve_stt,
+    stt_provider_id,
 )
 from timbal.voice.elevenlabs import ElevenLabsRealtimeSTT
 from timbal.voice.session import AudioInputConfig
@@ -274,6 +275,11 @@ class TestResolveStt:
     def test_unknown_provider_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown STT provider"):
             resolve_stt("whisper-cpp")
+
+    def test_stt_provider_id(self) -> None:
+        assert stt_provider_id(DeepgramFluxSTT()) == "deepgram-flux"
+        assert stt_provider_id(DeepgramNovaSTT()) == "deepgram-nova"
+        assert stt_provider_id(ElevenLabsRealtimeSTT()) == "elevenlabs"
 
     def test_is_flux_model(self) -> None:
         assert is_flux_model("flux-general-multi")

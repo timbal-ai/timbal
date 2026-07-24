@@ -214,7 +214,12 @@ async def voice_ws(ws: WebSocket) -> None:
         VoiceSession,
         VoiceSessionEvent,
     )
-    from ..voice.deepgram import DeepgramFluxSTT, effective_stt_model, resolve_stt
+    from ..voice.deepgram import (
+        DeepgramFluxSTT,
+        effective_stt_model,
+        resolve_stt,
+        stt_provider_id,
+    )
     from ..voice.elevenlabs import ElevenLabsStreamTTS
 
     await ws.accept()
@@ -282,10 +287,10 @@ async def voice_ws(ws: WebSocket) -> None:
         # Fallback must not keep a Flux/Nova model id on the ElevenLabs wire,
         # or the client/config log will claim Deepgram while Scribe runs.
         stt = resolve_stt("elevenlabs")
-        stt_provider = "elevenlabs"
         stt_model_requested = None
     stt_is_flux = isinstance(stt, DeepgramFluxSTT)
-    stt_label = type(stt).__name__
+    # Config id for clients/logs (``deepgram-flux``), not the class name.
+    stt_provider = stt_provider_id(stt)
     stt_model = effective_stt_model(stt, stt_model_requested)
     tts = ElevenLabsStreamTTS()
 
@@ -368,7 +373,7 @@ async def voice_ws(ws: WebSocket) -> None:
     )
     logger.info(
         "voice_ws_session_config",
-        stt=stt_label,
+        stt=type(stt).__name__,
         stt_provider=stt_provider,
         stt_model=stt_model,
         stt_model_requested=merged.get("stt_model"),
@@ -462,7 +467,9 @@ async def voice_ws(ws: WebSocket) -> None:
                 {
                     "type": "session_started",
                     "playback_acks": "recommended",
-                    "stt_provider": stt_label,
+                    # Config id (``elevenlabs`` / ``deepgram-flux`` / …), not
+                    # the STT class name — matches playground select values.
+                    "stt_provider": stt_provider,
                     "stt_model": stt_model,
                     "model": llm_model,
                     "turn_detector": turn_detector_label,
