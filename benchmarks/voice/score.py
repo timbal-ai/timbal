@@ -58,6 +58,7 @@ class RunRecord:
     interrupted: bool
     heard_chars: int | None
     latencies_ms: list[float]
+    dead_air_ms: list[float]
     vad_endpointed: list[bool]
     errors: list[str]
     wall_secs: float
@@ -104,6 +105,7 @@ def record(scenario: Scenario, result: RunResult, repeat: int = 0, jobs: int = 1
         interrupted=result.interrupted,
         heard_chars=None if result.heard_text is None else len(result.heard_text),
         latencies_ms=[round(v, 1) for v in result.latencies_ms],
+        dead_air_ms=[round(v, 1) for v in result.dead_air_ms],
         vad_endpointed=[m.vad_endpointed for m in result.metrics],
         errors=list(result.errors),
         wall_secs=round(result.wall_secs, 2),
@@ -158,6 +160,12 @@ class Scorecard:
     latency_min: float | None = None
     latency_max: float | None = None
     latency_samples: int = 0
+    # Speech end -> turn accepted. Gated alongside latency because it is the only
+    # metric that can see a hold: `eou→audio` starts counting at the accepted
+    # commit, so hold policy is invisible to it by construction.
+    dead_air_p50: float | None = None
+    dead_air_p95: float | None = None
+    dead_air_samples: int = 0
     per_scenario: dict[str, float] = field(default_factory=dict)
     """Gated scenario id -> pass rate across repeats. Known failures are excluded, so
     marking one cannot quietly bake broken behavior into the baseline."""
@@ -182,6 +190,7 @@ def build_scorecard(records: list[RunRecord]) -> Scorecard:
     per_scenario = {name: sum(r.passed for r in runs) / len(runs) for name, runs in by_scenario.items()}
     # Latency describes the stack, not an expectation, so known failures still count.
     latencies = [v for r in records for v in r.latencies_ms]
+    dead_air = [v for r in records for v in r.dead_air_ms]
     passed = sum(r.passed for r in gated)
 
     return Scorecard(
@@ -198,6 +207,9 @@ def build_scorecard(records: list[RunRecord]) -> Scorecard:
         latency_min=min(latencies) if latencies else None,
         latency_max=max(latencies) if latencies else None,
         latency_samples=len(latencies),
+        dead_air_p50=percentile(dead_air, 0.5),
+        dead_air_p95=percentile(dead_air, 0.95),
+        dead_air_samples=len(dead_air),
         per_scenario=dict(sorted(per_scenario.items())),
         flaky=sorted(name for name, rate in per_scenario.items() if 0.0 < rate < 1.0),
         known_failures=sorted({r.scenario for r in records if r.xfail}),
@@ -218,6 +230,12 @@ def format_scorecard(card: Scorecard) -> str:
             f"  eou→audio:   p50 {card.latency_p50:.0f}ms   p95 {card.latency_p95:.0f}ms   "
             f"range {card.latency_min:.0f}-{card.latency_max:.0f}ms   "
             f"n={card.latency_samples}{gated}"
+        )
+    if card.dead_air_p50 is not None:
+        gated = "" if card.dead_air_samples >= MIN_LATENCY_SAMPLES else "  (ungated: too few samples)"
+        lines.append(
+            f"  dead air:    p50 {card.dead_air_p50:.0f}ms   p95 {card.dead_air_p95:.0f}ms   "
+            f"n={card.dead_air_samples}{gated}   (speech end → turn accepted)"
         )
     failing = [name for name, rate in card.per_scenario.items() if rate < 1.0]
     if failing:
@@ -366,27 +384,45 @@ def compare(card: Scorecard, baseline: dict[str, dict]) -> Comparison:
     if card.ghost_turns > previous.get("ghost_turns", 0):
         out.regressions.append(f"ghost turns {previous.get('ghost_turns', 0)} → {card.ghost_turns}")
 
-    before_p50 = previous.get("latency_p50")
-    if before_p50 and card.latency_p50:
-        moved = card.latency_p50 / before_p50
-        delta = f"eou→audio p50 {before_p50:.0f}ms → {card.latency_p50:.0f}ms"
-        # Concurrent runs share CPU with each other's ONNX inference, so their
-        # latency measures the machine's load as much as the code's. Comparing
-        # across different --jobs would gate on scheduling noise.
-        before_jobs = previous.get("jobs", 1)
-        if card.jobs != before_jobs:
-            out.notes.append(
-                f"{delta} — not gated, measured at --jobs {card.jobs} against a --jobs {before_jobs} baseline"
-            )
-            return out
-        enough = min(card.latency_samples, previous.get("latency_samples", 0)) >= MIN_LATENCY_SAMPLES
-        if moved > LATENCY_REGRESSION_RATIO:
-            worse = f"{delta} (>{(LATENCY_REGRESSION_RATIO - 1) * 100:.0f}% worse)"
-            if enough:
-                out.regressions.append(worse)
-            else:
-                out.notes.append(f"{worse} — not gated, fewer than {MIN_LATENCY_SAMPLES} samples")
-        elif moved < 1 / LATENCY_REGRESSION_RATIO:
-            out.improvements.append(delta)
+    _compare_timing(out, card, previous, "latency", "eou→audio p50", card.latency_p50, card.latency_samples)
+    _compare_timing(out, card, previous, "dead_air", "dead air p50", card.dead_air_p50, card.dead_air_samples)
 
     return out
+
+
+def _compare_timing(
+    out: Comparison,
+    card: Scorecard,
+    previous: dict,
+    key: str,
+    label: str,
+    now: float | None,
+    samples: int,
+) -> None:
+    """Gate one timing percentile against its baseline entry.
+
+    Both timings gate identically, but they answer different questions and a
+    change can move one without the other: removing the text-complete hold tier
+    left `eou→audio` flat — it starts at the accepted commit — while adding
+    2.6s of dead air to six barge-in cells.
+    """
+    before = previous.get(f"{key}_p50")
+    if not before or not now:
+        return
+    delta = f"{label} {before:.0f}ms → {now:.0f}ms"
+    # Concurrent runs share CPU with each other's ONNX inference, so their
+    # timings measure the machine's load as much as the code's. Comparing
+    # across different --jobs would gate on scheduling noise.
+    before_jobs = previous.get("jobs", 1)
+    if card.jobs != before_jobs:
+        out.notes.append(f"{delta} — not gated, measured at --jobs {card.jobs} against a --jobs {before_jobs} baseline")
+        return
+    moved = now / before
+    if moved > LATENCY_REGRESSION_RATIO:
+        worse = f"{delta} (>{(LATENCY_REGRESSION_RATIO - 1) * 100:.0f}% worse)"
+        if min(samples, previous.get(f"{key}_samples", 0)) >= MIN_LATENCY_SAMPLES:
+            out.regressions.append(worse)
+        else:
+            out.notes.append(f"{worse} — not gated, fewer than {MIN_LATENCY_SAMPLES} samples")
+    elif moved < 1 / LATENCY_REGRESSION_RATIO:
+        out.improvements.append(delta)

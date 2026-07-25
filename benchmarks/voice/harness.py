@@ -98,6 +98,16 @@ class RunResult:
     audio_bytes: int = 0
     wall_secs: float = 0.0
     failures: list[str] = field(default_factory=list)
+    # Wall time from the user falling silent to the turn being accepted — the
+    # dead air a caller actually sits through, and the half of the picture
+    # `latencies_ms` cannot see. `eou→first audio` starts at the *accepted*
+    # commit, so every second a hold spends deciding is invisible to it. That
+    # blindness let a tier-removal experiment read as 11 fixes and 0
+    # regressions while adding 2.6s to six barge-in cells.
+    dead_air_ms: list[float] = field(default_factory=list)
+    # Monotonic timestamp of the most recent speech end, consumed by the next
+    # commit. Not an output; internal to the measurement.
+    speech_ended_at: float | None = None
 
     @property
     def passed(self) -> bool:
@@ -266,6 +276,10 @@ async def run_scenario(
                 replies_at_say = len(result.replies_spoken)
                 feeder.push(clips[step.clip_key])
                 await feeder.drain()
+                # drain() returns once the last frame is pushed, so this is the
+                # instant the speaker fell silent. A later part of the same
+                # fluent utterance overwrites it, leaving the final speech end.
+                result.speech_ended_at = time.monotonic()
             elif isinstance(step, Silence):
                 emit("silence", f"{step.secs:.1f}s")
                 await asyncio.sleep(step.secs)
@@ -343,7 +357,13 @@ def _observe(
     elif isinstance(event, TranscriptPartial):
         emit("partial", f'"{event.text}"')
     elif isinstance(event, TranscriptCommitted):
-        emit("committed", f'"{event.text}"{"  (replace)" if event.replace else ""}')
+        detail = f'"{event.text}"{"  (replace)" if event.replace else ""}'
+        if result.speech_ended_at is not None:
+            dead_air = (time.monotonic() - result.speech_ended_at) * 1000
+            result.dead_air_ms.append(dead_air)
+            result.speech_ended_at = None
+            detail += f"  dead air {dead_air:.0f}ms"
+        emit("committed", detail)
         if event.replace and result.committed:
             result.committed[-1] = event.text
         else:

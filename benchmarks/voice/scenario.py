@@ -327,7 +327,12 @@ class NoAgentReply:
 
 @dataclass(frozen=True)
 class MaxLatency:
-    """Every turn's ``eou_to_first_audio_ms`` stayed under a ceiling."""
+    """Every turn's ``eou_to_first_audio_ms`` stayed under a ceiling.
+
+    Measures the *pipeline* after a turn is accepted. It cannot see a hold,
+    because its clock starts at the accepted commit — use :class:`MaxDeadAir`
+    for anything that changes turn-taking timing.
+    """
 
     ms: float
 
@@ -335,6 +340,32 @@ class MaxLatency:
         over = [v for v in result.latencies_ms if v > self.ms]
         if over:
             return f"eou→audio over {self.ms}ms: {[round(v) for v in over]}"
+        return None
+
+
+@dataclass(frozen=True)
+class MaxDeadAir:
+    """Time from the user falling silent to the turn being accepted.
+
+    The assertion that makes hold policy falsifiable. Every other metric here is
+    blind to it: `eou→audio` starts at the accepted commit, so a hold that sits
+    for three seconds before committing costs nothing measurable, and pass/fail
+    only ever saw whether the turn eventually merged.
+
+    That blindness had teeth. Disabling the text-complete hold tier reads as 11
+    scenario-cells fixed and zero regressions, and on that evidence it looks
+    like an obvious win — while adding 2.6s before the assistant answers an
+    ordinary question in six barge-in cells, 2.6s to three closers, and 8.2s to
+    a long run-on it "fixed". Use this on any scenario where the speaker has
+    genuinely finished, so buying a merge with dead air has to be declared.
+    """
+
+    ms: float
+
+    def check(self, result: RunResult, scenario: Scenario) -> str | None:
+        over = [v for v in result.dead_air_ms if v > self.ms]
+        if over:
+            return f"dead air over {self.ms}ms: {[round(v) for v in over]}"
         return None
 
 
@@ -547,7 +578,7 @@ SCENARIOS: list[Scenario] = [
         domain="support",
         replies=["Happy to help. Have a good day."],
         script=[Say("That's all."), *_SETTLE],
-        expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), NoErrors()],
+        expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), MaxDeadAir(3500), NoErrors()],
         note=(
             "The case the text-complete hold tier exists for, and the only one in the suite: "
             "Smart Turn under-scores this closer (0.115 — 13 of 14 closers measured score "
@@ -555,8 +586,12 @@ SCENARIOS: list[Scenario] = [
             "is armed on an utterance that is actually over. Disabling the tier costs 2.7s of "
             "dead air here (speech end to reply: 0.91s with it, 3.59s without), which is why "
             "the tier survives even though it is what splits medical_hesitant_pause. "
-            "Deliberately carries no MaxLatency: eou→audio is measured from the *accepted* "
-            "commit, so it reads ~200ms either way and cannot see the hold."
+            "Carries MaxDeadAir rather than MaxLatency, because eou→audio is measured from "
+            "the *accepted* commit and reads ~200ms whether the hold ran or not. Dead air "
+            "sits at 1.9s median / 2.8s worst with the tier; removing it puts this at ~4.5s, "
+            "which is what the 3500ms ceiling is placed to catch. It is a tripwire on a "
+            "6-sample distribution, not a tight bound — the per-cell dead-air gate in "
+            "score.py is the real instrument."
         ),
     ),
     Scenario(
