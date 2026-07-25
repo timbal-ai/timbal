@@ -44,6 +44,7 @@ def get_context_window(model_id: str) -> int | None:
 # Model type with provider prefixes
 Model = Literal[
     "anthropic/claude-fable-5",
+    "anthropic/claude-opus-5",
     "anthropic/claude-opus-4-8",
     "anthropic/claude-sonnet-5",
     "anthropic/claude-opus-4-7",
@@ -106,7 +107,9 @@ Model = Literal[
     "togetherai/google/gemma-3-27b-it",
     "togetherai/deepcogito/cogito-v2-1-671b",
     "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
+    "google/gemini-3.6-flash",
     "google/gemini-3.5-flash",
+    "google/gemini-3.5-flash-lite",
     "google/gemini-3.1-pro-preview",
     "google/gemini-3.1-flash-lite",
     "google/gemini-3-flash-preview",

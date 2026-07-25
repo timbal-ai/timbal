@@ -20,6 +20,24 @@ PROMPT = "Reply with exactly one word: ok"
 
 LIVE_MODELS = [
     pytest.param(
+        "anthropic/claude-opus-5",
+        "ANTHROPIC_API_KEY",
+        None,
+        id="anthropic-claude-opus-5",
+    ),
+    pytest.param(
+        "google/gemini-3.6-flash",
+        "GEMINI_API_KEY",
+        None,
+        id="google-gemini-3.6-flash",
+    ),
+    pytest.param(
+        "google/gemini-3.5-flash-lite",
+        "GEMINI_API_KEY",
+        None,
+        id="google-gemini-3.5-flash-lite",
+    ),
+    pytest.param(
         "xai/grok-4.5",
         "XAI_API_KEY",
         None,
@@ -64,8 +82,9 @@ async def test_frontier_model_agent_collect(model: str, env_key: str, fallback_e
     _skip_if_no_key(env_key, fallback_env)
 
     # Reasoning models (MiniMax / Qwen) spend many tokens on reasoning_content
-    # before visible text — 64 is often exhausted with an empty content array.
-    agent = Agent(name=f"probe_{model.replace('/', '_')}", model=model, max_tokens=512, tools=[])
+    # before visible text, and Opus 5 thinks by default — a small budget is
+    # often exhausted with an empty content array.
+    agent = Agent(name=f"probe_{model.replace('/', '_')}", model=model, max_tokens=2048, tools=[])
     result: OutputEvent = await agent(prompt=PROMPT).collect()
 
     assert result.status.code == "success", result.error
@@ -87,7 +106,7 @@ async def test_frontier_model_llm_router_streams(model: str, env_key: str, fallb
     async for chunk in _llm_router(
         model=model,
         messages=[Message(role="user", content=[TextContent(text=PROMPT)])],
-        max_tokens=512,
+        max_tokens=2048,
     ):
         chunks.append(chunk)
 

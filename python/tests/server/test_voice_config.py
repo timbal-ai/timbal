@@ -24,6 +24,7 @@ from .voice_env import VOICE_ENV_KEYS
 class TestDefaultVoiceConfigFromEnv:
     def test_defaults_when_unset(self) -> None:
         cfg = voice_routes.default_voice_config_from_env()
+        assert cfg["stt_provider"] == "elevenlabs"
         assert cfg["stt_model"] == "scribe_v2_realtime"
         assert cfg["tts_model"] == "eleven_flash_v2_5"
         assert cfg["voice"] == voice_routes._DEFAULT_VOICE_ID
@@ -33,10 +34,12 @@ class TestDefaultVoiceConfigFromEnv:
         assert cfg["tts_extra"]["auto_mode"] is True
 
     def test_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_STT_PROVIDER", "deepgram")
         monkeypatch.setenv("TIMBAL_STT_MODEL", "custom_stt")
         monkeypatch.setenv("TIMBAL_TTS_MODEL", "custom_tts")
         monkeypatch.setenv("TIMBAL_VOICE_LANGUAGE", "en")
         cfg = voice_routes.default_voice_config_from_env()
+        assert cfg["stt_provider"] == "deepgram"
         assert cfg["stt_model"] == "custom_stt"
         assert cfg["tts_model"] == "custom_tts"
         assert cfg["language"] == "en"

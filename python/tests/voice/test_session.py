@@ -7,6 +7,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
+import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.voice.metrics import TurnMetricsEvent
@@ -29,6 +30,12 @@ from timbal.voice.session import (
     VoiceSession,
     VoiceSessionEvent,
     _strip_markdown,
+)
+from timbal.voice.turn_detection import (
+    CommitAction,
+    CommitDecision,
+    PartialDecision,
+    TurnDetector,
 )
 
 # ---------------------------------------------------------------------------
@@ -412,6 +419,53 @@ class TestAudioRecording:
                 pass
 
         assert session.input_audio == b""
+
+
+# ---------------------------------------------------------------------------
+# Tests: LLM connection warmup
+# ---------------------------------------------------------------------------
+
+
+class TestLlmWarmup:
+    async def test_warmup_uses_session_model_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Playground per-session model must warm that provider, not agent.model."""
+        warmed: list[str] = []
+
+        async def _fake_warmup(model: str) -> None:
+            warmed.append(model)
+
+        monkeypatch.setattr("timbal.core.llm_router.warmup_llm_connection", _fake_warmup)
+        agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
+        session = VoiceSession(
+            agent=agent,
+            stt=MockSTT(),
+            tts=MockTTS(),
+            model="openai/gpt-4o-mini",
+        )
+        session._start_llm_warmup()
+        assert session._llm_warmup_task is not None
+        await session._llm_warmup_task
+        assert warmed == ["openai/gpt-4o-mini"]
+
+    async def test_warmup_falls_back_to_agent_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        warmed: list[str] = []
+
+        async def _fake_warmup(model: str) -> None:
+            warmed.append(model)
+
+        monkeypatch.setattr("timbal.core.llm_router.warmup_llm_connection", _fake_warmup)
+        agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session._start_llm_warmup()
+        assert session._llm_warmup_task is not None
+        await session._llm_warmup_task
+        assert warmed == ["groq/llama-3.1-8b-instant"]
+
+    def test_warmup_skips_test_model(self) -> None:
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session._start_llm_warmup()
+        assert session._llm_warmup_task is None
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +947,26 @@ class TestInterruptionTruncation:
         # Second turn's reply is intact.
         assert assistant_entries[1].text == "Second reply"
 
+    async def test_interrupt_drops_queued_audio_before_interrupted_event(self) -> None:
+        """TTS can enqueue far more AudioOutput than the WS drains. Barge-in must
+        not wait behind that backlog or long replies keep playing after interrupt."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        await session._emit(AudioOutput(data=b"\x00" * 64))
+        await session._emit(AudioOutput(data=b"\x01" * 64))
+        await session._emit(AgentTextDone(text="already spoken"))
+        await session._emit(AudioOutput(data=b"\x02" * 64))
+        dropped = session._drop_queued_audio_output()
+        assert dropped == 3
+        remaining: list[VoiceSessionEvent] = []
+        while True:
+            try:
+                remaining.append(session._event_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        assert len(remaining) == 1
+        assert isinstance(remaining[0], AgentTextDone)
+
     async def test_completed_turn_barge_in_resaves_serialized_trace(self) -> None:
         """Regression: interrupt() after AgentTextDone must re-persist the
         truncated memory. Serializing providers already saved the full reply in
@@ -1203,6 +1277,12 @@ class TestInterruptionTruncation:
         assert [e.role for e in session.transcript] == ["user", "assistant"]
         assert session.transcript[0].text == combined
         assert session.transcript[1].text == "Second reply"
+        committed = [e for e in events if isinstance(e, TranscriptCommitted)]
+        assert len(committed) == 2
+        assert committed[0].replace is False
+        assert committed[0].text == fragment
+        assert committed[1].replace is True
+        assert committed[1].text == combined
         # The merged turn's LLM input must contain the combined utterance
         # exactly once — the old memory *rewrite* (instead of pop) left it in
         # both the parent memory and the new prompt.
@@ -1237,6 +1317,80 @@ class TestInterruptionTruncation:
 
         await session._align_continue_memory(fragment_user_text="hello can")
         assert root.memory == []
+
+    async def test_hold_during_tts_does_not_truncate_reply(self) -> None:
+        """HOLD while the client is still playing must defer — not amputate the
+        greeting for an echo-ish fragment (session log: Hello! How can I…)."""
+
+        class _HoldThenExpire(TurnDetector):
+            async def on_partial(self, text, state):  # noqa: ARG002
+                return PartialDecision.IGNORE
+
+            async def on_committed(self, text, state):  # noqa: ARG002
+                if state.holding:
+                    return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="hold_supersede")
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=text,
+                    reason="audio_hold",
+                    hold_timeout_secs=0.15,
+                )
+
+        tracker = FakePlaybackTracker()
+        agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE, "Second"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = SlowMockTTS(delay=0.02, chunk=b"\x00\x01" * 50, num_chunks=4)
+        session = VoiceSession(
+            agent=agent,
+            stt=stt,
+            tts=tts,
+            turn_detector=_HoldThenExpire(),
+            playback_tracker=tracker,
+        )
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Julia."))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            # Client still has queued TTS — HOLD must not emit interrupt/truncate.
+            tracker.playing = True
+            tracker.played = 80
+            await stt.inject(TranscriptEvent(type="committed", text="Hello, hello."))
+            await asyncio.sleep(0.05)
+            interrupts = [e for e in events if isinstance(e, SessionInterrupted)]
+            assert interrupts == [], "HOLD during TTS must not interrupt"
+            # Full reply still in transcript (not truncated to a heard prefix).
+            assistants = [e for e in session.transcript if e.role == "assistant"]
+            assert assistants and assistants[0].text == self.RESPONSE
+            tracker.playing = False
+            # Let hold expire → turn for the held fragment.
+            for _ in range(200):
+                if sum(1 for e in events if isinstance(e, AgentTextDone)) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("second turn never finished after hold expiry")
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        assert sum(1 for e in events if isinstance(e, AgentTextDone)) >= 2
+        # First assistant entry survived the HOLD (may later be joined by turn 2).
+        assert session.transcript[1].role == "assistant"
+        assert session.transcript[1].text == self.RESPONSE
 
     async def test_interrupt_cancels_orphan_turn_before_speaking(self) -> None:
         """``interrupt()`` must cancel a scheduled turn even if ``_is_speaking``
@@ -1475,10 +1629,20 @@ class TestVadBargeInVeto:
         # Reply survived intact.
         assert session.transcript[-1].role == "assistant"
         assert session.transcript[-1].text == "This is a fairly long reply that keeps on playing for a while."
+        # Vetoed barge-in partials must not flash in the playground caption.
+        vetoed = [
+            e
+            for e in events
+            if isinstance(e, TranscriptPartial) and "not not too bad" in e.text.lower()
+        ]
+        assert vetoed == []
 
     async def test_real_speech_partial_still_interrupts(self) -> None:
         _, events = await self._run_barge_in_scenario(speech_secs=1.0)
         assert any(isinstance(e, SessionInterrupted) for e in events)
+        assert any(
+            isinstance(e, TranscriptPartial) and "not not too bad" in e.text.lower() for e in events
+        )
 
 
 class TestStreamingTTS:
@@ -1555,3 +1719,302 @@ class TestStreamingTTS:
         assert session._turn_tts_stream is None
         assert session._turn_tts_pump is None
         assert any(isinstance(e, SessionInterrupted) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Tests: hold expiry timing (partial-grace anchor)
+# ---------------------------------------------------------------------------
+
+
+class _AlwaysHoldOnceDetector(TurnDetector):
+    """HOLDs the first fresh commit with a fixed short timeout; anything while
+    holding supersedes into a NEW_TURN (minimal detector for expiry timing)."""
+
+    def __init__(self, timeout_secs: float) -> None:
+        self._timeout_secs = timeout_secs
+
+    async def on_partial(self, text: str, state) -> PartialDecision:
+        return PartialDecision.IGNORE
+
+    async def on_committed(self, text: str, state) -> CommitDecision:
+        if state.holding:
+            return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="new_turn")
+        return CommitDecision(
+            action=CommitAction.HOLD, text=text, reason="hold", hold_timeout_secs=self._timeout_secs
+        )
+
+
+class TestHoldExpiryTiming:
+    async def _run_hold_scenario(
+        self,
+        *,
+        grace_secs: float,
+        timeout_secs: float,
+        partial_after_commit_delay: float | None,
+        run_timeout: float = 10.0,
+        endpointer: object | None = None,
+    ) -> tuple[float, VoiceSession]:
+        """Inject partial→commit (HOLD) and return seconds from commit to turn start."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=agent, stt=stt, tts=tts, turn_detector=_AlwaysHoldOnceDetector(timeout_secs)
+        )
+        session._hold_partial_grace_secs = grace_secs
+        if endpointer is not None:
+            session._endpointer = endpointer  # type: ignore[assignment]
+
+        events: list[VoiceSessionEvent] = []
+        elapsed = 0.0
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            nonlocal elapsed
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            # The fragment's own partial precedes its commit (STT ordering).
+            await stt.inject(TranscriptEvent(type="partial", text="Thank you"))
+            await stt.inject(TranscriptEvent(type="committed", text="Thank you."))
+            t0 = asyncio.get_event_loop().time()
+            if partial_after_commit_delay is not None:
+                await asyncio.sleep(partial_after_commit_delay)
+                # User resumed speaking mid-hold.
+                await stt.inject(TranscriptEvent(type="partial", text="and one more"))
+            while not any(isinstance(e, TranscriptCommitted) for e in events):
+                await asyncio.sleep(0.01)
+            elapsed = asyncio.get_event_loop().time() - t0
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=run_timeout)
+        return elapsed, session
+
+    async def test_pre_commit_partial_does_not_stretch_hold(self) -> None:
+        """Live bug: every commit is preceded by its own partials, so anchoring
+        the grace window on *any* recent partial floored each hold at the grace
+        window (~2s) instead of the armed timeout (1.2s tier)."""
+        elapsed, session = await self._run_hold_scenario(
+            grace_secs=5.0,  # deliberately huge: failure mode is unmissable
+            timeout_secs=0.2,
+            partial_after_commit_delay=None,
+        )
+        assert elapsed < 2.0, f"hold expiry took {elapsed:.2f}s — pre-commit partial stretched it"
+        assert session.transcript[0].text == "Thank you."
+
+    async def test_post_arm_partial_extends_hold(self) -> None:
+        """A partial *after* the hold is armed means the user resumed speaking
+        — the expiry must wait out the grace window (no VAD in this harness →
+        extension is conservative)."""
+        elapsed, _ = await self._run_hold_scenario(
+            grace_secs=0.8,
+            timeout_secs=0.1,
+            partial_after_commit_delay=0.05,
+        )
+        # Must have waited past the bare timeout into the grace window.
+        assert elapsed > 0.5, f"hold expired after only {elapsed:.2f}s despite fresh partial"
+
+    async def test_pre_commit_speech_does_not_stretch_via_vad_lookback(self) -> None:
+        """Live bug: Silero's 2s lookback still contains the held utterance, so
+        ``not vad_contradicts`` was always true after commit — any late STT
+        refinement floored a 0.35s text-complete HOLD at the 2s grace window.
+        """
+
+        class _StaleSpeechEP:
+            """Reports speech only in wide windows (pre-commit residue)."""
+
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.5 if window_secs >= 1.0 else 0.0
+
+            def notify_committed(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        elapsed, _ = await self._run_hold_scenario(
+            grace_secs=2.0,
+            timeout_secs=0.2,
+            partial_after_commit_delay=0.05,
+            endpointer=_StaleSpeechEP(),
+        )
+        assert elapsed < 0.8, (
+            f"hold expiry took {elapsed:.2f}s — pre-commit VAD speech stretched the grace"
+        )
+
+    async def test_dangling_token_hold_is_dropped_on_expiry(self) -> None:
+        """Live bug: stale-force-committed \"I\" HOLDs for 3s then becomes a
+        user turn and the LLM invents a reply. Dangling tokens must die here."""
+        agent = Agent(name="t", model=TestModel(responses=["should not run"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=agent, stt=stt, tts=tts, turn_detector=_AlwaysHoldOnceDetector(0.15)
+        )
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="I"))
+            await asyncio.sleep(0.5)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        assert all(entry.role != "user" for entry in session.transcript)
+        assert not any(isinstance(e, AgentTextDone) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Tests: stale partial sweeper
+# ---------------------------------------------------------------------------
+
+
+class _StuckPartialSTT(DelayedMockSTT):
+    """STT that transcribes a partial but never commits it on its own — the
+    live 'quiet speech during playback' failure. ``commit()`` releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.commit_calls = 0
+        self.pending_text: str | None = None
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+        if self.pending_text is not None:
+            text, self.pending_text = self.pending_text, None
+            await self.inject(TranscriptEvent(type="committed", text=text))
+
+
+class TestStalePartialSweeper:
+    async def test_stuck_partial_is_force_committed(self) -> None:
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = _StuckPartialSTT()
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.2
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            stt.pending_text = "Cool."
+            await stt.inject(TranscriptEvent(type="partial", text="Cool."))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert stt.commit_calls >= 1
+        assert session.transcript[0].role == "user"
+        assert session.transcript[0].text == "Cool."
+
+    async def test_sweeper_does_not_refire_on_ignored_commit(self) -> None:
+        """An IGNOREd commit (noise) leaves _last_commit_at stale; the sweeper
+        must force at most one commit per stranded partial, not one per poll."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = _StuckPartialSTT()
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.15
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            # Hesitation-only: the resulting forced commit is IGNOREd by the
+            # heuristic detector, so no turn starts and no _last_commit_at bump.
+            stt.pending_text = "Mm-hmm."
+            await stt.inject(TranscriptEvent(type="partial", text="Mm-hmm."))
+            await asyncio.sleep(1.0)  # several poll+stale windows
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert stt.commit_calls == 1
+        assert all(entry.role != "user" for entry in session.transcript)
+
+    async def test_noop_commit_provider_synthesizes_stranded_partial(self) -> None:
+        """Flux-style STT: commit() is a no-op, so the sweeper must promote the
+        stranded partial itself or the UI caption hangs forever."""
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.15
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="partial", text="What are you doing?"))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        assert session.transcript[0].role == "user"
+        assert session.transcript[0].text == "What are you doing?"

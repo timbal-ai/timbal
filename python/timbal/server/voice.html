@@ -38,16 +38,95 @@
     -webkit-font-smoothing: antialiased;
   }
   .shell {
-    max-width: 480px;
+    max-width: 1160px;
     margin: 0 auto;
     height: 100%;
     max-height: 100dvh;
     min-height: 0;
-    padding: 1.5rem 1rem 2rem;
+    padding: 1.5rem 1rem 1.5rem;
     display: flex;
     flex-direction: column;
     gap: 1rem;
     overflow: hidden;
+  }
+  .layout {
+    flex: 1;
+    display: flex;
+    gap: 1rem;
+    min-height: 0;
+  }
+  .panel {
+    flex: 0 0 250px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .panel-title {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .field-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .panel select {
+    width: 100%;
+    min-width: 0;
+    font: inherit;
+    font-size: 0.8125rem;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.65rem;
+    outline: none;
+    cursor: pointer;
+  }
+  .panel select:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(0,0,0,.07);
+  }
+  .model-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+  .model-count {
+    font-size: 0.65625rem;
+    color: var(--text-muted);
+    margin-top: -0.15rem;
+  }
+  .panel-note {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+    margin-top: auto;
+    padding-top: 0.65rem;
+    border-top: 1px solid var(--border);
+  }
+  @media (max-width: 900px) {
+    body { overflow: auto; }
+    .shell { max-height: none; height: auto; }
+    .layout { flex-direction: column; overflow: visible; }
+    .panel { flex: none; width: auto; overflow: visible; }
+    .card { order: -1; min-height: 60dvh; }
+    .panel-note { margin-top: 0; }
   }
   .top {
     display: flex;
@@ -100,9 +179,8 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.35rem;
-    padding: 0.75rem 1rem;
+    padding-bottom: 0.75rem;
     border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, #fafafa 0%, var(--surface) 100%);
   }
   .conn-version {
     font-size: 0.75rem;
@@ -164,35 +242,20 @@
     50% { opacity: 0.5; transform: scale(0.85); }
   }
 
-  #mic-select, #td-select {
-    flex: 1;
-    min-width: 0;
-    font: inherit;
-    font-size: 0.8125rem;
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    padding: 0.5rem 0.65rem;
-    outline: none;
-    cursor: pointer;
+  .mic-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.5rem;
   }
-  #mic-select:focus, #td-select:focus {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(0,0,0,.07);
-  }
-  #td-select {
-    flex: 0 1 auto;
-    max-width: 46%;
-  }
+  .mic-row .field { flex: 1; min-width: 0; }
   .mic-viz {
     display: flex;
     align-items: flex-end;
     justify-content: center;
     gap: 3px;
     height: 28px;
-    flex: 0 0 56px;
-    padding-bottom: 2px;
+    flex: 0 0 40px;
+    padding-bottom: 5px;
   }
   .mic-bar {
     width: 4px;
@@ -238,30 +301,6 @@
     pointer-events: none;
   }
   #voice-empty[hidden] { display: none !important; }
-  .orb-wrap {
-    width: 72px;
-    height: 72px;
-    margin-bottom: 1rem;
-    position: relative;
-  }
-  .orb {
-    position: absolute;
-    inset: 12px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 30% 30%, #fafafa, #e4e4e7);
-    border: 1px solid var(--border);
-  }
-  .card.card--live #voice-empty .orb-wrap .ring {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    border: 2px solid var(--success-soft);
-    animation: ring-pulse 2s ease-out infinite;
-  }
-  @keyframes ring-pulse {
-    0% { transform: scale(0.85); opacity: 0.8; }
-    100% { transform: scale(1.35); opacity: 0; }
-  }
   .empty-title {
     font-size: 0.9375rem;
     font-weight: 600;
@@ -272,8 +311,20 @@
     font-size: 0.8125rem;
     color: var(--text-muted);
     margin-top: 0.35rem;
-    max-width: 240px;
+    max-width: 280px;
     line-height: 1.4;
+  }
+  .msg.status {
+    margin: 0.35rem auto 0.65rem;
+    max-width: 90%;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-style: italic;
+    padding: 0.35rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.03);
+    border: 1px solid var(--border);
   }
 
   .msg { margin-bottom: 0.65rem; max-width: 90%; }
@@ -357,16 +408,6 @@
     color: var(--text-muted);
     line-height: 1.35;
   }
-  .foot-row--mic {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-  }
-  .foot-row--mic #mic-select {
-    flex: 1;
-    min-width: 0;
-  }
   .foot-actions {
     display: flex;
     align-items: center;
@@ -399,31 +440,47 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
-  .btn-stop {
+  .btn-session {
     flex-shrink: 0;
     width: 2.5rem;
     height: 2.5rem;
     padding: 0;
     border: none;
     border-radius: 10px;
-    background: var(--danger);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
   }
-  .btn-stop:hover:not(:disabled) {
-    background: #b91c1c;
-  }
-  .btn-stop:focus-visible {
+  .btn-session:focus-visible {
     outline: 2px solid var(--primary);
     outline-offset: 2px;
   }
-  .btn-stop-icon {
+  .btn-session[data-mode="stop"] {
+    background: var(--danger);
+  }
+  .btn-session[data-mode="stop"]:hover:not(:disabled) {
+    background: #b91c1c;
+  }
+  .btn-session[data-mode="start"] {
+    background: var(--primary);
+  }
+  .btn-session[data-mode="start"]:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+  .btn-session-icon--stop {
     width: 11px;
     height: 11px;
     border-radius: 2px;
     background: var(--primary-fg);
+  }
+  .btn-session-icon--start {
+    width: 0;
+    height: 0;
+    margin-left: 2px;
+    border-style: solid;
+    border-width: 7px 0 7px 12px;
+    border-color: transparent transparent transparent var(--primary-fg);
   }
   button.primary {
     background: var(--primary);
@@ -449,64 +506,111 @@
     </div>
   </header>
 
-  <main id="card" class="card">
-    <div id="conn-strip" class="conn-strip">
-      <span id="conn-version" class="conn-version"></span>
-      <div id="conn-agent" class="conn-agent" hidden>
-        <div id="conn-runnable-title" class="conn-runnable-title"></div>
-        <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
-      </div>
-    </div>
-    <div class="transcript-wrap">
-      <div id="voice-empty">
-        <div class="orb-wrap">
-          <div class="ring"></div>
-          <div class="orb"></div>
+  <div class="layout">
+    <aside class="panel" aria-label="Agent configuration">
+      <h2 class="panel-title">Agent</h2>
+      <div id="conn-strip" class="conn-strip">
+        <span id="conn-version" class="conn-version"></span>
+        <div id="conn-agent" class="conn-agent" hidden>
+          <div id="conn-runnable-title" class="conn-runnable-title"></div>
+          <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
         </div>
-        <p class="empty-title">Listening</p>
-        <p class="empty-sub">When you’re connected, speak normally. Transcripts and replies show up here.</p>
       </div>
-      <div id="transcript" role="log" aria-live="polite" aria-relevant="additions"></div>
-    </div>
-    <div class="foot">
-      <div class="foot-row foot-row--top">
-        <div id="foot-status" class="foot-status" data-state="connecting">
-          <span class="foot-status-dot" aria-hidden="true"></span>
-          <div class="foot-status-lines">
-            <span id="foot-status-title" class="foot-status-title">Getting ready</span>
-            <span id="foot-status-detail" class="foot-status-detail">Microphone and server connection…</span>
+      <div class="model-picker" title="Agent LLM — applied on the next Start. Needs the matching provider API key on the server.">
+        <label class="field">
+          <span class="field-label">Provider</span>
+          <select id="model-provider-select" aria-label="LLM provider">
+            <option value="">All providers</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Model</span>
+          <select id="model-select" aria-label="LLM model">
+            <option value="">Agent default</option>
+          </select>
+        </label>
+        <span id="model-count" class="model-count"></span>
+      </div>
+      <p class="panel-note">Changes apply on the next session Start. Model overrides need the matching provider API key on the server.</p>
+    </aside>
+
+    <main id="card" class="card">
+      <div class="transcript-wrap">
+        <div id="voice-empty">
+          <p class="empty-title">Listening</p>
+          <p class="empty-sub">Speak normally. Transcripts, tool calls, and replies show up here.</p>
+        </div>
+        <div id="transcript" role="log" aria-live="polite" aria-relevant="additions"></div>
+      </div>
+      <div class="foot">
+        <div class="foot-row foot-row--top">
+          <div id="foot-status" class="foot-status" data-state="ended">
+            <span class="foot-status-dot" aria-hidden="true"></span>
+            <div class="foot-status-lines">
+              <span id="foot-status-title" class="foot-status-title">Ready</span>
+              <span id="foot-status-detail" class="foot-status-detail">Connecting…</span>
+            </div>
+          </div>
+          <div class="foot-actions">
+            <button type="button" id="btn-reconnect" class="primary">Reload page</button>
+            <button type="button" id="btn-session" class="btn-session" data-mode="start" aria-label="Start session" title="Start a new voice session">
+              <span class="btn-session-icon btn-session-icon--start" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
-        <div class="foot-actions">
-          <button type="button" id="btn-reconnect" class="primary">Reload page</button>
-          <button type="button" id="btn-stop" class="btn-stop" disabled aria-label="End session">
-            <span class="btn-stop-icon" aria-hidden="true"></span>
-          </button>
-        </div>
+        <p class="foot-warn">Audio is captured in your browser (microphone) and streamed to this server. Use a private session and only on sites you trust; anyone with access to this page may be able to use the same agent.</p>
       </div>
-      <div class="foot-row foot-row--mic">
-        <select id="mic-select" aria-label="Microphone"><option value="">Loading devices…</option></select>
-        <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking">
-          <option value="">Turns: server default</option>
-          <option value="heuristic">Turns: heuristic</option>
-          <option value="provider">Turns: provider VAD</option>
-          <option value="local">Turns: local EOU</option>
-          <option value="lexical">Turns: lexical</option>
-          <option value="raw">Turns: raw (no filters)</option>
-        </select>
+    </main>
+
+    <aside class="panel" aria-label="Voice session configuration">
+      <h2 class="panel-title">Voice session</h2>
+      <div class="mic-row">
+        <label class="field">
+          <span class="field-label">Microphone</span>
+          <select id="mic-select" aria-label="Microphone"><option value="">Loading devices…</option></select>
+        </label>
         <div id="mic-viz" class="mic-viz" aria-hidden="true">
           <div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div>
         </div>
       </div>
-      <p class="foot-warn">Audio is captured in your browser (microphone) and streamed to this server. Use a private session and only on sites you trust; anyone with access to this page may be able to use the same agent.</p>
-    </div>
-  </main>
+      <label class="field">
+        <span class="field-label">Noise suppression</span>
+        <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.">
+          <option value="browser">Browser</option>
+          <option value="rnnoise">RNNoise</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Speech-to-text</span>
+        <select id="stt-select" aria-label="STT provider" title="Speech-to-text provider — applied on the next Start. Deepgram needs DEEPGRAM_API_KEY on the server.">
+          <option value="">Server default</option>
+          <option value="elevenlabs">ElevenLabs Scribe</option>
+          <option value="deepgram-flux">Deepgram Flux</option>
+          <option value="deepgram-nova">Deepgram Nova-3</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Turn detection</span>
+        <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking. Applied on the next Start.">
+          <option value="">Server default</option>
+          <option value="heuristic">Heuristic</option>
+          <option value="provider">Provider VAD</option>
+          <option value="local">Smart Turn + Namo</option>
+          <option value="lexical">Namo text</option>
+          <option value="raw">Raw (no filters)</option>
+        </select>
+      </label>
+      <p class="panel-note">Echo cancellation stays on in every mode. Settings apply on the next Start.</p>
+    </aside>
+  </div>
 
 </div>
 <script type="application/json" id="timbal-voice-runnable-meta">__TIMBAL_VOICE_RUNNABLE_META_JSON__</script>
 <script>
 const SAMPLE_RATE = 16000;
-const CHUNK_MS = 100;
+// Flux wants ~80ms frames; Nova/Scribe are fine at the same cadence.
+const CHUNK_MS = 80;
 
 const cardEl = document.getElementById('card');
 const footStatus = document.getElementById('foot-status');
@@ -514,20 +618,161 @@ const footStatusTitle = document.getElementById('foot-status-title');
 const footStatusDetail = document.getElementById('foot-status-detail');
 const transcriptEl = document.getElementById('transcript');
 const voiceEmpty = document.getElementById('voice-empty');
-const btnStop = document.getElementById('btn-stop');
+const btnSession = document.getElementById('btn-session');
 const btnReconnect = document.getElementById('btn-reconnect');
 const micSelect = document.getElementById('mic-select');
 const tdSelect = document.getElementById('td-select');
+const nsSelect = document.getElementById('ns-select');
 const micViz = document.getElementById('mic-viz');
 
 const TD_STORAGE_KEY = 'timbal-voice-turn-detector';
 // Unknown stored values leave the select on '' (server default) automatically.
 tdSelect.value = localStorage.getItem(TD_STORAGE_KEY) || '';
 tdSelect.onchange = () => {
-  // A detector is fixed at session start, so apply by starting a new session.
+  // Applied on the next Start (no reload) — modes are fixed per WebSocket hello.
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
-  location.reload();
 };
+
+const sttSelect = document.getElementById('stt-select');
+const STT_STORAGE_KEY = 'timbal-voice-stt-provider';
+sttSelect.value = localStorage.getItem(STT_STORAGE_KEY) || '';
+function syncTdForStt() {
+  // Flux owns end-of-turn — Smart Turn / Namo would only run after Flux
+  // already committed, which feels like "wait until you shut up".
+  if (sttSelect.value === 'deepgram-flux') {
+    const incompatible = !tdSelect.value || ['local', 'lexical'].includes(tdSelect.value);
+    if (incompatible) {
+      tdSelect.value = 'provider';
+      localStorage.setItem(TD_STORAGE_KEY, 'provider');
+    }
+  }
+}
+sttSelect.onchange = () => {
+  // Applied on the next Start — the provider is fixed per WebSocket hello.
+  localStorage.setItem(STT_STORAGE_KEY, sttSelect.value);
+  syncTdForStt();
+};
+syncTdForStt();
+
+const modelSelect = document.getElementById('model-select');
+const modelProviderSelect = document.getElementById('model-provider-select');
+const modelCountEl = document.getElementById('model-count');
+const MODEL_STORAGE_KEY = 'timbal-voice-llm-model';
+const PROVIDER_LABELS = {
+  anthropic: 'Anthropic',
+  openai: 'OpenAI',
+  google: 'Google',
+  togetherai: 'Together AI',
+  xai: 'xAI',
+  groq: 'Groq',
+  fireworks: 'Fireworks',
+  xiaomi: 'Xiaomi',
+  byteplus: 'BytePlus',
+  cerebras: 'Cerebras',
+  sambanova: 'SambaNova',
+  moonshot: 'Moonshot',
+};
+/** @type {{id: string, provider: string, display_name: string}[]} */
+let MODEL_CATALOG = [];
+
+function providerLabel(p) {
+  return PROVIDER_LABELS[p] || (p ? p.charAt(0).toUpperCase() + p.slice(1) : p);
+}
+
+function initModelPicker(models, agentDefault) {
+  MODEL_CATALOG = Array.isArray(models) ? models : [];
+  const providers = [...new Set(MODEL_CATALOG.map((m) => m.provider))].sort((a, b) =>
+    providerLabel(a).localeCompare(providerLabel(b)),
+  );
+  modelProviderSelect.innerHTML = '<option value="">All providers</option>';
+  for (const p of providers) {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = providerLabel(p);
+    modelProviderSelect.appendChild(opt);
+  }
+
+  const stored = localStorage.getItem(MODEL_STORAGE_KEY) || '';
+  if (stored && stored.includes('/')) {
+    modelProviderSelect.value = stored.split('/', 1)[0];
+  }
+  renderModelOptions(stored, agentDefault);
+
+  modelProviderSelect.onchange = () => {
+    renderModelOptions(modelSelect.value, agentDefault);
+  };
+  modelSelect.onchange = () => {
+    localStorage.setItem(MODEL_STORAGE_KEY, modelSelect.value);
+    // Sync provider step when a concrete model is chosen.
+    if (modelSelect.value && modelSelect.value.includes('/')) {
+      const p = modelSelect.value.split('/', 1)[0];
+      if (modelProviderSelect.value && modelProviderSelect.value !== p) {
+        modelProviderSelect.value = p;
+        renderModelOptions(modelSelect.value, agentDefault);
+      }
+    }
+  };
+}
+
+function renderModelOptions(preferred, agentDefault) {
+  const provider = modelProviderSelect.value;
+  let list = MODEL_CATALOG;
+  if (provider) list = list.filter((m) => m.provider === provider);
+
+  const defaultLabel = agentDefault
+    ? `Agent default (${agentDefault})`
+    : 'Agent default';
+  modelSelect.innerHTML = '';
+  const defOpt = document.createElement('option');
+  defOpt.value = '';
+  defOpt.textContent = defaultLabel;
+  modelSelect.appendChild(defOpt);
+
+  for (const m of list) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    // When browsing all providers, prefix so names don't collide visually.
+    opt.textContent = provider ? m.display_name : `${providerLabel(m.provider)} · ${m.display_name}`;
+    opt.title = m.id;
+    modelSelect.appendChild(opt);
+  }
+
+  // Preserve selection: preferred → stored → empty. Unknown ids stay selectable.
+  const want = preferred || '';
+  if (want && ![...modelSelect.options].some((o) => o.value === want)) {
+    const opt = document.createElement('option');
+    opt.value = want;
+    opt.textContent = want;
+    opt.title = want;
+    modelSelect.appendChild(opt);
+  }
+  modelSelect.value = [...modelSelect.options].some((o) => o.value === want) ? want : '';
+  if (modelCountEl) {
+    const total = MODEL_CATALOG.length;
+    modelCountEl.textContent = provider
+      ? `${list.length} of ${total} models`
+      : `${total} models`;
+  }
+}
+
+const NS_STORAGE_KEY = 'timbal-voice-noise-suppression';
+nsSelect.value = localStorage.getItem(NS_STORAGE_KEY) || 'browser';
+if (!nsSelect.value) nsSelect.value = 'browser'; // unknown stored value
+nsSelect.onchange = () => {
+  // Applied on the next Start — AudioContext rate / worklet are rebuilt then.
+  localStorage.setItem(NS_STORAGE_KEY, nsSelect.value);
+};
+
+function setSessionButton(mode) {
+  const start = mode === 'start';
+  btnSession.dataset.mode = start ? 'start' : 'stop';
+  btnSession.disabled = false;
+  btnSession.setAttribute('aria-label', start ? 'Start session' : 'End session');
+  btnSession.title = start ? 'Start a new voice session' : 'End session';
+  btnSession.innerHTML = start
+    ? '<span class="btn-session-icon btn-session-icon--start" aria-hidden="true"></span>'
+    : '<span class="btn-session-icon btn-session-icon--stop" aria-hidden="true"></span>';
+}
 const micBars = () => [...micViz.querySelectorAll('.mic-bar')];
 
 function truncateMiddle(s, max) {
@@ -549,8 +794,10 @@ function initRunnableStrip() {
   try {
     meta = JSON.parse(raw.textContent);
   } catch {
+    initModelPicker([], '');
     return;
   }
+  initModelPicker(meta.models || [], (meta.model || '').trim());
   const v = (meta.version || '').trim();
   verEl.textContent = v ? `Timbal ${v}` : 'Timbal';
   const spec = (meta.import_spec || '').trim();
@@ -588,6 +835,8 @@ let playedAccumMs = 0;
 let lastPlaybackAckMs = -1;
 let playbackAckTimer = null;
 const PLAYBACK_ACK_INTERVAL_MS = 250;
+/** After barge-in, ignore audio frames still in flight on the WS (server also drops its queue). */
+let suppressAssistantAudio = false;
 
 /** Cumulative ms of TTS audio actually played this session. */
 function computePlayedMs() {
@@ -634,7 +883,10 @@ function setConn(state, title, detail) {
   footStatusDetail.textContent = detail;
   cardEl.classList.toggle('card--inactive', state === 'ended' || state === 'error');
   cardEl.classList.toggle('card--live', state === 'live');
-  btnReconnect.classList.toggle('visible', state === 'ended' || state === 'error');
+  // Hard failures only — normal stop/disconnect uses Start for a new session.
+  btnReconnect.classList.toggle('visible', state === 'error');
+  if (state === 'ended' || state === 'error') setSessionButton('start');
+  else if (state === 'live' || state === 'connecting') setSessionButton('stop');
 }
 
 function updateEmptyState() {
@@ -668,18 +920,17 @@ function log(cls, text) {
 }
 
 let partialEl = null;
+let statusEl = null;
 function setPartial(text) {
   if (!text) {
     if (partialEl) { partialEl.remove(); partialEl = null; }
     updateEmptyState();
     return;
   }
-  // Seal any in-flight assistant bubble so live STT can't read as a
-  // continuation of the previous reply.
-  if (window._assistantEl) {
-    window._lastAssistantEl = window._assistantEl;
-    window._assistantEl = null;
-  }
+  // Do NOT seal the in-flight assistant bubble here: a stray mic partial
+  // (breath, echo blip) mid-reply would split one reply across two bubbles.
+  // The live caption is parked *after* the assistant bubble (appendChild
+  // below), so ordering stays readable while the reply keeps growing.
   if (!partialEl) {
     partialEl = log('partial', '');
   } else {
@@ -687,6 +938,18 @@ function setPartial(text) {
     transcriptEl.appendChild(partialEl);
   }
   partialEl.textContent = '… ' + text;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  updateEmptyState();
+}
+function setStatus(text) {
+  if (!text) {
+    if (statusEl) { statusEl.remove(); statusEl = null; }
+    updateEmptyState();
+    return;
+  }
+  if (!statusEl) statusEl = log('status', '');
+  else transcriptEl.appendChild(statusEl);
+  statusEl.textContent = text;
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   updateEmptyState();
 }
@@ -716,52 +979,188 @@ function pickPreferredMic(mics) {
   return mics.length ? mics[0].deviceId : undefined;
 }
 
+// ---- RNNoise (client-side neural noise suppression) ----------------------
+// Runs as a mic *preprocessor* inside the capture worklet, before PCM is sent
+// to the server — deliberately transport-agnostic (a WebRTC channel later
+// would reuse the same denoised track). Assets come from jsDelivr; any load
+// failure falls back to the browser's built-in suppressor for the session.
+const RNNOISE_CDN = 'https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist';
+/** RNNoise operates on 480-sample frames of 48 kHz audio (10 ms). */
+const RNNOISE_RATE = 48000;
+const RNNOISE_FRAME = 480;
+/** null = not fetched yet; false = fetch failed (don't retry this page load). */
+let rnnoiseAssets = null;
+/** True when the shared AudioContext was built for the RNNoise graph (48 kHz + glue in the worklet module). */
+let rnnoiseCtxActive = false;
+
+async function loadRnnoiseAssets() {
+  const withTimeout = (p) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('fetch timeout')), 6000)),
+  ]);
+  const [glue, wasm] = await Promise.all([
+    withTimeout(fetch(`${RNNOISE_CDN}/rnnoise.js`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    })),
+    withTimeout(fetch(`${RNNOISE_CDN}/rnnoise.wasm`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.arrayBuffer();
+    })),
+  ]);
+  return { glue, wasm };
+}
+
+/**
+ * Capture worklet module source. With `glue` (the emscripten factory
+ * `createRNNWasmModule`) prepended, the processor can denoise: it buffers
+ * 480-sample frames at the context rate (48 kHz), runs rnnoise_process_frame
+ * in-place, then decimates 3:1 (mean of 3 — cheap anti-alias; speech lives
+ * well under the resulting 8 kHz Nyquist) so the server keeps receiving the
+ * same 16 kHz PCM as the plain path. Until the wasm module resolves, frames
+ * pass through un-denoised at the same output rate, so the negotiated
+ * sample_rate never changes mid-session.
+ */
+function captureWorkletSource(glue) {
+  return (glue || '') + `
+    class Capture extends AudioWorkletProcessor {
+      constructor(options) {
+        super();
+        this._buf = [];
+        this._frame = [];
+        this._denoise = !!(options && options.processorOptions && options.processorOptions.denoise);
+        this._outRate = this._denoise ? sampleRate / 3 : sampleRate;
+        this._rn = null; // { mod, state, ptr } once the wasm module is ready
+        this.port.onmessage = (e) => {
+          const msg = e.data;
+          if (msg && msg.type === 'rnnoise-init') this._initRnnoise(msg.wasm);
+        };
+      }
+      _initRnnoise(wasmBytes) {
+        try {
+          createRNNWasmModule({ wasmBinary: new Uint8Array(wasmBytes) }).then((mod) => {
+            const state = mod._rnnoise_create();
+            const ptr = mod._malloc(${RNNOISE_FRAME} * 4);
+            this._rn = { mod, state, ptr };
+            this.port.postMessage({ type: 'rnnoise-ready' });
+          }).catch((err) => this.port.postMessage({ type: 'rnnoise-error', error: String(err) }));
+        } catch (err) {
+          this.port.postMessage({ type: 'rnnoise-error', error: String(err) });
+        }
+      }
+      _pushDenoised(ch) {
+        for (let i = 0; i < ch.length; i++) this._frame.push(ch[i]);
+        while (this._frame.length >= ${RNNOISE_FRAME}) {
+          const frame = this._frame.splice(0, ${RNNOISE_FRAME});
+          if (this._rn) {
+            const { mod, state, ptr } = this._rn;
+            const base = ptr >> 2;
+            // Re-read HEAPF32 around the call: wasm memory growth detaches old views.
+            let heap = mod.HEAPF32;
+            // RNNoise expects float samples in int16 range.
+            for (let j = 0; j < ${RNNOISE_FRAME}; j++) heap[base + j] = frame[j] * 32768;
+            mod._rnnoise_process_frame(state, ptr, ptr);
+            heap = mod.HEAPF32;
+            for (let j = 0; j < ${RNNOISE_FRAME}; j++) frame[j] = heap[base + j] / 32768;
+          }
+          for (let j = 0; j < ${RNNOISE_FRAME}; j += 3) {
+            this._buf.push((frame[j] + frame[j + 1] + frame[j + 2]) / 3);
+          }
+        }
+      }
+      process(inputs) {
+        const ch = inputs[0][0];
+        if (!ch) return true;
+        if (this._denoise) {
+          this._pushDenoised(ch);
+        } else {
+          for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
+        }
+        const needed = Math.floor(this._outRate * ${CHUNK_MS / 1000});
+        while (this._buf.length >= needed) {
+          const slice = this._buf.splice(0, needed);
+          const i16 = new Int16Array(slice.length);
+          for (let j = 0; j < slice.length; j++) {
+            let s = Math.max(-1, Math.min(1, slice[j]));
+            i16[j] = s < 0 ? s * 32768 : s * 32767;
+          }
+          this.port.postMessage(i16.buffer, [i16.buffer]);
+        }
+        return true;
+      }
+    }
+    registerProcessor('capture', Capture);
+  `;
+}
+
 async function startMic(deviceId) {
   if (currentSource) { currentSource.disconnect(); currentSource = null; }
   if (worklet) { worklet.disconnect(); worklet = null; }
   if (analyser) { analyser.disconnect(); analyser = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
 
+  const nsMode = nsSelect.value;
+  let useRnnoise = nsMode === 'rnnoise';
+  if (useRnnoise && rnnoiseAssets === null) {
+    try {
+      rnnoiseAssets = await loadRnnoiseAssets();
+    } catch (err) {
+      console.warn('RNNoise assets failed to load — falling back to browser noise suppression.', err);
+      rnnoiseAssets = false;
+    }
+  }
+  if (useRnnoise && !rnnoiseAssets) useRnnoise = false;
+  // The context (rate + worklet module) is created once per page; a mic change
+  // mid-session must keep matching it, whatever the current fetch state says.
+  if (audioCtx) useRnnoise = rnnoiseCtxActive;
+
   const constraints = {
     audio: {
-      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
-      sampleRate: SAMPLE_RATE,
+      echoCancellation: true, // always: the barge-in echo gates assume the browser AEC is doing its job
+      // Never stack two suppressors — browser NS stays on only in 'browser'
+      // mode or as the fallback when RNNoise assets failed to load.
+      noiseSuppression: nsMode === 'browser' || (nsMode === 'rnnoise' && !useRnnoise),
+      autoGainControl: true,
+      sampleRate: useRnnoise ? RNNOISE_RATE : SAMPLE_RATE,
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
     }
   };
   micStream = await navigator.mediaDevices.getUserMedia(constraints);
 
   if (!audioCtx) {
-    audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-    await audioCtx.audioWorklet.addModule('data:text/javascript,' + encodeURIComponent(`
-      class Capture extends AudioWorkletProcessor {
-        constructor() { super(); this._buf = []; }
-        process(inputs) {
-          const ch = inputs[0][0];
-          if (!ch) return true;
-          for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
-          const needed = Math.floor(sampleRate * ${CHUNK_MS / 1000});
-          while (this._buf.length >= needed) {
-            const slice = this._buf.splice(0, needed);
-            const i16 = new Int16Array(slice.length);
-            for (let j = 0; j < slice.length; j++) {
-              let s = Math.max(-1, Math.min(1, slice[j]));
-              i16[j] = s < 0 ? s * 32768 : s * 32767;
-            }
-            this.port.postMessage(i16.buffer, [i16.buffer]);
-          }
-          return true;
-        }
-      }
-      registerProcessor('capture', Capture);
-    `));
+    audioCtx = new AudioContext({ sampleRate: useRnnoise ? RNNOISE_RATE : SAMPLE_RATE });
+    if (useRnnoise && Math.round(audioCtx.sampleRate) !== RNNOISE_RATE) {
+      // Decimating a non-48k context by 3 would yield a wire rate the STT
+      // provider rejects (e.g. 44100/3 = 14700). Rebuild the plain graph and
+      // restore the browser suppressor for this session.
+      console.warn(`RNNoise needs a 48 kHz AudioContext; got ${audioCtx.sampleRate} — falling back to browser noise suppression.`);
+      await audioCtx.close();
+      audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      useRnnoise = false;
+      try { await micStream.getAudioTracks()[0].applyConstraints({ noiseSuppression: true }); } catch (_) {}
+    }
+    rnnoiseCtxActive = useRnnoise;
+    await audioCtx.audioWorklet.addModule('data:text/javascript,'
+      + encodeURIComponent(captureWorkletSource(useRnnoise ? rnnoiseAssets.glue : '')));
   }
 
   currentSource = audioCtx.createMediaStreamSource(micStream);
-  worklet = new AudioWorkletNode(audioCtx, 'capture');
+  worklet = new AudioWorkletNode(audioCtx, 'capture', {
+    processorOptions: { denoise: rnnoiseCtxActive },
+  });
+  if (rnnoiseCtxActive) {
+    // Copy: the transferable is consumed per node, and mic changes make new nodes.
+    const wasmBytes = rnnoiseAssets.wasm.slice(0);
+    worklet.port.postMessage({ type: 'rnnoise-init', wasm: wasmBytes }, [wasmBytes]);
+  }
   worklet.port.onmessage = (e) => {
+    const d = e.data;
+    if (d && d.type === 'rnnoise-ready') { console.info('RNNoise active on mic input.'); return; }
+    if (d && d.type === 'rnnoise-error') {
+      console.warn('RNNoise failed in the audio worklet — mic continues un-denoised.', d.error);
+      return;
+    }
     if (!micAudioToWs || !ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(new Uint8Array(e.data));
+    ws.send(new Uint8Array(d));
   };
   currentSource.connect(worklet);
   const silent = audioCtx.createGain();
@@ -808,7 +1207,7 @@ navigator.mediaDevices.addEventListener('devicechange', async () => {
 });
 
 function playPCM(b64) {
-  if (!audioCtx) return;
+  if (!audioCtx || suppressAssistantAudio) return;
   if (audioCtx.state === 'suspended') void audioCtx.resume();
   const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   const i16 = new Int16Array(raw.buffer);
@@ -833,17 +1232,88 @@ function playPCM(b64) {
 
 btnReconnect.onclick = () => location.reload();
 
+let sessionBusy = false;
+/** Bumped on every teardown so an in-flight `start()` can't resurrect a dead session. */
+let startGen = 0;
+
+async function endSession({ userInitiated = false, silent = false } = {}) {
+  startGen += 1;
+  userEndedSession = userInitiated;
+  stopAssistantAudio();
+  if (playbackAckTimer) { clearInterval(playbackAckTimer); playbackAckTimer = null; }
+  micAudioToWs = false;
+  sessionReady = false;
+  micViz.classList.remove('active');
+  if (ws) {
+    const sock = ws;
+    ws = null;
+    sock.onclose = null;
+    sock.onerror = null;
+    sock.onmessage = null;
+    try { sock.close(); } catch (_) {}
+  }
+  if (worklet) { try { worklet.disconnect(); } catch (_) {} worklet = null; }
+  if (currentSource) { try { currentSource.disconnect(); } catch (_) {} currentSource = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx) {
+    try { await audioCtx.close(); } catch (_) {}
+    audioCtx = null;
+    rnnoiseCtxActive = false;
+  }
+  analyser = null;
+  if (meterRAF) { cancelAnimationFrame(meterRAF); meterRAF = null; }
+  setSessionButton('start');
+  if (!silent) {
+    if (userInitiated) {
+      setConn('ended', 'Session ended', 'Click Start for a new session.');
+    } else {
+      setConn('ended', 'Disconnected', 'Click Start for a new session.');
+    }
+  }
+  updateEmptyState();
+}
+
+async function startSession() {
+  if (sessionBusy) return;
+  sessionBusy = true;
+  btnSession.disabled = true;
+  try {
+    // Always a fresh session: tear down mic/WS/graph, then open a new one.
+    await endSession({ userInitiated: false, silent: true });
+    userEndedSession = false;
+    await start();
+  } catch (err) {
+    console.error(err);
+    setSessionButton('start');
+    setConn('error', 'Could not start', err?.message || 'Microphone or connection failed.');
+  } finally {
+    sessionBusy = false;
+    btnSession.disabled = false;
+  }
+}
+
+btnSession.onclick = () => {
+  if (btnSession.dataset.mode === 'stop') {
+    void endSession({ userInitiated: true });
+    return;
+  }
+  void startSession();
+};
+
 async function start() {
+  const gen = startGen;
   setConn('connecting', 'Getting ready', 'Microphone and server connection…');
   userEndedSession = false;
   sessionReady = false;
 
   await startMic();
+  if (gen !== startGen) return;
   const mics = await populateDevices();
   const preferred = pickPreferredMic(mics);
   const activeId = micStream?.getAudioTracks()[0]?.getSettings().deviceId;
   if (preferred && preferred !== activeId) {
     await startMic(preferred);
+    if (gen !== startGen) return;
     await populateDevices();
   }
 
@@ -852,15 +1322,26 @@ async function start() {
   micAudioToWs = false;
   ws = new WebSocket(`${proto}://${location.host}/voice/ws`);
   ws.binaryType = 'arraybuffer';
+  if (gen !== startGen) {
+    try { ws.close(); } catch (_) {}
+    ws = null;
+    return;
+  }
 
   ws.onopen = () => {
+    if (gen !== startGen) return;
     // The config hello MUST be the first frame on the socket — the server
     // reads one frame as session config. stopAssistantAudio() below sends a
     // playback ack, which used to race ahead and eat the config slot.
-    const sr = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    // Report the worklet's OUTPUT rate: the RNNoise graph runs the context at
+    // 48 kHz but decimates 3:1 before sending, so the wire rate is ctx/3.
+    const ctxRate = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    const sr = rnnoiseCtxActive ? Math.round(ctxRate / 3) : ctxRate;
     sessionSampleRate = sr;
     const hello = { sample_rate: sr };
     if (tdSelect.value) hello.turn_detector = tdSelect.value;
+    if (sttSelect.value) hello.stt_provider = sttSelect.value;
+    if (modelSelect.value) hello.model = modelSelect.value;
     ws.send(JSON.stringify(hello));
     transcriptEl.innerHTML = '';
     window._assistantEl = null;
@@ -868,7 +1349,10 @@ async function start() {
     window._turnBubbles = [];
     window._replyDone = false;
     partialEl = null;
+    statusEl = null;
+    setConn('live', 'Starting…', 'Loading STT / turn models (first session can take a few seconds)…');
     resetPlaybackTracking();
+    suppressAssistantAudio = false;
     stopAssistantAudio();
     sessionReady = false;
     if (playbackAckTimer) clearInterval(playbackAckTimer);
@@ -901,26 +1385,25 @@ async function start() {
       window.addEventListener('keydown', kick);
     })();
     setConn('live', 'Connected', 'Waiting for voice session…');
-    btnStop.disabled = false;
     updateEmptyState();
   };
 
   ws.onclose = (ev) => {
     micAudioToWs = false;
-    btnStop.disabled = true;
     if (playbackAckTimer) { clearInterval(playbackAckTimer); playbackAckTimer = null; }
     sessionReady = false;
     micViz.classList.remove('active');
+    // Teardown from endSession/startSession already nulled `ws` — ignore.
     if (connVisual === 'ended' || connVisual === 'error') {
       updateEmptyState();
       return;
     }
     if (userEndedSession) {
-      setConn('ended', 'Session ended', 'You stopped the session. Reload to start again.');
+      setConn('ended', 'Session ended', 'Click Start for a new session.');
     } else {
       setConn('ended', 'Disconnected', ev.wasClean
-        ? 'The connection closed. Reload if you want another session.'
-        : 'Connection dropped — check the server and reload.');
+        ? 'Connection closed. Click Start for a new session.'
+        : 'Connection dropped — check the server, then click Start.');
     }
     updateEmptyState();
   };
@@ -940,20 +1423,52 @@ async function start() {
     switch (msg.type) {
       case 'session_started':
         sessionReady = true;
-        setConn('live', 'Listening', msg.turn_detector
-          ? `Speak naturally — turn detection: ${msg.turn_detector}${msg.vad_endpointing ? ' + VAD endpointing' : ''}.`
-          : 'Speak naturally — audio streams to your Timbal agent.');
+        {
+          const bits = [];
+          if (msg.model) bits.push(msg.model);
+          if (msg.stt_provider) bits.push(`STT ${msg.stt_provider}${msg.stt_model ? `/${msg.stt_model}` : ''}`);
+          if (msg.turn_detector) bits.push(msg.turn_detector);
+          if (msg.vad_endpointing) bits.push('VAD endpointing');
+          setConn('live', 'Listening', bits.length
+            ? `Speak naturally — ${bits.join(' · ')}.`
+            : 'Speak naturally — audio streams to your Timbal agent.');
+        }
         updateEmptyState();
         break;
       case 'transcript_partial':
         setPartial(msg.text);
         break;
+      case 'agent_status':
+        setStatus(msg.text || '');
+        break;
       case 'transcript_committed':
         setPartial(null);
+        setStatus(null);
+        // New user turn — allow TTS again (barge-in may have suppressed audio).
+        suppressAssistantAudio = false;
+        // Seal the prior assistant turn. interrupt() for a not-yet-spoken
+        // CONTINUE rewrite arrives after this commit's predecessor already
+        // sealed — without sealing here, an empty heard_text interrupt can
+        // wipe the *previous* completed reply (still in _turnBubbles).
+        window._turnBubbles = [];
+        window._replyDone = true;
+        window._assistantEl = null;
+        if (msg.replace) {
+          const users = transcriptEl.querySelectorAll('.msg.user');
+          const last = users[users.length - 1];
+          if (last) {
+            last.textContent = msg.text;
+            transcriptEl.scrollTop = transcriptEl.scrollHeight;
+            updateEmptyState();
+            break;
+          }
+        }
         log('user', msg.text);
         break;
       case 'agent_text_delta':
         setPartial(null);
+        setStatus(null);
+        suppressAssistantAudio = false;
         // First delta after a finished reply starts a new turn's bubble set.
         if (window._replyDone) { window._turnBubbles = []; window._replyDone = false; }
         if (!window._assistantEl) {
@@ -981,7 +1496,13 @@ async function start() {
         // A mid-stream STT partial can split one reply across several bubbles
         // (setPartial seals the in-flight bubble); rewrite the *whole* set,
         // not just the last fragment.
-        if (msg.heard_text !== undefined && msg.heard_text !== null) {
+        //
+        // Skip when nothing is in flight for *this* turn: CONTINUE can interrupt
+        // a just-started LLM call (heard="") and must not delete the prior
+        // completed assistant bubble still referenced by _lastAssistantEl.
+        const inFlight = Boolean(window._assistantEl)
+          || (window._turnBubbles && window._turnBubbles.length && !window._replyDone);
+        if (msg.heard_text !== undefined && msg.heard_text !== null && (inFlight || msg.heard_text)) {
           const bubbles = (window._turnBubbles && window._turnBubbles.length)
             ? window._turnBubbles
             : [window._assistantEl || window._lastAssistantEl].filter(Boolean);
@@ -996,6 +1517,7 @@ async function start() {
         window._replyDone = false;
         window._assistantEl = null;
         window._lastAssistantEl = null;
+        suppressAssistantAudio = true;
         stopAssistantAudio();
         updateEmptyState();
         break;
@@ -1007,21 +1529,18 @@ async function start() {
         window._sessionTranscript = msg.entries;
         break;
       case 'session_ended':
-        setConn('ended', 'Session ended', 'The agent closed this voice session.');
+        setConn('ended', 'Session ended', 'Click Start for a new session.');
         break;
     }
   };
 }
 
-btnStop.onclick = () => {
-  userEndedSession = true;
-  stopAssistantAudio();
-  if (ws) ws.close();
-  micStream?.getTracks().forEach(t => t.stop());
-};
-
 initRunnableStrip();
-start();
+setSessionButton('start');
+setConn('connecting', 'Getting ready', 'Microphone and server connection…');
+cardEl.classList.add('card--inactive');
+// Auto-start on load — no idle play click. Start remains after Stop for a new session.
+void startSession();
 </script>
 </body>
 </html>

@@ -225,20 +225,29 @@ async def sync_to_async_gen(
 
 
 def coerce_to_dict(v: Any) -> dict[str, Any]:
-    """Utility function to convert LLM outputs into python objects."""
+    """Utility function to convert LLM outputs into python objects.
+
+    Providers often emit ``null`` / ``"null"`` / ``None`` for tools with no
+    parameters (Groq + OpenAI-compatible chat completions). Treat those as ``{}``.
+    """
+    if v is None:
+        return {}
     if isinstance(v, dict):
         return v
-    elif isinstance(v, str):
-        if v.strip() == "":
+    if isinstance(v, str):
+        stripped = v.strip()
+        if not stripped or stripped.lower() in ("null", "none"):
             return {}
         try:
-            v = json.loads(v)
-            return v
+            parsed = json.loads(stripped)
         except Exception:
             try:
-                v = literal_eval(v)
-                return v
+                parsed = literal_eval(stripped)
             except Exception as e:
                 raise ValueError(f"Cannot coerce value to dict: {v}") from e
-    else:
+        if parsed is None:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
         raise ValueError(f"Cannot coerce value to dict: {v}")
+    raise ValueError(f"Cannot coerce value to dict: {v}")
