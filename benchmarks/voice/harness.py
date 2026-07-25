@@ -264,7 +264,7 @@ async def run_scenario(
                 emit("say", f'"{step.text}"')
                 commits_at_say = len(result.committed)
                 replies_at_say = len(result.replies_spoken)
-                feeder.push(clips[step.text])
+                feeder.push(clips[step.clip_key])
                 await feeder.drain()
             elif isinstance(step, Silence):
                 emit("silence", f"{step.secs:.1f}s")

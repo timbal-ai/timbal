@@ -30,9 +30,19 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Say:
-    """Inject one synthesized clip."""
+    """Inject one synthesized clip.
+
+    ``utterance`` marks this as slice ``part`` of a longer sentence rendered in
+    one piece — see :func:`fluent`.
+    """
 
     text: str
+    utterance: str | None = None
+    part: int = 0
+
+    @property
+    def clip_key(self) -> str:
+        return self.text if self.utterance is None else f"{self.utterance}#{self.part}"
 
 
 @dataclass(frozen=True)
@@ -69,6 +79,34 @@ class AwaitAssistantDone:
 
 
 Step = Say | Silence | AwaitAssistantAudio | AwaitCommit | AwaitAssistantDone
+
+
+def fluent(*parts: str | float) -> list[Step]:
+    """Script one sentence the speaker pauses inside, keeping mid-sentence prosody.
+
+    Takes alternating text and gap seconds — ``fluent("The pain started", 1.5,
+    "maybe on Tuesday.")`` — and renders the joined sentence in a single TTS call,
+    slicing it at the character timestamps.
+
+    Synthesizing the fragments separately is what a naive harness does, and it is
+    wrong in a way that silently changes the answer: ElevenLabs renders each
+    fragment as its own sentence with a falling contour. Measured with Smart Turn
+    v3 on identical words, "I want to return an item I bought" scores 0.986
+    (finished) standalone and 0.019 (mid-thought) cut from the fluent render. Use
+    this for any pause *inside* a sentence; use bare ``Say`` for genuinely separate
+    utterances.
+    """
+    texts = [p for p in parts if isinstance(p, str)]
+    utterance = " ".join(texts)
+    steps: list[Step] = []
+    index = 0
+    for part in parts:
+        if isinstance(part, str):
+            steps.append(Say(part, utterance=utterance, part=index))
+            index += 1
+        else:
+            steps.append(Silence(part))
+    return steps
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +174,7 @@ class NoGhostTurns:
     min_similarity: float = 0.6
 
     def check(self, result: RunResult, scenario: Scenario) -> str | None:
-        spoken = [s.text for s in scenario.script if isinstance(s, Say)]
+        spoken = scenario.texts()
         ghosts = [
             text
             for text in result.committed
@@ -262,7 +300,20 @@ class Scenario:
         return self.detectors is None or detector in self.detectors
 
     def texts(self) -> list[str]:
+        """Everything the user says, fluent parts included — what was *spoken*."""
         return [s.text for s in self.script if isinstance(s, Say)]
+
+    def standalone_texts(self) -> list[str]:
+        """Clips synthesized on their own; fluent parts are sliced from one render."""
+        return [s.text for s in self.script if isinstance(s, Say) and s.utterance is None]
+
+    def fluent_groups(self) -> list[tuple[str, tuple[str, ...]]]:
+        """``(whole utterance, parts)`` for each sentence spoken across pauses."""
+        groups: dict[str, list[str]] = {}
+        for step in self.script:
+            if isinstance(step, Say) and step.utterance is not None:
+                groups.setdefault(step.utterance, []).append(step.text)
+        return [(utterance, tuple(parts)) for utterance, parts in groups.items()]
 
 
 # ---------------------------------------------------------------------------
@@ -299,17 +350,22 @@ _FILLER_DETECTORS = frozenset({"heuristic", "lexical", "local"})
 _FILLER_NOTE = "Skipped for `provider`: trusting the provider's commit means a bare filler legitimately starts a turn."
 
 # Measured, not assumed. The fragment Flux commits mid-pause is, in isolation, a
-# grammatically complete sentence: "The pain started.", "I'll take a burger, some
-# fries." Namo — the text EOU that `lexical` actually resolves to — scores both
-# 1.00 complete, and scores them identically with and without the trailing period,
-# so this is not an artifact of provider-added punctuation. Only prosody separates
-# "The pain started [rising, continuing]" from "The pain started [falling, done]",
-# and SmartTurn v3 under `--detector local` does not catch it either. The untapped
-# signal is Flux's own `end_of_turn_confidence`, which Timbal currently logs and
-# discards.
+# grammatically complete sentence — "The pain started." before "maybe on Tuesday" —
+# and Namo, the text EOU that `lexical` resolves to, scores it 1.00 complete with or
+# without the trailing period. Only prosody marks the continuation, and while the
+# audio EOU does hear it (Smart Turn scores this fragment 0.054 on fluent audio), a
+# text-confidence tier shrinks the resulting hold to 0.35s against a 1.5s pause, so
+# `local` splits it too — intermittently; it merges roughly one run in five. Flux's
+# own `end_of_turn_confidence` is no help either: sampled across the suite,
+# fragments (0.690-0.920) and true ends (0.701-0.904) overlap almost entirely.
+#
+# Every other scenario in this class stopped failing once fluent synthesis landed
+# (see `fluent`), which is the measure of how much the old per-`Say` fixture was
+# testing TTS phrasing rather than turn-taking.
 _TRAILING_MODIFIER_FAILURE = (
     "the committed fragment is a complete sentence in isolation, so text EOU scores it "
-    "complete; only prosody marks the continuation, and the audio EOU misses it too"
+    "complete; the audio EOU does hear the continuation but the text-complete tier cuts "
+    "its hold to 0.35s"
 )
 
 # Under `provider` the session defers to the STT's endpointing entirely, so none of
@@ -338,9 +394,7 @@ SCENARIOS: list[Scenario] = [
         domain="support",
         replies=["I can help with that. Do you have the order number?"],
         script=[
-            Say("I want to return an item I bought"),
-            Silence(1.5),
-            Say("about three weeks ago."),
+            *fluent("I want to return an item I bought", 1.5, "about three weeks ago."),
             *_SETTLE,
         ],
         expect=[
@@ -349,11 +403,27 @@ SCENARIOS: list[Scenario] = [
             Interrupted(False),
             NoErrors(),
         ],
-        known_failure={"provider": _PROVIDER_ENDPOINTING_FAILURE},
         note=(
-            "The one scenario where a detector choice changes correctness rather than "
-            "latency: under `provider` it splits and the second fragment barges in on the "
-            "reply to the first, under `lexical` it merges into a single clean turn."
+            "Used to split under `provider` and `local` and was marked a known failure for "
+            "both. Fluent synthesis fixed it outright: rendered standalone this fragment "
+            "scores 0.986 finished, and cut from the whole sentence it scores 0.019."
+        ),
+    ),
+    Scenario(
+        id="support_closer",
+        domain="support",
+        replies=["Happy to help. Have a good day."],
+        script=[Say("That's all."), *_SETTLE],
+        expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), NoErrors()],
+        note=(
+            "The case the text-complete hold tier exists for, and the only one in the suite: "
+            "Smart Turn under-scores this closer (0.115 — 13 of 14 closers measured score "
+            "above 0.5 and never reach the tier) while the text reads finished, so the hold "
+            "is armed on an utterance that is actually over. Disabling the tier costs 2.7s of "
+            "dead air here (speech end to reply: 0.91s with it, 3.59s without), which is why "
+            "the tier survives even though it is what splits medical_hesitant_pause. "
+            "Deliberately carries no MaxLatency: eou→audio is measured from the *accepted* "
+            "commit, so it reads ~200ms either way and cannot see the hold."
         ),
     ),
     Scenario(
@@ -401,9 +471,7 @@ SCENARIOS: list[Scenario] = [
         domain="food_ordering",
         replies=["Sure — one large pepperoni. Anything else?"],
         script=[
-            Say("I'd like to order a large"),
-            Silence(1.5),
-            Say("pepperoni pizza please."),
+            *fluent("I'd like to order a large", 1.5, "pepperoni pizza please."),
             *_SETTLE,
         ],
         expect=[
@@ -424,28 +492,28 @@ SCENARIOS: list[Scenario] = [
         domain="food_ordering",
         replies=["Got it — a large pepperoni pizza."],
         script=[
-            Say("I'd like to order a large"),
-            Silence(3.0),  # long enough that a split is the correct answer
-            Say("pepperoni pizza please."),
+            # long enough that a split is the correct answer
+            *fluent("I'd like to order a large", 3.0, "pepperoni pizza please."),
             *_SETTLE,
         ],
         expect=[UserTurns(2), NoGhostTurns(), NoErrors()],
         expect_by_detector={
-            # Observed, with the mechanism deliberately not asserted: under `lexical`
-            # this merges, and the event trace shows Flux never committing the first
-            # fragment at all — it streams partials through the whole 3s gap and emits
-            # one commit. So the merge happens inside Flux, not in Timbal's HOLD.
+            # Observed, with the mechanism deliberately not asserted: under `lexical` and
+            # `local` this merges, and the event trace shows Flux never committing the
+            # first fragment at all — it streams partials through the whole 3s gap and
+            # emits one commit. So the merge happens inside Flux, not in Timbal's HOLD.
             # Why the same cached audio splits under `provider` is still unexplained;
             # `commit()` is a no-op for Flux, so it is not an obvious forced endpoint.
-            "lexical": [
+            detector: [
                 Merged("I'd like to order a large pepperoni pizza please."),
                 NoGhostTurns(),
                 NoErrors(),
-            ],
+            ]
+            for detector in ("lexical", "local")
         },
         note=(
-            "Splits under `provider`, merges under `lexical`, from byte-identical cached "
-            "audio. Consistent across runs but not yet explained — see the comment above."
+            "Splits under `provider`, merges under `lexical` and `local`, from byte-identical "
+            "cached audio. Consistent across runs but not yet explained — see the comment above."
         ),
     ),
     Scenario(
@@ -453,9 +521,8 @@ SCENARIOS: list[Scenario] = [
         domain="food_ordering",
         replies=["A burger, fries and a chocolate milkshake. Coming up."],
         script=[
-            Say("I'll take a burger, some fries,"),
-            Silence(1.4),  # mid-list breath, not an end of turn
-            Say("and a chocolate milkshake."),
+            # mid-list breath, not an end of turn
+            *fluent("I'll take a burger, some fries,", 1.4, "and a chocolate milkshake."),
             *_SETTLE,
         ],
         expect=[
@@ -463,8 +530,11 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(),
             NoErrors(),
         ],
-        known_failure={"*": _TRAILING_MODIFIER_FAILURE},
-        note="A pause after a comma mid-enumeration: prosody says continue even though the gap is long.",
+        note=(
+            "A pause after a comma mid-enumeration: prosody says continue even though the "
+            "gap is long. Failed on every detector until fluent synthesis; now passes on all "
+            "three."
+        ),
     ),
     Scenario(
         id="food_barge_in",
@@ -501,14 +571,17 @@ SCENARIOS: list[Scenario] = [
         domain="medical_intake",
         replies=["Thanks. Has it changed since then?"],
         script=[
-            Say("The pain started"),
-            Silence(1.5),
-            Say("maybe on Tuesday."),
+            *fluent("The pain started", 1.5, "maybe on Tuesday."),
             *_SETTLE,
         ],
         expect=[Merged("The pain started maybe on Tuesday."), NoGhostTurns(), NoErrors()],
         known_failure={"*": _TRAILING_MODIFIER_FAILURE},
-        note="Trailing off mid-recall, the archetypal case for holding instead of endpointing.",
+        intermittent=True,
+        note=(
+            "Trailing off mid-recall, the archetypal case for holding instead of "
+            "endpointing, and the last of its class still failing after fluent synthesis. "
+            "`local` merges it about one run in five, so passing proves nothing."
+        ),
     ),
     Scenario(
         id="medical_barge_in",
@@ -539,9 +612,7 @@ SCENARIOS: list[Scenario] = [
         domain="banking",
         replies=["Got it, account 447291."],
         script=[
-            Say("My account number is four four seven"),
-            Silence(1.4),
-            Say("two nine one."),
+            *fluent("My account number is four four seven", 1.4, "two nine one."),
             *_SETTLE,
         ],
         expect=[
@@ -549,11 +620,14 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(min_similarity=0.4),
             NoErrors(),
         ],
-        known_failure={"*": "splits into three turns, one of them a spurious single-token commit (observed: 'I')"},
+        known_failure={
+            "provider": "Flux splits the digit string and commits a spurious single-token turn"
+        },
         note=(
             "The hardest merge in the suite: a digit string broken across a pause, with no "
-            "words to hint continuation. Also the only scenario so far to produce a genuine "
-            "ghost turn, which is worth keeping precisely because it reproduces one."
+            "words to hint continuation. `lexical` and `local` merge it once the fragment "
+            "carries mid-sentence prosody; `provider` still splits and emits the one genuine "
+            "ghost turn the suite reproduces."
         ),
     ),
     Scenario(
@@ -598,9 +672,7 @@ SCENARIOS: list[Scenario] = [
         domain="coding_help",
         replies=["Can you paste the traceback?"],
         script=[
-            Say("I'm getting an error in my"),
-            Silence(1.5),
-            Say("async generator function."),
+            *fluent("I'm getting an error in my", 1.5, "async generator function."),
             *_SETTLE,
         ],
         expect=[

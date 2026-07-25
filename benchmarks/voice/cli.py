@@ -41,7 +41,7 @@ from score import (
     save_baseline,
     write_jsonl,
 )
-from synth import synthesize_clips
+from synth import synthesize_clips, synthesize_fluent
 
 
 def _report(result: RunResult, known_failure: str | None, intermittent: bool = False) -> None:
@@ -122,7 +122,8 @@ async def main() -> int:
         print("refusing to update the baseline from a filtered run: it would drop the other scenarios")
         return 2
 
-    clips = await synthesize_clips([text for s in selected for text in s.texts()])
+    clips = await synthesize_clips([text for s in selected for text in s.standalone_texts()])
+    clips |= await synthesize_fluent([g for s in selected for g in s.fluent_groups()])
 
     records = []
     started = time.monotonic()
