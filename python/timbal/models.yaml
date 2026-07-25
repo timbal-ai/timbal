@@ -14,16 +14,27 @@ models:
   display_name: Claude Fable 5
   description: Anthropic's most capable widely released model for long-horizon agentic work, complex reasoning, and ambitious
     coding tasks.
-  notes: Includes safety classifiers; blocked requests return stop_reason refusal. Configure Opus 4.8 fallback for production
+  notes: Includes safety classifiers; blocked requests return stop_reason refusal. Configure Opus 5 fallback for production
     workloads.
   input_price: 10.0
   output_price: 50.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
+- id: anthropic/claude-opus-5
+  provider: anthropic
+  display_name: Claude Opus 5
+  description: Anthropic's latest Opus — near-frontier intelligence at half the price of Fable 5, with step-change gains in
+    deep reasoning, agentic coding, and long-horizon tasks.
+  notes: Thinking is on by default; effort defaults to high and `thinking.type=disabled` is rejected at xhigh/max effort.
+    Fast mode (~2.5x speed) is $10/$50 per 1M tokens on the Claude API only.
+  input_price: 5.0
+  output_price: 25.0
+  context_window: 1000000
+  capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-8
   provider: anthropic
   display_name: Claude Opus 4.8
-  description: Anthropic's latest Opus — improved coding, agents, and long-context reasoning.
+  description: Previous-generation Opus for coding, agents, and long-context reasoning. Superseded by Opus 5 at the same price.
   input_price: 5.0
   output_price: 25.0
   context_window: 1000000
@@ -67,7 +78,7 @@ models:
   provider: anthropic
   display_name: Claude Opus 4.1
   description: Previous-generation Opus model with high intelligence for complex reasoning tasks.
-  notes: Deprecated; retires August 5, 2026. Prefer claude-opus-4-8 or claude-fable-5.
+  notes: Deprecated; retires August 5, 2026. Prefer claude-opus-5 or claude-fable-5.
   input_price: 15.0
   output_price: 75.0
   context_window: 200000
