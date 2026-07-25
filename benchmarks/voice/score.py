@@ -1,0 +1,300 @@
+"""Scoring, result persistence and regression gating for the voice replay harness.
+
+Three ideas do the work here:
+
+* **Records, not assertions.** Every run serializes to one JSONL line, so a run
+  is analyzable after the fact rather than only pass/fail at the time.
+* **Deltas, not absolutes.** Gating compares against a committed baseline.
+  Absolute thresholds rot within a week because STT providers drift under us —
+  yesterday's 400ms ceiling is tomorrow's false alarm in both directions.
+* **Flaky is a finding, not noise.** STT is nondeterministic, so a scenario that
+  passes some repeats and fails others is surfaced by name. Those are usually a
+  real race, not a bad test.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from harness import RunResult
+from scenario import Scenario, similarity
+
+HERE = Path(__file__).parent
+RESULTS_DIR = HERE / "results"
+# Not under results/ (which is gitignored) — the baseline is meant to be committed.
+BASELINE_PATH = HERE / "baseline.json"
+
+# Gate thresholds. Deliberately loose: this catches direction changes, not noise.
+LATENCY_REGRESSION_RATIO = 1.15
+# Latency gating needs a distribution, not a handful of samples. At suite sizes
+# below this, p95 is effectively the maximum and a single slow turn trips the
+# gate while every scenario passes (observed: 394ms -> 477ms on an unchanged
+# tree). Below the floor, latency is reported but never gated, and the gate uses
+# p50 — robust to one outlier — rather than p95.
+MIN_LATENCY_SAMPLES = 20
+
+
+# ---------------------------------------------------------------------------
+# Records
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunRecord:
+    """One scenario × config × repeat."""
+
+    scenario: str
+    domain: str
+    stt: str
+    detector: str
+    repeat: int
+    passed: bool
+    failures: list[str]
+    user_turns: int
+    ghost_turns: int
+    interrupted: bool
+    heard_chars: int | None
+    latencies_ms: list[float]
+    vad_endpointed: list[bool]
+    errors: list[str]
+    wall_secs: float
+    known_failure: str = ""
+    """Non-empty when this scenario is expected to fail for this detector."""
+    intermittent: bool = False
+
+    @property
+    def xfail(self) -> bool:
+        return bool(self.known_failure)
+
+    @property
+    def xpass(self) -> bool:
+        return self.xfail and self.passed and not self.intermittent
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+
+
+def count_ghost_turns(result: RunResult, scenario: Scenario, min_similarity: float = 0.6) -> int:
+    """Committed turns that resemble nothing the script said.
+
+    Tracked as a metric independent of whether a scenario declared the matching
+    expectation — a hallucinated transcript is worth knowing about everywhere.
+    """
+    spoken = scenario.texts()
+    return sum(1 for text in result.committed if not any(similarity(text, said) >= min_similarity for said in spoken))
+
+
+def record(scenario: Scenario, result: RunResult, repeat: int = 0) -> RunRecord:
+    return RunRecord(
+        scenario=scenario.id,
+        domain=scenario.domain,
+        stt=result.stt,
+        detector=result.detector,
+        repeat=repeat,
+        passed=result.passed,
+        failures=list(result.failures),
+        user_turns=len(result.committed),
+        ghost_turns=count_ghost_turns(result, scenario),
+        interrupted=result.interrupted,
+        heard_chars=None if result.heard_text is None else len(result.heard_text),
+        latencies_ms=[round(v, 1) for v in result.latencies_ms],
+        vad_endpointed=[m.vad_endpointed for m in result.metrics],
+        errors=list(result.errors),
+        wall_secs=round(result.wall_secs, 2),
+        known_failure=scenario.known_failure_reason(result.detector) or "",
+        intermittent=scenario.intermittent,
+    )
+
+
+def write_jsonl(records: list[RunRecord], path: Path | None = None) -> Path:
+    path = path or RESULTS_DIR / f"run-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"{r.to_json()}\n" for r in records))
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
+
+
+def percentile(values: list[float], q: float) -> float | None:
+    """Linear-interpolated percentile. ``q`` in [0, 1].
+
+    Rounded: these land in a committed baseline, and float noise like
+    ``382.97999999999996`` makes review diffs unreadable.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 1)
+    pos = q * (len(ordered) - 1)
+    low = int(pos)
+    high = min(low + 1, len(ordered) - 1)
+    return round(ordered[low] + (ordered[high] - ordered[low]) * (pos - low), 1)
+
+
+@dataclass
+class Scorecard:
+    label: str
+    stt: str
+    detector: str
+    runs: int
+    """Gated runs only — known failures are counted separately."""
+    passed: int
+    pass_rate: float
+    ghost_turns: int
+    errors: int
+    latency_p50: float | None
+    latency_p95: float | None
+    latency_min: float | None = None
+    latency_max: float | None = None
+    latency_samples: int = 0
+    per_scenario: dict[str, float] = field(default_factory=dict)
+    """Gated scenario id -> pass rate across repeats. Known failures are excluded, so
+    marking one cannot quietly bake broken behavior into the baseline."""
+    flaky: list[str] = field(default_factory=list)
+    known_failures: list[str] = field(default_factory=list)
+    unexpected_passes: list[str] = field(default_factory=list)
+    wall_secs: float = 0.0
+
+
+def build_scorecard(records: list[RunRecord]) -> Scorecard:
+    if not records:
+        raise ValueError("no records to score")
+
+    gated = [r for r in records if not r.xfail]
+    by_scenario: dict[str, list[RunRecord]] = {}
+    for r in gated:
+        by_scenario.setdefault(r.scenario, []).append(r)
+
+    per_scenario = {name: sum(r.passed for r in runs) / len(runs) for name, runs in by_scenario.items()}
+    # Latency describes the stack, not an expectation, so known failures still count.
+    latencies = [v for r in records for v in r.latencies_ms]
+    passed = sum(r.passed for r in gated)
+
+    return Scorecard(
+        label=f"{records[0].stt}/{records[0].detector}",
+        stt=records[0].stt,
+        detector=records[0].detector,
+        runs=len(gated),
+        passed=passed,
+        pass_rate=passed / len(gated) if gated else 1.0,
+        ghost_turns=sum(r.ghost_turns for r in gated),
+        errors=sum(len(r.errors) for r in gated),
+        latency_p50=percentile(latencies, 0.5),
+        latency_p95=percentile(latencies, 0.95),
+        latency_min=min(latencies) if latencies else None,
+        latency_max=max(latencies) if latencies else None,
+        latency_samples=len(latencies),
+        per_scenario=dict(sorted(per_scenario.items())),
+        flaky=sorted(name for name, rate in per_scenario.items() if 0.0 < rate < 1.0),
+        known_failures=sorted({r.scenario for r in records if r.xfail}),
+        unexpected_passes=sorted({r.scenario for r in records if r.xpass}),
+        wall_secs=round(sum(r.wall_secs for r in records), 1),
+    )
+
+
+def format_scorecard(card: Scorecard) -> str:
+    lines = [
+        f"{card.label}: {card.passed}/{card.runs} passed ({card.pass_rate:.0%})",
+        f"  ghost turns: {card.ghost_turns}   session errors: {card.errors}",
+    ]
+    if card.latency_p50 is not None:
+        gated = "" if card.latency_samples >= MIN_LATENCY_SAMPLES else "  (ungated: too few samples)"
+        lines.append(
+            f"  eou→audio:   p50 {card.latency_p50:.0f}ms   p95 {card.latency_p95:.0f}ms   "
+            f"range {card.latency_min:.0f}-{card.latency_max:.0f}ms   "
+            f"n={card.latency_samples}{gated}"
+        )
+    failing = [name for name, rate in card.per_scenario.items() if rate < 1.0]
+    if failing:
+        lines.append(f"  failing:     {', '.join(failing)}")
+    if card.flaky:
+        lines.append(f"  FLAKY:       {', '.join(card.flaky)}  (passed some repeats, not others)")
+    if card.known_failures:
+        lines.append(f"  known fail:  {', '.join(card.known_failures)}  (reported, not gated)")
+    if card.unexpected_passes:
+        lines.append(
+            f"  XPASS:       {', '.join(card.unexpected_passes)}  — now passing, drop the known_failure marker"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Baseline + gating
+# ---------------------------------------------------------------------------
+
+
+def load_baseline(path: Path = BASELINE_PATH) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
+
+
+def save_baseline(card: Scorecard, path: Path = BASELINE_PATH) -> None:
+    """Merge one config's scorecard into the baseline, leaving the others alone."""
+    baseline = load_baseline(path)
+    baseline[card.label] = asdict(card)
+    path.write_text(json.dumps(dict(sorted(baseline.items())), indent=2) + "\n")
+
+
+@dataclass
+class Comparison:
+    regressions: list[str] = field(default_factory=list)
+    improvements: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    """Informational: movement seen but deliberately not gated."""
+
+    @property
+    def ok(self) -> bool:
+        return not self.regressions
+
+
+def compare(card: Scorecard, baseline: dict[str, dict]) -> Comparison:
+    """Gate on movement away from the baseline, not on absolute thresholds."""
+    out = Comparison()
+    previous = baseline.get(card.label)
+    if previous is None:
+        out.notes.append(f"no baseline for {card.label} yet — run with --update-baseline")
+        return out
+
+    was: dict[str, float] = previous.get("per_scenario", {})
+    for name, rate in card.per_scenario.items():
+        before = was.get(name)
+        if before is None:
+            continue
+        if rate < before:
+            out.regressions.append(f"{name}: pass rate {before:.0%} → {rate:.0%}")
+        elif rate > before:
+            out.improvements.append(f"{name}: pass rate {before:.0%} → {rate:.0%}")
+
+    new_scenarios = sorted(set(card.per_scenario) - set(was))
+    if new_scenarios:
+        out.notes.append(f"new scenarios, nothing to compare: {', '.join(new_scenarios)}")
+
+    for name in card.unexpected_passes:
+        out.improvements.append(f"{name}: known failure now passes — drop the known_failure marker")
+
+    if card.ghost_turns > previous.get("ghost_turns", 0):
+        out.regressions.append(f"ghost turns {previous.get('ghost_turns', 0)} → {card.ghost_turns}")
+
+    before_p50 = previous.get("latency_p50")
+    if before_p50 and card.latency_p50:
+        moved = card.latency_p50 / before_p50
+        delta = f"eou→audio p50 {before_p50:.0f}ms → {card.latency_p50:.0f}ms"
+        enough = min(card.latency_samples, previous.get("latency_samples", 0)) >= MIN_LATENCY_SAMPLES
+        if moved > LATENCY_REGRESSION_RATIO:
+            worse = f"{delta} (>{(LATENCY_REGRESSION_RATIO - 1) * 100:.0f}% worse)"
+            if enough:
+                out.regressions.append(worse)
+            else:
+                out.notes.append(f"{worse} — not gated, fewer than {MIN_LATENCY_SAMPLES} samples")
+        elif moved < 1 / LATENCY_REGRESSION_RATIO:
+            out.improvements.append(delta)
+
+    return out
