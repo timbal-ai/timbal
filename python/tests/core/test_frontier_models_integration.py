@@ -20,6 +20,18 @@ PROMPT = "Reply with exactly one word: ok"
 
 LIVE_MODELS = [
     pytest.param(
+        "google/gemini-3.6-flash",
+        "GEMINI_API_KEY",
+        None,
+        id="google-gemini-3.6-flash",
+    ),
+    pytest.param(
+        "google/gemini-3.5-flash-lite",
+        "GEMINI_API_KEY",
+        None,
+        id="google-gemini-3.5-flash-lite",
+    ),
+    pytest.param(
         "xai/grok-4.5",
         "XAI_API_KEY",
         None,
