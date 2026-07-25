@@ -1,9 +1,9 @@
 ---
 title: "Anthropic"
-description: "Claude Fable 5, Sonnet 5, Opus, and Haiku models with specs, pricing, and capabilities"
+description: "Claude Fable 5, Opus 5, Sonnet 5, and Haiku models with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [Anthropic model docs](https://docs.anthropic.com/en/docs/about-claude/models) · [Opus 4.8 pricing](https://docs.anthropic.com/en/about-claude/pricing)</Note>
+<Note>Source: [Anthropic model docs](https://docs.anthropic.com/en/docs/about-claude/models) · [What's new in Opus 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-opus-5) · [Pricing](https://docs.anthropic.com/en/about-claude/pricing)</Note>
 
 ## Latest
 
@@ -22,6 +22,22 @@ description: "Claude Fable 5, Sonnet 5, Opus, and Haiku models with specs, prici
   - <Icon icon="brain" size={14} /> Adaptive thinking (always on)
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2026
+  </Card>
+
+  <Card title="claude-opus-5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-opus-5`
+
+  Latest Opus and the recommended default for complex agentic coding and enterprise work — near-Fable-5 intelligence at half the price, with large gains in deep reasoning, long-horizon tool loops, and test-time compute scaling.
+
+  - &#36;5 / &#36;25 per 1M tokens (input / output; Fast mode &#36;10 / &#36;50 at ~2.5x speed)
+  - <Icon icon="window-maximize" size={14} /> 1M context (default and maximum)
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Adaptive thinking (on by default)
+  - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2026
   </Card>
 
   <Card title="claude-sonnet-5">
@@ -45,7 +61,7 @@ description: "Claude Fable 5, Sonnet 5, Opus, and Haiku models with specs, prici
 
   `anthropic/claude-opus-4-8`
 
-  Latest Opus for agentic coding, long-running tasks, and complex reasoning. Builds on 4.7 with stronger consistency and autonomy across coding, agents, and professional work.
+  Previous Opus generation for agentic coding, long-running tasks, and complex reasoning. Same price as Opus 5 — migrate unless you depend on thinking being off by default.
 
   - &#36;5 / &#36;25 per 1M tokens (input / output)
   - <Icon icon="window-maximize" size={14} /> 1M context
