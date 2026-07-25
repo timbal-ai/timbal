@@ -198,9 +198,7 @@ def slice_fluent(pcm: bytes, char_end_times: Sequence[float], parts: Sequence[st
     return slices
 
 
-async def _synthesize_aligned(
-    utterance: str, voice_id: str, model: str
-) -> tuple[bytes, list[float]]:
+async def _synthesize_aligned(utterance: str, voice_id: str, model: str) -> tuple[bytes, list[float]]:
     """Whole-utterance PCM plus per-character end times, cached on disk.
 
     Uses the REST ``with-timestamps`` endpoint; the streaming websocket used for

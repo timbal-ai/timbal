@@ -318,7 +318,7 @@ async def run_scenario(
 
     result.failures = [
         message
-        for expectation in scenario.expectations_for(config.detector)
+        for expectation in scenario.expectations_for(config.detector, config.stt)
         if (message := expectation.check(result, scenario)) is not None
     ]
     return result

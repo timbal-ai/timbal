@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from harness import RunResult
@@ -114,12 +114,51 @@ def fluent(*parts: str | float) -> list[Step]:
 # ---------------------------------------------------------------------------
 
 
+_DIGIT_WORDS = {
+    "0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+    "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine",
+}  # fmt: skip
+
+
+def _spell_digits(match: re.Match[str]) -> str:
+    return " ".join(_DIGIT_WORDS[d] for d in match.group())
+
+
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text.lower())).strip()
+    """Lowercase, strip punctuation, and render digit runs as spoken words.
+
+    The digit pass exists because providers disagree about a spoken digit string
+    with no bearing on turn-taking: Flux writes "four four seven two nine one"
+    and Nova writes "447291" for the same audio. Without it, `banking_digits`
+    fails in seven of twelve cells having committed exactly one turn in all
+    twelve — a pure formatting difference reported as a turn-taking defect.
+
+    Digits are spelled out one by one rather than parsed as numbers, matching how
+    an account number is read aloud. "30 days" would normalize to "three zero
+    days", which is wrong, but nothing in the suite says a number that way.
+    """
+    spelled = re.sub(r"\d+", _spell_digits, text.lower())
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", spelled)).strip()
 
 
 def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, normalize(a), normalize(b)).ratio()
+
+
+def best_window(haystack: str, needle: str) -> float:
+    """Similarity between ``needle`` and the closest same-length word window of ``haystack``.
+
+    Whole-string similarity cannot see a dropped fragment inside a long utterance;
+    this can, because a missing part matches no window.
+    """
+    hay, ned = normalize(haystack).split(), normalize(needle).split()
+    if not ned:
+        return 1.0
+    if not hay:
+        return 0.0
+    joined = " ".join(ned)
+    windows = (" ".join(hay[i : i + len(ned)]) for i in range(max(1, len(hay) - len(ned) + 1)))
+    return max(SequenceMatcher(None, joined, w).ratio() for w in windows)
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +197,40 @@ class Merged:
     def check(self, result: RunResult, scenario: Scenario) -> str | None:
         if len(result.committed) != 1:
             return f"expected a single merged turn, got {len(result.committed)}: {result.committed}"
+        # Whole-string similarity alone lets a dropped fragment through: ElevenLabs
+        # committed coding_double_pause without "inside a test" and still scored 0.84
+        # against the full sentence, so the scenario reported a clean merge on a third
+        # of the utterance being lost. A merge that loses a part is not a merge.
+        if (fault := AllPartsHeard().check(result, scenario)) is not None:
+            return fault
         score = similarity(self.text, result.committed[0])
         if score < self.min_similarity:
             return f"merged text similarity {score:.2f} < {self.min_similarity}: {result.committed[0]!r}"
+        return None
+
+
+@dataclass(frozen=True)
+class ContentPreserved:
+    """Everything spoken reached the agent, across however many turns it took.
+
+    The turn-count-agnostic counterpart to :class:`Merged`. Use it when *whether*
+    an utterance splits is a defensible product choice but losing half of it is
+    not — at a long pause, holding and splitting are both reasonable, and a
+    scenario that demands one of them is asserting a policy it cannot justify.
+    This still catches the failure that actually hurts: ElevenLabs committing
+    "I'd like to order a large" and silently dropping the pizza.
+    """
+
+    min_similarity: float = 0.85
+
+    def check(self, result: RunResult, scenario: Scenario) -> str | None:
+        if (fault := AllPartsHeard().check(result, scenario)) is not None:
+            return fault
+        spoken = " ".join(scenario.texts())
+        heard = " ".join(result.committed)
+        score = similarity(spoken, heard)
+        if score < self.min_similarity:
+            return f"content similarity {score:.2f} < {self.min_similarity}: {heard!r} vs {spoken!r}"
         return None
 
 
@@ -182,6 +252,29 @@ class NoGhostTurns:
         ]
         if ghosts:
             return f"turns not present in the script: {ghosts}"
+        return None
+
+
+@dataclass(frozen=True)
+class AllPartsHeard:
+    """Every scripted fragment reached the agent, wherever the turns fell.
+
+    Similarity over a whole utterance is blind to a dropped tail, and the longer
+    the utterance the blinder it gets. ElevenLabs committed `coding_double_pause`
+    as "The build fails when I import the module" — "inside a test" simply gone —
+    and that still scores 0.84 against the full sentence, clearing the 0.8 bar on
+    `Merged`. The scenario reported a clean merge while a third of it was lost.
+    Matching each fragment against its best window catches the drop no matter how
+    much correct text surrounds it.
+    """
+
+    min_similarity: float = 0.75
+
+    def check(self, result: RunResult, scenario: Scenario) -> str | None:
+        heard = " ".join(result.committed)
+        missing = [t for t in scenario.texts() if best_window(heard, t) < self.min_similarity]
+        if missing:
+            return f"fragments never heard: {missing} — got {result.committed}"
         return None
 
 
@@ -268,15 +361,16 @@ class Scenario:
     script: list[Step]
     expect: list[Expectation]
     expect_by_detector: dict[str, list[Expectation]] = field(default_factory=dict)
-    """Per-detector overrides. Necessary because the same observable behavior can
-    be correct for different reasons: Deepgram Flux merges a mid-thought pause
-    inside its own turn machine, while ``lexical`` merges it via Timbal's HOLD."""
+    """Overrides keyed by ``"detector"``, ``"stt/detector"`` or ``"*"``, most
+    specific first. Necessary because the same observable behavior can be correct
+    for different reasons: Deepgram Flux merges a mid-thought pause inside its own
+    turn machine, while ``lexical`` merges it via Timbal's HOLD."""
     detectors: frozenset[str] | None = None
     """Detectors this scenario is meaningful for (``None`` = all)."""
     quick: bool = False
     """Part of the representative ``--quick`` subset (one per domain, plus a barge-in)."""
     known_failure: dict[str, str] = field(default_factory=dict)
-    """Detector (or ``"*"``) -> why this cannot pass today.
+    """``"detector"`` / ``"stt/detector"`` / ``"*"`` -> why this cannot pass today.
 
     The scenario still runs and still reports, but it does not gate, and its
     *desired* expectations stay in the file rather than being rewritten to match
@@ -290,11 +384,31 @@ class Scenario:
     """
     note: str = ""
 
-    def expectations_for(self, detector: str) -> list[Expectation]:
-        return self.expect_by_detector.get(detector, self.expect)
+    def _scoped(self, table: dict[str, Any], detector: str, stt: str | None) -> Any | None:
+        """Look up ``table`` by cell, then STT, then detector, then ``"*"``.
 
-    def known_failure_reason(self, detector: str) -> str | None:
-        return self.known_failure.get(detector) or self.known_failure.get("*")
+        Both overrides and known failures need this. A finding is usually specific
+        to one *cell*, not to a detector everywhere: `food_list_pause` merges under
+        `lexical` on Flux and splits under `lexical` on Nova, because on Flux the
+        provider merged it before any detector saw it. Keying by detector alone
+        would let a Flux observation silently excuse a Nova failure.
+
+        The ``"deepgram-nova/*"`` rung exists because some failures are the STT's
+        alone and land identically under all four detectors — Nova committing a
+        "mm-hmm", ElevenLabs merging two finished sentences. Writing those out
+        per cell repeats one fact four times and hides that it is one fact.
+        """
+        rungs = [f"{stt}/{detector}", f"{stt}/*"] if stt is not None else []
+        for key in (*rungs, detector, "*"):
+            if (hit := table.get(key)) is not None:
+                return hit
+        return None
+
+    def expectations_for(self, detector: str, stt: str | None = None) -> list[Expectation]:
+        return self._scoped(self.expect_by_detector, detector, stt) or self.expect
+
+    def known_failure_reason(self, detector: str, stt: str | None = None) -> str | None:
+        return self._scoped(self.known_failure, detector, stt)
 
     def applies_to(self, detector: str) -> bool:
         return self.detectors is None or detector in self.detectors
@@ -370,6 +484,25 @@ _TRAILING_MODIFIER_FAILURE = (
 
 # Under `provider` the session defers to the STT's endpointing entirely, so none of
 # Timbal's hold logic runs and whatever Flux decides stands.
+# Under `provider` there is no Timbal hold to override the STT, so any pause Flux
+# chooses to end its turn at becomes a split. Flux usually holds through these two
+# and occasionally does not; a single run reads as a clean pass, and only --repeat
+# shows the 2-in-3. Both fragments here end at the "--" Flux writes for a hesitation.
+_FLUX_PROVIDER_SPLIT = (
+    "Flux intermittently ends its turn at the pause rather than holding through it, and under "
+    "`provider` nothing in Timbal runs to override that — merged 2/3 at --repeat 3"
+)
+
+# A spurious single-token "I" turn committed just after a correctly merged utterance.
+# Long attributed to `banking_digits_pause` and assumed to be something about digit
+# strings; `medical_filler_midway` reproduced it verbatim on ordinary words, so it is
+# the Flux + `provider` path, not the content. Roughly one run in four to six, which is
+# why it took a wider suite to catch twice.
+_FLUX_PROVIDER_GHOST_I = (
+    "Flux + `provider` intermittently commits a spurious single-token 'I' turn after the real "
+    "one; not specific to this scenario"
+)
+
 _PROVIDER_ENDPOINTING_FAILURE = (
     "`provider` defers to Flux's endpointing, which splits here; `lexical` merges it "
     "correctly because Namo scores the fragment 0.00 incomplete"
@@ -458,6 +591,99 @@ SCENARIOS: list[Scenario] = [
         ],
         note="Pairs with support_barge_in: same reply, later offset, measurably longer heard text.",
     ),
+    Scenario(
+        id="support_barge_in_instant",
+        domain="support",
+        replies=[_RETURN_POLICY_REPLY],
+        script=[
+            Say("Tell me about your return policy."),
+            AwaitAssistantAudio(offset_ms=150),
+            Say("Actually, cancel that."),
+            *_SETTLE,
+        ],
+        expect=[UserTurns(2), Interrupted(True), NoGhostTurns(), NoErrors()],
+        note=(
+            "Barge-in before the assistant is really speaking, racing playback start against "
+            "the interrupt. Deliberately asserts no HeardPrefix: at 150ms there may honestly "
+            "be nothing heard yet, and failing on that would be testing the expectation."
+        ),
+    ),
+    Scenario(
+        id="support_barge_in_one_word",
+        domain="support",
+        replies=[_RETURN_POLICY_REPLY],
+        script=[
+            Say("Tell me about your return policy."),
+            AwaitAssistantAudio(offset_ms=900),
+            Say("Stop."),
+            *_SETTLE,
+        ],
+        expect=[UserTurns(2), Interrupted(True), NoGhostTurns(), NoErrors()],
+        note=(
+            "The most important barge-in in voice UX and the one the code is built to ignore: "
+            "both HeuristicTurnDetector and ProviderTurnDetector drop partials shorter than "
+            "MIN_BARGE_IN_PARTIAL_WORDS (2) as mic blips, and 'Stop.' is one word. Asserts the "
+            "desired behavior rather than the implemented one — if this fails everywhere, the "
+            "gate is the finding."
+        ),
+    ),
+    Scenario(
+        id="support_pause_short",
+        domain="support",
+        replies=["Of course. What's the order number?"],
+        script=[
+            *fluent("I need help with", 0.6, "my recent order."),
+            *_SETTLE,
+        ],
+        expect=[
+            Merged("I need help with my recent order."),
+            NoGhostTurns(),
+            Interrupted(False),
+            NoErrors(),
+        ],
+        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_SPLIT},
+        intermittent=True,
+        note=(
+            "The floor of the pause family: 0.6s is shorter than any endpointer's silence "
+            "window, so every configuration should merge it. Exists to prove the harder pause "
+            "scenarios are measuring difficulty rather than a broken fixture — and it earns "
+            "that, merging in eleven of twelve cells. The exception is instructive: `provider` "
+            "on Flux splits even 0.6s about one run in three, so the floor is not the "
+            "detector's, it is whatever the STT decided."
+        ),
+    ),
+    Scenario(
+        id="support_trailing_conjunction",
+        domain="support",
+        replies=["I'm sorry to hear that. Let me check the tracking."],
+        script=[
+            *fluent("I ordered a lamp last week and", 1.5, "it still hasn't arrived."),
+            *_SETTLE,
+        ],
+        expect=[
+            Merged("I ordered a lamp last week and it still hasn't arrived."),
+            NoGhostTurns(),
+            NoErrors(),
+        ],
+        note=(
+            "A dangling coordinating conjunction is the strongest continuation cue in text, so "
+            "this is the pause case text EOU should get right without any help from prosody — "
+            "the complement to medical_hesitant_pause, where the fragment reads complete and "
+            "only prosody says otherwise."
+        ),
+    ),
+    Scenario(
+        id="support_silence_only",
+        domain="support",
+        replies=["Hello?"],
+        script=[Silence(4.0)],
+        expect=[UserTurns(0), NoAgentReply(), NoErrors()],
+        note=(
+            "Four seconds of nothing. No scenario previously asserted that an open mic with no "
+            "speech produces no turn, which is the purest form of the ghost-turn bug and the "
+            "one a VAD or watchdog misfire would cause."
+        ),
+    ),
     # -- food_ordering: enumerations, mid-list pauses --------------------------
     Scenario(
         id="food_simple",
@@ -496,24 +722,18 @@ SCENARIOS: list[Scenario] = [
             *fluent("I'd like to order a large", 3.0, "pepperoni pizza please."),
             *_SETTLE,
         ],
-        expect=[UserTurns(2), NoGhostTurns(), NoErrors()],
-        expect_by_detector={
-            # Observed, with the mechanism deliberately not asserted: under `lexical` and
-            # `local` this merges, and the event trace shows Flux never committing the
-            # first fragment at all — it streams partials through the whole 3s gap and
-            # emits one commit. So the merge happens inside Flux, not in Timbal's HOLD.
-            # Why the same cached audio splits under `provider` is still unexplained;
-            # `commit()` is a no-op for Flux, so it is not an obvious forced endpoint.
-            detector: [
-                Merged("I'd like to order a large pepperoni pizza please."),
-                NoGhostTurns(),
-                NoErrors(),
-            ]
-            for detector in ("lexical", "local")
-        },
+        expect=[ContentPreserved(), NoGhostTurns(), NoErrors()],
         note=(
-            "Splits under `provider`, merges under `lexical` and `local`, from byte-identical "
-            "cached audio. Consistent across runs but not yet explained — see the comment above."
+            "The one scenario whose desired outcome is genuinely ambiguous, so it asserts "
+            "content rather than turn count. At a 3.0s gap both answers are defensible — "
+            "holding costs 3s of dead air, splitting sends a fragment to the LLM — and the "
+            "suite has no basis for calling either wrong. Observed: Flux merges under "
+            "`lexical`/`local` and splits under `heuristic`/`provider`, Nova splits under all "
+            "four, ElevenLabs merges under `lexical`/`local`. Flux's merge is not Timbal's: "
+            "the trace shows Flux streaming partials through the whole gap and emitting one "
+            "commit, so no fragment ever reaches a detector. It previously demanded a merge "
+            "wherever one had been seen, which quietly turned observations into requirements "
+            "and failed Nova for behaving reasonably."
         ),
     ),
     Scenario(
@@ -547,6 +767,68 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(2), Interrupted(True), HeardPrefix(), NoGhostTurns(), NoErrors()],
+    ),
+    Scenario(
+        id="food_backchannel",
+        domain="food_ordering",
+        replies=[_MENU_REPLY],
+        script=[
+            Say("Tell me what's on the menu today."),
+            AwaitAssistantAudio(offset_ms=1200),
+            Say("Mm-hmm."),
+            # No AwaitAssistantDone: the reply to turn 1 has already been generated and a
+            # correct run produces no second one, so waiting for one always times out.
+            Silence(3.0),
+        ],
+        expect=[UserTurns(1), Interrupted(False), NoGhostTurns(), NoErrors()],
+        known_failure={
+            "deepgram-nova/*": "Nova transcribes the backchannel as 'Mhmm.' and commits it, "
+            "which cuts the assistant off; no detector sees anything to distinguish it from a "
+            "one-word barge-in",
+            "deepgram-flux/local": "same commit, intermittently — 2/3 at --repeat 3",
+        },
+        intermittent=True,
+        note=(
+            "Listeners say 'mm-hmm' while you talk and do not mean stop. Nothing in the suite "
+            "distinguished a backchannel from a barge-in before this, and the two are "
+            "acoustically similar and semantically opposite. The split is by STT, not "
+            "detector: Flux and ElevenLabs swallow the sound, Nova transcribes it and all four "
+            "detectors then interrupt on it. Timbal has no notion of a backchannel, so on any "
+            "STT that transcribes one, an acknowledgement silences the assistant."
+        ),
+    ),
+    Scenario(
+        id="food_trailing_preposition",
+        domain="food_ordering",
+        replies=["Sure, I can deliver there."],
+        script=[
+            *fluent("Can you deliver it to", 1.5, "the office on Main Street?"),
+            *_SETTLE,
+        ],
+        expect=[
+            Merged("Can you deliver it to the office on Main Street?"),
+            NoGhostTurns(),
+            NoErrors(),
+        ],
+        note="A stranded preposition: syntactically incomplete, so text EOU should hold without prosody.",
+    ),
+    Scenario(
+        id="food_rapid_fire",
+        domain="food_ordering",
+        replies=["Two coffees, got it."],
+        script=[
+            Say("I'll have a coffee."),
+            Silence(0.9),
+            Say("Actually, make it two."),
+            *_SETTLE,
+        ],
+        expect=[UserTurns(2), NoGhostTurns(), NoErrors()],
+        note=(
+            "The inverse of every pause scenario: two genuinely finished sentences separated by "
+            "a short gap, which must *not* merge. The suite is full of cases punishing a split "
+            "and had none punishing a merge, so a detector could have scored well by simply "
+            "holding everything."
+        ),
     ),
     # -- medical_intake: hesitation-heavy -------------------------------------
     Scenario(
@@ -595,6 +877,90 @@ SCENARIOS: list[Scenario] = [
         ],
         expect=[UserTurns(2), Interrupted(True), HeardPrefix(), NoGhostTurns(), NoErrors()],
     ),
+    Scenario(
+        id="medical_barge_in_twice",
+        domain="medical_intake",
+        replies=[_FEVER_REPLY],
+        script=[
+            Say("What should I do about a fever?"),
+            AwaitAssistantAudio(offset_ms=600),
+            Say("Wait, hold on."),
+            AwaitAssistantAudio(offset_ms=600),
+            Say("Okay, never mind."),
+            *_SETTLE,
+        ],
+        expect=[UserTurns(3), Interrupted(True), NoGhostTurns(), NoErrors()],
+        note=(
+            "Two interruptions in one session. Every other barge-in scenario stops after the "
+            "first, so nothing checked that the session recovers enough to be interrupted "
+            "again — a stuck playback or un-cleared interrupt flag would pass all of them."
+        ),
+    ),
+    Scenario(
+        id="medical_self_correction",
+        domain="medical_intake",
+        replies=["Noted, the white one."],
+        script=[
+            *fluent("I take the blue pill, no wait,", 1.2, "the white one."),
+            *_SETTLE,
+        ],
+        expect=[
+            Merged("I take the blue pill, no wait, the white one.", min_similarity=0.8),
+            NoGhostTurns(min_similarity=0.5),
+            NoErrors(),
+        ],
+        known_failure={"deepgram-flux/*": _TRAILING_MODIFIER_FAILURE},
+        note=(
+            "Self-repair mid-utterance. 'No wait,' is a complete clause boundary that reads "
+            "finished to text EOU while guaranteeing more speech follows — and committing here "
+            "sends the LLM the retracted answer, which is worse than a split usually is. Fails "
+            "0/3 in every Flux cell and passes on nova/lexical and three ElevenLabs cells, so "
+            "the ceiling is the STT's segmentation rather than the detector's judgement."
+        ),
+    ),
+    Scenario(
+        id="medical_filler_midway",
+        domain="medical_intake",
+        replies=["Thanks. Anything else?"],
+        script=[
+            *fluent("The pain is, um,", 1.3, "mostly at night."),
+            *_SETTLE,
+        ],
+        expect=[
+            Merged("The pain is, um, mostly at night.", min_similarity=0.8),
+            NoGhostTurns(min_similarity=0.5),
+            NoErrors(),
+        ],
+        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_GHOST_I},
+        intermittent=True,
+        note=(
+            "A filler immediately before the gap, which is where hedges actually occur in "
+            "speech. medical_hesitation covers a bare 'Um...' at idle; this covers one "
+            "mid-sentence, where the hedge logic has to hold rather than suppress. It merges "
+            "the pause correctly everywhere and is marked only for the ghost 'I' — which it "
+            "was the first scenario other than banking_digits_pause to produce, retiring the "
+            "theory that the ghost had anything to do with digits."
+        ),
+    ),
+    Scenario(
+        id="medical_long_utterance",
+        domain="medical_intake",
+        replies=["That's helpful, thank you."],
+        script=[
+            Say(
+                "I've been having headaches every morning for about two weeks and they "
+                "usually fade after breakfast but yesterday it lasted the whole day and "
+                "I felt dizzy whenever I stood up too quickly."
+            ),
+            *_SETTLE,
+        ],
+        expect=[UserTurns(1), ContentPreserved(min_similarity=0.8), NoGhostTurns(), NoErrors()],
+        note=(
+            "Twelve seconds of unbroken speech with several clause boundaries an endpointer "
+            "could mistake for an ending. The longest utterance in the suite by a wide margin; "
+            "everything else is short enough that a premature commit has nowhere to happen."
+        ),
+    ),
     # -- banking: digit strings and short confirmations ------------------------
     Scenario(
         id="banking_digits",
@@ -620,14 +986,15 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(min_similarity=0.4),
             NoErrors(),
         ],
-        known_failure={
-            "provider": "Flux splits the digit string and commits a spurious single-token turn"
-        },
+        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_GHOST_I},
+        intermittent=True,
         note=(
             "The hardest merge in the suite: a digit string broken across a pause, with no "
             "words to hint continuation. `lexical` and `local` merge it once the fragment "
-            "carries mid-sentence prosody; `provider` still splits and emits the one genuine "
-            "ghost turn the suite reproduces."
+            "carries mid-sentence prosody. `provider` mostly merges it too, but drops to a "
+            "split plus a ghost 'I' about one run in six, visible only under --repeat. That "
+            "ghost was assumed to be about digit strings until medical_filler_midway produced "
+            "the identical turn on ordinary words."
         ),
     ),
     Scenario(
@@ -657,6 +1024,44 @@ SCENARIOS: list[Scenario] = [
         detectors=_FILLER_DETECTORS,
         note=_FILLER_NOTE,
     ),
+    Scenario(
+        id="banking_short_reject",
+        domain="banking",
+        replies=["Understood, I've cancelled it."],
+        script=[Say("No."), *_SETTLE],
+        expect=[UserTurns(1), NoGhostTurns(min_similarity=0.3), Interrupted(False), NoErrors()],
+        note=(
+            "The shortest possible real turn. Pairs with banking_confirmation, which is "
+            "intermittent for exactly this reason: ElevenLabs has been seen transcribing "
+            "one-word answers as partials that never commit, hanging the session outright. A "
+            "'No.' that goes unheard is a worse failure than a split."
+        ),
+    ),
+    Scenario(
+        id="banking_correction",
+        domain="banking",
+        replies=["Transferring to account four four eight."],
+        script=[
+            *fluent("Send it to account four four seven, sorry,", 1.3, "four four eight."),
+            *_SETTLE,
+        ],
+        expect=[
+            Merged("Send it to account four four seven, sorry, four four eight.", min_similarity=0.75),
+            NoGhostTurns(min_similarity=0.4),
+            NoErrors(),
+        ],
+        known_failure={
+            "deepgram-flux/local": _TRAILING_MODIFIER_FAILURE,
+            "deepgram-flux/provider": _TRAILING_MODIFIER_FAILURE,
+        },
+        note=(
+            "Self-correction on a digit string: no lexical context, and committing early sends "
+            "the LLM the wrong account number rather than merely a fragment. The one scenario "
+            "where a split has a concrete, wrong consequence — the agent acts on 447 when the "
+            "caller said 448. `lexical` merges it 3/3 on Flux where `local` and `provider` "
+            "never do, the clearest case in the suite of Namo beating the audio EOU outright."
+        ),
+    ),
     # -- coding_help: technical tokens ---------------------------------------
     Scenario(
         id="coding_simple",
@@ -680,6 +1085,13 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(min_similarity=0.5),
             NoErrors(),
         ],
+        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_SPLIT},
+        intermittent=True,
+        note=(
+            "Baselined as a clean pass until --repeat 3 caught `provider` splitting it once in "
+            "three. Nothing changed in the product; the suite had only ever run it once per "
+            "cell. A worthwhile reminder that a green single run is weak evidence."
+        ),
     ),
     Scenario(
         id="coding_barge_in",
@@ -692,6 +1104,74 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(2), Interrupted(True), HeardPrefix(), NoGhostTurns(), NoErrors()],
+    ),
+    Scenario(
+        id="coding_barge_in_echo",
+        domain="coding_help",
+        replies=[_IMPORTS_REPLY],
+        script=[
+            Say("Explain how Python handles imports."),
+            AwaitAssistantAudio(offset_ms=1400),
+            Say("Sorry, the module cache?"),
+            *_SETTLE,
+        ],
+        expect=[UserTurns(2), Interrupted(True), NoGhostTurns(min_similarity=0.5), NoErrors()],
+        note=(
+            "A real interruption made of words the assistant is in the middle of saying, which "
+            "is what asking someone to repeat themselves sounds like. `_likely_stt_echo` "
+            "suppresses partials resembling the assistant's own text to survive a leaky AEC, "
+            "and cannot tell this apart from the echo it exists to drop. Measures that "
+            "suppressor's false-positive rate on genuine speech."
+        ),
+    ),
+    Scenario(
+        id="coding_double_pause",
+        domain="coding_help",
+        replies=["Sounds like an import cycle. Can you share the traceback?"],
+        script=[
+            *fluent("The build fails when I", 1.2, "import the module", 1.2, "inside a test."),
+            *_SETTLE,
+        ],
+        expect=[
+            Merged("The build fails when I import the module inside a test.", min_similarity=0.8),
+            NoGhostTurns(min_similarity=0.5),
+            NoErrors(),
+        ],
+        known_failure={
+            "deepgram-flux/*": "holds through the first gap and splits at the second; the "
+            "fragment it commits reads as a finished sentence, so nothing argues for holding"
+        },
+        intermittent=True,
+        note=(
+            "Two gaps in one sentence, and the first is the one that gets held: every Flux cell "
+            "merges 'The build fails when I' with 'import the module' and then commits, leaving "
+            "'inside a test' as its own turn. A hold that fires once and latches would look "
+            "identical, which is why one-gap scenarios could not have found this. ElevenLabs "
+            "merges all three — but see AllPartsHeard: it used to drop 'inside a test' entirely "
+            "and still score 0.84 similarity, and this scenario is what exposed that."
+        ),
+    ),
+    Scenario(
+        id="coding_followup_after_reply",
+        domain="coding_help",
+        replies=["A segfault means bad memory access."],
+        script=[
+            Say("What does a segmentation fault mean?"),
+            AwaitCommit(),
+            AwaitAssistantDone(),
+            # AwaitAssistantDone fires when generation ends, not when playback drains, so
+            # speaking here would barge in on the tail. This waits out a ~2.5s reply.
+            Silence(5.0),
+            Say("And how do I debug it?"),
+            *_SETTLE,
+        ],
+        expect=[UserTurns(2), Interrupted(False), NoGhostTurns(), NoErrors()],
+        note=(
+            "A second turn taken after the assistant has finished speaking, uninterrupted. "
+            "This is a regression test for a bug we shipped: STT not resuming once the "
+            "assistant stopped, so the follow-up was never heard. Every other multi-turn "
+            "scenario barges in, which exercises the opposite path and would keep passing."
+        ),
     ),
 ]
 

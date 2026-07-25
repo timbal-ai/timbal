@@ -64,6 +64,9 @@ class RunRecord:
     known_failure: str = ""
     """Non-empty when this scenario is expected to fail for this detector."""
     intermittent: bool = False
+    jobs: int = 1
+    """Concurrency this run was measured under. Latency is only comparable at equal
+    concurrency, so it is recorded per run rather than inferred later."""
 
     @property
     def xfail(self) -> bool:
@@ -87,7 +90,7 @@ def count_ghost_turns(result: RunResult, scenario: Scenario, min_similarity: flo
     return sum(1 for text in result.committed if not any(similarity(text, said) >= min_similarity for said in spoken))
 
 
-def record(scenario: Scenario, result: RunResult, repeat: int = 0) -> RunRecord:
+def record(scenario: Scenario, result: RunResult, repeat: int = 0, jobs: int = 1) -> RunRecord:
     return RunRecord(
         scenario=scenario.id,
         domain=scenario.domain,
@@ -104,8 +107,9 @@ def record(scenario: Scenario, result: RunResult, repeat: int = 0) -> RunRecord:
         vad_endpointed=[m.vad_endpointed for m in result.metrics],
         errors=list(result.errors),
         wall_secs=round(result.wall_secs, 2),
-        known_failure=scenario.known_failure_reason(result.detector) or "",
+        known_failure=scenario.known_failure_reason(result.detector, result.stt) or "",
         intermittent=scenario.intermittent,
+        jobs=jobs,
     )
 
 
@@ -161,6 +165,9 @@ class Scorecard:
     known_failures: list[str] = field(default_factory=list)
     unexpected_passes: list[str] = field(default_factory=list)
     wall_secs: float = 0.0
+    jobs: int = 1
+    """Concurrency the cell ran at. Latency gating is suppressed unless this matches
+    the baseline's — contended runs measure the machine, not the change."""
 
 
 def build_scorecard(records: list[RunRecord]) -> Scorecard:
@@ -196,6 +203,7 @@ def build_scorecard(records: list[RunRecord]) -> Scorecard:
         known_failures=sorted({r.scenario for r in records if r.xfail}),
         unexpected_passes=sorted({r.scenario for r in records if r.xpass}),
         wall_secs=round(sum(r.wall_secs for r in records), 1),
+        jobs=max(r.jobs for r in records),
     )
 
 
@@ -223,6 +231,81 @@ def format_scorecard(card: Scorecard) -> str:
             f"  XPASS:       {', '.join(card.unexpected_passes)}  — now passing, drop the known_failure marker"
         )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Matrix
+# ---------------------------------------------------------------------------
+
+# Grid glyphs. Deliberately distinguishes "failed" from "expected to fail": a cell
+# full of x is a documented limitation, a single ✗ is a regression.
+_PASS, _FAIL, _XFAIL, _XPASS, _FLAKY, _ABSENT = "✓", "✗", "x", "!", "~", "·"
+
+
+def format_grid(cards: list[Scorecard], records: list[RunRecord]) -> str:
+    """Scenario × cell grid — the question the matrix exists to answer.
+
+    Reading down a column compares scenarios within one configuration; reading
+    across a row shows which configurations handle a given situation, which is the
+    only way to tell a Timbal bug from a provider quirk.
+    """
+    labels = [c.label for c in cards]
+    by_cell: dict[str, dict[str, list[RunRecord]]] = {label: {} for label in labels}
+    for r in records:
+        cell = by_cell.get(f"{r.stt}/{r.detector}")
+        if cell is not None:
+            cell.setdefault(r.scenario, []).append(r)
+
+    scenarios = sorted({r.scenario for r in records})
+    width = max((len(s) for s in scenarios), default=0)
+    columns = [str(i + 1) for i in range(len(labels))]
+
+    def glyph(runs: list[RunRecord]) -> str:
+        if not runs:
+            return _ABSENT
+        rate = sum(r.passed for r in runs) / len(runs)
+        if runs[0].xfail:
+            return _XPASS if all(r.xpass for r in runs) else _XFAIL
+        if rate == 1.0:
+            return _PASS
+        return _FAIL if rate == 0.0 else _FLAKY
+
+    lines = ["", "matrix  (rows: scenarios, columns: cells)", ""]
+    lines.append(f"  {'':<{width}}  " + "  ".join(f"{c:>3}" for c in columns))
+    for name in scenarios:
+        row = "  ".join(f"{glyph(by_cell[label].get(name, [])):>3}" for label in labels)
+        lines.append(f"  {name:<{width}}  {row}")
+
+    lines.append("")
+    for i, card in enumerate(cards):
+        rate = f"{card.passed}/{card.runs}"
+        p50 = f"{card.latency_p50:.0f}ms" if card.latency_p50 is not None else "-"
+        lines.append(f"  {i + 1:>3}  {card.label:<28} {rate:>7}  p50 {p50:>7}")
+    lines.append("")
+    lines.append(
+        f"  {_PASS} pass   {_FAIL} FAIL   {_XFAIL} known failure   {_XPASS} XPASS   {_FLAKY} flaky   {_ABSENT} not run"
+    )
+    return "\n".join(lines)
+
+
+def cross_cell_flaky(records: list[RunRecord]) -> list[str]:
+    """Scenarios that are flaky *within* at least one cell.
+
+    Deliberately not "differs across cells" — that is the matrix working as
+    intended, since detectors are supposed to behave differently. Flakiness inside
+    a single cell is the one that means a race.
+    """
+    by_cell_scenario: dict[tuple[str, str], list[RunRecord]] = {}
+    for r in records:
+        by_cell_scenario.setdefault((f"{r.stt}/{r.detector}", r.scenario), []).append(r)
+    flaky = set()
+    for (label, scenario), runs in by_cell_scenario.items():
+        if len(runs) < 2:
+            continue
+        rate = sum(r.passed for r in runs) / len(runs)
+        if 0.0 < rate < 1.0:
+            flaky.add(f"{scenario} [{label}] {sum(r.passed for r in runs)}/{len(runs)}")
+    return sorted(flaky)
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +370,15 @@ def compare(card: Scorecard, baseline: dict[str, dict]) -> Comparison:
     if before_p50 and card.latency_p50:
         moved = card.latency_p50 / before_p50
         delta = f"eou→audio p50 {before_p50:.0f}ms → {card.latency_p50:.0f}ms"
+        # Concurrent runs share CPU with each other's ONNX inference, so their
+        # latency measures the machine's load as much as the code's. Comparing
+        # across different --jobs would gate on scheduling noise.
+        before_jobs = previous.get("jobs", 1)
+        if card.jobs != before_jobs:
+            out.notes.append(
+                f"{delta} — not gated, measured at --jobs {card.jobs} against a --jobs {before_jobs} baseline"
+            )
+            return out
         enough = min(card.latency_samples, previous.get("latency_samples", 0)) >= MIN_LATENCY_SAMPLES
         if moved > LATENCY_REGRESSION_RATIO:
             worse = f"{delta} (>{(LATENCY_REGRESSION_RATIO - 1) * 100:.0f}% worse)"

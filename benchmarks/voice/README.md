@@ -18,7 +18,7 @@ mock STT. That covers the session state machine and nothing below it — no audi
 no real STT connection, no VAD, no endpointing. The bugs that actually reach
 production live in that gap.
 
-## Status: 21 scenarios across 5 domains, scoring and gating in place
+## Status: 38 scenarios across 5 domains, matrix, scoring and gating in place
 
 | File | Role |
 |---|---|
@@ -28,7 +28,7 @@ production live in that gap.
 | `score.py` | JSONL records, scorecard aggregation, baseline diffing |
 | `cli.py` | runner, reporting, regression gate |
 
-Still to come: the config matrix with parallelism, and AEC-leak simulation.
+Still to come: AEC-leak simulation.
 
 ## What it found
 
@@ -103,27 +103,205 @@ one — both are Namo 0.00 plus a provider-added period, so nothing separates th
 Left alone.
 
 `banking_confirmation` intermittently splits "Yes, that's correct." in two with a
-self-barge-in, and `banking_digits_pause` under `provider` still emits the one
-genuine ghost turn the suite reproduces. Both are recorded as known failures with
-written reasons, scoped to the detectors where they actually occur, so they report
-on every run without blocking the gate.
+self-barge-in, and `banking_digits_pause` under `provider` emits the one genuine
+ghost turn the suite reproduces. Both are recorded as known failures with written
+reasons, scoped to the detectors where they actually occur, so they report on
+every run without blocking the gate.
+
+The digit-string one is a good argument for `--repeat`. A single run showed it
+passing and the marker looked stale; at `--repeat 6` it merged 5 times and split
+once, emitting a ghost `'I'`. A rate like that is invisible to any single run in
+either direction — it would read as fixed five times out of six and as reliably
+broken the sixth. It is marked `intermittent` so passing no longer reports as an
+unexpected pass, since passing genuinely proves nothing here.
+
+**Adding a second STT backend broke seven cells that were working correctly.**
+`banking_digits` failed in seven of twelve cells while committing exactly one turn
+in all twelve: Flux writes "four four seven two nine one" and Nova writes "447291"
+for the same audio. Perfect turn-taking, reported as a turn-taking defect. The
+suite had already been bitten by this once and fixed it by rewriting the script to
+match Flux's spelling, which is precisely the fix that does not survive a second
+provider. `normalize()` now spells digit runs out, so the comparison is
+representation-independent.
+
+**A scenario was quietly grading providers against each other's habits.**
+`food_long_pause` asserted a merge under `lexical` and `local` because that had
+been *observed* on Flux, so Nova failed it for splitting a 3.0s pause — which is
+perfectly defensible behavior, and which the trace showed Flux never even gave a
+detector the chance to get wrong. At that gap neither answer is knowably right:
+holding costs 3s of dead air, splitting sends a fragment to the LLM. It now asserts
+`ContentPreserved` — everything spoken arrived, across however many turns — which
+still fails ElevenLabs for dropping half the order while letting both turn-taking
+policies pass. Any expectation that encodes an observation rather than a
+requirement will do this as soon as the matrix widens.
 
 Three cells are baselined so far:
 
 | cell | gated | p50 | p95 | known failures |
 |---|---|---:|---:|---:|
-| `deepgram-flux/local` | 19/19 | 228ms | 300ms | 2 |
-| `deepgram-flux/lexical` | 19/19 | 230ms | 301ms | 2 |
-| `deepgram-flux/provider` | 16/16 | 222ms | 326ms | 3 |
+| `deepgram-flux/local` | 19/19 | 214ms | 283ms | 2 |
+| `deepgram-flux/lexical` | 19/19 | 235ms | 328ms | 2 |
+| `deepgram-flux/provider` | 16/16 | 234ms | 324ms | 3 |
 
-The three are indistinguishable at the median now. `provider` carries the extra
-known failure — it is the only configuration that still splits a digit string
-across a pause and emits the one ghost turn the suite reproduces — and it has the
-longest tail, so it still looks like the wrong default on Flux. `local` and
-`lexical` are otherwise equivalent here, which means the audio EOU is not currently
-buying anything Namo does not already provide, at least on Flux with clean audio.
-Three cells is not a matrix; worth confirming across STT backends before changing
-any default.
+The three are indistinguishable at the median: the 21ms spread is inside the ±6%
+drift two identical serial runs show (see below), so nobody should read a winner
+out of this column.
+
+### Measuring only Flux was measuring Flux
+
+The Flux column cannot tell detectors apart, because Flux does turn detection
+itself. Every detector scores 95–100% on it, and the reasonable-looking conclusion
+from that column alone — "the audio EOU buys nothing Namo doesn't already provide"
+— was an artifact of the choice of backend. Running the same 21 scenarios against
+Nova and ElevenLabs, which return transcripts without deciding turns, separates
+them immediately (2 repeats, 456 runs):
+
+| detector | Flux | Nova | ElevenLabs |
+|---|---:|---:|---:|
+| `heuristic` | 95% | 79% | 79% |
+| `local` | **100%** | **89%** | **95%** |
+| `lexical` | 100% | 76% | 87% |
+| `provider` | 97% | 75% | 75% |
+
+`local` wins every column. Restricting to the mid-sentence pause merges, the only
+family where detectors differ at all, makes the mechanism plain:
+
+| detector | Flux | Nova | ElevenLabs |
+|---|---:|---:|---:|
+| `heuristic` | 80% | 20% | 20% |
+| `local` | 100% | **60%** | **80%** |
+| `lexical` | 100% | 20% | 70% |
+| `provider` | 100% | **0%** | **0%** |
+
+`provider` goes from perfect to zero. That is the expected result stated plainly:
+it defers to the STT, and off Flux there is nothing to defer to. Every other
+scenario family is flat — barge-in is 90–100% in all twelve cells — so pause
+merging carries the entire discriminating signal in the suite.
+
+The real finding is that **Smart Turn earns its keep precisely where the STT does
+not endpoint for you**, which is invisible on Flux. `local` beats `lexical` by 40
+points on Nova and 10 on ElevenLabs: hearing that the speaker's pitch is still
+mid-phrase survives a transcript that reads like a finished sentence, and text
+alone does not. If Timbal is ever pointed at a plain streaming ASR, `local` is the
+default and `provider` is close to unusable for pauses.
+
+Two caveats. Nova and ElevenLabs are not baselined — several cells have genuine
+failures that would need per-cell `known_failure` markers first, so only the Flux
+column is gated today. And ElevenLabs drops content on hard inputs independently of
+turn-taking (it committed "I'd like to order a large" and silently lost the pizza),
+which `ContentPreserved` now catches but which is an STT-quality difference rather
+than a turn-taking one.
+
+The ranking survived the suite growing to 38 (numbers are not comparable to the
+table above — the added scenarios are deliberately harder): `local` 92/81/92,
+`lexical` 94/71/89, `heuristic` 89/65/76, `provider` 91/63/75. `local` still wins
+both non-Flux columns by 10 points or more; `lexical` edges it by 2 on Flux, where
+the backend is doing the work anyway.
+
+### Harder cases: 21 → 38 scenarios
+
+Barge-in scored 90–100% in all twelve cells, which meant five scenarios were
+spending real time confirming something already known. Seventeen were added to
+attack the edges instead: barge-in at 150ms instead of a comfortable 600, a
+one-word "Stop.", two interruptions in one session, an interruption made of the
+assistant's own words, a backchannel that must *not* interrupt, three-part
+sentences, self-corrections, a 12-second run-on, two finished sentences 0.9s
+apart that must not merge, and four seconds of pure silence.
+
+**Barge-in survived all of it.** Instant, one-word, double and echoing barge-ins
+pass in all twelve cells, as do pure silence, a bare "No." and a follow-up taken
+after the assistant stops. The one-word case is the surprising pass:
+`MIN_BARGE_IN_PARTIAL_WORDS` drops single-word *partials* as mic blips, so "Stop."
+should have been ignored — the commit still arrives and still cuts the assistant
+off. The gate delays a one-word barge-in rather than losing it.
+
+Every new failure is a stop mid-thought, and the detector rankings barely move
+(17 new scenarios, 12 cells):
+
+| detector | Flux | Nova | ElevenLabs |
+|---|---:|---:|---:|
+| `heuristic` | 82% | 47% | 70% |
+| `local` | 82% | **70%** | **88%** |
+| `lexical` | 88% | 64% | 88% |
+| `provider` | 82% | 47% | 70% |
+
+**The metric was hiding failures.** `coding_double_pause` passed on ElevenLabs
+having committed "The build fails when I import the module" — "inside a test"
+simply gone. Whole-string similarity scored that 0.84 against the full sentence,
+over the 0.8 bar, so a third of the utterance vanished and the suite called it a
+clean merge. The same bug was passing `banking_digits_pause` on ElevenLabs at 0.85
+while "291" was dropped from an account number. `Merged` and `ContentPreserved`
+now check each spoken fragment against its best-matching window of the transcript,
+where a missing part matches nothing and scores 0.40. Both of those are now
+correctly red. A similarity threshold over a long string cannot see a dropped
+tail, and the longer the utterance the blinder it gets.
+
+Three findings are the STT's, identical under all four detectors:
+
+- **Nova commits backchannels.** "Mm-hmm" over the assistant is transcribed and
+  committed, and every detector then treats it as a barge-in and stops the reply.
+  Flux and ElevenLabs swallow the sound and pass. Timbal has no notion of a
+  backchannel, so on any STT that transcribes one, an acknowledgement silences the
+  assistant.
+- **Nova endpoints at sentence boundaries.** The 12-second run-on comes back as
+  three turns, split at clause boundaries inside continuous speech.
+- **ElevenLabs merges finished sentences.** "I'll have a coffee." and "Actually,
+  make it two." 0.9s apart come back as one turn in all four cells. Its endpointer
+  waits longer than Flux's, which helps on pauses and hurts here — the suite had
+  no scenario punishing an over-merge before this, so a detector could have scored
+  well by holding everything.
+
+Two findings sharpen older ones. The spurious single-token `'I'` turn under Flux +
+`provider` had been attributed to digit strings for as long as
+`banking_digits_pause` was the only scenario producing it; `medical_filler_midway`
+now produces it verbatim on ordinary words, so it is the path, not the content.
+And running the baselined cells at `--repeat 3` caught `coding_pause` splitting
+once in three under `provider` — a scenario baselined as a clean pass, unchanged,
+that had only ever been run once per cell.
+
+The trailing-modifier failure now has four instances rather than one, and they
+agree: `medical_hesitant_pause`, `medical_self_correction`, `banking_correction`
+and `coding_double_pause` all commit a fragment that is a complete sentence in
+isolation, and no text signal argues for holding. `banking_correction` is the one
+with teeth — split, the agent transfers to account 447 when the caller said 448 —
+and it is also the clearest win for Namo anywhere in the suite: `lexical` merges it
+3/3 on Flux where `local` and `provider` never do.
+
+Known failures went from 3 to 10 of 38, which is worth watching. Eight of the ten
+are scoped to specific cells rather than blanket-marked, and eight are
+`intermittent` — but a suite that marks everything interesting gates nothing, and
+this is the point at which that stops being a theoretical concern.
+
+**Parallelism turned out to be nearly free, which was not the expectation.**
+`--jobs` was built assuming concurrent sessions would contend for Silero and Smart
+Turn inference and inflate `eou→audio`, so the gate refuses to compare runs
+measured at different concurrency. Then the full suite was run four times, twice
+each way — p50 per cell, in run order:
+
+| cell | serial | serial | `--jobs 4` | `--jobs 4` |
+|---|---:|---:|---:|---:|
+| `deepgram-flux/local` | 228ms | 214ms | 214ms | 217ms |
+| `deepgram-flux/lexical` | 230ms | 235ms | 213ms | 214ms |
+| `deepgram-flux/provider` | 222ms | 234ms | 222ms | 215ms |
+
+Two serial runs of the same cell differ by up to 6%, which is as large as any
+serial-to-parallel gap — and the parallel runs are, if anything, slightly faster
+and tighter (213–222ms, against 214–235ms serial). There is no separation to find
+here.
+
+Real-time pacing is why: a replayed session spends nearly all of its wall clock
+asleep between 20ms frames, so four of them interleave in the gaps rather than
+competing for CPU. The same 54 runs take 426s serially and 114s at `--jobs 4`, a
+3.7× speedup that costs nothing measurable.
+
+The guard stays anyway. It costs one serial run before committing a baseline, and
+the headroom above is specific to this machine, this suite size and `--jobs 4` —
+none of which the gate can verify at compare time. It fails toward reporting a
+number rather than gating on one.
+
+The same table is a warning about the latency figures generally: a 15% gate on a
+statistic that drifts 6% between identical runs has less headroom than it looks
+like, and any cross-detector comparison under ~20ms is noise.
 
 ## Running
 
@@ -141,9 +319,52 @@ uv run python benchmarks/voice/cli.py --repeat 3              # variance + flaky
 uv run python benchmarks/voice/cli.py --quiet                # results only
 uv run python benchmarks/voice/cli.py --dump                 # WAVs to results/dumps/
 uv run python benchmarks/voice/cli.py --update-baseline       # accept current behavior
+
+# the matrix: --stt and --detector are crossed, one scorecard per cell
+uv run python benchmarks/voice/cli.py --detector local,lexical,provider --jobs 4
 ```
 
 Exit code is non-zero when any expectation fails or a regression is gated.
+
+## The matrix
+
+`--stt` and `--detector` take comma-separated lists and are crossed, producing one
+scorecard, one baseline entry and one gate per cell, plus a scenario × cell grid at
+the end. The grid is the point: a row tells you whether a scenario fails everywhere
+(Timbal's problem) or in one column (that provider's problem), which no amount of
+staring at a single cell will tell you.
+
+```
+                            1    2    3
+  banking_digits_pause      ✓    ✓    x
+  banking_hesitation        ✓    ✓    ·
+  medical_hesitant_pause    x    x    x
+
+    1  deepgram-flux/local            19/19  p50   214ms
+    2  deepgram-flux/lexical          19/19  p50   213ms
+    3  deepgram-flux/provider         16/16  p50   222ms
+
+  ✓ pass   ✗ FAIL   x known failure   ! XPASS   ~ flaky   · not run
+```
+
+`x` and `✗` are deliberately different glyphs: a row of `x` is a documented
+limitation, a single `✗` is a regression. `·` means the scenario opted out of that
+detector (see *Per-detector expectations*).
+
+`known_failure` and `expect_by_detector` keys are matched most-specific-first:
+`"deepgram-nova/lexical"`, then `"deepgram-nova/*"`, then `"lexical"`, then `"*"`.
+Scope findings to a cell whenever they came from one — a bare detector key silently
+applies a Flux observation to every other backend, which is how `food_long_pause`
+came to fail Nova for behaving reasonably. The `"deepgram-nova/*"` rung is for
+failures that are the STT's alone and land identically under all four detectors,
+like Nova committing a "mm-hmm"; writing those per cell states one fact four times
+and hides that it is one fact.
+
+`--jobs N` overlaps runs across the whole queue, cells included. Two rules keep it
+from corrupting the thing it accelerates: `--update-baseline` is refused above
+`--jobs 1`, and latency is never compared across differing concurrency — it is
+printed with a note instead. Pass rates and ghost turns still gate normally, so a
+parallel matrix run is a real gate on everything except speed.
 
 ## Results and the regression gate
 
@@ -160,6 +381,7 @@ STT providers drift under us and yesterday's ceiling is tomorrow's false alarm:
 | a scenario's pass rate drops | speedups |
 | ghost turns increase | brand-new scenarios (nothing to compare) |
 | median latency worsens >15% | latency with fewer than 20 samples |
+| | latency measured at a different `--jobs` than the baseline |
 
 **Latency gates on p50, not p95.** With ~8 latency samples, p95 is the maximum in
 disguise: one slow turn moved it 394ms → 477ms on an unchanged tree while all five
@@ -175,10 +397,18 @@ Measured on this suite, p50 is worth gating and the tail is not — two independ
 | p95 | 383ms | 375ms | 2% |
 | max | 462ms | 378ms | 18% |
 
-At 20 scenarios a single pass produces 28 latency samples, so `--repeat 1` clears
-the floor on its own. Repeats still buy flaky detection: any scenario that passes
-some repeats and fails others is reported by name as **FLAKY** — usually a real
-race rather than a bad test.
+At 38 scenarios a single pass produces well over 40 latency samples, so
+`--repeat 1` clears the floor on its own. Repeats still buy flaky detection: any
+scenario that passes some repeats and fails others is reported by name as
+**FLAKY** — usually a real race rather than a bad test. This is not optional
+rigour: `coding_pause` sat in the baseline as a clean pass until `--repeat 3`
+caught it splitting once in three under `provider`.
+
+Flaky detection deliberately looks *within* a cell, not across cells. Two detectors
+disagreeing is the matrix working as designed; the same detector disagreeing with
+itself is a race. It also covers known failures, which the per-cell scorecard
+cannot see — those are excluded from `per_scenario` by design, which is how a
+marked scenario passing 5 runs in 6 stays invisible until you ask for repeats.
 
 ## Known failures
 
@@ -249,11 +479,24 @@ the provider's commit means a bare "Um..." legitimately starts a turn.
 
 ## What the current library measures
 
-`pause` (1.6s gap, merges) and `long_pause` (3.0s gap, splits) bracket Deepgram
-Flux's turn window between those two durations. `barge_in` and `barge_in_late`
-interrupt the same reply at 600ms and 2500ms, yielding heard prefixes of ~39 and
-~77 characters — which is how you check the truncation path scales with real
-playback position.
+Scenarios come in matched sets, because a single data point about turn-taking is
+rarely interpretable on its own.
+
+Pause length is swept at 0.6s, 1.2–1.5s and 3.0s (`support_pause_short`, the
+`*_pause` family, `food_long_pause`), which brackets each backend's turn window
+and separates "merges anything" from "merges what a speaker would". Barge-in is
+swept by offset at 150ms, 600ms and 2500ms against the same reply, yielding heard
+prefixes from nothing to ~77 characters — which is how you check the truncation
+path scales with real playback position — and by shape: one word, twice in a
+session, echoing the assistant's own words, and a backchannel that must not
+interrupt at all.
+
+Each family also carries its own inverse, so a detector cannot score well by
+always guessing the same way. Against the pause merges sit `food_rapid_fire` (two
+finished sentences 0.9s apart, must split) and `medical_long_utterance` (12
+unbroken seconds, must not). Against the barge-ins sits `food_backchannel`.
+Against every commit sits `support_silence_only`, which says an open mic with no
+speech produces no turn at all.
 
 ## Voices
 
