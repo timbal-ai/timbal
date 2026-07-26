@@ -716,6 +716,36 @@ SCENARIOS: list[Scenario] = [
         ),
     ),
     Scenario(
+        id="support_echo_silence",
+        domain="support",
+        replies=[_RETURN_POLICY_REPLY],
+        script=[
+            Say("Tell me about your return policy."),
+            # The user says nothing for the whole reply. Anything committed here
+            # came out of the assistant's own mouth.
+            AwaitAssistantDone(),
+            Silence(4.0),
+        ],
+        expect=[UserTurns(1), Interrupted(False), NoGhostTurns(), NoErrors()],
+        note=(
+            "Run with --aec-leak to bleed the assistant's output back into the mic. "
+            "`_likely_stt_echo` exists so speaker bleed does not make the assistant "
+            "interrupt itself, and until this scenario nothing had ever fed it echo: every "
+            "run was clean user-only audio. coding_barge_in_echo proves the suppressor does "
+            "not fire on genuine speech; this is the other half.\n\n"
+            "Measured on deepgram-flux/local: clean at 0.0 and 0.15, intermittent from 0.20, "
+            "and 4 failures in 6 at 0.30 — where the assistant cuts itself off mid-reply and "
+            "commits its own words as a user turn. Real barge-in still works at 0.30, so the "
+            "suppressor is letting echo through rather than over-suppressing.\n\n"
+            "The mechanism is visible in what gets committed: 'Our retailers.', 'Arise "
+            "retailers.', 'has aroused retailers.' — all manglings of the reply's own tail, "
+            "'...authorized retailers.' The suppressor is a text-similarity check against "
+            "what the assistant said, so echo that the STT transcribes *badly* stops "
+            "resembling its source and passes the very filter built to catch it. Louder, "
+            "cleaner echo would be caught; garbled echo is not."
+        ),
+    ),
+    Scenario(
         id="support_silence_only",
         domain="support",
         replies=["Hello?"],

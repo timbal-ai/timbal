@@ -28,7 +28,42 @@ production live in that gap.
 | `score.py` | JSONL records, scorecard aggregation, baseline diffing |
 | `cli.py` | runner, reporting, regression gate |
 
-Still to come: AEC-leak simulation.
+### The echo suppressor fails on echo it cannot read
+
+`--aec-leak GAIN` mixes the assistant's own output back into the mic, standing in
+for an echo canceller that does not fully cancel. Until it existed, all ~3,000
+runs fed clean user-only audio, so `_likely_stt_echo` — the guard that stops the
+assistant interrupting itself on speaker bleed — had never once been exercised.
+`coding_barge_in_echo` only ever proved it does not fire on genuine speech.
+
+Measured on `deepgram-flux/local` with `support_echo_silence`, where the user
+says nothing at all for the whole reply:
+
+| leak gain | outcome |
+|---|---|
+| 0.0 (every prior run) | clean |
+| 0.15 | clean |
+| 0.20 | 1 failure in 3 |
+| 0.30 | **4 failures in 6** |
+
+Failure means the assistant cut itself off mid-reply and committed its own words
+as a user turn. Real barge-in still passes at 0.30, so this is under-suppression,
+not over-suppression.
+
+**The mechanism is the interesting part.** The committed ghosts were `'Our
+retailers.'`, `'Arise retailers.'` and `'has aroused retailers.'` — all manglings
+of the same phrase from the reply's tail, "...authorized retailers." The
+suppressor is a text-similarity check against what the assistant just said, so
+echo the STT transcribes *badly enough* stops resembling its source and passes
+the filter built to catch it. Clean echo gets suppressed; garbled echo does not,
+which inverts the intuition that louder bleed is the dangerous case.
+
+That also explains why the boundary is probabilistic rather than a threshold: it
+depends on how the STT happens to mis-hear a given phrase, not on the gain alone.
+
+Still to come: a fix for the above — text similarity alone cannot carry this, and
+the endpointer's Silero speech history is available as corroborating evidence
+(`_vad_vetoes_barge_in` already uses it, but only when an audio EOU exists).
 
 ## What it found
 

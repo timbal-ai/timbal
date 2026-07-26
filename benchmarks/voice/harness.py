@@ -18,6 +18,7 @@ and interruption truncation runs on the wall-clock estimate, which is a
 
 from __future__ import annotations
 
+import array
 import asyncio
 import time
 from collections import deque
@@ -37,6 +38,7 @@ from scenario import (
 from synth import (
     ASSISTANT_VOICE_ID,
     BYTES_PER_SECOND,
+    FRAME_BYTES,
     FRAME_SECS,
     HERE,
     SAMPLE_RATE,
@@ -86,13 +88,18 @@ class HarnessConfig:
     # instance attributes — class-level constants must have a matching
     # instance attribute to be reachable.
     detector_params: Mapping[str, Any] = field(default_factory=dict)
+    # Fraction of the assistant's own output mixed back into the mic, standing
+    # in for imperfect echo cancellation. 0.0 is every run before this one.
+    aec_leak: float = 0.0
 
     @property
     def label(self) -> str:
-        if not self.detector_params:
-            return f"{self.stt}/{self.detector}"
-        tweaks = ",".join(f"{k}={v}" for k, v in sorted(self.detector_params.items()))
-        return f"{self.stt}/{self.detector}[{tweaks}]"
+        suffix = ""
+        if self.aec_leak:
+            suffix += f"[leak={self.aec_leak}]"
+        if self.detector_params:
+            suffix += "[" + ",".join(f"{k}={v}" for k, v in sorted(self.detector_params.items())) + "]"
+        return f"{self.stt}/{self.detector}{suffix}"
 
 
 @dataclass
@@ -165,15 +172,55 @@ class PlaybackSim:
         return self.played_bytes / self._bps * 1000
 
 
-class ScriptFeeder:
-    """Paced PCM source: clip audio when speaking, silence the rest of the time."""
+def mix_pcm16(base: bytes, leak: bytes, gain: float) -> bytes:
+    """Sum two PCM16 frames with ``leak`` attenuated, clipping at int16 bounds."""
+    out = array.array("h", base)
+    other = array.array("h", leak)
+    for i in range(min(len(out), len(other))):
+        out[i] = max(-32768, min(32767, int(out[i] + other[i] * gain)))
+    return out.tobytes()
 
-    def __init__(self) -> None:
+
+class ScriptFeeder:
+    """Paced PCM source: clip audio when speaking, silence the rest of the time.
+
+    With ``leak_gain`` above zero it also mixes the assistant's own output back
+    into the mic, standing in for an echo canceller that does not fully cancel.
+    Every run before this fed clean user-only audio, which means
+    ``_likely_stt_echo`` — the guard that stops the assistant interrupting
+    itself on speaker bleed — had never once been exercised.
+    """
+
+    # Cap on buffered assistant audio. TTS generates faster than realtime, so an
+    # uncapped buffer would drift seconds behind and leak the assistant's voice
+    # into silence long after it stopped speaking — a harsher and less realistic
+    # test than the thing being simulated.
+    MAX_LEAK_SECS = 1.0
+
+    def __init__(self, leak_gain: float = 0.0) -> None:
         self._pending: deque[bytes] = deque()
+        self._leak = bytearray()
+        self._leak_gain = leak_gain
+        self._max_leak_bytes = int(BYTES_PER_SECOND * self.MAX_LEAK_SECS)
         self._stopped = False
 
     def push(self, pcm: bytes) -> None:
         self._pending.extend(frames(pcm))
+
+    def push_leak(self, pcm: bytes) -> None:
+        """Queue assistant output to bleed into the mic."""
+        if self._leak_gain <= 0:
+            return
+        self._leak.extend(pcm)
+        if len(self._leak) > self._max_leak_bytes:
+            del self._leak[: len(self._leak) - self._max_leak_bytes]
+
+    def _next_leak(self) -> bytes | None:
+        if self._leak_gain <= 0 or len(self._leak) < FRAME_BYTES:
+            return None
+        frame = bytes(self._leak[:FRAME_BYTES])
+        del self._leak[:FRAME_BYTES]
+        return frame
 
     async def drain(self) -> None:
         while self._pending:
@@ -192,7 +239,10 @@ class ScriptFeeder:
         """
         next_at = time.monotonic()
         while not self._stopped:
-            yield self._pending.popleft() if self._pending else SILENCE_FRAME
+            frame = self._pending.popleft() if self._pending else SILENCE_FRAME
+            if (leak := self._next_leak()) is not None:
+                frame = mix_pcm16(frame, leak, self._leak_gain)
+            yield frame
             next_at += FRAME_SECS
             await asyncio.sleep(max(0.0, next_at - time.monotonic()))
 
@@ -268,7 +318,7 @@ async def run_scenario(
         record_audio=config.dump,
     )
 
-    feeder = ScriptFeeder()
+    feeder = ScriptFeeder(leak_gain=config.aec_leak)
     playback = PlaybackSim()
     assistant_speaking = asyncio.Event()
     # session.close() interrupts any reply still playing. That teardown interrupt
@@ -341,7 +391,7 @@ async def run_scenario(
         acker: asyncio.Task[None] | None = None
         try:
             async for event in stream:
-                _observe(event, result, playback, assistant_speaking, closing, emit)
+                _observe(event, result, playback, feeder, assistant_speaking, closing, emit)
                 if isinstance(event, SessionStarted):
                     started = time.monotonic()
                     acker = asyncio.create_task(ack_loop())
@@ -375,6 +425,7 @@ def _observe(
     event: VoiceSessionEvent,
     result: RunResult,
     playback: PlaybackSim,
+    feeder: ScriptFeeder,
     assistant_speaking: asyncio.Event,
     closing: asyncio.Event,
     emit: Logger,
@@ -382,6 +433,7 @@ def _observe(
     if isinstance(event, AudioOutput):
         # Individual chunks are far too chatty to log; the playhead is what matters.
         playback.on_emit(len(event.data))
+        feeder.push_leak(event.data)
         assistant_speaking.set()
         result.audio_chunks += 1
         result.audio_bytes += len(event.data)

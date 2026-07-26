@@ -126,6 +126,15 @@ async def main() -> int:
         "--jobs", type=int, default=1, help="concurrent runs; latency is reported but not gated above 1"
     )
     parser.add_argument("--dump", action="store_true", help="write input/output WAVs per run")
+    parser.add_argument(
+        "--aec-leak",
+        type=float,
+        default=0.0,
+        metavar="GAIN",
+        help="mix the assistant's own output back into the mic at this gain (0.1-0.3 is a "
+        "realistic imperfect echo canceller); exercises the echo suppressor, which clean "
+        "user-only audio never does",
+    )
     parser.add_argument("--quick", action="store_true", help="representative subset (one per domain)")
     parser.add_argument("--quiet", action="store_true", help="hide the per-event stream")
     parser.add_argument("--list", action="store_true", help="list scenarios and exit")
@@ -148,7 +157,7 @@ async def main() -> int:
     jobs = max(1, args.jobs)
     repeats = max(1, args.repeat)
     cells = [
-        HarnessConfig(stt=stt, detector=detector, language=args.language, dump=args.dump)
+        HarnessConfig(stt=stt, detector=detector, language=args.language, dump=args.dump, aec_leak=args.aec_leak)
         for stt in _values(args.stt, "deepgram-flux")
         for detector in _values(args.detector, "provider")
     ]
