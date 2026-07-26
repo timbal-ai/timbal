@@ -407,6 +407,18 @@ class Scenario:
     *desired* expectations stay in the file rather than being rewritten to match
     broken behavior. If it starts passing, that's reported as an unexpected pass.
     """
+    known_failure_under_leak: dict[str, str] = field(default_factory=dict)
+    """Same key grammar, but only when the run injects echo (``--aec-leak`` > 0).
+
+    Echo is a separate axis, not a harder version of the clean one: a scenario can
+    be sound under user-only audio and fail purely because the assistant hears
+    itself. Folding the two into one table would either excuse a clean-run failure
+    or make every leak run report nine regressions it already knows about.
+
+    Always treated as intermittent, whatever :attr:`intermittent` says, because
+    under-suppression depends on how the STT happens to mis-hear a given phrase
+    rather than on the gain — so a pass at any single gain proves nothing.
+    """
     intermittent: bool = False
     """The known failure is nondeterministic, so passing sometimes means nothing.
 
@@ -438,8 +450,17 @@ class Scenario:
     def expectations_for(self, detector: str, stt: str | None = None) -> list[Expectation]:
         return self._scoped(self.expect_by_detector, detector, stt) or self.expect
 
-    def known_failure_reason(self, detector: str, stt: str | None = None) -> str | None:
+    def known_failure_reason(self, detector: str, stt: str | None = None, aec_leak: float = 0.0) -> str | None:
+        """The leak table wins when echo is injected: it is the more specific claim,
+        and a scenario marked for both is failing for two different reasons."""
+        if aec_leak and (hit := self._scoped(self.known_failure_under_leak, detector, stt)) is not None:
+            return hit
         return self._scoped(self.known_failure, detector, stt)
+
+    def is_intermittent(self, detector: str, stt: str | None = None, aec_leak: float = 0.0) -> bool:
+        if aec_leak and self._scoped(self.known_failure_under_leak, detector, stt) is not None:
+            return True
+        return self.intermittent
 
     def applies_to(self, detector: str) -> bool:
         return self.detectors is None or detector in self.detectors
@@ -553,6 +574,30 @@ _FLUX_PROVIDER_GHOST_I = (
     "one; not specific to this scenario"
 )
 
+# Every leak failure in the suite is one bug wearing nine hats: the assistant hears
+# its own bleed, interrupts itself, and commits a fragment of its own reply as a user
+# turn — 'Add memory access.' from "a bad memory access", 'retailers. Stop.' from
+# "...authorized retailers." `_likely_stt_echo` is a text-similarity check whose fuzzy
+# branch is provably unreachable (the tail is sized at 3x the commit, capping
+# SequenceMatcher at 0.50 against a 0.68 threshold), so only exact substrings are
+# caught and echo the STT garbles walks straight through the filter built for it.
+#
+# Scoped to the one cell the leak axis has actually been measured on. The suppressor
+# is shared code, so the other eleven are presumably no better — but "presumably" is
+# what these markers exist to keep out, and an unmeasured cell should report its
+# failures rather than have them excused by a Flux observation.
+#
+# The set of scenarios carrying this is empirical and incomplete by construction: which
+# ones trip depends on how the STT garbles a given reply, so successive runs surface
+# different members. It reached thirteen by two samples at 0.15 and would likely grow
+# with repeats. The leak *baseline* is the real instrument — it records per-scenario
+# rates and gates on movement — and these markers exist so one can be taken at all.
+_ECHO_UNDER_SUPPRESSION = (
+    "the assistant interrupts itself on its own echo: bleed transcribed badly enough stops "
+    "resembling its source and passes `_likely_stt_echo`"
+)
+_ECHO_LEAK_CELL = "deepgram-flux/local"
+
 _PROVIDER_ENDPOINTING_FAILURE = (
     "`provider` defers to Flux's endpointing, which splits here; `lexical` merges it "
     "correctly because Namo scores the fragment 0.00 incomplete"
@@ -571,6 +616,13 @@ SCENARIOS: list[Scenario] = [
         script=[Say("What's your return policy?"), *_SETTLE],
         expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), NoErrors()],
         quick=True,
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
+        note=(
+            "One question, one reply, no pauses — and at a 0.15 echo leak the assistant "
+            "interrupts itself on 3 of 4 repeats. The simplest scenario in the suite is enough "
+            "to show that a mediocre echo canceller does not degrade turn-taking at the "
+            "margins, it breaks the ordinary case."
+        ),
     ),
     Scenario(
         id="support_pause",
@@ -586,6 +638,7 @@ SCENARIOS: list[Scenario] = [
             Interrupted(False),
             NoErrors(),
         ],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "Used to split under `provider` and `local` and was marked a known failure for "
             "both. Fluent synthesis fixed it outright: rendered standalone this fragment "
@@ -602,6 +655,7 @@ SCENARIOS: list[Scenario] = [
         replies=["Happy to help. Have a good day."],
         script=[Say("That's all."), *_SETTLE],
         expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), MaxDeadAir(3500), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "The case the text-complete hold tier exists for, and the only one in the suite: "
             "Smart Turn under-scores this closer (0.115 — 13 of 14 closers measured score "
@@ -655,6 +709,7 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(),
             NoErrors(),
         ],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note="Pairs with support_barge_in: same reply, later offset, measurably longer heard text.",
     ),
     Scenario(
@@ -685,6 +740,7 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(2), Interrupted(True), NoGhostTurns(), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "The most important barge-in in voice UX and the one the code is built to ignore: "
             "both HeuristicTurnDetector and ProviderTurnDetector drop partials shorter than "
@@ -755,16 +811,21 @@ SCENARIOS: list[Scenario] = [
             Silence(4.0),
         ],
         expect=[UserTurns(1), Interrupted(False), NoGhostTurns(), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "Run with --aec-leak to bleed the assistant's output back into the mic. "
             "`_likely_stt_echo` exists so speaker bleed does not make the assistant "
             "interrupt itself, and until this scenario nothing had ever fed it echo: every "
             "run was clean user-only audio. coding_barge_in_echo proves the suppressor does "
             "not fire on genuine speech; this is the other half.\n\n"
-            "Measured on deepgram-flux/local: clean at 0.0 and 0.15, intermittent from 0.20, "
-            "and 4 failures in 6 at 0.30 — where the assistant cuts itself off mid-reply and "
-            "commits its own words as a user turn. Real barge-in still works at 0.30, so the "
-            "suppressor is letting echo through rather than over-suppressing.\n\n"
+            "Measured on deepgram-flux/local: clean at 0.0, intermittent from 0.20, and 4-5 "
+            "failures in 6 at 0.30 — where the assistant cuts itself off mid-reply and commits "
+            "its own words as a user turn. Real barge-in still works at 0.30, so the suppressor "
+            "is letting echo through rather than over-suppressing.\n\n"
+            "0.15 was recorded as clean here and is not: it fails ~1 in 3. The original reading "
+            "came from too few repeats on the one scenario the leak axis was ever run against. "
+            "Running the whole suite at 0.15 fails nine scenarios, which is why the marker now "
+            "lives on all of them rather than here alone.\n\n"
             "The mechanism is visible in what gets committed: 'Our retailers.', 'Arise "
             "retailers.', 'has aroused retailers.' — all manglings of the reply's own tail, "
             "'...authorized retailers.' The suppressor is a text-similarity check against "
@@ -792,6 +853,7 @@ SCENARIOS: list[Scenario] = [
         replies=["One large coffee and a croissant. Anything else?"],
         script=[Say("Can I get a large coffee and a croissant?"), *_SETTLE],
         expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
     ),
     Scenario(
         id="food_pause",
@@ -811,6 +873,7 @@ SCENARIOS: list[Scenario] = [
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
             "elevenlabs/lexical": _TEXT_ONLY_PAUSE_SHORTFALL + " — merged 2/3",
         },
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         intermittent=True,
         quick=True,
         note=(
@@ -957,6 +1020,7 @@ SCENARIOS: list[Scenario] = [
         ],
         expect=[UserTurns(2), NoGhostTurns(), NoErrors()],
         known_failure={"elevenlabs/*": _EL_OVERMERGE},
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "The inverse of every pause scenario: two genuinely finished sentences separated by "
             "a short gap, which must *not* merge. The suite is full of cases punishing a split "
@@ -1024,6 +1088,7 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(3), Interrupted(True), NoGhostTurns(), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "Two interruptions in one session. Every other barge-in scenario stops after the "
             "first, so nothing checked that the session recovers enough to be interrupted "
@@ -1117,6 +1182,7 @@ SCENARIOS: list[Scenario] = [
         # look like a hallucinated turn to every text comparison.
         script=[Say("My account number is four four seven two nine one."), *_SETTLE],
         expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note="Digit strings are the STT-hostile case: no lexical context to fall back on.",
     ),
     Scenario(
@@ -1280,6 +1346,7 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(2), Interrupted(True), NoGhostTurns(min_similarity=0.5), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "A real interruption made of words the assistant is in the middle of saying, which "
             "is what asking someone to repeat themselves sounds like. `_likely_stt_echo` "
@@ -1330,6 +1397,7 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(2), Interrupted(False), NoGhostTurns(), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_UNDER_SUPPRESSION},
         note=(
             "A second turn taken after the assistant has finished speaking, uninterrupted. "
             "This is a regression test for a bug we shipped: STT not resuming once the "

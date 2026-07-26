@@ -68,6 +68,18 @@ class RunRecord:
     jobs: int = 1
     """Concurrency this run was measured under. Latency is only comparable at equal
     concurrency, so it is recorded per run rather than inferred later."""
+    aec_leak: float = 0.0
+    """Echo gain fed back into the mic. Recorded because it changes what the run means
+    — a leak run and a clean one were previously indistinguishable in the JSONL, so a
+    file could only be read correctly by whoever remembered the command."""
+    label: str = ""
+    """Full cell label, axis suffixes included (``[leak=0.15]``, swept params).
+
+    Scoring and baselining key off this rather than rebuilding ``stt/detector``, which
+    silently dropped every non-default axis: a leak or sweep run matched no cell at
+    all, so it printed no scorecard, gated nothing, and its ``--update-baseline`` was
+    a no-op. Once matched, the same stripping would have let a leak cell overwrite the
+    clean baseline of the same stt/detector."""
 
     @property
     def xfail(self) -> bool:
@@ -114,7 +126,14 @@ def count_ghost_turns(result: RunResult, scenario: Scenario, min_similarity: flo
     return ghosts
 
 
-def record(scenario: Scenario, result: RunResult, repeat: int = 0, jobs: int = 1) -> RunRecord:
+def record(
+    scenario: Scenario,
+    result: RunResult,
+    repeat: int = 0,
+    jobs: int = 1,
+    aec_leak: float = 0.0,
+    label: str = "",
+) -> RunRecord:
     return RunRecord(
         scenario=scenario.id,
         domain=scenario.domain,
@@ -132,9 +151,11 @@ def record(scenario: Scenario, result: RunResult, repeat: int = 0, jobs: int = 1
         vad_endpointed=[m.vad_endpointed for m in result.metrics],
         errors=list(result.errors),
         wall_secs=round(result.wall_secs, 2),
-        known_failure=scenario.known_failure_reason(result.detector, result.stt) or "",
-        intermittent=scenario.intermittent,
+        known_failure=scenario.known_failure_reason(result.detector, result.stt, aec_leak) or "",
+        intermittent=scenario.is_intermittent(result.detector, result.stt, aec_leak),
         jobs=jobs,
+        aec_leak=aec_leak,
+        label=label or f"{result.stt}/{result.detector}",
     )
 
 
@@ -218,7 +239,8 @@ def build_scorecard(records: list[RunRecord]) -> Scorecard:
     passed = sum(r.passed for r in gated)
 
     return Scorecard(
-        label=f"{records[0].stt}/{records[0].detector}",
+        # Fallback keeps result files written before labels were recorded scoreable.
+        label=records[0].label or f"{records[0].stt}/{records[0].detector}",
         stt=records[0].stt,
         detector=records[0].detector,
         runs=len(gated),

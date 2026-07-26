@@ -28,10 +28,59 @@ from timbal.voice.turn_detection import (
     TurnState,
     _is_garbage_commit,
     _is_same_user_utterance_refinement,
+    _likely_stt_echo,
     resolve_turn_detector,
 )
 
 from .test_session import MockSTT, MockTTS
+
+
+class TestLikelySttEcho:
+    """Garbled echo must be suppressed; genuine speech against the same reply must not.
+
+    Both lists are real transcripts from ``--aec-leak`` runs, so this pins the margin
+    the threshold was calibrated on rather than restating the implementation.
+    """
+
+    REPLY = (
+        "Our return policy allows returns within thirty days of purchase, provided "
+        "the item is unused and you still have the original receipt or a valid proof "
+        "of purchase from one of our authorized retailers."
+    )
+    SEGFAULT_REPLY = "A segfault means bad memory access."
+
+    def test_garbled_echo_is_suppressed(self) -> None:
+        """The old check scored these 0.23-0.33 against a 0.68 threshold and passed
+        every one through: it compared the commit to a tail sized at 3x its length,
+        which caps ratio() at 0.50, so the branch could never fire."""
+        for echo in (
+            "Our retailers.",
+            "Arise retailers.",
+            "Advised retailers.",
+            "advertised retailers.",
+            "Archives to retailers.",
+            "has aroused retailers.",
+        ):
+            assert _likely_stt_echo(echo, self.REPLY), echo
+
+    def test_genuine_barge_ins_survive(self) -> None:
+        for real in ("Actually, cancel that.", "Wait, hold on.", "Okay, never mind.", "Okay, thanks."):
+            assert not _likely_stt_echo(real, self.REPLY), real
+
+    def test_user_quoting_the_assistant_survives(self) -> None:
+        """The tightest case in the suite (`coding_barge_in_echo`): the user repeats the
+        assistant's own words, which is what asking someone to clarify sounds like. It
+        scores 0.58 against echo's 0.68 floor — the whole margin, so it guards it."""
+        reply = "Python caches imported modules, so the module body runs exactly once."
+        assert not _likely_stt_echo("Sorry, the module cache?", reply)
+        assert _likely_stt_echo("When look exactly once.", reply)
+
+    def test_exact_substring_still_suppressed(self) -> None:
+        assert _likely_stt_echo("memory access.", self.SEGFAULT_REPLY)
+
+    def test_no_assistant_text_is_never_echo(self) -> None:
+        assert not _likely_stt_echo("Our retailers.", "")
+
 
 # ---------------------------------------------------------------------------
 # Moved heuristic functions (ported from test_voice_session_stt_refinement.py)

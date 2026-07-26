@@ -119,10 +119,16 @@ def _list_scenarios() -> int:
         for detector, reason in s.known_failure.items():
             kind = "intermittent" if s.intermittent else "known failure"
             print(f"      [{kind}, {detector}] {reason}")
+        for detector, reason in s.known_failure_under_leak.items():
+            print(f"      [under --aec-leak, {detector}] {reason}")
         if s.note:
             print(f"      {s.note}")
     known = sum(1 for s in SCENARIOS if s.known_failure)
-    print(f"\n{len(SCENARIOS)} scenarios, {known} known failures; * = --quick subset")
+    leak_known = sum(1 for s in SCENARIOS if s.known_failure_under_leak)
+    print(
+        f"\n{len(SCENARIOS)} scenarios, {known} known failures, "
+        f"{leak_known} more under --aec-leak; * = --quick subset"
+    )
     return 0
 
 
@@ -256,13 +262,16 @@ async def main() -> int:
                 print(line) if live else buffer.append(line)
 
             result = await run_scenario(job.scenario, clips, job.config, log=log)
-            known = job.scenario.known_failure_reason(job.config.detector, job.config.stt)
-            report = _report(result, known, job.scenario.intermittent)
+            leak = job.config.aec_leak
+            known = job.scenario.known_failure_reason(job.config.detector, job.config.stt, leak)
+            report = _report(result, known, job.scenario.is_intermittent(job.config.detector, job.config.stt, leak))
             if live:
                 print("\n".join(report))
             else:
                 print("\n".join([job.header, *buffer, *report]))
-            return record(job.scenario, result, repeat=job.repeat, jobs=jobs)
+            return record(
+                job.scenario, result, repeat=job.repeat, jobs=jobs, aec_leak=leak, label=job.config.label
+            )
 
     records = list(await asyncio.gather(*(run(job) for job in queue)))
 
@@ -277,7 +286,7 @@ async def main() -> int:
     exit_code = 0
 
     for config in cells:
-        cell_records = [r for r in records if f"{r.stt}/{r.detector}" == config.label]
+        cell_records = [r for r in records if r.label == config.label]
         if not cell_records:
             continue
         card = build_scorecard(cell_records)

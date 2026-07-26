@@ -61,6 +61,62 @@ which inverts the intuition that louder bleed is the dangerous case.
 That also explains why the boundary is probabilistic rather than a threshold: it
 depends on how the STT happens to mis-hear a given phrase, not on the gain alone.
 
+**The "clean at 0.15" row above is an artifact of measuring one scenario.** The
+leak axis had only ever been run against `support_echo_silence`; running the whole
+suite at 0.15 on `deepgram-flux/local` gives 57/78 with **12 ghost turns and 9
+scenarios failing**, every one of them `interrupted=True` with a fragment of the
+assistant's own reply committed as a user turn — `'Add memory access.'` from "a bad
+memory access", `'exactly once.'`, `'retailers. Stop.'`, `'Hopefully, you should see
+a doctor.'`. `support_simple` — a single question, one reply, no pauses — has the
+assistant interrupting itself on 3 of 4 repeats. So a merely mediocre echo canceller
+does not degrade turn-taking at the margins; it breaks the ordinary case, and the
+suite's clean bill of health came entirely from never having fed it echo.
+
+**Fixed by comparing against a length-matched window.** The cap above is entirely an
+artifact of scoring a short commit against a long tail, so the repair is to score it
+against a slice of the tail its own length, aligned on the longest run the two share:
+
+```python
+block = SequenceMatcher(None, c, tail).find_longest_match(0, len(c), 0, len(tail))
+start = max(0, min(len(tail) - len(c), block.b - block.a))
+return SequenceMatcher(None, c, tail[start : start + len(c)]).ratio() >= 0.65
+```
+
+Anchoring beats sliding every window, which is the obvious alternative and measurably
+worse: a weak anchor yields a badly-matched window, so coincidental resemblance
+elsewhere in the reply cannot inflate the score. On the adversarial case it is the
+difference between 0.75 and 0.58. The threshold is calibrated on transcripts from leak
+runs rather than picked — garbled echo of a known reply scores 0.68–1.00 and genuine
+barge-ins against the same replies score 0.24–0.58, two classes that do not overlap —
+and 0.65 sits in that gap nearer the echo side deliberately, since suppressing real
+speech makes the assistant uninterruptible, the worse of the two failures.
+
+| | before | after |
+|---|---|---|
+| leak 0.15, gated | 44/48 and 55/60 (~92%) | **40/40 (100%)** |
+| leak 0.15, ghost turns | 12 per 78 runs | **6** |
+| clean, 4 baselined cells | 100% | **100%, no regressions** (126 runs) |
+
+The clean-run check is the one that matters for shipping it: a suppressor that catches
+more echo can start eating genuine interruptions, and `support_barge_in`,
+`medical_barge_in` and friends all still barge in.
+
+**The residual has a separate cause worth its own fix.** Both call sites gate the check
+behind `state.assistant_active`, so echo that commits just *after* playback ends is
+never tested at all. `coding_followup_after_reply` is the clean demonstration: it
+commits `'memory access.'`, which is an exact substring of its own reply "a segfault
+means bad memory access" and would be caught by the very first branch — but the reply
+has finished by the time it lands, so nothing looks. Any fix needs a short grace window
+after playback rather than dropping the flag, or a user turn that legitimately echoes
+the last reply becomes unsuppressable.
+
+Both mechanisms that consume mic energy were ruled out as causes by disabling them:
+the hold's VAD extension (`HOLD_VAD_MAX_EXTENSION_SECS = 0`) and the stale-partial
+watchdog's mic-quiet anchor, separately and together, fail at the same rate. That
+matters because both look like plausible suspects — echo carries energy, so in
+principle it can defer a hold and can go quiet in a way that triggers a rescue — and
+neither is responsible. The under-suppression is the whole story.
+
 **The fuzzy branch of that check is unreachable, provably.** `_likely_stt_echo`
 falls back to `SequenceMatcher(c, tail).ratio() >= 0.68`, where `tail` is
 `max(3*len(c), 100)` characters. Since `ratio()` is `2M/(len(c)+len(tail))` with

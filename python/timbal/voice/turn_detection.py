@@ -228,6 +228,22 @@ def _normalize_echo(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+# Similarity between a commit and the best-aligned same-length window of the
+# assistant's recent speech, above which the commit is treated as echo.
+#
+# Calibrated on transcripts from `--aec-leak` runs, not chosen: garbled echo of a
+# known reply scores 0.68-1.00 ("archives to retailers." / "advised retailers." /
+# "add memory access.") and genuine barge-ins against the same replies score
+# 0.24-0.58 ("wait, hold on." 0.43, "stop." 0.40). The two classes do not overlap,
+# and 0.65 sits in the gap nearer the echo side on purpose: suppressing real speech
+# makes the assistant uninterruptible, which is the worse failure of the two.
+#
+# The tightest case is `coding_barge_in_echo` at 0.58, where the user quotes the
+# assistant's own words back ("sorry, the module cache?") — genuinely ambiguous from
+# text alone, and the scenario exists to keep that margin honest.
+_ECHO_WINDOW_RATIO = 0.65
+
+
 def _likely_stt_echo(committed: str, assistant_so_far: str) -> bool:
     """True if STT text is probably the assistant's own speech leaking into the mic."""
     c = _normalize_echo(committed)
@@ -243,7 +259,22 @@ def _likely_stt_echo(committed: str, assistant_so_far: str) -> bool:
         return True
     tail_len = min(len(a), max(len(c) * 3, 100))
     tail = a[-tail_len:]
-    return SequenceMatcher(None, c, tail).ratio() >= 0.68
+    if len(tail) <= len(c):
+        return SequenceMatcher(None, c, tail).ratio() >= _ECHO_WINDOW_RATIO
+    # Compare against a *same-length* window of the tail, aligned on the longest run
+    # the two share. Scoring against the whole tail cannot work: ratio() is
+    # 2M/(len(c)+len(tail)) with M <= len(c), and the tail is deliberately sized at
+    # 3x the commit, which caps the score at 0.50 — so a perfect echo scored below
+    # the old 0.68 threshold and this branch was unreachable. Only exact substrings
+    # were ever suppressed, which is precisely why echo the STT garbles slightly
+    # walked through the filter built to catch it. Anchoring also beats sliding every
+    # window: a weak anchor yields a badly-matched window, so coincidental
+    # resemblance elsewhere in the reply cannot inflate the score.
+    block = SequenceMatcher(None, c, tail).find_longest_match(0, len(c), 0, len(tail))
+    if not block.size:
+        return False
+    start = max(0, min(len(tail) - len(c), block.b - block.a))
+    return SequenceMatcher(None, c, tail[start : start + len(c)]).ratio() >= _ECHO_WINDOW_RATIO
 
 
 def _is_same_user_utterance_refinement(active: str, new: str) -> bool:
