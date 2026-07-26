@@ -61,9 +61,42 @@ which inverts the intuition that louder bleed is the dangerous case.
 That also explains why the boundary is probabilistic rather than a threshold: it
 depends on how the STT happens to mis-hear a given phrase, not on the gain alone.
 
-Still to come: a fix for the above — text similarity alone cannot carry this, and
-the endpointer's Silero speech history is available as corroborating evidence
-(`_vad_vetoes_barge_in` already uses it, but only when an audio EOU exists).
+**The fuzzy branch of that check is unreachable, provably.** `_likely_stt_echo`
+falls back to `SequenceMatcher(c, tail).ratio() >= 0.68`, where `tail` is
+`max(3*len(c), 100)` characters. Since `ratio()` is `2M/(len(c)+len(tail))` with
+`M <= len(c)`, sizing the tail at three times the commit caps the score at
+exactly **0.50** — a *perfect* match scores well under the threshold:
+
+| commit chars | tail chars | best possible ratio |
+|---:|---:|---:|
+| 10 | 100 | 0.182 |
+| 33 | 100 | 0.496 |
+| 60 | 180 | 0.500 |
+| 200 | 400 | 0.667 |
+
+It can only fire while the assistant's whole reply is still shorter than the
+~100-char window. Echo is guarded during the opening of a reply and unguarded for
+the rest of it, with nothing but exact-substring matching left — which is why
+every ghost came from the tail of a long reply and every one was a near-miss.
+
+**A window-matching fix was tried and reverted.** Replacing the whole-string
+ratio with a best-window comparison separates the recorded ghosts (0.615–0.963)
+from clean user phrases (0.340–0.500) with a clear gap, and at a 0.58 threshold
+it takes `support_echo_silence` at 0.30 leak from 4-in-6 failing to 6/6 passing.
+It also breaks barge-in outright: `support_barge_in`, which passes at 0.30 leak
+today, fails every run, and the assistant becomes uninterruptible — the worse
+failure of the two.
+
+The flaw was in how the threshold was set. Scoring *clean* user phrases against
+the reply is the wrong sample: under leak the STT transcribes a **blend** of user
+speech and echo, and the blend lands between the two distributions rather than
+inside the genuine one. No threshold on that comparison separates them, because
+the thing being measured is not two populations but a continuum.
+
+Which leaves the audio reference. Real AEC correlates the mic against recently
+played output, and the harness already has both signals. Note that Silero is
+*not* the answer despite being available: `_vad_vetoes_barge_in` says plainly
+that speaker echo carries energy, so VAD cannot tell it from speech.
 
 ## What it found
 
