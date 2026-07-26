@@ -21,9 +21,10 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from typing import Any
 
 from scenario import (
     AwaitAssistantAudio,
@@ -62,6 +63,7 @@ from timbal.voice import (
     VoiceSession,
     VoiceSessionEvent,
     resolve_stt,
+    resolve_turn_detector,
 )
 from timbal.voice.elevenlabs import ElevenLabsStreamTTS
 
@@ -76,10 +78,21 @@ class HarnessConfig:
     detector: str = "provider"
     language: str = "en"
     dump: bool = False
+    # Detector attributes to override per run, e.g.
+    # {"text_complete_hold_timeout_secs": 1.0}. Exists so a parameter sweep can
+    # ask "what is the right value" instead of editing product constants and
+    # re-running by hand, which is how the hold tier came to be tested at 0.35
+    # and 3.0 and nowhere in between. Applied after construction, so only
+    # instance attributes — class-level constants must have a matching
+    # instance attribute to be reachable.
+    detector_params: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
-        return f"{self.stt}/{self.detector}"
+        if not self.detector_params:
+            return f"{self.stt}/{self.detector}"
+        tweaks = ",".join(f"{k}={v}" for k, v in sorted(self.detector_params.items()))
+        return f"{self.stt}/{self.detector}[{tweaks}]"
 
 
 @dataclass
@@ -205,6 +218,26 @@ def stt_config(stt: str, language: str) -> AudioInputConfig:
 # ---------------------------------------------------------------------------
 
 
+def _build_detector(config: HarnessConfig) -> Any:
+    """The detector name, or a configured instance when params are overridden.
+
+    Rejects unknown attribute names rather than silently setting them: a typo in
+    a sweep would otherwise run the default configuration under a label claiming
+    it was something else, and every number in the sweep would be wrong in a way
+    nothing could detect afterwards.
+    """
+    if not config.detector_params:
+        return config.detector
+    detector = resolve_turn_detector(config.detector)
+    for name, value in config.detector_params.items():
+        if not hasattr(detector, name):
+            raise ValueError(
+                f"{type(detector).__name__} has no attribute {name!r}; cannot override it for {config.label}"
+            )
+        setattr(detector, name, value)
+    return detector
+
+
 async def run_scenario(
     scenario: Scenario,
     clips: dict[str, bytes],
@@ -231,7 +264,7 @@ async def run_scenario(
         tts=ElevenLabsStreamTTS(),
         audio_input=stt_config(config.stt, config.language),
         audio_output=AudioOutputConfig(model=TTS_MODEL, voice=ASSISTANT_VOICE_ID, sample_rate=SAMPLE_RATE),
-        turn_detector=config.detector,
+        turn_detector=_build_detector(config),
         record_audio=config.dump,
     )
 

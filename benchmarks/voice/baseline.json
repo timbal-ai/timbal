@@ -3,16 +3,19 @@
     "label": "deepgram-flux/lexical",
     "stt": "deepgram-flux",
     "detector": "lexical",
-    "runs": 34,
-    "passed": 34,
+    "runs": 33,
+    "passed": 33,
     "pass_rate": 1.0,
     "ghost_turns": 0,
     "errors": 0,
-    "latency_p50": 227.8,
-    "latency_p95": 330.2,
-    "latency_min": 171.4,
-    "latency_max": 432.0,
+    "latency_p50": 219.7,
+    "latency_p95": 321.5,
+    "latency_min": 166.7,
+    "latency_max": 362.3,
     "latency_samples": 50,
+    "dead_air_p50": 724.6,
+    "dead_air_p95": 2166.8,
+    "dead_air_samples": 49,
     "per_scenario": {
       "banking_correction": 1.0,
       "banking_digits": 1.0,
@@ -24,7 +27,6 @@
       "coding_followup_after_reply": 1.0,
       "coding_pause": 1.0,
       "coding_simple": 1.0,
-      "food_backchannel": 1.0,
       "food_barge_in": 1.0,
       "food_list_pause": 1.0,
       "food_long_pause": 1.0,
@@ -53,11 +55,12 @@
     "known_failures": [
       "banking_confirmation",
       "coding_double_pause",
+      "food_backchannel",
       "medical_hesitant_pause",
       "medical_self_correction"
     ],
     "unexpected_passes": [],
-    "wall_secs": 268.9,
+    "wall_secs": 270.3,
     "jobs": 1
   },
   "deepgram-flux/local": {
@@ -69,11 +72,14 @@
     "pass_rate": 1.0,
     "ghost_turns": 0,
     "errors": 0,
-    "latency_p50": 226.8,
-    "latency_p95": 291.8,
-    "latency_min": 164.7,
-    "latency_max": 356.3,
+    "latency_p50": 222.4,
+    "latency_p95": 273.1,
+    "latency_min": 168.1,
+    "latency_max": 316.4,
     "latency_samples": 52,
+    "dead_air_p50": 819.4,
+    "dead_air_p95": 1520.6,
+    "dead_air_samples": 51,
     "per_scenario": {
       "banking_digits": 1.0,
       "banking_digits_pause": 1.0,
@@ -118,7 +124,7 @@
       "medical_self_correction"
     ],
     "unexpected_passes": [],
-    "wall_secs": 262.0,
+    "wall_secs": 261.7,
     "jobs": 1
   },
   "deepgram-flux/provider": {
@@ -130,11 +136,14 @@
     "pass_rate": 1.0,
     "ghost_turns": 0,
     "errors": 0,
-    "latency_p50": 226.4,
-    "latency_p95": 320.8,
-    "latency_min": 171.1,
-    "latency_max": 396.6,
-    "latency_samples": 51,
+    "latency_p50": 219.4,
+    "latency_p95": 315.8,
+    "latency_min": 178.2,
+    "latency_max": 355.8,
+    "latency_samples": 52,
+    "dead_air_p50": 550.1,
+    "dead_air_p95": 1459.8,
+    "dead_air_samples": 51,
     "per_scenario": {
       "banking_digits": 1.0,
       "banking_short_reject": 1.0,
@@ -177,7 +186,7 @@
       "support_pause_short"
     ],
     "unexpected_passes": [],
-    "wall_secs": 247.6,
+    "wall_secs": 246.4,
     "jobs": 1
   }
 }

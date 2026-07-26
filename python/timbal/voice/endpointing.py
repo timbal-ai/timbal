@@ -149,9 +149,7 @@ class VadEndpointer:
             min_commit_interval_secs if min_commit_interval_secs is not None else self.MIN_COMMIT_INTERVAL_SECS
         )
         self.text_incomplete_delay_secs = (
-            text_incomplete_delay_secs
-            if text_incomplete_delay_secs is not None
-            else self.TEXT_INCOMPLETE_DELAY_SECS
+            text_incomplete_delay_secs if text_incomplete_delay_secs is not None else self.TEXT_INCOMPLETE_DELAY_SECS
         )
 
         self._score: Callable[[], Awaitable[float | None]] | None = None
@@ -302,18 +300,6 @@ class VadEndpointer:
                 return
             t0 = time.monotonic()
             p = await self._score()
-            if p is None:
-                # No audio EOU available / not enough buffered signal: never
-                # force-commit blind — the provider debounce handles it.
-                logger.debug("vad_endpoint_skipped", reason="no_eou_score")
-                return
-            delay = endpointing_delay(
-                p,
-                min_delay=self.min_delay_secs,
-                max_delay=self.max_delay_secs,
-                curve=self.delay_curve,
-            )
-            text_bumped = False
             p_text: float | None = None
             if self._text_score is not None:
                 try:
@@ -321,15 +307,37 @@ class VadEndpointer:
                 except Exception as e:
                     logger.warning("vad_text_score_failed", error=str(e))
                     p_text = None
-                if p_text is not None and p_text < self.TEXT_INCOMPLETE_THRESHOLD:
-                    bumped = max(delay, self.text_incomplete_delay_secs)
-                    text_bumped = bumped > delay
-                    delay = bumped
+            driver = "audio"
+            if p is None:
+                # No audio EOU (text-only detector, or not enough buffered
+                # signal). Size the delay from the text score instead of
+                # skipping: the mapping only needs a P(complete), and refusing
+                # to commit here leaves the turn waiting on the provider's own
+                # debounce — 7.5s on a spoken account number under Nova.
+                if p_text is None:
+                    logger.debug("vad_endpoint_skipped", reason="no_eou_score")
+                    return
+                p, driver = p_text, "text"
+            delay = endpointing_delay(
+                p,
+                min_delay=self.min_delay_secs,
+                max_delay=self.max_delay_secs,
+                curve=self.delay_curve,
+            )
+            text_bumped = False
+            # Only a bump when text is the *second* opinion. With text driving,
+            # the incomplete case is already priced into the delay above, and
+            # applying the floor again would double-count it.
+            if driver == "audio" and p_text is not None and p_text < self.TEXT_INCOMPLETE_THRESHOLD:
+                bumped = max(delay, self.text_incomplete_delay_secs)
+                text_bumped = bumped > delay
+                delay = bumped
             # INFO on purpose: fires once per speech-stop and is the whole
             # observable behaviour of the endpointing fast path.
             logger.info(
                 "vad_eou_score",
                 p=round(p, 3),
+                driver=driver,
                 delay_secs=round(delay, 3),
                 score_ms=round((time.monotonic() - t0) * 1000, 1),
                 p_text=round(p_text, 3) if p_text is not None else None,

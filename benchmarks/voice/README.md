@@ -81,10 +81,17 @@ Gating the tier on the audio score does not resolve it either. At the tier, clos
 score {0.115} and fragments {0.054, 0.376}: the fragments straddle the closer, so
 no threshold separates them.
 
-**Careful with `eou→audio`: it is measured from the *accepted* commit, so it does
-not include hold time.** A detector that holds for three seconds and then answers
-in 200ms reports 200ms. Cross-detector latency comparisons in this README are only
-meaningful where holds do not fire; where they do, read the event timeline instead.
+**Two timings, and confusing them will mislead you.** `eou→audio` is measured
+from the *accepted* commit, so it does not include hold time: a detector that
+holds three seconds and then answers in 200ms reports 200ms. `dead air` is
+speech end → turn accepted, and is the only metric that can see a hold. Both are
+gated per cell against the baseline. A change can move one without the other —
+removing the text-complete hold tier leaves `eou→audio` flat while adding 2.6s of
+dead air to six barge-in cells.
+
+Use `MaxDeadAir` on any scenario where the speaker has genuinely finished, so
+that buying a merge with silence has to be declared rather than slipping through
+as a free win.
 
 **Flux's `end_of_turn_confidence` does not rescue it.** Across all 28 commits in a
 suite run, mid-thought fragments scored 0.690–0.920 and genuine turn ends
@@ -272,6 +279,67 @@ are scoped to specific cells rather than blanket-marked, and eight are
 `intermittent` — but a suite that marks everything interesting gates nothing, and
 this is the point at which that stops being a theoretical concern.
 
+### The suite could not see the cost of a hold
+
+`eou→audio` starts counting at the *accepted* commit, so every second a hold
+spends deciding costs nothing measurable. Pass/fail only ever saw whether a turn
+eventually merged. Between them, the two metrics were blind to turn-taking
+timing — and that blindness nearly shipped a bad change.
+
+The text-complete hold tier shortens a hold to 0.35s when the audio model says
+"incomplete" but the transcript reads finished. Disabling it looks like an
+unambiguous win: **11 scenario-cells fixed, zero regressions**, every `local`
+cell converging on 95% (Flux 89→95, Nova 79→95, ElevenLabs 87→95), including
+`medical_hesitant_pause` on all three backends.
+
+Timing speech end to commit tells the other half. The tier fires on **21% of
+scenario-cells**, and the cost lands almost entirely on cases that were already
+correct:
+
+| scenario-cell | cost of removing the tier | was it failing before? |
+|---|---:|---|
+| `medical_barge_in`, `medical_barge_in_twice` (6 cells) | +2.6s | no — pure loss |
+| `support_closer` (3 cells) | +2.6s | no — pure loss |
+| `support_pause` (3 cells) | +2.4s | no — pure loss |
+| `medical_long_utterance` (Nova) | **+8.2s** | counted as a *fix* |
+
+Six barge-in cells taking 2.6s longer to answer an ordinary question is not
+visible anywhere in pass/fail, and an 8.2s "fix" is not a fix. **The tier
+stays.** A fixed timeout is the wrong shape for the underlying problem — the
+cases where a long hold is pure cost are exactly those where no further speech
+ever arrives — but that is a redesign, and a threshold on the audio score cannot
+discriminate: the fragment scores 0.054 and the closer it must not catch scores
+0.115.
+
+So `MaxDeadAir` and a per-cell dead-air gate now exist, measuring speech end →
+turn accepted. Current: p50 560–699ms, p95 1.6–2.2s across the gated cells.
+
+**Dead air immediately found something unrelated.** On
+`deepgram-nova/lexical` a spoken account number sits at **7.5s** — reproducible,
+and against 0.4–2.1s in all eleven other cells. Root cause:
+`_maybe_start_endpointer` arms the VAD endpointing fast path only when the
+detector exposes an audio EOU model, so `LexicalTurnDetector` (text-only) never
+arms it, nothing ever sends Deepgram a `Finalize`, and the commit waits on Nova's
+own endpointing. `local` commits the same audio in 750ms. Flux hides it entirely
+by endpointing itself. The fast path's value — telling the STT to stop — is
+independent of *how* EOU was decided, so the one configuration that needs it
+most is the one architecturally forbidden from having it.
+
+Getting there killed three hypotheses, each of which looked right:
+
+- **Namo mis-scoring digit strings.** It scores them 0.987–1.000, complete.
+- **The stale-partial watchdog rescuing a stranded turn.** The committed text is
+  numeral-formatted (`"447291"`) while every partial was word-formatted, so the
+  commit is Nova's own `smart_format` final, not a synthesized rescue.
+- **`_endpoint_text_score` routing past Namo.** Real bug — the chain checks
+  `effective_text_eou` then `fallback_text_eou`, and `LexicalTurnDetector` names
+  its predictor `text_eou`, so the endpointer scored partials with the
+  punctuation baseline. Fixing it changed dead air by 0ms, because that method is
+  only ever called by an armed endpointer, which under `lexical` never exists.
+  Dead code for the detector it names.
+
+None of the three was visible in pass/fail or in `eou→audio`.
+
 **Parallelism turned out to be nearly free, which was not the expectation.**
 `--jobs` was built assuming concurrent sessions would contend for Silero and Smart
 Turn inference and inflate `eou→audio`, so the gate refuses to compare runs
@@ -380,8 +448,14 @@ STT providers drift under us and yesterday's ceiling is tomorrow's false alarm:
 |---|---|
 | a scenario's pass rate drops | speedups |
 | ghost turns increase | brand-new scenarios (nothing to compare) |
-| median latency worsens >15% | latency with fewer than 20 samples |
-| | latency measured at a different `--jobs` than the baseline |
+| median `eou→audio` worsens >15% | either timing with fewer than 20 samples |
+| median dead air worsens >15% | either timing measured at a different `--jobs` |
+
+Both timings gate through the same `_compare_timing` helper. That is deliberate
+rather than tidiness: the latency block used to `return` early on a `--jobs`
+mismatch, and a dead-air check bolted on after it would have been skipped
+silently on exactly the parallel runs people actually use — the same shape of
+blind spot the dead-air metric exists to close.
 
 **Latency gates on p50, not p95.** With ~8 latency samples, p95 is the maximum in
 disguise: one slow turn moved it 394ms → 477ms on an unchanged tree while all five

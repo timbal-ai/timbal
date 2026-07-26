@@ -604,8 +604,16 @@ SCENARIOS: list[Scenario] = [
             Say("Actually, cancel that."),
             *_SETTLE,
         ],
-        expect=[UserTurns(2), Interrupted(True), HeardPrefix(max_chars=80), NoGhostTurns(), NoErrors()],
+        expect=[UserTurns(2), Interrupted(True), HeardPrefix(max_chars=100), NoGhostTurns(), NoErrors()],
         quick=True,
+        note=(
+            "The ceiling was 80 and sat inside the harness's own resolution: playback acks "
+            "arrive every 250ms, several characters of speech per tick, so runs landed at 82 "
+            "and 85 with the interrupt working perfectly and a genuine prefix heard. It read "
+            "as a barge-in regression on a run that had none. 100 leaves room for ack "
+            "granularity while still separating this from support_barge_in_late (~77+ chars "
+            "at a 2500ms offset is the contrast being drawn, and that one carries no ceiling)."
+        ),
     ),
     Scenario(
         id="support_barge_in_late",
@@ -820,7 +828,9 @@ SCENARIOS: list[Scenario] = [
             "deepgram-nova/*": "Nova transcribes the backchannel as 'Mhmm.' and commits it, "
             "which cuts the assistant off; no detector sees anything to distinguish it from a "
             "one-word barge-in",
-            "deepgram-flux/local": "same commit, intermittently — 2/3 at --repeat 3",
+            "deepgram-flux/*": "same commit, intermittently — Flux usually swallows the sound "
+            "but lets it through often enough to fail roughly one run in three, under both "
+            "`local` and `lexical`",
         },
         intermittent=True,
         note=(
@@ -829,7 +839,9 @@ SCENARIOS: list[Scenario] = [
             "acoustically similar and semantically opposite. The split is by STT, not "
             "detector: Flux and ElevenLabs swallow the sound, Nova transcribes it and all four "
             "detectors then interrupt on it. Timbal has no notion of a backchannel, so on any "
-            "STT that transcribes one, an acknowledgement silences the assistant."
+            "STT that transcribes one, an acknowledgement silences the assistant. Nova fails "
+            "it every run; Flux leaks it roughly one run in three, which is how it passed "
+            "three straight repeats under `lexical` before failing a re-baseline."
         ),
     ),
     Scenario(
@@ -1029,7 +1041,13 @@ SCENARIOS: list[Scenario] = [
             "carries mid-sentence prosody. `provider` mostly merges it too, but drops to a "
             "split plus a ghost 'I' about one run in six, visible only under --repeat. That "
             "ghost was assumed to be about digit strings until medical_filler_midway produced "
-            "the identical turn on ordinary words."
+            "the identical turn on ordinary words.\n\n"
+            "On deepgram-nova/lexical this used to merge and now splits, which is a real "
+            "change and the right one: the merge was an artifact of Nova taking 7.5s to "
+            "finalize, long enough to swallow the 1.4s gap whole. Once the endpointer armed "
+            "for text-only detectors and commits landed at ~1.0s, the pause became visible "
+            "and that cell splits it — consistent with its 20% pause-merge rate everywhere "
+            "else. A merge bought with 6.5s of dead air was never worth having."
         ),
     ),
     Scenario(

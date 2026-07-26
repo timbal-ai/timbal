@@ -53,6 +53,16 @@ if TYPE_CHECKING:
 logger = structlog.get_logger("timbal.voice.session")
 
 
+async def _no_audio_score() -> float | None:
+    """Audio-EOU scorer for detectors that have none — always abstains.
+
+    Bound instead of the detector's ``score_recent_audio`` so the endpointer
+    takes its documented "no audio score" path and sizes the delay from the
+    text EOU, rather than the session having to special-case the binding.
+    """
+    return None
+
+
 def _trace_debug_fields() -> dict[str, Any]:
     """Best-effort tracing ids for debug logs (safe when no RunContext)."""
     ctx = get_run_context()
@@ -411,6 +421,14 @@ class VoiceSession:
         # unavailable); a VadEndpointer instance = use as-is (custom knobs).
         self._vad_endpointing = vad_endpointing
         self._endpointer: VadEndpointer | None = None
+        # Whether Silero's speech history may be used as *evidence* about the
+        # user (barge-in vetoes, hold extension), as opposed to merely driving
+        # the commit fast path. False when the endpointer armed on a text EOU
+        # alone: those three behaviours were written for detectors that have
+        # always had an audio model, and switching them on as a side effect of
+        # a latency fix would change barge-in and hold behaviour under the
+        # guise of committing sooner.
+        self._vad_evidence = False
         # time.monotonic() of the last endpointer-forced stt.commit(); the next
         # committed transcript within a short window is attributed to it.
         self._endpoint_commit_sent_at: float | None = None
@@ -641,12 +659,7 @@ class VoiceSession:
         # SessionInterrupted so the client is not still scheduling backlog PCM
         # for seconds after a barge-in.
         dropped_audio = self._drop_queued_audio_output() if was_active else 0
-        if (
-            was_active
-            and self._turn_finalized_ok
-            and truncate_completed
-            and self._last_interruption_heard_text is None
-        ):
+        if was_active and self._turn_finalized_ok and truncate_completed and self._last_interruption_heard_text is None:
             # The turn completed (AgentTextDone emitted, full reply committed to
             # transcript/memory) but buffered audio was still playing: rewrite the
             # committed entry in place to the heard prefix. Checked *after* the
@@ -729,10 +742,23 @@ class VoiceSession:
     async def _maybe_start_endpointer(self) -> None:
         """Arm the local VAD endpointing loop when the pieces exist.
 
-        Requires a turn detector exposing an audio EOU (``score_recent_audio``
-        with a non-None ``audio_eou``) and the ``timbal[voice]`` extra for
-        Silero. Silently stays off otherwise (warning when explicitly
-        requested). See :mod:`timbal.voice.endpointing`.
+        Needs the ``timbal[voice]`` extra for Silero, plus *some* EOU signal to
+        size the delay with: an audio EOU (``score_recent_audio`` with a
+        non-None ``audio_eou``), or failing that a text EOU. Silently stays off
+        otherwise (warning when explicitly requested). See
+        :mod:`timbal.voice.endpointing`.
+
+        Arming without an audio EOU exists because the fast path's job — telling
+        the STT to finalize — has nothing to do with *how* the turn end was
+        decided, while the coupling meant the configuration that needs it most
+        could never have it. A text-only detector on an STT that does not
+        endpoint aggressively waits on the provider: measured on
+        deepgram-nova/lexical, a spoken account number sat 7.5s from speech end
+        to commit, against 750ms for the same audio under ``local``.
+
+        The VAD *evidence* behaviours stay off in that mode — see
+        :attr:`_vad_evidence`. Silero being loaded is not a reason to start
+        vetoing barge-ins on a detector that has never done so.
         """
         spec = self._vad_endpointing
         if spec is False:
@@ -740,11 +766,12 @@ class VoiceSession:
         explicit = spec is not None
         score_fn = getattr(self.turn_detector, "score_recent_audio", None)
         audio_eou = getattr(self.turn_detector, "audio_eou", None)
-        if score_fn is None or audio_eou is None:
+        has_audio_eou = score_fn is not None and audio_eou is not None
+        if not has_audio_eou and not self._has_text_eou():
             if explicit:
                 logger.warning(
                     "vad_endpointing_unavailable",
-                    reason="turn detector has no audio EOU model",
+                    reason="turn detector exposes neither an audio nor a text EOU",
                     detector=type(self.turn_detector).__name__,
                 )
             return
@@ -755,7 +782,9 @@ class VoiceSession:
         else:
             endpointer = spec
         endpointer.bind(
-            score=score_fn,
+            # No audio EOU: the endpointer falls back to text_score to size the
+            # delay rather than skipping the commit entirely.
+            score=score_fn if has_audio_eou else _no_audio_score,
             commit=self._endpoint_commit,
             should_commit=self._endpoint_should_commit,
             text_score=self._endpoint_text_score,
@@ -774,10 +803,19 @@ class VoiceSession:
             logger.warning("vad_endpointer_start_failed", error=str(e))
             return
         self._endpointer = endpointer
+        self._vad_evidence = has_audio_eou
         logger.info(
             "vad_endpointing_active",
             stop_silence_secs=endpointer.stop_silence_secs,
             max_delay_secs=endpointer.max_delay_secs,
+            driver="audio_eou" if has_audio_eou else "text_eou",
+        )
+
+    def _has_text_eou(self) -> bool:
+        """Whether the detector can score a partial's completeness."""
+        return any(
+            getattr(self.turn_detector, name, None) is not None
+            for name in ("effective_text_eou", "fallback_text_eou", "text_eou")
         )
 
     def _endpoint_should_commit(self) -> bool:
@@ -834,7 +872,7 @@ class VoiceSession:
         uninterruptible on missing evidence. Speaker echo DOES carry energy, so
         this gate never vetoes echo; the text-similarity check handles that.
         """
-        if self._endpointer is None:
+        if self._endpointer is None or not self._vad_evidence:
             return False
         speech_secs = self._endpointer.speech_secs_in_window(self.BARGE_IN_VAD_WINDOW_SECS)
         if speech_secs is None or speech_secs >= self.MIN_BARGE_IN_VAD_SPEECH_SECS:
@@ -857,7 +895,7 @@ class VoiceSession:
         mid-utterance. Conservative on missing evidence (no endpointer /
         starved VAD → ``False``), mirroring :meth:`_vad_vetoes_barge_in`.
         """
-        if self._endpointer is None:
+        if self._endpointer is None or not self._vad_evidence:
             return False
         speech_secs = self._endpointer.speech_secs_in_window(self.BARGE_IN_VAD_WINDOW_SECS)
         return speech_secs is not None and speech_secs < self.MIN_BARGE_IN_VAD_SPEECH_SECS
@@ -873,7 +911,7 @@ class VoiceSession:
         still supersedes via COMMIT). No endpointer → ``True`` so unit tests
         without Silero keep the partial-extends-hold behavior.
         """
-        if self._endpointer is None:
+        if self._endpointer is None or not self._vad_evidence:
             return True
         window = time.monotonic() - since_monotonic
         if window <= 0:
@@ -944,10 +982,7 @@ class VoiceSession:
                 await asyncio.sleep(0.4)
                 if self._closed or not stranded:
                     continue
-                if (
-                    self._latest_partial_text == stranded
-                    and self._last_partial_at > self._last_commit_at
-                ):
+                if self._latest_partial_text == stranded and self._last_partial_at > self._last_commit_at:
                     logger.info(
                         "stt_stale_partial_synthesized",
                         text_preview=stranded[:80],
@@ -1152,8 +1187,7 @@ class VoiceSession:
         if self._endpointer is not None:
             self._endpointer.notify_committed()
         vad_endpointed = (
-            self._endpoint_commit_sent_at is not None
-            and time.monotonic() - self._endpoint_commit_sent_at < 2.0
+            self._endpoint_commit_sent_at is not None and time.monotonic() - self._endpoint_commit_sent_at < 2.0
         )
         if vad_endpointed:
             # INFO: the observable payoff of the fast path — how much sooner
@@ -1261,9 +1295,7 @@ class VoiceSession:
                 await self.interrupt()
                 self._cancel_turn.clear()
             # Detector returns the full utterance to hold (refine/merge already applied).
-            timeout = (
-                decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs
-            )
+            timeout = decision.hold_timeout_secs if decision.hold_timeout_secs is not None else self.hold_timeout_secs
             await self._arm_hold(final_text, timeout)
             return
 
@@ -1574,9 +1606,7 @@ class VoiceSession:
                             t.cancel()
                     if self._tts_tasks:
                         try:
-                            await asyncio.shield(
-                                asyncio.gather(*self._tts_tasks, return_exceptions=True)
-                            )
+                            await asyncio.shield(asyncio.gather(*self._tts_tasks, return_exceptions=True))
                         except asyncio.CancelledError:
                             pass
                     try:
