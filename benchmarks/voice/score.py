@@ -402,8 +402,18 @@ class Comparison:
         return not self.regressions
 
 
-def compare(card: Scorecard, baseline: dict[str, dict]) -> Comparison:
-    """Gate on movement away from the baseline, not on absolute thresholds."""
+def compare(card: Scorecard, baseline: dict[str, dict], partial: bool = False) -> Comparison:
+    """Gate on movement away from the baseline, not on absolute thresholds.
+
+    ``partial`` marks a filtered run (``-s`` / ``--quick``). Per-scenario rates stay
+    comparable because they are matched by name, but every *aggregate* is computed over
+    a different population than the baseline's, so comparing them invents movement that
+    is only a change of subject. Measured: the barge-in subset alone carries most of the
+    suite's ghost turns, so running just those reported "ghost turns 1 → 3" against a
+    full-suite baseline while being clean — and the reverse is worse, since a subset
+    that excludes them looks like an improvement. Latency and dead air are the same
+    story, a p50 over eight scenarios against a p50 over thirty-nine.
+    """
     out = Comparison()
     previous = baseline.get(card.label)
     if previous is None:
@@ -426,6 +436,12 @@ def compare(card: Scorecard, baseline: dict[str, dict]) -> Comparison:
 
     for name in card.unexpected_passes:
         out.improvements.append(f"{name}: known failure now passes — drop the known_failure marker")
+
+    if partial:
+        out.notes.append(
+            "filtered run: per-scenario rates gated, aggregates (ghost turns, latency, dead air) not comparable"
+        )
+        return out
 
     if card.ghost_turns > previous.get("ghost_turns", 0):
         out.regressions.append(f"ghost turns {previous.get('ghost_turns', 0)} → {card.ghost_turns}")

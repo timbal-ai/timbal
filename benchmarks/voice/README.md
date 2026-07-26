@@ -98,8 +98,28 @@ speech makes the assistant uninterruptible, the worse of the two failures.
 | clean, 4 baselined cells | 100% | **100%, no regressions** (126 runs) |
 
 The clean-run check is the one that matters for shipping it: a suppressor that catches
-more echo can start eating genuine interruptions, and `support_barge_in`,
-`medical_barge_in` and friends all still barge in.
+more echo can start eating genuine interruptions. All seven baselined cells were run,
+and the decisive one is `deepgram-flux/provider`, where `_likely_stt_echo` is the *only*
+semantic filter between a partial and cancelling the reply — no VAD corroboration, no
+EOU, nothing to catch an over-suppression. It scores 53/54 with all ten barge-in
+scenarios passing every repeat, `coding_barge_in_echo` included, while
+`support_echo_silence` stays uninterrupted. Its one flake is `food_long_pause` with
+`interrupted=False`, so the assistant never spoke over it and the echo check was never
+consulted.
+
+The ElevenLabs cells look worse (17/24 and 21/24 on the barge-in subset) and are not:
+the genuine barge-in is heard, and the extra turn is `'Yes.'` or `'Yeah.'` — the
+provider's documented hallucination on trailing silence, the same family as the `'Bye.'`
+above. 17/24 is also up from the 15/24 measured there before this change.
+
+Reading that comparison surfaced a gate defect worth knowing about. Per-scenario rates
+are matched by name and safe on a filtered run, but ghost turns, latency and dead air
+are aggregates over whatever subset ran, so comparing them against a full-suite
+baseline compares populations. The barge-in subset alone carries most of the suite's
+ghost turns and duly reported "ghost turns 1 → 3" while being clean; a subset that
+*excludes* them would have reported an improvement just as falsely. `compare()` now
+takes `partial` and skips aggregates for filtered runs, which is the same reasoning
+that already makes `--update-baseline` refuse them.
 
 **The residual has a separate cause worth its own fix.** Both call sites gate the check
 behind `state.assistant_active`, so echo that commits just *after* playback ends is

@@ -312,7 +312,7 @@ async def main() -> int:
             print(f"  baseline updated for {card.label}")
             continue
 
-        comparison = compare(card, baseline)
+        comparison = compare(card, baseline, partial=bool(args.scenario or args.quick))
         for line in comparison.notes:
             print(f"\n  note: {line}")
         if comparison.improvements:
