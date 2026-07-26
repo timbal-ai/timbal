@@ -2064,3 +2064,60 @@ class TestStalePartialSweeper:
 
         assert session.transcript[0].role == "user"
         assert session.transcript[0].text == "What are you doing?"
+
+    async def _run_churn_scenario(self, endpointer: object) -> tuple[_StuckPartialSTT, VoiceSession]:
+        """Stranded partial while the provider keeps emitting *new* partials
+        faster than the stale threshold, so transcript staleness never accrues.
+        """
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = _StuckPartialSTT()
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS())
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.4
+        _arm_vad(session, endpointer)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            stt.pending_text = "Sorry, one more thing."
+            # 0.1s apart against a 0.4s threshold: every hallucination resets the
+            # anchor well before it can expire.
+            for text in ("Sorry, one more thing.", "Yeah.", "I don't know.", "Yeah.", "Mm.", "Yeah."):
+                await stt.inject(TranscriptEvent(type="partial", text=text))
+                await asyncio.sleep(0.1)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        return stt, session
+
+    async def test_partial_churn_does_not_disarm_sweeper(self) -> None:
+        """Measured on ElevenLabs barge-ins: it hallucinates on trailing silence,
+        and each invented partial both restarts its own VAD silence timer (so it
+        never commits) and refreshes this sweeper's anchor (so the rescue never
+        fires). The user's interruption was lost outright in 8 of 12 runs. A quiet
+        mic has to be enough to conclude the provider is not going to commit.
+        """
+        stt, session = await self._run_churn_scenario(_FakeEndpointer(0.0))
+        assert stt.commit_calls >= 1, "churning partials kept the sweeper disarmed"
+        assert any(e.role == "user" and e.text == "Sorry, one more thing." for e in session.transcript)
+
+    async def test_live_mic_still_defers_the_sweeper(self) -> None:
+        """The mirror of the above: partials arriving while the mic is genuinely
+        hot mean the user is still talking, and force-committing there would cut
+        them off mid-utterance. Only *silence* may substitute for staleness.
+        """
+        stt, _ = await self._run_churn_scenario(_FakeEndpointer(0.5))
+        assert stt.commit_calls == 0, "sweeper force-committed while the user was still speaking"

@@ -962,6 +962,28 @@ class VoiceSession:
         speech_secs = self._endpointer.speech_secs_in_window(window)
         return speech_secs is not None and speech_secs >= self.MIN_HOLD_VAD_SPEECH_SECS
 
+    # Silero speech inside a window that still counts as quiet. A stray frame or
+    # two is a blip on breath or a click rather than the user resuming, and
+    # demanding exactly zero would let one of them keep a stranded transcript
+    # hostage for as long as the session lives.
+    MAX_QUIET_SPEECH_SECS = 0.1
+
+    def _mic_quiet_for(self, secs: float) -> bool:
+        """Silero heard essentially nothing in the trailing ``secs``.
+
+        Missing evidence returns ``False`` — no Silero means no opinion, and the
+        caller falls back to transcript staleness.
+
+        Not gated on :attr:`_vad_evidence`, for the reason
+        :meth:`_vad_hears_speech_now` is not: that flag guards inferences which
+        can *suppress* something the user did. This one only rescues speech that
+        would otherwise be lost outright.
+        """
+        if self._endpointer is None:
+            return False
+        speech_secs = self._endpointer.speech_secs_in_window(secs)
+        return speech_secs is not None and speech_secs <= self.MAX_QUIET_SPEECH_SECS
+
     # -- Internal: audio → STT ---------------------------------------------
 
     async def _forward_audio(self, audio_in: AsyncIterable[bytes]) -> None:
@@ -991,6 +1013,16 @@ class VoiceSession:
         force ``stt.commit()`` so the transcript flows through the normal
         ``_handle_committed`` path.
 
+        A *newer partial* is the wrong thing to wait on by itself. ElevenLabs
+        hallucinates on trailing silence, and each invented partial both restarts
+        its own VAD silence timer — so it never commits — and refreshes this
+        watchdog's anchor, so the safety net stays disarmed by the very churn it
+        exists to catch. Measured on `medical_barge_in`: partials 1.0-1.2s apart
+        (``"Sorry, one more thing."``, ``"Yeah."``, ``"Yeah."``) against a 2.5s
+        threshold, and the interrupting turn was never committed at all. So mic
+        silence counts too: if the user demonstrably stopped speaking that long
+        ago, the provider clearly will not commit, whatever it is still emitting.
+
         Providers whose ``commit()`` is a no-op (Deepgram Flux) never answer
         that nudge. After a short grace for Finalize-capable providers, we
         synthesize a committed event from the stranded partial text so the
@@ -1009,13 +1041,14 @@ class VoiceSession:
                 if self._last_partial_at <= self._stale_commit_sent_at:
                     continue
                 stale_secs = time.monotonic() - self._last_partial_at
-                if stale_secs < self._stale_partial_commit_secs:
+                mic_quiet = self._mic_quiet_for(self._stale_partial_commit_secs)
+                if stale_secs < self._stale_partial_commit_secs and not mic_quiet:
                     continue
                 self._stale_commit_sent_at = time.monotonic()
                 stranded = self._latest_partial_text
                 # INFO on purpose: this is the only trace that a transcript was
                 # rescued from a provider that silently refused to commit.
-                logger.info("stt_stale_partial_commit", stale_secs=round(stale_secs, 1))
+                logger.info("stt_stale_partial_commit", stale_secs=round(stale_secs, 1), mic_quiet=mic_quiet)
                 try:
                     await self.stt.commit()
                 except Exception as e:
@@ -1024,6 +1057,13 @@ class VoiceSession:
                 await asyncio.sleep(0.4)
                 if self._closed or not stranded:
                     continue
+                # The text holding still across the grace is load-bearing, and not
+                # merely a guard against racing a mid-flight commit: it is the
+                # only thing separating real speech from provider churn. Dropping
+                # it (so a partial that mutated inside the 400ms still synthesized)
+                # was measured at 4/12 on the ElevenLabs barge-ins versus 7/12
+                # with it, and synthesized a hallucinated ``"Yeah."`` as a turn of
+                # its own. A stranded turn is better than an invented one.
                 if self._latest_partial_text == stranded and self._last_partial_at > self._last_commit_at:
                     logger.info(
                         "stt_stale_partial_synthesized",

@@ -687,17 +687,46 @@ present — and then never commits:
 Not the harness, and not the hold change: forcing the waits back to resolving
 immediately reproduces it identically, 0/3, and the same scenario passes 3/3 on
 `deepgram-nova/lexical` while ElevenLabs passes 4/4 on non-barge-in scenarios. The
-plausible mechanism is visible in the trace — ElevenLabs hallucinates on the
-trailing silence, and with `commit_strategy="vad"` each invented partial restarts
-the 1.2s silence timer that would otherwise commit, so the real utterance is held
-open indefinitely. That is the same threshold the merge rates depend on, which
-makes it a poor thing to be load-bearing twice.
+mechanism is visible in the trace — ElevenLabs hallucinates on the trailing
+silence, and with `commit_strategy="vad"` each invented partial restarts the 1.2s
+silence timer that would otherwise commit, so the real utterance is held open
+indefinitely. That is the same threshold the merge rates depend on, which makes it
+a poor thing to be load-bearing twice.
+
+**But calling it provider-side was letting Timbal off too easily.** The session
+already has a watchdog for precisely this — a partial the provider never commits,
+whose docstring describes the words hanging "as a '…' caption forever" and which is
+meant to fire once "the provider clearly won't". It measured staleness from the
+*last partial arrival*, so partials landing 1.0–1.2s apart against its 2.5s
+threshold kept it permanently disarmed: the churn that stops ElevenLabs committing
+is the same churn that stops the safety net noticing. Logging the anchor shows it
+firing at `stale_secs` of 0.0, 0.4 and 0.9 once mic silence counts too — three
+rescues that could never have happened on transcript staleness alone.
+
+Anchoring on mic silence instead (`_mic_quiet_for`: Silero heard ≤0.1s of speech in
+the window, so the user demonstrably stopped, whatever the provider is still
+emitting) takes the four barge-in scenarios from 4/12 to **15/24**, no session
+errors, with the three remaining failures flaky rather than hard and
+`support_barge_in_instant` passing outright. It is deliberately not gated on
+`_vad_evidence`: that flag guards inferences which can *suppress* something the
+user did, and this one only rescues speech that would otherwise be lost. Confirmed
+free of collateral damage across 156 runs on the four baselined Deepgram cells — no
+unexpected failures, no errors, and the single ghost is `banking_confirmation` on
+`deepgram-flux/local`, which produced the identical ghost in 1 of 3 repeats before
+the change.
+
+Two fixes that looked obvious and measured worse, both worth not re-trying:
+
+| Hypothesis | Result |
+|---|---|
+| `commit_strategy="manual"`, so Timbal drives commits instead of ElevenLabs' VAD | **0/12**, and every run also errored `timed out waiting for assistant audio`. The first turn still commits via the endpointer, but the reply never arrives in time. Only viable at all where the endpointer arms — under `heuristic` or `provider` nothing would ever commit. |
+| Dropping the synthesis fallback's requirement that the partial text hold still across its 400ms grace, since a hallucination landing inside that window skips the rescue | **4/12** and it synthesized a hallucinated `"Yeah."` as a turn of its own. The stability check is not merely guarding against a racing commit: it is the only thing separating real speech from churn. A stranded turn beats an invented one. |
 
 Consequence for the baseline: 5 of 12 cells carry a current one, all Deepgram, all
 at `--jobs 6`. The two ElevenLabs entries are stale — `--jobs 1`, ~31 runs from a
-`--quick` subset — and cannot be refreshed while the provider is dropping turns,
-since a cell with unmarked failures is refused. Latency there is consequently
-ungated on a concurrency mismatch as well.
+`--quick` subset — and still cannot be refreshed, since a cell with unmarked
+failures is refused and the barge-ins remain flaky at 62%. Latency there is
+consequently ungated on a concurrency mismatch as well.
 
 Two incidental findings from the same session. `sweep.py` never configured
 structlog, so every sweep — including the tier retune above — buried its own
@@ -792,11 +821,11 @@ failures that are the STT's alone and land identically under all four detectors,
 like Nova committing a "mm-hmm"; writing those per cell states one fact four times
 and hides that it is one fact.
 
-`--jobs N` overlaps runs across the whole queue, cells included. Two rules keep it
-from corrupting the thing it accelerates: `--update-baseline` is refused above
-`--jobs 1`, and latency is never compared across differing concurrency — it is
-printed with a note instead. Pass rates and ghost turns still gate normally, so a
-parallel matrix run is a real gate on everything except speed.
+`--jobs N` overlaps runs across the whole queue, cells included. One rule keeps it
+from corrupting the thing it accelerates: latency is never compared across differing
+concurrency — it is printed with a note instead. Baselines may be taken in parallel
+(see the measurement above), so what a parallel run records is gated against later
+runs at the same `--jobs`. Pass rates and ghost turns gate regardless.
 
 ## Results and the regression gate
 
