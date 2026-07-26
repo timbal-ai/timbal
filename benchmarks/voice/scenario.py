@@ -513,6 +513,25 @@ _TRAILING_MODIFIER_FAILURE = (
     "its hold to 0.35s"
 )
 
+# Off Flux, Namo alone is not enough to hold a mid-sentence pause. Nova commits a
+# fragment that reads as a finished sentence and `lexical` has no second opinion to
+# contradict it — the audio EOU is exactly what `local` adds, and the gap between
+# them on this family is 20% vs 60% (Nova) and 70% vs 80% (ElevenLabs). Marked per
+# cell rather than per detector because the same detector merges these on Flux,
+# where the provider held the fragment before any detector saw it.
+_TEXT_ONLY_PAUSE_SHORTFALL = (
+    "text EOU alone cannot hold this pause off Flux: the committed fragment reads finished and nothing contradicts it"
+)
+
+# Even with Smart Turn, some pauses are past what either signal resolves. Kept
+# separate from the text-only reason so a fix to one is not credited to the other.
+_AUDIO_PAUSE_SHORTFALL = "audio EOU hears the continuation but the hold does not survive this gap"
+
+# ElevenLabs' endpointer waits longer than Flux's, which helps mid-sentence pauses
+# and hurts here: two finished sentences 0.9s apart come back as one turn, in all
+# four cells, with no detector given a chance to disagree.
+_EL_OVERMERGE = "ElevenLabs merges the two sentences into one turn before any detector sees them"
+
 # Under `provider` the session defers to the STT's endpointing entirely, so none of
 # Timbal's hold logic runs and whatever Flux decides stands.
 # Under `provider` there is no Timbal hold to override the STT, so any pause Flux
@@ -567,6 +586,7 @@ SCENARIOS: list[Scenario] = [
             Interrupted(False),
             NoErrors(),
         ],
+        known_failure={"deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL},
         note=(
             "Used to split under `provider` and `local` and was marked a known failure for "
             "both. Fluent synthesis fixed it outright: rendered standalone this fragment "
@@ -708,6 +728,11 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(),
             NoErrors(),
         ],
+        known_failure={
+            "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "elevenlabs/lexical": _TEXT_ONLY_PAUSE_SHORTFALL + " — merged 3/4",
+        },
+        intermittent=True,
         note=(
             "A dangling coordinating conjunction is the strongest continuation cue in text, so "
             "this is the pause case text EOU should get right without any help from prosody — "
@@ -779,6 +804,11 @@ SCENARIOS: list[Scenario] = [
             Interrupted(False),
             NoErrors(),
         ],
+        known_failure={
+            "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "elevenlabs/lexical": _TEXT_ONLY_PAUSE_SHORTFALL + " — merged 2/3",
+        },
+        intermittent=True,
         quick=True,
         note=(
             "Under deepgram-flux + provider, Flux holds through the gap and merges inside "
@@ -796,6 +826,11 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[ContentPreserved(), NoGhostTurns(), NoErrors()],
+        known_failure={
+            "elevenlabs/lexical": "ElevenLabs drops part of the utterance across this gap rather "
+            "than splitting it — content preserved 1/3"
+        },
+        intermittent=True,
         note=(
             "The one scenario whose desired outcome is genuinely ambiguous, so it asserts "
             "content rather than turn count. At a 3.0s gap both answers are defensible — "
@@ -823,6 +858,13 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(),
             NoErrors(),
         ],
+        known_failure={
+            "deepgram-nova/local": _AUDIO_PAUSE_SHORTFALL,
+            "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "elevenlabs/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
+            "elevenlabs/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+        },
+        intermittent=True,
         note=(
             "A pause after a comma mid-enumeration: prosody says continue even though the "
             "gap is long. Failed on every detector until fluent synthesis; now passes on all "
@@ -887,7 +929,16 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(),
             NoErrors(),
         ],
-        note="A stranded preposition: syntactically incomplete, so text EOU should hold without prosody.",
+        known_failure={
+            "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "elevenlabs/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
+        },
+        intermittent=True,
+        note=(
+            "A stranded preposition: syntactically incomplete, so text EOU should hold without "
+            "prosody. It does on Flux and under `local` on Nova — the off-Flux `lexical` failure "
+            "is the one that should be fixable on text alone, and is not."
+        ),
     ),
     Scenario(
         id="food_rapid_fire",
@@ -900,6 +951,7 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(2), NoGhostTurns(), NoErrors()],
+        known_failure={"elevenlabs/*": _EL_OVERMERGE},
         note=(
             "The inverse of every pause scenario: two genuinely finished sentences separated by "
             "a short gap, which must *not* merge. The suite is full of cases punishing a split "
@@ -986,7 +1038,12 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(min_similarity=0.5),
             NoErrors(),
         ],
-        known_failure={"deepgram-flux/*": _TRAILING_MODIFIER_FAILURE},
+        known_failure={
+            "deepgram-flux/*": _TRAILING_MODIFIER_FAILURE,
+            "deepgram-nova/local": _TRAILING_MODIFIER_FAILURE,
+            "elevenlabs/local": _TRAILING_MODIFIER_FAILURE + " — merged 2/3",
+        },
+        intermittent=True,
         note=(
             "Self-repair mid-utterance. 'No wait,' is a complete clause boundary that reads "
             "finished to text EOU while guaranteeing more speech follows — and committing here "
@@ -1008,7 +1065,10 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(min_similarity=0.5),
             NoErrors(),
         ],
-        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_GHOST_I},
+        known_failure={
+            "deepgram-flux/provider": _FLUX_PROVIDER_GHOST_I,
+            "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+        },
         intermittent=True,
         note=(
             "A filler immediately before the gap, which is where hedges actually occur in "
@@ -1032,6 +1092,10 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[UserTurns(1), ContentPreserved(min_similarity=0.8), NoGhostTurns(), NoErrors()],
+        known_failure={
+            "deepgram-nova/lexical": "Nova endpoints at the clause boundaries inside this run-on "
+            "and text EOU scores each piece finished, so it commits three turns"
+        },
         note=(
             "Twelve seconds of unbroken speech with several clause boundaries an endpointer "
             "could mistake for an ending. The longest utterance in the suite by a wide margin; "
@@ -1063,7 +1127,12 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(min_similarity=0.4),
             NoErrors(),
         ],
-        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_GHOST_I},
+        known_failure={
+            "deepgram-flux/provider": _FLUX_PROVIDER_GHOST_I,
+            "deepgram-nova/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
+            "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "elevenlabs/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
+        },
         intermittent=True,
         note=(
             "The hardest merge in the suite: a digit string broken across a pause, with no "
@@ -1136,7 +1205,11 @@ SCENARIOS: list[Scenario] = [
         known_failure={
             "deepgram-flux/local": _TRAILING_MODIFIER_FAILURE,
             "deepgram-flux/provider": _TRAILING_MODIFIER_FAILURE,
+            "deepgram-nova/local": _TRAILING_MODIFIER_FAILURE,
+            "deepgram-nova/lexical": _TRAILING_MODIFIER_FAILURE,
+            "elevenlabs/local": _TRAILING_MODIFIER_FAILURE + " — merged 1/3",
         },
+        intermittent=True,
         note=(
             "Self-correction on a digit string: no lexical context, and committing early sends "
             "the LLM the wrong account number rather than merely a fragment. The one scenario "
@@ -1168,7 +1241,10 @@ SCENARIOS: list[Scenario] = [
             NoGhostTurns(min_similarity=0.5),
             NoErrors(),
         ],
-        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_SPLIT},
+        known_failure={
+            "deepgram-flux/provider": _FLUX_PROVIDER_SPLIT,
+            "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+        },
         intermittent=True,
         note=(
             "Baselined as a clean pass until --repeat 3 caught `provider` splitting it once in "

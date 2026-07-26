@@ -260,12 +260,42 @@ mid-phrase survives a transcript that reads like a finished sentence, and text
 alone does not. If Timbal is ever pointed at a plain streaming ASR, `local` is the
 default and `provider` is close to unusable for pauses.
 
-Two caveats. Nova and ElevenLabs are not baselined — several cells have genuine
-failures that would need per-cell `known_failure` markers first, so only the Flux
-column is gated today. And ElevenLabs drops content on hard inputs independently of
-turn-taking (it committed "I'd like to order a large" and silently lost the pizza),
-which `ContentPreserved` now catches but which is an STT-quality difference rather
-than a turn-taking one.
+One caveat: ElevenLabs drops content on hard inputs independently of turn-taking
+(it committed "I'd like to order a large" and silently lost the pizza), which
+`ContentPreserved` now catches but which is an STT-quality difference rather than
+a turn-taking one.
+
+### Seven cells gate, five do not, and that is deliberate
+
+A census of the nine ungated cells at `--repeat 3` (1,041 runs) turned up 77
+failing scenario-cells. Marking all 77 would have been the wrong answer, because
+they are not 77 findings:
+
+| detector | unmarked failing cells |
+|---|---:|
+| `heuristic` | 29 |
+| `provider` | 24 |
+| `lexical` | 14 |
+| `local` | 10 |
+
+`heuristic` has no EOU model at all and `provider` delegates to the STT, so
+neither can hold a mid-sentence pause on a backend that does not endpoint for
+them. Their 53 failures are one architectural fact recorded 53 times, and
+marking them would turn `known_failure` from a record of defects into wallpaper.
+
+So the four cells where the detector does real work — `deepgram-nova` and
+`elevenlabs` × `local` and `lexical` — are now baselined, taking the gate from 3
+cells to **7**. That cost 24 cell-scoped markers, each citing a measured rate.
+The remaining five (`deepgram-flux/heuristic`, and `heuristic`/`provider` on both
+other backends) are measured on every run and reported, but not gated: their
+pause-family failures are a property of choosing a detector with nothing to hold
+with, which is what the detector table above is for.
+
+The markers cluster into three named reasons rather than 24 bespoke ones —
+`_TEXT_ONLY_PAUSE_SHORTFALL` (Namo alone cannot hold the pause off Flux),
+`_AUDIO_PAUSE_SHORTFALL` (Smart Turn hears it but the hold does not survive), and
+`_EL_OVERMERGE` — so a fix to any one of them shows up as a block of unexpected
+passes rather than a scatter.
 
 The ranking survived the suite growing to 38 (numbers are not comparable to the
 table above — the added scenarios are deliberately harder): `local` 92/81/92,
@@ -401,8 +431,10 @@ protect — `support_closer`, all four barge-ins, `banking_short_reject`,
 cost is p95 dead air 1969 → 2683ms. 3.0 scores higher on merges still and is not
 worth it: p95 3617ms and `support_pause_short` starts failing.
 
-The default is now 1.2. The gated Flux cells stayed at 100% and their dead-air
-p50 improved (725→680, 819→615, 550→486ms).
+The default is now 1.2. The gated Flux cells stayed at 100% and their dead-air p50
+improved, so they were re-baselined serially against the new default rather than
+left holding pre-retune numbers the gate would have had slack against
+(725→668, 819→656, 550→489ms).
 
 What the sweep also settled is where this knob *stops*. `medical_self_correction`
 tops out at 33% and `banking_correction` at 22% — at every value tried. Those are
