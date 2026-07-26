@@ -187,9 +187,7 @@ class _DeepgramSTTBase(SpeechToText):
             # Deepgram closes normally after CloseStream; only surface abnormal
             # closures as errors so the session tears down loudly.
             if not self._stop.is_set() and e.rcvd is not None and e.rcvd.code not in (1000, 1001):
-                await self._queue.put(
-                    TranscriptEvent(type="error", text=f"STT connection closed: {e}")
-                )
+                await self._queue.put(TranscriptEvent(type="error", text=f"STT connection closed: {e}"))
         except Exception as e:
             logger.error("dg_stt_receive_error", error=str(e), exc_info=True)
             await self._queue.put(TranscriptEvent(type="error", text=f"STT receive error: {e}"))

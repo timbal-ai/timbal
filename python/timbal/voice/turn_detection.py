@@ -184,10 +184,31 @@ def _is_garbage_commit(text: str) -> bool:
 # "no", "sí", "ok", "ya" must never match.
 _HESITATION_TOKENS = frozenset(
     {
-        "uh", "uhh", "uhhh", "um", "umm", "ummm", "uhm", "uhum",
-        "hm", "hmm", "hmmm", "mm", "mmm", "mhm", "mmhm",
-        "er", "erm", "eh", "ehh", "ehm", "em",
-        "ah", "ahh", "ahhh", "aah",
+        "uh",
+        "uhh",
+        "uhhh",
+        "um",
+        "umm",
+        "ummm",
+        "uhm",
+        "uhum",
+        "hm",
+        "hmm",
+        "hmmm",
+        "mm",
+        "mmm",
+        "mhm",
+        "mmhm",
+        "er",
+        "erm",
+        "eh",
+        "ehh",
+        "ehm",
+        "em",
+        "ah",
+        "ahh",
+        "ahhh",
+        "aah",
     }
 )
 _HESITATION_WORD_RE = re.compile(r"[a-zà-öø-ÿ']+")
@@ -335,10 +356,7 @@ class HeuristicTurnDetector(TurnDetector):
         is_noise = _is_noise(text)
         is_hesitation = _is_hesitation_only(text)
         is_echo = _likely_stt_echo(text, state.assistant_text) if not is_noise else False
-        too_short = (
-            len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS
-            or len(text.split()) < self.MIN_BARGE_IN_PARTIAL_WORDS
-        )
+        too_short = len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS or len(text.split()) < self.MIN_BARGE_IN_PARTIAL_WORDS
         if not is_noise and not is_hesitation and not is_echo and not too_short:
             return PartialDecision.BARGE_IN
         logger.debug(
@@ -426,9 +444,7 @@ class HeuristicTurnDetector(TurnDetector):
                 # utterance → not a VAD mid-phrase split. Ultra-early crumbs
                 # are STT ghosts (live: "…killer." then "No." at +55ms);
                 # anything later is a real short barge-in → NEW_TURN below.
-                if _looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(
-                    text
-                ):
+                if _looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(text):
                     words = _WORD_RE.findall(text)
                     if (
                         state.seconds_since_last_commit < self.TRAILING_CRUMB_WINDOW_SECS
@@ -688,9 +704,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self.audio_eou = audio_eou
         if completion_threshold is not None:
             self.completion_threshold = completion_threshold
-        self.hold_timeout_secs = (
-            hold_timeout_secs if hold_timeout_secs is not None else self.DEFAULT_HOLD_TIMEOUT_SECS
-        )
+        self.hold_timeout_secs = hold_timeout_secs if hold_timeout_secs is not None else self.DEFAULT_HOLD_TIMEOUT_SECS
         self.text_complete_hold_timeout_secs = (
             text_complete_hold_timeout_secs
             if text_complete_hold_timeout_secs is not None
@@ -911,9 +925,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
                     action=CommitAction.HOLD,
                     text=candidate,
                     reason="audio_complete_text_incomplete",
-                    hold_timeout_secs=min(
-                        self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs
-                    ),
+                    hold_timeout_secs=min(self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs),
                 )
             return CommitDecision(
                 action=CommitAction.NEW_TURN,
@@ -926,10 +938,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         if (
             state.active_user_text
             and state.assistant_active
-            and not (
-                _looks_like_finished_utterance(state.active_user_text)
-                and _looks_like_fresh_hold_utterance(text)
-            )
+            and not (_looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(text))
         ):
             combined = state.active_user_text.rstrip(", ") + " " + text
             return CommitDecision(
@@ -1047,8 +1056,6 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
     if callable(spec):
         built = spec()
         if not isinstance(built, TurnDetector):
-            raise TypeError(
-                f"turn_detector factory must return a TurnDetector, got {type(built)!r}"
-            )
+            raise TypeError(f"turn_detector factory must return a TurnDetector, got {type(built)!r}")
         return built
     raise TypeError(f"turn_detector must be str | TurnDetector | callable | None, got {type(spec)!r}")

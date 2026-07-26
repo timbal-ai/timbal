@@ -382,9 +382,7 @@ class RealtimeSession:
         if self._turn_text or self._turn_audio_bytes:
             # S2S interleaves text and audio without segment boundaries: map the
             # heard position proportionally over the whole turn.
-            heard_text = map_played_bytes_to_text(
-                [(self._turn_text, self._turn_audio_bytes)], heard_bytes
-            )
+            heard_text = map_played_bytes_to_text([(self._turn_text, self._turn_audio_bytes)], heard_bytes)
         if self._turn_active:
             if heard_text:
                 self._transcript.append(TranscriptEntry(role="assistant", text=heard_text))
