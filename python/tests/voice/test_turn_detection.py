@@ -478,11 +478,12 @@ class TestLocalAudioTurnDetector:
 
     async def test_incomplete_audio_complete_text_short_hold(self) -> None:
         """Confidence tier: Smart Turn under-scores short closers ("Thank you."
-        p=0.036 live) — terminal punctuation disagrees, so the hold shrinks to
-        the short tier instead of eating the full budget as dead air.
+        p=0.036 live) — terminal punctuation disagrees, so the hold shrinks
+        below the full budget instead of eating all of it as dead air.
 
-        Keep this well under the incomplete-text HOLD (1.2s): VAD has usually
-        already waited, and a second 1.2s tax is the cold-start "slow" feel.
+        The tier was 0.35s until the sweep retuned it to 1.2s, which is also
+        what the incomplete-text tier costs: the two now differ only in the
+        logged reason, and "short" means short of ``hold_timeout_secs`` alone.
         """
         det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
         await det.start(type("C", (), {"sample_rate": 16000})())
@@ -491,8 +492,8 @@ class TestLocalAudioTurnDetector:
         assert decision.action is CommitAction.HOLD
         assert decision.reason == "audio_hold_text_complete"
         assert decision.hold_timeout_secs == det.text_complete_hold_timeout_secs
-        assert det.text_complete_hold_timeout_secs == 0.35
-        assert det.text_complete_hold_timeout_secs < det.text_incomplete_hold_timeout_secs
+        assert det.text_complete_hold_timeout_secs == 1.2
+        assert det.text_complete_hold_timeout_secs <= det.text_incomplete_hold_timeout_secs
         assert det.text_complete_hold_timeout_secs < det.hold_timeout_secs
         # Per-session clones keep the knob.
         assert det.clone().text_complete_hold_timeout_secs == det.text_complete_hold_timeout_secs

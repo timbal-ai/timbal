@@ -586,11 +586,14 @@ SCENARIOS: list[Scenario] = [
             Interrupted(False),
             NoErrors(),
         ],
-        known_failure={"deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL},
         note=(
             "Used to split under `provider` and `local` and was marked a known failure for "
             "both. Fluent synthesis fixed it outright: rendered standalone this fragment "
-            "scores 0.986 finished, and cut from the whole sentence it scores 0.019."
+            "scores 0.986 finished, and cut from the whole sentence it scores 0.019.\n\n"
+            "The last marker, `deepgram-nova/lexical`, went the same way once holds could be "
+            "extended on mic energy instead of only on new partials: a text-only detector has "
+            "no prosody to hold on, so it was expiring mid-pause. Passes 3/3 there now, and "
+            "the marker was never flagged intermittent, so it had been failing reliably."
         ),
     ),
     Scenario(
@@ -826,22 +829,24 @@ SCENARIOS: list[Scenario] = [
             *_SETTLE,
         ],
         expect=[ContentPreserved(), NoGhostTurns(), NoErrors()],
-        known_failure={
-            "elevenlabs/lexical": "ElevenLabs drops part of the utterance across this gap rather "
-            "than splitting it — content preserved 1/3"
-        },
-        intermittent=True,
         note=(
             "The one scenario whose desired outcome is genuinely ambiguous, so it asserts "
             "content rather than turn count. At a 3.0s gap both answers are defensible — "
             "holding costs 3s of dead air, splitting sends a fragment to the LLM — and the "
             "suite has no basis for calling either wrong. Observed: Flux merges under "
             "`lexical`/`local` and splits under `heuristic`/`provider`, Nova splits under all "
-            "four, ElevenLabs merges under `lexical`/`local`. Flux's merge is not Timbal's: "
+            "four, ElevenLabs splits under `lexical`. Flux's merge is not Timbal's: "
             "the trace shows Flux streaming partials through the whole gap and emitting one "
             "commit, so no fragment ever reaches a detector. It previously demanded a merge "
             "wherever one had been seen, which quietly turned observations into requirements "
-            "and failed Nova for behaving reasonably."
+            "and failed Nova for behaving reasonably.\n\n"
+            "It also carried a known failure blaming ElevenLabs for dropping the second "
+            "fragment instead of splitting. That was the harness: `AwaitCommit` resolved on "
+            "the *first* fragment's commit, which on ElevenLabs lands ~1.6s late and so "
+            "arrived after the wait was armed, leaving only the 0.8s tail for a commit that "
+            "needed ~1.0s. The turn was lost to teardown, not by the provider — and one "
+            "observed turn instead of two is also why this note used to say ElevenLabs merged "
+            "here. It splits, 4/4, content intact."
         ),
     ),
     Scenario(

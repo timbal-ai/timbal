@@ -920,6 +920,48 @@ class VoiceSession:
         speech_secs = self._endpointer.speech_secs_in_window(window)
         return speech_secs is not None and speech_secs >= self.MIN_BARGE_IN_VAD_SPEECH_SECS
 
+    # Trailing window for "the user is still talking right now". Long enough to
+    # bridge Silero's between-phoneme dips, short enough that a HOLD fires
+    # promptly once they really stop.
+    HOLD_VAD_SPEECH_WINDOW_SECS = 0.5
+    MIN_HOLD_VAD_SPEECH_SECS = 0.1
+    # Ceiling on how long mic energy alone may defer one HOLD. Echo surviving an
+    # imperfect canceller carries energy, so without a cap the assistant's own
+    # playback could hold a turn open for as long as it speaks.
+    HOLD_VAD_MAX_EXTENSION_SECS = 3.0
+
+    def _vad_hears_speech_now(self, since_monotonic: float) -> bool:
+        """Silero saw speech in the last :attr:`HOLD_VAD_SPEECH_WINDOW_SECS`,
+        counting only after ``since_monotonic``.
+
+        Two departures from the neighbouring VAD gates, both because this one
+        *triggers* a hold extension instead of corroborating an STT partial:
+
+        Missing evidence returns ``False``, not ``True`` — a permissive default
+        would defer every hold to its cap on any session without Silero.
+
+        It does not require :attr:`_vad_evidence` (an audio EOU model). That
+        flag guards behaviours that can *suppress* something the user did, like
+        vetoing a barge-in, where being wrong makes the assistant
+        uninterruptible. Declining to end a turn while the mic is live only
+        delays it, by at most :attr:`HOLD_VAD_MAX_EXTENSION_SECS`, and the
+        user's own commit supersedes the hold either way — and the text-only
+        detectors that lack an audio EOU are exactly the ones whose STT splits
+        utterances soonest.
+
+        The anchor matters only for holds shorter than the window: no shipped
+        tier is (1.2s is the shortest, and the provider's own silence threshold
+        precedes it), but without it a 0.2s hold would count the held
+        utterance's own tail as the user resuming and extend on itself.
+        """
+        if self._endpointer is None:
+            return False
+        window = min(self.HOLD_VAD_SPEECH_WINDOW_SECS, time.monotonic() - since_monotonic)
+        if window <= 0:
+            return False
+        speech_secs = self._endpointer.speech_secs_in_window(window)
+        return speech_secs is not None and speech_secs >= self.MIN_HOLD_VAD_SPEECH_SECS
+
     # -- Internal: audio → STT ---------------------------------------------
 
     async def _forward_audio(self, audio_in: AsyncIterable[bytes]) -> None:
@@ -1078,6 +1120,7 @@ class VoiceSession:
             me = asyncio.current_task()
             try:
                 remaining = timeout_secs
+                vad_extended_secs = 0.0
                 while True:
                     await asyncio.sleep(remaining)
                     # Never fire mid-utterance: a *new* STT partial since the
@@ -1096,6 +1139,26 @@ class VoiceSession:
                         logger.debug(
                             "stt_hold_extended",
                             remaining=round(remaining, 3),
+                            timeout_secs=timeout_secs,
+                        )
+                        continue
+                    # Mic says the user is still going but the STT has not caught
+                    # up. Waiting for a partial loses this race whenever the
+                    # provider commits on a short silence: measured on
+                    # ElevenLabs at a 0.3s VAD threshold, an interior pause
+                    # committed the fragment and the next one's audio was in
+                    # flight ~1.3s before any partial existed to extend on, so
+                    # a 1.2s hold fired mid-sentence and split the utterance.
+                    if vad_extended_secs < self.HOLD_VAD_MAX_EXTENSION_SECS and self._vad_hears_speech_now(anchor):
+                        remaining = min(
+                            self.HOLD_VAD_SPEECH_WINDOW_SECS,
+                            self.HOLD_VAD_MAX_EXTENSION_SECS - vad_extended_secs,
+                        )
+                        vad_extended_secs += remaining
+                        logger.debug(
+                            "stt_hold_extended_vad",
+                            remaining=round(remaining, 3),
+                            extended_secs=round(vad_extended_secs, 3),
                             timeout_secs=timeout_secs,
                         )
                         continue

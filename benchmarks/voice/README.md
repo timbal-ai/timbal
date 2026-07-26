@@ -501,6 +501,230 @@ The same table is a warning about the latency figures generally: a 15% gate on a
 statistic that drifts 6% between identical runs has less headroom than it looks
 like, and any cross-detector comparison under ~20ms is noise.
 
+### ElevenLabs was doing the merging, and that hid a defect in ours
+
+ElevenLabs' dead air sits at p50 ~1.5s against Deepgram's 0.5–0.7s, which read as
+a provider property until someone looked: `default_voice_config_from_env` ships
+`vad_silence_threshold_secs=1.2` while Nova ships `endpointing=300`. A 4x
+asymmetry, in *our* config, with a written justification on neither. The obvious
+move was to cut it toward Nova's and collect the second.
+
+Sweeping it says the opposite, and says it flatly:
+
+| `vad_silence_threshold_secs` | pause merges | dead air p50 | p95 |
+|---|---:|---:|---:|
+| 0.3 | 47% | 728ms | 2388ms |
+| 0.5 | 44% | 757ms | 2722ms |
+| 0.8 | 59% | 1024ms | 3125ms |
+| 1.2 (ships) | **86%** | 1409ms | 2721ms |
+
+Every millisecond of that 1.5s is buying a merge: 39 points of them for 681ms.
+And the per-scenario column says who was earning it — `medical_self_correction`
+and `banking_correction`, the two cases the hold-tier sweep above could never fix
+at any value, score 100% here and 0% at 0.3. **ElevenLabs' VAD was holding them,
+not our detector.** Take its 1.2s away and Timbal's own merge path is exposed at
+47%, which is also roughly where `deepgram-nova/lexical` has been sitting all
+along at `endpointing=300`. Two findings filed separately were one defect, with a
+provider's patience masking it on one backend and not the other.
+
+That also killed a day of planned work before it started. Switching ElevenLabs to
+`commit_strategy="manual"` — Timbal owning endpointing end to end, which sounds
+strictly better — is the 0.3 column with extra steps, plus `rate_limited` being a
+*fatal* STT message type and the endpointer silently dropping any commit it skips
+for `session_gate` or `commit_interval`.
+
+The defect itself is one line of the `coding_double_pause` trace at 0.3:
+
+```
+17:19:00  commit "The build fails when I-"   audio p=0.007  → HOLD 3.0s
+17:19:02  commit "I import the module."      audio p=0.035  → HOLD 1.2s
+17:19:03  [user starts speaking "inside a test."]
+17:19:03  stt_hold_expired                                  ← mid-speech
+17:19:04  commit "Inside a test."                            → 2 turns, FAIL
+```
+
+`_arm_hold` already refuses to fire mid-utterance — but it keys that on a new STT
+*partial* since the commit, and lets Silero only corroborate one, never trigger.
+When the provider commits on a short silence the next fragment's audio is in
+flight for over a second before any partial exists, so the guard has nothing to
+hold on and the timer wins. Silero saw that speech the whole time; the log line
+`vad_speech_stop utterance_secs=0.96` sits four lines above the expiry. The
+fastest signal in the pipeline was subordinated to the slowest.
+
+Holds now also extend on mic energy alone (`_vad_hears_speech_now`), capped at
+3.0s, re-checked every 500ms:
+
+| at `vad_silence_threshold_secs=0.3` | pause merges | dead air p50 | p95 |
+|---|---:|---:|---:|
+| before | 47% | 728ms | 2388ms |
+| after | **77%** | 742ms | 2230ms |
+
+Thirty points for fourteen milliseconds — the tell that those merges were never
+being bought with time. They were being lost to a timer firing while the user was
+still talking, and waiting for the *user* rather than for a *duration* costs
+nothing when the user has in fact stopped. At 1.2 the change is inert (86% → 83%,
+inside the noise at n=78), exactly as it should be: ElevenLabs isn't splitting
+utterances there, so there is nothing to catch.
+
+The cap is not decoration. Echo surviving an imperfect canceller carries energy —
+see the echo-suppressor section — so without it the assistant's own playback could
+hold a turn open for as long as it speaks.
+
+**What this changes is the shape of the config question, not just a number.** The
+gap between an aggressive threshold and the shipped one has gone from 39 points to
+six:
+
+| | pause merges | dead air p50 |
+|---|---:|---:|
+| 0.3 | 77% | 742ms |
+| 1.2 | 83% | 1417ms |
+
+Six points for 675ms on every turn is a trade worth arguing about; 39 points for
+the same 675ms was not. Unresolved deliberately: n=78 on one backend, and the
+pause family excludes every barge-in by construction, which is precisely where
+holding longer would cost.
+
+**Confirming the fix on the full matrix caught the harness scoring it wrong.**
+The gate reported `ghost turns 1 → 3` (or 4) against baseline in four cells — and
+those are exactly the four where merging improved. `count_ghost_turns` asked
+whether a committed turn resembled *one* script entry at ≥0.6 similarity, so a
+correct three-fragment merge, being about 2.5x longer than any fragment it was
+compared against, resembled none of them:
+
+```
+deepgram-nova/local   coding_double_pause   turns=1 ghosts=1 passed=True failures=[]
+  committed: ['The build fails when I import the module. Inside a test.']
+  script:    ['The build fails when I', 'import the module', 'inside a test.']
+```
+
+One turn, zero failures, and the metric calls it invented. Three repeats × the one
+scenario in the suite with three fragments, plus one pre-existing real ghost,
+accounts for every unit of that "regression" — and it gates. It mis-scored the
+inverse too: `medical_long_utterance` split into three commits counted two ghosts,
+because a piece of a run-on does not resemble the whole.
+
+Turns are now matched against a *window* of the whole script (`best_window`, which
+already existed for `HeardPrefix`) rather than any single entry, since turn
+boundaries are the thing under test and are not expected to line up with script
+boundaries. Turns under three words keep the per-entry rule: a one-word needle
+finds a passable window in almost any script, and a spurious lone `"I"` turn —
+which Flux really does emit — has to stay countable. Across all 38 speaking
+scenarios, replayed both as one perfect merge and as perfect per-entry turns,
+neither shape now registers a ghost.
+
+**Chasing two apparent flakes found the harness had been mis-measuring
+ElevenLabs on the whole pause family.** 69 failures in the matrix read
+`fragments never heard` — the second half of an utterance absent entirely, the
+worst failure class here. 68 were ElevenLabs, across 13 scenarios, concentrated
+in `provider` (31) and `heuristic` (29): exactly the two detectors with no
+Timbal-side endpointing, so exactly the two that wait on the provider's own
+commit.
+
+`AwaitCommit` waited for `len(committed) > base`, with `base` sampled when the
+last `Say` *started*. ElevenLabs commits ~1.6s after speech ends, so the
+*previous* fragment's commit landed after that sample and satisfied the wait
+meant for the fragment under test. What remained was the 0.8s tail plus a 0.5s
+drain, against a commit needing ~1.0s. The turn was lost to teardown:
+
+```
+[+ 3.19s] committed  "The pain is, um..."     <- fragment 1, 1.7s after it was spoken
+[+ 4.05s] await_commit                        <- satisfied instantly by the line above
+[+ 4.67s] partial    "Mostly at night."       <- fragment 2 arrives
+                                              <- teardown ~4.85s. Never committed.
+```
+
+Nova commits in ~600ms, before the next fragment is even spoken, so its
+watermark stays honest — which is why Nova showed real splits while ElevenLabs
+showed phantom content loss. The bias tracked provider commit latency, so the
+slower provider was penalised for being slow *twice*.
+
+A count cannot distinguish a commit for the speech just fed from a late one for
+earlier speech, so waits are now timed. Anything arriving after the last `Say`'s
+audio finished feeding is the answer, because mic audio is paced at realtime and
+the provider cannot have been sent a clip it has not received yet.
+
+That alone is not enough, and the comment it replaced said why: "a fast commit
+can land while the clip is still draining". Two different events look like that.
+One is this bug — an earlier utterance's commit, arriving late — but the other is
+real: the provider can have all the audio it needs before the harness finishes
+handing the clip over, and `food_simple` commits `'…a large coffee and a
+croissant'` without the final `?` for exactly that reason. Then nothing ever
+arrives "after", and a strict timed wait hangs for its full timeout. Requiring it
+cost 4 runs in a 111-run cell, `medical_barge_in_twice` taking 46s to fail on
+three turns it had already committed correctly.
+
+So a wait resolves on either: something arriving after the speech, or the session
+going quiet for 1.0s with something already in hand. The fallback covers the
+early commit, and also covers a final `Say` that correctly produces nothing —
+which previously only avoided a timeout by accident, because a stale event
+satisfied it. `food_backchannel`'s workaround of dropping the step entirely is no
+longer load-bearing, though it is left in place.
+
+Under the fix `medical_filler_midway` on `elevenlabs/provider` reports the same
+thing 3/3: a split, no errors, nothing lost. `food_long_pause` on
+`elevenlabs/lexical` goes 1/3 to 4/4 with content intact, and its known failure —
+which blamed the provider for dropping audio — is gone. Two things worth
+knowing: latency percentiles for affected cells were computed on a biased subset,
+since a turn that never commits also never reports `eou→audio` (the repro went
+from 3 samples to 6), so the ElevenLabs latency figures recorded before this are
+drawn from a biased subset of turns.
+
+**The re-baseline then caught ElevenLabs dropping barge-in commits outright.**
+`medical_barge_in`, `support_barge_in`, `support_barge_in_instant` and
+`support_barge_in_late` under `elevenlabs/lexical` went from 12/12 passing to
+5/12 in the space of four hours, on cells whose only code change in between was
+the harness. The interrupting turn interrupts — `interrupted=True`, heard text
+present — and then never commits:
+
+```
+[+ 4.84s] say       "Sorry, one more thing."
+[+ 5.02s] partial   "I don't know."          <- invented; this is what barges in
+[+ 7.02s] partial   "Sorry, one more thing."  <- the real text, as a partial
+[+ 8.23s] partial   "Yeah."                   <- invented
+[+ 9.24s] partial   "Yeah."                   <- no commit, ever
+```
+
+Not the harness, and not the hold change: forcing the waits back to resolving
+immediately reproduces it identically, 0/3, and the same scenario passes 3/3 on
+`deepgram-nova/lexical` while ElevenLabs passes 4/4 on non-barge-in scenarios. The
+plausible mechanism is visible in the trace — ElevenLabs hallucinates on the
+trailing silence, and with `commit_strategy="vad"` each invented partial restarts
+the 1.2s silence timer that would otherwise commit, so the real utterance is held
+open indefinitely. That is the same threshold the merge rates depend on, which
+makes it a poor thing to be load-bearing twice.
+
+Consequence for the baseline: 5 of 12 cells carry a current one, all Deepgram, all
+at `--jobs 6`. The two ElevenLabs entries are stale — `--jobs 1`, ~31 runs from a
+`--quick` subset — and cannot be refreshed while the provider is dropping turns,
+since a cell with unmarked failures is refused. Latency there is consequently
+ungated on a concurrency mismatch as well.
+
+Two incidental findings from the same session. `sweep.py` never configured
+structlog, so every sweep — including the tier retune above — buried its own
+result table under a few hundred thousand DEBUG lines, far enough to be dropped
+outright by anything that caps captured output. And `python/tests/voice/` had four
+red tests: one asserting the pre-retune `0.35`, and three that set
+`session._endpointer` without `_vad_evidence`, which the endpointer-arming fix
+split into separate flags — so the tests covering VAD veto behaviour were all
+silently exercising the no-evidence path. Both are fixed. The tier assertion also
+turned out to be unsatisfiable rather than merely stale: the retune moved the
+complete tier to 1.2, which is what `TEXT_INCOMPLETE_HOLD_TIMEOUT_SECS` already
+was, so the two confidence tiers now differ only in the logged reason and the
+inverse tier has never been re-swept against its new counterpart.
+
+Baselines may also now be taken in parallel. `--update-baseline` used to refuse
+`--jobs > 1`, on the grounds that contention would bake the machine's load into
+the latency the gate compares against. Measured on `deepgram-nova/local`,
+`--quick`, 3 repeats, it does not: p50 278ms and p95 407ms at `--jobs 6` against
+280ms and 453ms serial. `eou→audio` is mostly spent waiting on STT and TTS
+sockets rather than competing for CPU, so the sessions overlap their waiting; the
+only outlier in either run is a 962ms first-run model load, in the *serial* one.
+The refusal bought nothing a busy machine at `--jobs 1` would not also spoil, and
+it priced a full baseline at roughly six times what it needs to cost, which is
+the kind of price that stops anyone taking one. What makes it sound is unchanged
+and unrelated: a baseline records its own concurrency, and latency comparison is
+declined across a mismatch.
+
 ## Running
 
 ```bash
@@ -520,7 +744,17 @@ uv run python benchmarks/voice/cli.py --update-baseline       # accept current b
 
 # the matrix: --stt and --detector are crossed, one scorecard per cell
 uv run python benchmarks/voice/cli.py --detector local,lexical,provider --jobs 4
+
+# reproduce one cell of a sweep with the event stream visible — the step between
+# "this value scores worse" and knowing why
+uv run python benchmarks/voice/cli.py -s coding_double_pause --stt elevenlabs \
+    --detector local --stt-param vad_silence_threshold_secs=0.3 --verbose
 ```
+
+`--stt-param` and `--detector-param` take `KEY=VALUE`. STT keys are checked against
+a per-backend allowlist (`harness.SWEEPABLE_STT_KEYS`) because providers ignore
+unknown query params in silence: a typo would otherwise sweep one value under four
+labels and every number in the table would agree with every other.
 
 Exit code is non-zero when any expectation fails or a regression is gated.
 

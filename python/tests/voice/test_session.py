@@ -1559,6 +1559,19 @@ class _FakeEndpointer:
         pass
 
 
+def _arm_vad(session: VoiceSession, endpointer: object | None) -> None:
+    """Attach a fake endpointer *and* the evidence flag that gates its use.
+
+    ``_vad_evidence`` is a separate flag set by ``_maybe_start_endpointer``
+    only when the detector carries an audio EOU model, because the endpointer
+    now also arms for text-only detectors that must not inherit the veto
+    behaviours. Assigning ``_endpointer`` alone therefore exercises the
+    no-evidence path — which is how three tests here went red unnoticed.
+    """
+    session._endpointer = endpointer  # type: ignore[assignment]
+    session._vad_evidence = endpointer is not None
+
+
 class TestVadBargeInVeto:
     """STT hallucinates plausible phrases from silence (observed live:
     'Not, not too bad, mate.' while nobody spoke) — they pass every text gate
@@ -1568,16 +1581,16 @@ class TestVadBargeInVeto:
     def test_veto_matrix(self) -> None:
         session, _, _ = _make_session()
         # No endpointer (heuristic mode, no Silero) → never veto.
-        session._endpointer = None
+        _arm_vad(session, None)
         assert session._vad_vetoes_barge_in("no stop that") is False
         # VAD armed but unhealthy/starved (None) → no evidence, never veto.
-        session._endpointer = _FakeEndpointer(None)
+        _arm_vad(session, _FakeEndpointer(None))
         assert session._vad_vetoes_barge_in("no stop that") is False
         # Real speech energy present → allow the barge-in.
-        session._endpointer = _FakeEndpointer(1.0)
+        _arm_vad(session, _FakeEndpointer(1.0))
         assert session._vad_vetoes_barge_in("no stop that") is False
         # Armed, healthy, and the mic was silent → hallucination, veto.
-        session._endpointer = _FakeEndpointer(0.0)
+        _arm_vad(session, _FakeEndpointer(0.0))
         assert session._vad_vetoes_barge_in("no stop that") is True
 
     async def _run_barge_in_scenario(self, speech_secs: float | None) -> tuple[VoiceSession, list[VoiceSessionEvent]]:
@@ -1590,7 +1603,7 @@ class TestVadBargeInVeto:
         tts = SlowMockTTS(delay=0.05, num_chunks=6)
         tracker = FakePlaybackTracker()
         session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
-        session._endpointer = _FakeEndpointer(speech_secs)
+        _arm_vad(session, _FakeEndpointer(speech_secs))
 
         events: list[VoiceSessionEvent] = []
 
@@ -1763,7 +1776,7 @@ class TestHoldExpiryTiming:
         )
         session._hold_partial_grace_secs = grace_secs
         if endpointer is not None:
-            session._endpointer = endpointer  # type: ignore[assignment]
+            _arm_vad(session, endpointer)
 
         events: list[VoiceSessionEvent] = []
         elapsed = 0.0
@@ -1851,6 +1864,39 @@ class TestHoldExpiryTiming:
         )
         assert elapsed < 0.8, (
             f"hold expiry took {elapsed:.2f}s — pre-commit VAD speech stretched the grace"
+        )
+
+    async def test_live_mic_extends_hold_without_any_partial(self) -> None:
+        """Measured on ElevenLabs at a 0.3s VAD threshold: an interior pause
+        commits the fragment, then the next fragment's audio is in flight for
+        over a second before the STT emits a partial for it. Extending only on
+        partials loses that race and the hold fires mid-sentence, splitting the
+        utterance — so mic energy alone has to be enough.
+        """
+
+        class _LiveSpeechEP:
+            """Mic is hot *now*; the STT has produced nothing for it yet."""
+
+            def speech_secs_in_window(self, window_secs: float) -> float:  # noqa: ARG002
+                return 0.5
+
+            def notify_committed(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        elapsed, _ = await self._run_hold_scenario(
+            grace_secs=2.0,
+            timeout_secs=0.2,
+            partial_after_commit_delay=None,
+            endpointer=_LiveSpeechEP(),
+        )
+        # Speech never stops, so the extension runs to its cap and no further:
+        # unbounded, the assistant's own echo could hold a turn open forever.
+        assert elapsed > 1.0, f"hold expired after {elapsed:.2f}s while the mic was live"
+        assert elapsed < VoiceSession.HOLD_VAD_MAX_EXTENSION_SECS + 1.5, (
+            f"hold ran {elapsed:.2f}s — the extension cap is not holding"
         )
 
     async def test_dangling_token_hold_is_dropped_on_expiry(self) -> None:

@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from harness import RunResult
-from scenario import Scenario, similarity
+from scenario import Scenario, best_window, normalize, similarity
 
 HERE = Path(__file__).parent
 RESULTS_DIR = HERE / "results"
@@ -81,14 +81,37 @@ class RunRecord:
         return json.dumps(asdict(self))
 
 
+# Below this, window matching is not evidence: a one- or two-word needle finds a
+# passable window in almost any script, and a spurious lone "I" turn (Flux emits
+# them) is a real defect that has to stay countable.
+MIN_GHOST_WINDOW_WORDS = 3
+
+
 def count_ghost_turns(result: RunResult, scenario: Scenario, min_similarity: float = 0.6) -> int:
-    """Committed turns that resemble nothing the script said.
+    """Committed turns whose content the script never said.
 
     Tracked as a metric independent of whether a scenario declared the matching
     expectation — a hallucinated transcript is worth knowing about everywhere.
+
+    Matched against a *window* of the whole script rather than any single spoken
+    entry, because turn boundaries are the thing under test and rarely line up
+    with script boundaries. Comparing per entry mis-scored both directions: a
+    correct three-fragment merge ("The build fails when I import the module.
+    Inside a test.") is ~2.5x longer than any fragment of `coding_double_pause`
+    and resembled none of them, so five cells reported a hallucinated turn for
+    the merge the scenario asserts — while a run-on split into three commits
+    counted two ghosts for the same reason inverted. Both were gating.
     """
     spoken = scenario.texts()
-    return sum(1 for text in result.committed if not any(similarity(text, said) >= min_similarity for said in spoken))
+    script = " ".join(spoken)
+    ghosts = 0
+    for text in result.committed:
+        if len(normalize(text).split()) >= MIN_GHOST_WINDOW_WORDS:
+            attributable = best_window(script, text) >= min_similarity
+        else:
+            attributable = any(similarity(text, said) >= min_similarity for said in spoken)
+        ghosts += not attributable
+    return ghosts
 
 
 def record(scenario: Scenario, result: RunResult, repeat: int = 0, jobs: int = 1) -> RunRecord:
@@ -175,7 +198,8 @@ class Scorecard:
     wall_secs: float = 0.0
     jobs: int = 1
     """Concurrency the cell ran at. Latency gating is suppressed unless this matches
-    the baseline's — contended runs measure the machine, not the change."""
+    the baseline's, so a baseline and its runs must agree; the concurrency itself is
+    not the problem — see the note in `_compare_latency`."""
 
 
 def build_scorecard(records: list[RunRecord]) -> Scorecard:
@@ -410,9 +434,12 @@ def _compare_timing(
     if not before or not now:
         return
     delta = f"{label} {before:.0f}ms → {now:.0f}ms"
-    # Concurrent runs share CPU with each other's ONNX inference, so their
-    # timings measure the machine's load as much as the code's. Comparing
-    # across different --jobs would gate on scheduling noise.
+    # Only compare like with like. Measured on deepgram-nova/local, --quick,
+    # 3 repeats, contention is not detectable at --jobs 6: p50 278ms vs 280ms
+    # serial, p95 407ms vs 453ms — better, because eou→audio is mostly waiting
+    # on STT and TTS sockets rather than competing for CPU, and the serial run's
+    # one 962ms sample is first-run model warmup weighing on a smaller n. The
+    # guard stays because it is free and the equality is what makes it sound.
     before_jobs = previous.get("jobs", 1)
     if card.jobs != before_jobs:
         out.notes.append(f"{delta} — not gated, measured at --jobs {card.jobs} against a --jobs {before_jobs} baseline")

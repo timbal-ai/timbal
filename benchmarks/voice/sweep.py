@@ -1,12 +1,13 @@
-"""Parameter sweep: score a detector setting on merges gained against dead air added.
+"""Parameter sweep: score one setting on merges gained against dead air added.
 
-The hold tier is the worked example. ``TEXT_COMPLETE_HOLD_TIMEOUT_SECS`` ships at
-0.35s, and it has been measured at exactly two values: 0.35 (splits four
+The hold tier is the worked example. ``TEXT_COMPLETE_HOLD_TIMEOUT_SECS`` shipped at
+0.35s having been measured at exactly two values: 0.35 (splits four
 trailing-modifier scenarios) and 3.0 (fixes 11 scenario-cells and adds 2.6s of
-dead air to six barge-in cells). Nobody has tried 0.8, or 1.2. The interesting
-question — is there a setting that buys most of the merges for a fraction of the
-silence — was unanswerable until dead air became measurable, because a
-configuration that merged everything by holding forever looked free.
+dead air to six barge-in cells). Nobody had tried 0.8, or 1.2 — which is what it
+ships at now. The interesting question — is there a setting that buys most of the
+merges for a fraction of the silence — was unanswerable until dead air became
+measurable, because a configuration that merged everything by holding forever
+looked free.
 
 Two metrics, deliberately. Optimizing pass rate alone reproduces the mistake this
 harness was built to catch::
@@ -15,26 +16,36 @@ harness was built to catch::
         --param text_complete_hold_timeout_secs --values 0.35,0.8,1.2,2.0,3.0 \\
         --stt deepgram-nova,elevenlabs --detector local --repeat 3
 
+``stt.``-prefixed params vary the provider's own endpointing instead, which is the
+other half of the pipeline and the half nobody had tuned::
+
+    uv run python benchmarks/voice/sweep.py \\
+        --param stt.vad_silence_threshold_secs --values 0.4,0.6,0.8,1.2 \\
+        --stt elevenlabs --detector local,lexical --repeat 3
+
 Defaults to the pause-merge family (every scenario asserting ``Merged``), since
 that is the only family where detectors differ at all — barge-in, plain turns and
 silence sit at 100% in all twelve cells and would only add runtime and noise.
 
-Results are indicative, not conclusive: 38 English scenarios on three backends,
-with ten known failures and real intermittency. Treat a winner as a candidate to
-confirm against the full grid and the Flux gate, never as a decision.
+Results are indicative, not conclusive: 39 English scenarios on three backends,
+18 of them carrying a known failure somewhere, and real intermittency. Treat a
+winner as a candidate to confirm against the full grid and the Flux gate, never as
+a decision.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import statistics as st
 import sys
 import time
 from dataclasses import dataclass, field
 
+import structlog
 from dotenv import load_dotenv
-from harness import HarnessConfig, run_scenario
+from harness import HarnessConfig, coerce_param, run_scenario
 from scenario import SCENARIOS, Merged, Scenario
 from synth import synthesize_clips, synthesize_fluent
 
@@ -65,20 +76,14 @@ class Outcome:
         return f"{self.value:>10}  {self.passed:>3}/{self.total:<3} {self.rate:>5.0%}   {air}ms  {p95}ms"
 
 
-def _coerce(raw: str) -> float | int | bool | str:
-    for cast in (int, float):
-        try:
-            return cast(raw)
-        except ValueError:
-            continue
-    if raw.lower() in ("true", "false"):
-        return raw.lower() == "true"
-    return raw
-
-
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--param", required=True, help="detector attribute to vary")
+    parser.add_argument(
+        "--param",
+        required=True,
+        help="attribute to vary: a detector attribute, or 'stt.<key>' for a provider STT knob "
+        "(see harness.SWEEPABLE_STT_KEYS)",
+    )
     parser.add_argument("--values", required=True, help="comma-separated values to try")
     parser.add_argument("--stt", default="deepgram-nova,elevenlabs")
     parser.add_argument("--detector", default="local")
@@ -93,7 +98,12 @@ async def main() -> int:
     parser.add_argument("--jobs", type=int, default=6)
     args = parser.parse_args()
 
-    values = [_coerce(v.strip()) for v in args.values.split(",") if v.strip()]
+    values = [coerce_param(v.strip()) for v in args.values.split(",") if v.strip()]
+    param_field, param_key = (
+        ("stt_extra", args.param.removeprefix("stt."))
+        if args.param.startswith("stt.")
+        else ("detector_params", args.param)
+    )
     stts = [v.strip() for v in args.stt.split(",") if v.strip()]
     detectors = [v.strip() for v in args.detector.split(",") if v.strip()]
 
@@ -119,7 +129,7 @@ async def main() -> int:
     started = time.monotonic()
 
     async def one(value: object, stt: str, det: str, scenario: Scenario) -> None:
-        config = HarnessConfig(stt=stt, detector=det, detector_params={args.param: value})
+        config = HarnessConfig(stt=stt, detector=det, **{param_field: {param_key: value}})
         async with semaphore:
             result = await run_scenario(scenario, clips, config)
         out = outcomes[str(value)]
@@ -167,4 +177,9 @@ async def main() -> int:
 
 if __name__ == "__main__":
     load_dotenv()
+    # A sweep is hundreds of sessions, and at DEBUG each one emits a few hundred
+    # lines: the result table lands tens of megabytes below the scroll and gets
+    # dropped outright by anything that caps captured output. Same default as
+    # `cli.py`, which had it from the start.
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
     sys.exit(asyncio.run(main()))

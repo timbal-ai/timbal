@@ -39,7 +39,7 @@ from dataclasses import dataclass
 
 import structlog
 from dotenv import load_dotenv
-from harness import HarnessConfig, RunResult, run_scenario
+from harness import HarnessConfig, RunResult, coerce_param, run_scenario
 from scenario import SCENARIOS, Scenario, select
 from score import (
     RunRecord,
@@ -84,6 +84,17 @@ def _values(flags: list[str] | None, default: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _parse_params(flags: list[str] | None) -> dict[str, object]:
+    """``KEY=VALUE`` flags to a coerced mapping."""
+    params: dict[str, object] = {}
+    for flag in flags or []:
+        key, _, raw = flag.partition("=")
+        if not _ or not key.strip():
+            raise ValueError(f"expected KEY=VALUE, got {flag!r}")
+        params[key.strip()] = coerce_param(raw.strip())
+    return params
+
+
 @dataclass
 class _Job:
     config: HarnessConfig
@@ -123,7 +134,7 @@ async def main() -> int:
     parser.add_argument("--language", default="en")
     parser.add_argument("--repeat", type=int, default=1, help="runs per scenario (variance / flaky detection)")
     parser.add_argument(
-        "--jobs", type=int, default=1, help="concurrent runs; latency is reported but not gated above 1"
+        "--jobs", type=int, default=1, help="concurrent runs; latency gates whenever this matches the baseline's"
     )
     parser.add_argument("--dump", action="store_true", help="write input/output WAVs per run")
     parser.add_argument(
@@ -134,6 +145,20 @@ async def main() -> int:
         help="mix the assistant's own output back into the mic at this gain (0.1-0.3 is a "
         "realistic imperfect echo canceller); exercises the echo suppressor, which clean "
         "user-only audio never does",
+    )
+    # Reproducing one cell of a sweep with the event stream visible was the missing
+    # step between "this value scores worse" and knowing why.
+    parser.add_argument(
+        "--stt-param",
+        action="append",
+        metavar="KEY=VALUE",
+        help="provider STT knob, e.g. vad_silence_threshold_secs=0.3 (see harness.SWEEPABLE_STT_KEYS)",
+    )
+    parser.add_argument(
+        "--detector-param",
+        action="append",
+        metavar="KEY=VALUE",
+        help="detector attribute, e.g. text_complete_hold_timeout_secs=1.2",
     )
     parser.add_argument("--quick", action="store_true", help="representative subset (one per domain)")
     parser.add_argument("--quiet", action="store_true", help="hide the per-event stream")
@@ -156,8 +181,22 @@ async def main() -> int:
 
     jobs = max(1, args.jobs)
     repeats = max(1, args.repeat)
+    try:
+        stt_extra = _parse_params(args.stt_param)
+        detector_params = _parse_params(args.detector_param)
+    except ValueError as e:
+        print(e)
+        return 2
     cells = [
-        HarnessConfig(stt=stt, detector=detector, language=args.language, dump=args.dump, aec_leak=args.aec_leak)
+        HarnessConfig(
+            stt=stt,
+            detector=detector,
+            language=args.language,
+            dump=args.dump,
+            aec_leak=args.aec_leak,
+            stt_extra=stt_extra,
+            detector_params=detector_params,
+        )
         for stt in _values(args.stt, "deepgram-flux")
         for detector in _values(args.detector, "provider")
     ]
@@ -167,11 +206,16 @@ async def main() -> int:
         # silently drop every scenario it didn't cover and disarm their gates.
         print("refusing to update the baseline from a filtered run: it would drop the other scenarios")
         return 2
-    if args.update_baseline and jobs > 1:
-        # The baseline carries the latency the gate compares against. Recording it
-        # under contention would bake in whatever else the machine was doing.
-        print("refusing to update the baseline from a parallel run: measure latency at --jobs 1")
-        return 2
+    # A parallel baseline used to be refused here, on the grounds that contention
+    # would bake the machine's load into the latency the gate compares against.
+    # Measured, that does not happen: deepgram-nova/local, --quick, 3 repeats, is
+    # p50 278ms / p95 407ms at --jobs 6 against 280ms / 453ms serial — no worse,
+    # because eou→audio is mostly waiting on STT and TTS sockets rather than
+    # competing for CPU. What keeps this sound is that the baseline records its own
+    # concurrency and `_compare_latency` declines to compare across a mismatch, so
+    # a parallel baseline is only ever read by equally parallel runs. The refusal
+    # bought no protection against a busy machine at --jobs 1 either, and cost a
+    # ~6x slower baseline, which is the kind of price that stops people taking one.
 
     queue: list[_Job] = []
     skipped: list[tuple[HarnessConfig, Scenario]] = []

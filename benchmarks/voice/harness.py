@@ -88,6 +88,12 @@ class HarnessConfig:
     # instance attributes — class-level constants must have a matching
     # instance attribute to be reachable.
     detector_params: Mapping[str, Any] = field(default_factory=dict)
+    # Provider STT knobs to override per run, merged over the defaults in
+    # `stt_config`. The detector is not the only endpointer in the pipeline:
+    # ElevenLabs ships `vad_silence_threshold_secs=1.2` and Nova ships
+    # `endpointing=300`, and until these were sweepable the 4x asymmetry
+    # between them read as a provider property rather than a setting.
+    stt_extra: Mapping[str, Any] = field(default_factory=dict)
     # Fraction of the assistant's own output mixed back into the mic, standing
     # in for imperfect echo cancellation. 0.0 is every run before this one.
     aec_leak: float = 0.0
@@ -97,8 +103,9 @@ class HarnessConfig:
         suffix = ""
         if self.aec_leak:
             suffix += f"[leak={self.aec_leak}]"
-        if self.detector_params:
-            suffix += "[" + ",".join(f"{k}={v}" for k, v in sorted(self.detector_params.items())) + "]"
+        for params in (self.detector_params, self.stt_extra):
+            if params:
+                suffix += "[" + ",".join(f"{k}={v}" for k, v in sorted(params.items())) + "]"
         return f"{self.stt}/{self.detector}{suffix}"
 
 
@@ -108,7 +115,18 @@ class RunResult:
     stt: str
     detector: str
     committed: list[str] = field(default_factory=list)
+    # Arrival times, parallel to `committed` / `replies_spoken`. A wait for "one
+    # more commit" cannot tell a commit for the speech just fed from one for
+    # earlier speech that arrived late, and where a provider's commit lags the
+    # audio by more than the gap between fragments, that is every pause
+    # scenario it has. See `AwaitCommit` in `drive`.
+    committed_at: list[float] = field(default_factory=list)
     replies_spoken: list[str] = field(default_factory=list)
+    replied_at: list[float] = field(default_factory=list)
+    # Last time the session said anything at all — partial, commit or reply. What
+    # "the session has finished with the audio I fed it" is actually made of,
+    # since neither a count nor a single timestamp can express it.
+    last_event_at: float = 0.0
     interrupted: bool = False
     heard_text: str | None = None
     latencies_ms: list[float] = field(default_factory=list)
@@ -247,9 +265,42 @@ class ScriptFeeder:
             await asyncio.sleep(max(0.0, next_at - time.monotonic()))
 
 
-def stt_config(stt: str, language: str) -> AudioInputConfig:
+# STT knobs `--stt-param` may vary, per backend. An allowlist because providers
+# ignore unknown query params silently: a typo would sweep one value under
+# several labels and every number in the table would agree, convincingly.
+SWEEPABLE_STT_KEYS: dict[str, frozenset[str]] = {
+    "elevenlabs": frozenset(
+        {"commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"}
+    ),
+    "deepgram-nova": frozenset({"endpointing", "utterance_end_ms", "smart_format", "punctuate", "interim_results"}),
+    "deepgram-flux": frozenset({"eot_timeout_ms", "eot_threshold", "eager_eot_threshold"}),
+}
+
+
+def coerce_param(raw: str) -> float | int | bool | str:
+    """Best-effort literal from a command-line value (`0.3` -> float, `true` -> bool)."""
+    for cast in (int, float):
+        try:
+            return cast(raw)
+        except ValueError:
+            continue
+    if raw.lower() in ("true", "false"):
+        return raw.lower() == "true"
+    return raw
+
+
+def stt_config(stt: str, language: str, extra: Mapping[str, Any] | None = None) -> AudioInputConfig:
+    """Provider defaults for a cell, with `extra` merged over them.
+
+    The ElevenLabs values mirror ``timbal.voice.server.default_voice_config_from_env``
+    rather than inventing benchmark-only ones — measuring a configuration the
+    product does not ship would report dead air nobody experiences.
+    """
+    overrides = dict(extra or {})
+    if unknown := set(overrides) - SWEEPABLE_STT_KEYS.get(stt, frozenset()):
+        raise ValueError(f"{stt} has no sweepable STT param(s) {sorted(unknown)}")
     if stt.startswith("deepgram"):
-        return AudioInputConfig(language=language, sample_rate=SAMPLE_RATE)
+        return AudioInputConfig(language=language, sample_rate=SAMPLE_RATE, extra=overrides)
     return AudioInputConfig(
         model="scribe_v2_realtime",
         language=language,
@@ -259,6 +310,7 @@ def stt_config(stt: str, language: str) -> AudioInputConfig:
             "min_speech_duration_ms": 100,
             "vad_silence_threshold_secs": 1.2,
             "vad_threshold": 0.4,
+            **overrides,
         },
     )
 
@@ -312,7 +364,7 @@ async def run_scenario(
         agent=agent,
         stt=resolve_stt(config.stt),
         tts=ElevenLabsStreamTTS(),
-        audio_input=stt_config(config.stt, config.language),
+        audio_input=stt_config(config.stt, config.language, config.stt_extra),
         audio_output=AudioOutputConfig(model=TTS_MODEL, voice=ASSISTANT_VOICE_ID, sample_rate=SAMPLE_RATE),
         turn_detector=_build_detector(config),
         record_audio=config.dump,
@@ -345,24 +397,45 @@ async def run_scenario(
                 return
             await asyncio.sleep(FRAME_SECS)
 
+    # How long the session must say nothing before a wait accepts what it already
+    # has. Wide enough to cover the gap between speech ending and the first
+    # partial for it (~0.4s on ElevenLabs, the slowest measured here).
+    settle_secs = 1.0
+
+    def _settled(events: list[float], after: float) -> bool:
+        """Whether the session is done with the speech fed up to ``after``.
+
+        Anything arriving after that instant is the answer, since mic audio is
+        paced at realtime and the provider cannot have been sent a clip it has
+        not received yet.
+
+        Otherwise the provider may simply have answered early — it can have all
+        the audio it needs before the harness finishes handing the clip over, and
+        `food_simple` commits without the final "?" for exactly that reason. Then
+        nothing will ever arrive "after", so a wait for one hangs for its whole
+        timeout. Falling back to a quiet session with something already in hand
+        covers that, and covers a last `Say` that correctly produces nothing at
+        all, which used to depend on a stale event to avoid timing out.
+        """
+        if any(t > after for t in events):
+            return True
+        if not events:
+            return False
+        return time.monotonic() - max(after, result.last_event_at) >= settle_secs
+
     async def drive() -> None:
-        # Baselines are taken when speech *starts*, not when the wait step is
-        # reached: a fast commit can land while the clip is still draining, and a
-        # wait armed after the fact would sit there until it timed out.
-        commits_at_say = 0
-        replies_at_say = 0
+        last_say_ended = 0.0
 
         for step in scenario.script:
             if isinstance(step, Say):
                 emit("say", f'"{step.text}"')
-                commits_at_say = len(result.committed)
-                replies_at_say = len(result.replies_spoken)
                 feeder.push(clips[step.clip_key])
                 await feeder.drain()
                 # drain() returns once the last frame is pushed, so this is the
                 # instant the speaker fell silent. A later part of the same
                 # fluent utterance overwrites it, leaving the final speech end.
                 result.speech_ended_at = time.monotonic()
+                last_say_ended = result.speech_ended_at
             elif isinstance(step, Silence):
                 emit("silence", f"{step.secs:.1f}s")
                 await asyncio.sleep(step.secs)
@@ -377,10 +450,18 @@ async def run_scenario(
                 )
             elif isinstance(step, AwaitCommit):
                 emit("await_commit")
-                await wait_for(lambda base=commits_at_say: len(result.committed) > base, step.timeout, "commit")
+                await wait_for(
+                    lambda after=last_say_ended: _settled(result.committed_at, after),
+                    step.timeout,
+                    "commit",
+                )
             elif isinstance(step, AwaitAssistantDone):
                 emit("await_reply")
-                await wait_for(lambda base=replies_at_say: len(result.replies_spoken) > base, step.timeout, "reply")
+                await wait_for(
+                    lambda after=last_say_ended: _settled(result.replied_at, after),
+                    step.timeout,
+                    "reply",
+                )
         await asyncio.sleep(0.5)  # let trailing events land before teardown
         closing.set()
         feeder.stop()
@@ -440,8 +521,10 @@ def _observe(
     elif isinstance(event, SessionStarted):
         emit("session_started")
     elif isinstance(event, TranscriptPartial):
+        result.last_event_at = time.monotonic()
         emit("partial", f'"{event.text}"')
     elif isinstance(event, TranscriptCommitted):
+        result.last_event_at = time.monotonic()
         detail = f'"{event.text}"{"  (replace)" if event.replace else ""}'
         if result.speech_ended_at is not None:
             dead_air = (time.monotonic() - result.speech_ended_at) * 1000
@@ -451,11 +534,15 @@ def _observe(
         emit("committed", detail)
         if event.replace and result.committed:
             result.committed[-1] = event.text
+            result.committed_at[-1] = time.monotonic()
         else:
             result.committed.append(event.text)
+            result.committed_at.append(time.monotonic())
     elif isinstance(event, AgentTextDone):
+        result.last_event_at = time.monotonic()
         emit("agent_done", f'"{event.text}"')
         result.replies_spoken.append(event.text)
+        result.replied_at.append(time.monotonic())
         assistant_speaking.clear()
     elif isinstance(event, SessionInterrupted):
         playback.on_interrupted()
