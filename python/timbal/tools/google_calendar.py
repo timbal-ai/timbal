@@ -1,3 +1,5 @@
+import asyncio
+import uuid
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
@@ -6,6 +8,61 @@ from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
+
+# How long to keep re-reading an event whose conference is still being minted.
+_CONFERENCE_POLL_DELAYS = (0.5, 1.0, 2.0)
+
+
+def _meet_create_request() -> dict[str, Any]:
+    """Ask Google for a brand new Meet room.
+
+    `requestId` has to differ per call: Google treats a repeated id as a retry of
+    the same request and hands back the conference it already made, so a constant
+    value would quietly share one room across every event.
+    """
+    return {
+        "createRequest": {
+            "requestId": str(uuid.uuid4()),
+            "conferenceSolutionKey": {"type": "hangoutsMeet"},
+        }
+    }
+
+
+async def _await_conference(
+    client: Any,
+    token: str,
+    calendar_id: str,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-read an event until Google has finished attaching its conference.
+
+    Conferences are created asynchronously, so `events.insert` can answer with
+    `conferenceData.status.statusCode == "pending"` and no `hangoutLink` yet. The
+    link is the whole point of asking for a conference — it goes in front of a
+    human — so it is worth a few cheap reads rather than returning an event that
+    nobody can join.
+    """
+    event_id = event.get("id")
+    if not event_id:
+        return event
+
+    for delay in _CONFERENCE_POLL_DELAYS:
+        status = ((event.get("conferenceData") or {}).get("status") or {}).get("statusCode")
+        # Only `pending` will change. No status at all means Google never took the
+        # request — polling a calendar that cannot host Meet just wastes seconds.
+        if event.get("hangoutLink") or status != "pending":
+            break
+
+        await asyncio.sleep(delay)
+        response = await client.get(
+            f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"conferenceDataVersion": 1},
+        )
+        response.raise_for_status()
+        event = response.json()
+
+    return event
 
 
 async def _resolve_token(tool: Any) -> str:
@@ -69,7 +126,7 @@ class GoogleCalendarListEvents(Tool):
 
 class GoogleCalendarCreateEvent(Tool):
     name: str = "google_calendar_create_event"
-    description: str | None = "Create a new event in Google Calendar."
+    description: str | None = "Create a new event in Google Calendar, optionally with its own Google Meet link."
     integration: Annotated[str, Integration("google_calendar")] | None = None
     token: SecretStr | None = None
 
@@ -89,6 +146,13 @@ class GoogleCalendarCreateEvent(Tool):
             location: str | None = Field(None, description="Event location or venue."),
             attendees: list[str] | None = Field(None, description="List of attendee email addresses."),
             timezone: str = Field("UTC", description="Timezone for the event, e.g. 'America/New_York'"),
+            add_google_meet: bool = Field(
+                False,
+                description=(
+                    "If true, create a Google Meet conference for this event and return its join "
+                    "link in 'hangoutLink'. Each event gets its own room."
+                ),
+            ),
         ) -> Any:
             token = await _resolve_token(self)
             import httpx
@@ -105,21 +169,34 @@ class GoogleCalendarCreateEvent(Tool):
             if attendees:
                 body["attendees"] = [{"email": email} for email in attendees]
 
+            # Conference data is ignored unless the request opts into it, and the
+            # opt-in is a query parameter rather than a body field. Both or neither.
+            params: dict[str, Any] = {}
+            if add_google_meet:
+                body["conferenceData"] = _meet_create_request()
+                params["conferenceDataVersion"] = 1
+
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events",
                     headers={"Authorization": f"Bearer {token}"},
+                    params=params,
                     json=body,
                 )
                 response.raise_for_status()
-                return response.json()
+                event = response.json()
+
+                if add_google_meet:
+                    event = await _await_conference(client, token, calendar_id, event)
+
+                return event
 
         super().__init__(handler=_create_event, **kwargs)
 
 
 class GoogleCalendarUpdateEvent(Tool):
     name: str = "google_calendar_update_event"
-    description: str | None = "Update an existing event in Google Calendar."
+    description: str | None = "Update an existing event in Google Calendar, optionally attaching a Google Meet link."
     integration: Annotated[str, Integration("google_calendar")] | None = None
     token: SecretStr | None = None
 
@@ -141,6 +218,13 @@ class GoogleCalendarUpdateEvent(Tool):
             description: str | None = Field(None, description="Updated event description or notes."),
             location: str | None = Field(None, description="Updated event location or venue."),
             timezone: str | None = Field(None, description="Updated timezone for the event, e.g. 'America/New_York'"),
+            add_google_meet: bool = Field(
+                False,
+                description=(
+                    "If true, attach a Google Meet conference to this event and return its join "
+                    "link in 'hangoutLink'. Events that already have one keep it."
+                ),
+            ),
         ) -> Any:
             token = await _resolve_token(self)
             import httpx
@@ -157,14 +241,25 @@ class GoogleCalendarUpdateEvent(Tool):
             if end:
                 body["end"] = {"dateTime": end, "timeZone": timezone or "UTC"}
 
+            params: dict[str, Any] = {}
+            if add_google_meet:
+                body["conferenceData"] = _meet_create_request()
+                params["conferenceDataVersion"] = 1
+
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
                     headers={"Authorization": f"Bearer {token}"},
+                    params=params,
                     json=body,
                 )
                 response.raise_for_status()
-                return response.json()
+                event = response.json()
+
+                if add_google_meet:
+                    event = await _await_conference(client, token, calendar_id, event)
+
+                return event
 
         super().__init__(handler=_update_event, **kwargs)
 
