@@ -304,15 +304,45 @@ correct:
 | `medical_long_utterance` (Nova) | **+8.2s** | counted as a *fix* |
 
 Six barge-in cells taking 2.6s longer to answer an ordinary question is not
-visible anywhere in pass/fail, and an 8.2s "fix" is not a fix. **The tier
-stays.** A fixed timeout is the wrong shape for the underlying problem — the
-cases where a long hold is pure cost are exactly those where no further speech
-ever arrives — but that is a redesign, and a threshold on the audio score cannot
-discriminate: the fragment scores 0.054 and the closer it must not catch scores
-0.115.
+visible anywhere in pass/fail, and an 8.2s "fix" is not a fix. So the tier stays
+— but **0.35 was the wrong value, and only a sweep could show that**, because
+both endpoints look bad from where we were standing.
 
-So `MaxDeadAir` and a per-cell dead-air gate now exist, measuring speech end →
-turn accepted. Current: p50 560–699ms, p95 1.6–2.2s across the gated cells.
+`MaxDeadAir` and a per-cell dead-air gate now exist, measuring speech end → turn
+accepted, and `sweep.py` can vary a detector parameter without editing product
+constants. Sweeping the tier over 0.35 / 0.8 / 1.2 / 2.0 / 3.0 found the shape
+nobody had looked for:
+
+| tier timeout | pause merges | dead air p50 | p95 |
+|---|---:|---:|---:|
+| 0.35 (was) | 58% | 852ms | 2270ms |
+| **1.2** (now) | 81% | 889ms | 1944ms |
+| 3.0 | 90% | 844ms | 3617ms |
+
+**Median dead air is flat across the whole range.** The tier only fires when
+audio says incomplete and text says finished — a minority of turns — so the
+median cannot move and the cost is entirely a tail effect. That is exactly why
+0.35 read as free and went eight months unexamined: the metric that would have
+priced it did not exist, and the one that did could not see it.
+
+Confirmed on the full suite at `--repeat 3`, 684 runs across all three backends
+under `local`: correctness **84% → 92%**, with every scenario the tier exists to
+protect — `support_closer`, all four barge-ins, `banking_short_reject`,
+`coding_followup_after_reply` — unchanged at 100%. `coding_double_pause` goes
+33→100%, `medical_long_utterance` 67→100%, `medical_hesitant_pause` 0→67%. The
+cost is p95 dead air 1969 → 2683ms. 3.0 scores higher on merges still and is not
+worth it: p95 3617ms and `support_pause_short` starts failing.
+
+The default is now 1.2. The gated Flux cells stayed at 100% and their dead-air
+p50 improved (725→680, 819→615, 550→486ms).
+
+What the sweep also settled is where this knob *stops*. `medical_self_correction`
+tops out at 33% and `banking_correction` at 22% — at every value tried. Those are
+the two trailing-modifier cases with real consequences, and no hold duration
+fixes them, because their problem is not how long the hold runs but that nothing
+arms one when both signals read finished. A fixed timeout is the wrong shape for
+that, and a threshold on the audio score cannot discriminate either: the fragment
+scores 0.054 and the closer it must not catch scores 0.115.
 
 **Dead air immediately found something unrelated.** On
 `deepgram-nova/lexical` a spoken account number sits at **7.5s** — reproducible,

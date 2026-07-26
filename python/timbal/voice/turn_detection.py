@@ -669,12 +669,23 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
     # with the transcript as the confidence signal): when the audio model says
     # "incomplete" but the text looks finished (terminal punctuation — Smart
     # Turn systematically under-scores short closers like "Thank you." /
-    # "I am David." / "Quite good."), the hold shrinks to this. Keep it short:
-    # the VAD endpointer has usually already paid ~0.5–3s of silence delay
-    # before the commit, so a second 1.2s tax felt like dead air on every
-    # finished utterance Smart Turn under-scored. Both-signals-incomplete
-    # keeps the full timeout.
-    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 0.35
+    # "I am David." / "Quite good."), the hold shrinks to this. Both-signals-
+    # incomplete keeps the full timeout.
+    #
+    # Was 0.35 on the reasoning that a second tax on top of the endpointer's
+    # ~0.5-3s felt like dead air. Swept properly once dead air became
+    # measurable (benchmarks/voice/sweep.py), across 0.35/0.8/1.2/2.0/3.0 and
+    # then 0.35 vs 1.2 over 684 runs of the full suite on all three STT
+    # backends under `local`: correctness 84% -> 92%, with every scenario this
+    # tier exists to protect — closers, all four barge-ins, short answers —
+    # unchanged at 100%. The intuition was half right: holding longer does cost
+    # dead air, but only in the tail (p95 1969 -> 2683ms) because the tier fires
+    # on a minority of turns. The median does not move (831 -> 842ms), which is
+    # why 0.35 read as free and was never re-examined.
+    #
+    # 3.0 scores higher still on pause merges (90% vs 81%) and is not worth it:
+    # p95 dead air goes to 3617ms and `support_pause_short` starts failing.
+    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 1.2
     # The tier needs *confidently* finished text (terminal punctuation scores
     # P_TERMINAL=0.95), not the predictor's complete-leaning neutral (0.60) —
     # unpunctuated text must not shorten the hold.

@@ -83,6 +83,12 @@ async def main() -> int:
     parser.add_argument("--stt", default="deepgram-nova,elevenlabs")
     parser.add_argument("--detector", default="local")
     parser.add_argument("-s", "--scenario", action="append", help="override the default pause family")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="every scenario, not just the pause family — needed to price a winner, since the "
+        "cost of holding longer lands on closers and barge-ins that the pause family excludes",
+    )
     parser.add_argument("--repeat", type=int, default=3, help="runs per scenario per cell (default 3)")
     parser.add_argument("--jobs", type=int, default=6)
     args = parser.parse_args()
@@ -91,7 +97,7 @@ async def main() -> int:
     stts = [v.strip() for v in args.stt.split(",") if v.strip()]
     detectors = [v.strip() for v in args.detector.split(",") if v.strip()]
 
-    scenarios = pause_family()
+    scenarios = list(SCENARIOS) if args.all else pause_family()
     if args.scenario:
         wanted = set(args.scenario)
         scenarios = [s for s in SCENARIOS if s.id in wanted]
