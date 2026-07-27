@@ -43,6 +43,7 @@ from .turn_detection import (
     TurnDetector,
     TurnState,
     _is_same_user_utterance_refinement,
+    _likely_stt_echo,
     resolve_turn_detector,
 )
 
@@ -454,6 +455,13 @@ class VoiceSession:
 
         # Assistant text accumulated during the in-flight turn (for STT echo suppression).
         self._turn_assistant_text: str = ""
+        # Last time the assistant was observed speaking, for the echo grace window.
+        # Sampled rather than hooked because `_assistant_active` is derived from
+        # playback draining, which has no event to hang a callback on. Every partial
+        # and commit samples it, and echo is exactly what produces partials, so the
+        # reading is dense when it matters. A stale sample can only over-state the
+        # elapsed time and close the window early, which is the safe direction.
+        self._last_assistant_active_at: float = 0.0
 
         # User text for the in-flight turn.  Streaming STT (e.g. ElevenLabs VAD) often
         # emits a second ``committed_transcript`` that extends the first; without this,
@@ -1044,6 +1052,20 @@ class VoiceSession:
                 mic_quiet = self._mic_quiet_for(self._stale_partial_commit_secs)
                 if stale_secs < self._stale_partial_commit_secs and not mic_quiet:
                     continue
+                # Never rescue the assistant's own voice. An IGNOREd commit does
+                # not bump _last_commit_at, so suppressed echo still looks like a
+                # stranded partial — and this path is where it comes back to life:
+                # traced under --aec-leak, "memory access." was refused as echo
+                # while the reply played, then synthesized into a turn of its own
+                # three seconds later. Nothing downstream catches it, because by
+                # then the detector's echo grace window has closed.
+                #
+                # This rescue exists for user speech an over-eager AEC ducked
+                # below the provider's commit threshold, which is the one thing
+                # echo is not.
+                if _likely_stt_echo(self._latest_partial_text, self._turn_assistant_text):
+                    logger.debug("stt_stale_partial_echo_skipped", text_preview=self._latest_partial_text[:80])
+                    continue
                 self._stale_commit_sent_at = time.monotonic()
                 stranded = self._latest_partial_text
                 # INFO on purpose: this is the only trace that a transcript was
@@ -1127,13 +1149,19 @@ class VoiceSession:
         # so the next commit can refine/merge against it — but do NOT fold HOLD
         # into assistant_active (that breaks hallucination filters + refinements).
         active = self._held_user_text if holding else self._active_turn_user_text
+        assistant_active = self._assistant_active
+        if assistant_active:
+            self._last_assistant_active_at = now
         return TurnState(
-            assistant_active=self._assistant_active,
+            assistant_active=assistant_active,
             audio_playing=self._assistant_audio_playing,
             assistant_text=self._turn_assistant_text,
             active_user_text=active,
             seconds_since_turn_start=now - self._turn_started_at,
             seconds_since_last_commit=now - self._last_commit_at,
+            seconds_since_assistant_active=(
+                None if assistant_active or not self._last_assistant_active_at else now - self._last_assistant_active_at
+            ),
             partials_since_last_commit=self._partials_since_last_commit,
             holding=holding,
         )

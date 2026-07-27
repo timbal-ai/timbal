@@ -121,14 +121,58 @@ ghost turns and duly reported "ghost turns 1 → 3" while being clean; a subset 
 takes `partial` and skips aggregates for filtered runs, which is the same reasoning
 that already makes `--update-baseline` refuse them.
 
-**The residual has a separate cause worth its own fix.** Both call sites gate the check
-behind `state.assistant_active`, so echo that commits just *after* playback ends is
-never tested at all. `coding_followup_after_reply` is the clean demonstration: it
-commits `'memory access.'`, which is an exact substring of its own reply "a segfault
-means bad memory access" and would be caught by the very first branch — but the reply
-has finished by the time it lands, so nothing looks. Any fix needs a short grace window
-after playback rather than dropping the flag, or a user turn that legitimately echoes
-the last reply becomes unsuppressable.
+**The residual had two causes, and the second was self-inflicted.** Both call sites
+gated the check behind `state.assistant_active`, so echo committing just *after*
+playback ended was never tested. `coding_followup_after_reply` was the clean
+demonstration: it commits `'memory access.'`, an exact substring of its own reply, and
+nothing looks. `TurnState` now carries `seconds_since_assistant_active` and the check
+runs for 2s past playback — bounded, because `assistant_text` outlives its turn, so an
+unbounded window would let a user utterance resembling the last reply be dropped, and
+dropping it means no new turn starts to clear that text.
+
+That alone fixed nothing, which is the interesting part. Tracing the scenario showed the
+suppressor working perfectly and the rescue path undoing it:
+
+```
+stt_committed_received   'memory access.'   audio_playing=True
+stt_commit_ignored       reason=echo               <- suppressed correctly
+stt_stale_partial_commit mic_quiet=True stale_secs=1.9
+stt_stale_partial_synthesized 'memory access.'     <- resurrected 3s later
+stt_committed_accepted   action=new_turn           <- ghost turn
+```
+
+An IGNOREd commit does not bump `_last_commit_at`, so suppressed echo still looks like a
+stranded partial to the stale-partial watchdog, which synthesizes it back once the grace
+window has closed. The watchdog exists to rescue user speech that an over-eager AEC
+ducked below the provider's commit threshold — which is the one thing echo is not — so
+it now runs the same echo check before rescuing. Together: `coding_followup_after_reply`
+0/3 → 3/3, and ghost turns across the whole 78-run leak suite 12 → 2.
+
+Worth noting the shape of this bug, since the codebase invites more of it: two fixes
+that are individually correct, landed a day apart, in different files, that cancel each
+other. Neither test suite could catch it because each mechanism is right in isolation.
+
+| leak 0.15, deepgram-flux/local | ghosts (78 runs) | `coding_followup_after_reply` |
+| --- | --- | --- |
+| before the suppressor fix | 12 | 0/2 |
+| window-anchored suppressor | 6 | 0/3 |
+| \+ grace window | 6 | 0/3 |
+| \+ rescue guard | **2** | **3/3** |
+
+Eleven of the thirteen leak markers were retired by this. The two that remain are
+different in kind: `support_barge_in_one_word` gets the echo tail and the user's word in
+a *single* commit (`'retailers. Stop.'`), so suppressing it loses the barge-in the
+scenario tests — that needs the echo span located inside the commit, not a verdict on
+the whole string.
+
+**The axis still will not baseline, and the refusal is the finding.** At `--repeat 3` it
+scores 94% with all six failures flaky — `banking_digits_pause`, `coding_barge_in`,
+`food_simple`, `medical_barge_in_twice`, each passing some repeats — plus three session
+timeouts. Which scenarios trip depends on how the STT happens to garble a given reply,
+so successive runs surface different members and a marker set fitted to one run is
+fitted to noise. Two samples of the suite are not enough to tell a 90%-reliable scenario
+from a broken one; that needs repeats in the tens, which is the next real step here
+rather than more marker churn.
 
 Both mechanisms that consume mic energy were ruled out as causes by disabling them:
 the hold's VAD extension (`HOLD_VAD_MAX_EXTENSION_SECS = 0`) and the stale-partial

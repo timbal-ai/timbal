@@ -70,6 +70,12 @@ class TurnState(BaseModel):
     """User text of the in-flight turn, or the pending HOLD fragment when holding."""
     seconds_since_turn_start: float
     seconds_since_last_commit: float
+    seconds_since_assistant_active: float | None = None
+    """Seconds since the assistant was last speaking, or ``None`` while it still is.
+
+    ``None`` also covers "has never spoken", so a detector must treat it as "no echo
+    is possible" rather than "long ago".
+    """
     partials_since_last_commit: int
     """Partial transcripts seen since the previous committed transcript."""
     holding: bool = False
@@ -242,6 +248,35 @@ def _normalize_echo(s: str) -> str:
 # assistant's own words back ("sorry, the module cache?") — genuinely ambiguous from
 # text alone, and the scenario exists to keep that margin honest.
 _ECHO_WINDOW_RATIO = 0.65
+
+
+# How long after the assistant stops speaking its echo may still arrive.
+#
+# STT commits lag the audio that produced them — ~0.3s of endpointing on Deepgram
+# Flux, ~1.6s on ElevenLabs — so the tail of a reply routinely commits after playback
+# has already drained. 2s covers both with margin.
+_ECHO_GRACE_SECS = 2.0
+
+
+def _echo_window_open(state: TurnState) -> bool:
+    """The assistant is speaking, or stopped recently enough that echo is still landing.
+
+    Gating the echo check on :attr:`TurnState.assistant_active` alone misses precisely
+    the leak that arrives last, because the flag drops when playback drains while the
+    transcript for that audio is still in flight. Measured under ``--aec-leak``:
+    `coding_followup_after_reply` commits ``"memory access."`` — an exact substring of
+    its own reply, which the first branch of :func:`_likely_stt_echo` would catch — and
+    nothing looks, so it becomes a ghost turn.
+
+    Bounded rather than left open until the next turn, because ``assistant_text``
+    outlives the turn that produced it. Without a deadline a user whose genuine
+    utterance resembled the last reply would have it dropped — and dropping it means no
+    new turn starts to clear that text, so the suppression would never lift.
+    """
+    if state.assistant_active:
+        return True
+    since = state.seconds_since_assistant_active
+    return since is not None and since <= _ECHO_GRACE_SECS
 
 
 def _likely_stt_echo(committed: str, assistant_so_far: str) -> bool:
@@ -421,7 +456,7 @@ class HeuristicTurnDetector(TurnDetector):
             and not state.holding
         ):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination")
-        if state.assistant_active and _likely_stt_echo(text, state.assistant_text):
+        if _echo_window_open(state) and _likely_stt_echo(text, state.assistant_text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         # Pending HOLD: STT often re-commits a longer form of the same fragment.
         # Mid-turn "refinement" IGNORE would freeze the held text until timeout —
@@ -562,7 +597,7 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
         if _is_hesitation_only(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
-        if state.assistant_active and _likely_stt_echo(text, state.assistant_text):
+        if _echo_window_open(state) and _likely_stt_echo(text, state.assistant_text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="provider")
 
