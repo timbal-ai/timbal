@@ -299,15 +299,27 @@ async def main() -> int:
             print(f"    known: {name} — {reason}")
 
         if args.update_baseline:
-            if card.pass_rate < 1.0:
-                # Saving here would record the failure as the accepted status quo
-                # and disarm its gate. Either fix it, or mark it known_failure.
+            # Only a scenario that failed *every* repeat blocks. Saving one would
+            # record broken behavior as the accepted status quo and disarm its gate,
+            # which is what this guard is for — but it used to refuse on any failing
+            # run at all, and that is how a stale baseline outlives the truth. The
+            # ElevenLabs cells kept asserting a pass rate of 1.0 taken before a
+            # regression, gating every later run against a number only luck could
+            # meet, because one flaky repeat in forty was enough to block the
+            # refresh. A partial rate is not a broken baseline: `per_scenario`
+            # records 0.75 and the gate fires when it drops, which is strictly more
+            # honest than an unreachable 1.0 or a `known_failure` marker claiming a
+            # scenario cannot pass when it passes three times in four.
+            hard = sorted(name for name, rate in card.per_scenario.items() if rate == 0.0)
+            if hard:
                 print(
                     "\n  refusing to update the baseline: "
-                    f"{card.runs - card.passed} run(s) failed and are not marked known_failure"
+                    f"{', '.join(hard)} failed every repeat and are not marked known_failure"
                 )
                 exit_code = 1
                 continue
+            if card.flaky:
+                print(f"\n  recording flaky scenarios at their measured rate: {', '.join(card.flaky)}")
             save_baseline(card)
             print(f"  baseline updated for {card.label}")
             continue

@@ -595,6 +595,27 @@ _ECHO_MIXED_COMMIT = (
 )
 _ECHO_LEAK_CELL = "deepgram-flux/local"
 
+# Digit readback is the worst case for echo, from both directions at once.
+#
+# Garbled echo is only suppressed once a session has proved it leaks, by producing one
+# verbatim echo first (`TurnDetector.echo_verdict`). Digits never get there: the leak
+# is quiet, so the STT garbles every copy of it, and a run of digits garbles into other
+# digits that still resemble the reply. Nothing verbatim ever arrives to arm the filter.
+#
+# And the obvious repair — trust resemblance here, since a readback obviously echoes —
+# is exactly backwards. The reply *is* the user's digits, so a genuine correction
+# ("Four four eight." against "…account four four seven.") scores 0.75, inside the range
+# real echo occupies. Digit readback is where resemblance is least informative and most
+# tempting, which is why these two are marked rather than tuned around.
+#
+# Both are gated on measurement, not marked: everything else that fails under leak is
+# intermittent and the baseline now records it at its true rate. Only these two fail
+# every repeat.
+_ECHO_GARBLED_DIGITS = (
+    "garbled echo of a digit readback: the session never produces verbatim echo to arm "
+    "the resemblance check, and resemblance cannot be trusted when the reply is the digits"
+)
+
 _PROVIDER_ENDPOINTING_FAILURE = (
     "`provider` defers to Flux's endpointing, which splits here; `lexical` merges it "
     "correctly because Namo scores the fragment 0.00 incomplete"
@@ -816,8 +837,8 @@ SCENARIOS: list[Scenario] = [
             "is letting echo through rather than over-suppressing.\n\n"
             "0.15 was recorded as clean here and is not: it fails ~1 in 3. The original reading "
             "came from too few repeats on the one scenario the leak axis was ever run against. "
-            "Running the whole suite at 0.15 fails nine scenarios, which is why the marker now "
-            "lives on all of them rather than here alone.\n\n"
+            "The axis now carries its own baseline, so the whole suite's leak behaviour is "
+            "recorded at measured rates instead of being marked scenario by scenario.\n\n"
             "The mechanism is visible in what gets committed: 'Our retailers.', 'Arise "
             "retailers.', 'has aroused retailers.' — all manglings of the reply's own tail, "
             "'...authorized retailers.' The suppressor is a text-similarity check against "
@@ -1170,6 +1191,7 @@ SCENARIOS: list[Scenario] = [
         # look like a hallucinated turn to every text comparison.
         script=[Say("My account number is four four seven two nine one."), *_SETTLE],
         expect=[UserTurns(1), NoGhostTurns(), Interrupted(False), NoErrors()],
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_GARBLED_DIGITS},
         note="Digit strings are the STT-hostile case: no lexical context to fall back on.",
     ),
     Scenario(
@@ -1191,6 +1213,7 @@ SCENARIOS: list[Scenario] = [
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
             "elevenlabs/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
         },
+        known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_GARBLED_DIGITS},
         intermittent=True,
         note=(
             "The hardest merge in the suite: a digit string broken across a pause, with no "

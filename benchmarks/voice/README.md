@@ -97,6 +97,9 @@ speech makes the assistant uninterruptible, the worse of the two failures.
 | leak 0.15, ghost turns | 12 per 78 runs | **6** |
 | clean, 4 baselined cells | 100% | **100%, no regressions** (126 runs) |
 
+Those numbers stood for a few hours. The clean-run check below missed the case that
+undoes them — see "the suppressor ate a real turn on a clean run".
+
 The clean-run check is the one that matters for shipping it: a suppressor that catches
 more echo can start eating genuine interruptions. All seven baselined cells were run,
 and the decisive one is `deepgram-flux/provider`, where `_likely_stt_echo` is the *only*
@@ -159,20 +162,76 @@ other. Neither test suite could catch it because each mechanism is right in isol
 | \+ grace window | 6 | 0/3 |
 | \+ rescue guard | **2** | **3/3** |
 
-Eleven of the thirteen leak markers were retired by this. The two that remain are
-different in kind: `support_barge_in_one_word` gets the echo tail and the user's word in
-a *single* commit (`'retailers. Stop.'`), so suppressing it loses the barge-in the
-scenario tests — that needs the echo span located inside the commit, not a verdict on
-the whole string.
+Eleven of the thirteen leak markers were retired by this. One of the two that remained is
+different in kind and survives everything below: `support_barge_in_one_word` gets the echo
+tail and the user's word in a *single* commit (`'retailers. Stop.'`), so suppressing it
+loses the barge-in the scenario tests — that needs the echo span located inside the commit,
+not a verdict on the whole string.
 
-**The axis still will not baseline, and the refusal is the finding.** At `--repeat 3` it
-scores 94% with all six failures flaky — `banking_digits_pause`, `coding_barge_in`,
-`food_simple`, `medical_barge_in_twice`, each passing some repeats — plus three session
-timeouts. Which scenarios trip depends on how the STT happens to garble a given reply,
-so successive runs surface different members and a marker set fitted to one run is
-fitted to noise. Two samples of the suite are not enough to tell a 90%-reliable scenario
-from a broken one; that needs repeats in the tens, which is the next real step here
-rather than more marker churn.
+**Then the suppressor ate a real turn on a clean run, which reframes everything above.**
+`food_long_pause` on `elevenlabs/lexical` went 4/4 → 0/4. The user says "Pepperoni pizza,
+please." after a reply of "Got it — a large pepperoni pizza.", and the check drops it —
+on a run with no leak injected at all, suppressing echo that could not exist. It scores
+0.67, inside the 0.68–1.00 band the threshold was calibrated on.
+
+The calibration was not wrong about its samples; it was drawn only from barge-ins, where
+the user is *changing* the subject and shares little vocabulary with the reply. But
+confirmations, disambiguation and digit readback all put the user's next words into the
+reply by design, and there the populations interleave — genuine speech at 0.67 and 0.78
+against real echo at 0.76 and 0.79. No threshold splits that, so this is not a tuning
+problem, and a per-utterance "is this echo?" has no reliable text-only answer.
+
+**So resemblance was latched behind proof.** The check is now two branches with different
+standing: a verbatim substring of what is playing is evidence and always counts, while
+garbled resemblance is a guess, armed only once the same session has produced verbatim
+echo. The argument was that base rate decides it — when AEC works there is no echo in the
+signal at all, so every fuzzy suppression is a false positive by construction, and when it
+leaks the verbatim branch will see it.
+
+**It never arms, and the reason invalidates the design rather than its tuning.** Every
+remaining ghost under leak is garbled and not one is verbatim: `'surprised retailers.'`,
+`'Veroni, anything else?'`, `'Nash exactly once.'`, `'Not anything else?'`. Leak severity
+determines transcription quality. A leak quiet enough to be garbled is garbled
+*consistently* — the STT is transcribing faint, distorted audio, so of course every copy
+comes back wrong — while verbatim echo belongs to a louder, cleaner leak. The two are
+near-disjoint regimes rather than sequential stages, so "verbatim echo seen" does not
+predict "garbled echo present", and a 20-second scenario never earns its proof.
+
+| leak 0.15, deepgram-flux/local | gated pass | ghost turns |
+| --- | --- | --- |
+| unconditional resemblance | ~100% (13 markers) | 2 |
+| latched behind proof | 85% (2 markers) | 10 |
+
+**Kept regardless, because it changes which error you get.** Unconditional, a *working*
+AEC drops genuine user speech and the assistant answers something the user never said.
+Latched, a *leaking* AEC produces ghost turns. A ghost turn on a broken microphone is
+plainly the lesser harm, so the latch dominates on worst case even though it gives the
+leak numbers back. The real fix is timing, which is the only signal that survives both
+regimes: echo of a word arrives while that word is playing, and a user repeating it does
+so afterwards. Text similarity cannot see that and never will.
+
+One narrowing worth recording, since the earlier entry over-claimed: the latch restored
+`food_long_pause` on `elevenlabs/lexical` only. It still fails on `deepgram-flux/provider`
+and `deepgram-nova/lexical`, so those are a different cause and folding them into the echo
+story was wrong.
+
+**The axis baselines now, and the old refusal rule was what blocked it.** At `--repeat 4`
+it scores 85% with per-scenario rates recorded, and only `banking_digits` and
+`banking_digits_pause` fail every repeat. The previous rule — refuse if anything fails —
+demanded that a probabilistic axis be perfect before it could gate at all, so the axis
+never gated and its markers were fitted to whichever run was in front of me. Refusal now
+triggers only on a scenario that fails *every* repeat; flaky ones are recorded at their
+measured rate. The repeat count matters more than expected: at `--repeat 2` five scenarios
+looked hard and three of those five turned out to be intermittent at 4.
+
+Digit readback is the honest residual, and it is the worst case from both directions at
+once. Digits never produce verbatim echo — a run of digits garbles into other digits — so
+the filter never arms. And the obvious repair, trusting resemblance here because a readback
+plainly echoes, is exactly backwards: the reply *is* the user's digits, so a genuine
+correction ("Four four eight." against "…account four four seven.") scores 0.75. It is
+where resemblance is least informative and most tempting.
+
+Still open on this axis: 4 session errors per 120 runs under leak, untriaged.
 
 Both mechanisms that consume mic energy were ruled out as causes by disabling them:
 the hold's VAD extension (`HOLD_VAD_MAX_EXTENSION_SECS = 0`) and the stale-partial

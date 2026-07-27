@@ -12,11 +12,11 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from timbal.voice.deepgram import (
+    _AUDIO_FLUSH_BYTES,
     DEFAULT_FLUX_MODEL,
     DEFAULT_NOVA_MODEL,
     DeepgramFluxSTT,
     DeepgramNovaSTT,
-    _AUDIO_FLUSH_BYTES,
     effective_stt_model,
     is_flux_model,
     resolve_stt,

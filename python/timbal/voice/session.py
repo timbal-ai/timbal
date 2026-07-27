@@ -976,6 +976,34 @@ class VoiceSession:
     # hostage for as long as the session lives.
     MAX_QUIET_SPEECH_SECS = 0.1
 
+    # Never look further back than the endpointer keeps speech history for, or a
+    # window longer than the buffer would read as silence and convict a real turn.
+    MAX_HALLUCINATION_LOOKBACK_SECS = 3.0
+
+    def _mic_speech_since_last_commit(self) -> bool | None:
+        """Whether Silero heard the user speak since the previous commit.
+
+        ``None`` means no opinion, and the caller must not suppress on it: no
+        endpointer, no commit to measure from, or a gap longer than the speech
+        history, where "no speech in the buffer" says nothing about the utterance
+        that produced this commit.
+
+        Anchored on the last commit rather than a trailing window because a fixed
+        window cannot work here. ElevenLabs commits roughly 1.6s after the audio, so
+        any window wide enough not to convict a real late commit is also wide enough
+        to still contain the *previous* utterance and acquit an invented one. The gap
+        since the last commit is the interval the new text must account for.
+        """
+        if self._endpointer is None or not self._last_commit_at:
+            return None
+        window = time.monotonic() - self._last_commit_at
+        if window <= 0 or window > self.MAX_HALLUCINATION_LOOKBACK_SECS:
+            return None
+        speech_secs = self._endpointer.speech_secs_in_window(window)
+        if speech_secs is None:
+            return None
+        return speech_secs >= self.MIN_BARGE_IN_VAD_SPEECH_SECS
+
     # Trailing window Silero must find quiet before a partial can be called invented.
     # Shorter than the barge-in window because this fires between utterances, where
     # the pause is the signal, not during one.
@@ -1096,6 +1124,9 @@ class VoiceSession:
                 # This rescue exists for user speech an over-eager AEC ducked
                 # below the provider's commit threshold, which is the one thing
                 # echo is not.
+                # Verbatim only, deliberately: this runs outside the detector and so
+                # outside its leak latch, and rescuing is the last chance a stranded
+                # utterance gets. The traced case was an exact substring anyway.
                 if _likely_stt_echo(self._latest_partial_text, self._turn_assistant_text):
                     logger.debug("stt_stale_partial_echo_skipped", text_preview=self._latest_partial_text[:80])
                     continue
@@ -1203,6 +1234,7 @@ class VoiceSession:
             seconds_since_assistant_active=(
                 None if assistant_active or not self._last_assistant_active_at else now - self._last_assistant_active_at
             ),
+            mic_speech_since_last_commit=self._mic_speech_since_last_commit(),
             partials_since_last_commit=self._partials_since_last_commit,
             holding=holding,
         )

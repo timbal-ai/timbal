@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import aclosing
 
+import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.voice.eou import AudioEouModel, PunctuationEouPredictor, TextEouPredictor
@@ -28,6 +29,7 @@ from timbal.voice.turn_detection import (
     TurnState,
     _is_garbage_commit,
     _is_same_user_utterance_refinement,
+    _is_unvoiced_hallucination,
     _likely_stt_echo,
     resolve_turn_detector,
 )
@@ -35,11 +37,56 @@ from timbal.voice.turn_detection import (
 from .test_session import MockSTT, MockTTS
 
 
-class TestLikelySttEcho:
-    """Garbled echo must be suppressed; genuine speech against the same reply must not.
+class TestUnvoicedHallucination:
+    """A silent mic may veto ElevenLabs' inventions, and nothing else.
 
-    Both lists are real transcripts from ``--aec-leak`` runs, so this pins the margin
-    the threshold was calibrated on rather than restating the implementation.
+    The filter runs without the ``_vad_evidence`` gate, so what stops it suppressing
+    real speech is only its narrowness. These pin that: the phrases are the ones
+    actually observed committed on trailing silence, and the negatives are the short
+    barge-ins nearby in length that must survive.
+    """
+
+    @staticmethod
+    def _state(*, mic_speech: bool | None) -> TurnState:
+        return TurnState(
+            assistant_active=False,
+            audio_playing=False,
+            assistant_text="",
+            active_user_text="",
+            seconds_since_turn_start=1.0,
+            seconds_since_last_commit=1.4,
+            partials_since_last_commit=2,
+            mic_speech_since_last_commit=mic_speech,
+        )
+
+    @pytest.mark.parametrize("text", ["Yes.", "Yeah.", "Okay.", "Bye.", "I don't."])
+    def test_silent_mic_vetoes_stock_phrases(self, text: str) -> None:
+        assert _is_unvoiced_hallucination(text, self._state(mic_speech=False))
+
+    @pytest.mark.parametrize("text", ["Stop.", "Yes.", "Wait, hold on.", "Actually, cancel that."])
+    def test_mic_energy_admits_everything(self, text: str) -> None:
+        """A real interruption carries energy, which is what makes the filter safe:
+        even a one-word "Stop." is untouchable once Silero has heard it."""
+        assert not _is_unvoiced_hallucination(text, self._state(mic_speech=True))
+
+    @pytest.mark.parametrize("text", ["Wait, hold on.", "Actually, cancel that.", "No, the white one."])
+    def test_longer_barge_ins_survive_a_silent_mic(self, text: str) -> None:
+        """The second belt: over two words, VAD alone cannot drop it. Silero misses
+        quiet speech, and losing a real instruction costs more than a ghost turn."""
+        assert not _is_unvoiced_hallucination(text, self._state(mic_speech=False))
+
+    def test_no_opinion_never_suppresses(self) -> None:
+        """``None`` is no endpointer or too long a gap to judge — distinct from False,
+        and reading it as False would drop turns on every session without Silero."""
+        assert not _is_unvoiced_hallucination("Yeah.", self._state(mic_speech=None))
+
+
+class TestLikelySttEcho:
+    """Garbled echo must be suppressed, but only in a session shown to leak.
+
+    The transcripts are real, from ``--aec-leak`` runs. What they pin is the split
+    between the two branches: verbatim echo is evidence and always counts, garbled
+    echo is a guess that stays disarmed until the verbatim branch has fired.
     """
 
     REPLY = (
@@ -48,38 +95,70 @@ class TestLikelySttEcho:
         "of purchase from one of our authorized retailers."
     )
     SEGFAULT_REPLY = "A segfault means bad memory access."
+    GARBLED = (
+        "Our retailers.",
+        "Arise retailers.",
+        "Advised retailers.",
+        "advertised retailers.",
+        "Archives to retailers.",
+        "has aroused retailers.",
+    )
 
-    def test_garbled_echo_is_suppressed(self) -> None:
-        """The old check scored these 0.23-0.33 against a 0.68 threshold and passed
-        every one through: it compared the commit to a tail sized at 3x its length,
-        which caps ratio() at 0.50, so the branch could never fire."""
-        for echo in (
-            "Our retailers.",
-            "Arise retailers.",
-            "Advised retailers.",
-            "advertised retailers.",
-            "Archives to retailers.",
-            "has aroused retailers.",
-        ):
-            assert _likely_stt_echo(echo, self.REPLY), echo
+    @staticmethod
+    def _state(reply: str) -> TurnState:
+        return TurnState(
+            assistant_active=True,
+            audio_playing=True,
+            assistant_text=reply,
+            active_user_text="",
+            seconds_since_turn_start=2.0,
+            seconds_since_last_commit=2.0,
+            partials_since_last_commit=1,
+        )
 
-    def test_genuine_barge_ins_survive(self) -> None:
+    def test_garbled_echo_needs_a_leaking_session(self) -> None:
+        """Unlatched, none of these may be suppressed: the same scores are produced by
+        a user repeating the assistant, and dropping their turn is the worse error."""
+        detector = HeuristicTurnDetector()
+        for echo in self.GARBLED:
+            assert not detector.echo_verdict(echo, self._state(self.REPLY)), echo
+
+    def test_verbatim_echo_arms_the_garbled_branch(self) -> None:
+        """One verbatim leak is proof the mic hears the speaker, and from then on
+        resemblance is admissible. This is the whole mechanism in three lines."""
+        detector = HeuristicTurnDetector()
+        state = self._state(self.REPLY)
+        assert detector.echo_verdict("authorized retailers.", state)
+        for echo in self.GARBLED:
+            assert detector.echo_verdict(echo, state), echo
+
+    def test_the_latch_does_not_leak_across_sessions(self) -> None:
+        """Detectors are cloned per session, so proof from one call must not arm another."""
+        leaking = HeuristicTurnDetector()
+        assert leaking.echo_verdict("authorized retailers.", self._state(self.REPLY))
+        assert not HeuristicTurnDetector().echo_verdict("Our retailers.", self._state(self.REPLY))
+
+    def test_genuine_barge_ins_survive_even_when_latched(self) -> None:
+        detector = HeuristicTurnDetector()
+        state = self._state(self.REPLY)
+        detector.echo_verdict("authorized retailers.", state)
         for real in ("Actually, cancel that.", "Wait, hold on.", "Okay, never mind.", "Okay, thanks."):
-            assert not _likely_stt_echo(real, self.REPLY), real
+            assert not detector.echo_verdict(real, state), real
 
-    def test_user_quoting_the_assistant_survives(self) -> None:
-        """The tightest case in the suite (`coding_barge_in_echo`): the user repeats the
-        assistant's own words, which is what asking someone to clarify sounds like. It
-        scores 0.58 against echo's 0.68 floor — the whole margin, so it guards it."""
-        reply = "Python caches imported modules, so the module body runs exactly once."
-        assert not _likely_stt_echo("Sorry, the module cache?", reply)
-        assert _likely_stt_echo("When look exactly once.", reply)
+    def test_assistant_repeating_the_user_is_not_echo(self) -> None:
+        """The regression that produced the latch. `food_long_pause` lost the user's
+        order to a confirmation containing it, on a clean run where no echo existed —
+        and it scores 0.67, inside the range real echo occupies, so only the absence
+        of proof can save it."""
+        reply = "Got it — a large pepperoni pizza."
+        assert not HeuristicTurnDetector().echo_verdict("Pepperoni pizza, please.", self._state(reply))
 
-    def test_exact_substring_still_suppressed(self) -> None:
+    def test_verbatim_branch_is_exact_only(self) -> None:
         assert _likely_stt_echo("memory access.", self.SEGFAULT_REPLY)
+        assert not _likely_stt_echo("and memory access.", self.SEGFAULT_REPLY)
 
     def test_no_assistant_text_is_never_echo(self) -> None:
-        assert not _likely_stt_echo("Our retailers.", "")
+        assert not HeuristicTurnDetector().echo_verdict("Our retailers.", self._state(""))
 
 
 # ---------------------------------------------------------------------------
