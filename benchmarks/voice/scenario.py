@@ -548,6 +548,21 @@ _TEXT_ONLY_PAUSE_SHORTFALL = (
 # separate from the text-only reason so a fix to one is not credited to the other.
 _AUDIO_PAUSE_SHORTFALL = "audio EOU hears the continuation but the hold does not survive this gap"
 
+# `heuristic` and `provider` have no HOLD at all, so a pause the STT commits at is a
+# turn boundary and nothing downstream can merge it. Not a defect but the control
+# group: it measures what the hold path is worth, which is 65-69% against 98-100% on
+# the same STT.
+#
+# Marked per cell rather than per detector, because whether it bites is an STT ×
+# detector interaction and not a property of either. `deepgram-flux/heuristic` scores
+# 90% on the identical detector, since Flux holds the fragment provider-side before
+# any detector sees it — so a blanket "holdless detector cannot merge" rule would
+# falsely mark nine scenarios it passes and hide regressions there. Nova and
+# ElevenLabs commit each fragment, and their two holdless cells fail the same family.
+_NO_HOLD_TO_MERGE = (
+    "`heuristic` and `provider` have no hold, so each fragment the STT commits becomes its own turn"
+)
+
 # ElevenLabs' endpointer waits longer than Flux's, which helps mid-sentence pauses
 # and hurts here: two finished sentences 0.9s apart come back as one turn, in all
 # four cells, with no detector given a chance to disagree.
@@ -655,6 +670,12 @@ SCENARIOS: list[Scenario] = [
             Interrupted(False),
             NoErrors(),
         ],
+        known_failure={
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
+        },
         note=(
             "Used to split under `provider` and `local` and was marked a known failure for "
             "both. Fluent synthesis fixed it outright: rendered standalone this fragment "
@@ -777,7 +798,11 @@ SCENARIOS: list[Scenario] = [
             Interrupted(False),
             NoErrors(),
         ],
-        known_failure={"deepgram-flux/provider": _FLUX_PROVIDER_SPLIT},
+        known_failure={
+            "deepgram-flux/provider": _FLUX_PROVIDER_SPLIT,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
+        },
         intermittent=True,
         note=(
             "The floor of the pause family: 0.6s is shorter than any endpointer's silence "
@@ -804,6 +829,10 @@ SCENARIOS: list[Scenario] = [
         known_failure={
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
             "elevenlabs/lexical": _TEXT_ONLY_PAUSE_SHORTFALL + " — merged 3/4",
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(
@@ -884,6 +913,10 @@ SCENARIOS: list[Scenario] = [
         known_failure={
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
             "elevenlabs/lexical": _TEXT_ONLY_PAUSE_SHORTFALL + " — merged 2/3",
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         quick=True,
@@ -942,6 +975,10 @@ SCENARIOS: list[Scenario] = [
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
             "elevenlabs/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
             "elevenlabs/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(
@@ -1011,6 +1048,10 @@ SCENARIOS: list[Scenario] = [
         known_failure={
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
             "elevenlabs/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(
@@ -1121,6 +1162,10 @@ SCENARIOS: list[Scenario] = [
             "deepgram-flux/*": _TRAILING_MODIFIER_FAILURE,
             "deepgram-nova/local": _TRAILING_MODIFIER_FAILURE,
             "elevenlabs/local": _TRAILING_MODIFIER_FAILURE + " — merged 2/3",
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(
@@ -1147,6 +1192,10 @@ SCENARIOS: list[Scenario] = [
         known_failure={
             "deepgram-flux/provider": _FLUX_PROVIDER_GHOST_I,
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(
@@ -1173,7 +1222,9 @@ SCENARIOS: list[Scenario] = [
         expect=[UserTurns(1), ContentPreserved(min_similarity=0.8), NoGhostTurns(), NoErrors()],
         known_failure={
             "deepgram-nova/lexical": "Nova endpoints at the clause boundaries inside this run-on "
-            "and text EOU scores each piece finished, so it commits three turns"
+            "and text EOU scores each piece finished, so it commits three turns",
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         note=(
             "Twelve seconds of unbroken speech with several clause boundaries an endpointer "
@@ -1212,6 +1263,8 @@ SCENARIOS: list[Scenario] = [
             "deepgram-nova/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
             "elevenlabs/local": _AUDIO_PAUSE_SHORTFALL + " — merged 2/3",
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
         },
         known_failure_under_leak={_ECHO_LEAK_CELL: _ECHO_GARBLED_DIGITS},
         intermittent=True,
@@ -1289,6 +1342,11 @@ SCENARIOS: list[Scenario] = [
             "deepgram-nova/local": _TRAILING_MODIFIER_FAILURE,
             "deepgram-nova/lexical": _TRAILING_MODIFIER_FAILURE,
             "elevenlabs/local": _TRAILING_MODIFIER_FAILURE + " — merged 1/3",
+            "deepgram-flux/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(
@@ -1325,6 +1383,11 @@ SCENARIOS: list[Scenario] = [
         known_failure={
             "deepgram-flux/provider": _FLUX_PROVIDER_SPLIT,
             "deepgram-nova/lexical": _TEXT_ONLY_PAUSE_SHORTFALL,
+            "deepgram-flux/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(
@@ -1379,7 +1442,11 @@ SCENARIOS: list[Scenario] = [
         ],
         known_failure={
             "deepgram-flux/*": "holds through the first gap and splits at the second; the "
-            "fragment it commits reads as a finished sentence, so nothing argues for holding"
+            "fragment it commits reads as a finished sentence, so nothing argues for holding",
+            "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
+            "elevenlabs/provider": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
+            "deepgram-nova/provider": _NO_HOLD_TO_MERGE,
         },
         intermittent=True,
         note=(

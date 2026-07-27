@@ -135,7 +135,7 @@ class TurnDetector(ABC):
     _echo_leak_seen: bool = False
     """This session has produced verbatim echo, so its AEC demonstrably leaks."""
 
-    def echo_verdict(self, text: str, state: TurnState) -> bool:
+    def echo_verdict(self, text: str, state: TurnState, *, arm: bool = False) -> bool:
         """Whether ``text`` is the assistant hearing itself.
 
         Two branches with very different standing. A verbatim substring of what is
@@ -165,7 +165,17 @@ class TurnDetector(ABC):
         if not _echo_window_open(state):
             return False
         if _likely_stt_echo(text, state.assistant_text):
-            self._echo_leak_seen = True
+            # Only a commit is allowed to arm the latch. A partial is text the STT is
+            # still revising, and reading it as evidence about the *microphone* is a
+            # category error that costs a turn: in a confirmation flow the user's own
+            # partials are verbatim substrings of the reply by construction. `Pepperoni`
+            # then `Pepperoni pizza` against "Got it — a large pepperoni pizza." armed
+            # the latch on a clean run, and the now-armed resemblance branch ate the
+            # commit that followed. Length cannot tell those apart either — the echo
+            # this exists to catch is `memory access` at 13 chars, the false proof is
+            # `pepperoni pizza` at 15.
+            if arm:
+                self._echo_leak_seen = True
             return True
         return self._echo_leak_seen and _resembles_stt_echo(text, state.assistant_text)
 
@@ -556,7 +566,7 @@ class HeuristicTurnDetector(TurnDetector):
             and not state.holding
         ):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination")
-        if self.echo_verdict(text, state):
+        if self.echo_verdict(text, state, arm=True):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
@@ -699,7 +709,7 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
         if _is_hesitation_only(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
-        if self.echo_verdict(text, state):
+        if self.echo_verdict(text, state, arm=True):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")

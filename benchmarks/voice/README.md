@@ -233,6 +233,68 @@ where resemblance is least informative and most tempting.
 
 Still open on this axis: 4 session errors per 120 runs under leak, untriaged.
 
+**The latch then armed itself on a clean run, and the mechanism refutes the claim above.**
+`food_long_pause` went 100% → 0% on `deepgram-flux/provider` and `deepgram-nova/lexical`,
+and the trace shows `'pepperoni pizza, please.'` suppressed as echo while the reply is
+still playing — which only the *resemblance* branch can do, so the latch was armed on a
+run with no leak. What armed it was the user's own partials. The STT emits `Pepperoni`,
+then `Pepperoni pizza`, and `'pepperoni pizza'` is a verbatim substring of "Got it — a
+large pepperoni pizza."
+
+So "a verbatim substring cannot also be produced by a user saying the same thing" is
+false, and confirmation flows are exactly where it is false: the reply restates the
+request, so the user's words are a substring of it by construction. Length does not
+separate the cases either — the echo this exists to catch is `'memory access'` at 13
+characters and the false proof is `'pepperoni pizza'` at 15.
+
+What does separate them is *what kind of event* the evidence is. A partial is text the STT
+is still revising, and reading it as evidence about the microphone is a category error;
+a commit is a claim the provider has settled on. Only commits arm the latch now.
+Suppressing an echo-shaped partial still happens and predates all of this — that was never
+the problem, arming on it was. `food_long_pause` returns to 100% on both cells, and
+`banking_correction` and `support_barge_in`, which regressed the same way, clear with it.
+
+**Full matrix, 12 cells × 39 scenarios × 3 repeats: zero ghost turns.** Not one in 1386
+runs, against a suite where they were routine this morning. That is the clearest signal
+that the day's filters — resemblance latched to commits, the unvoiced-commit guard, the
+watchdog's echo check — are subtracting spurious turns without eating real ones.
+
+It also prices the hold path for the first time, because five cells had never been
+baselined and four of them are holdless. Raw rates, before the pause family was marked
+on those cells — they read 100% now, which is the point of marking, so these numbers
+only exist here:
+
+| detector | ElevenLabs | Flux | Nova |
+|---|---|---|---|
+| `heuristic` (no hold) | 69% | **90%** | 67% |
+| `provider` (no hold) | 68% | 96% | 65% |
+| `lexical` | 98% | 100% | 96% |
+| `local` | 100% | 100% | 99% |
+
+The holdless cells fail one family — pause merging — and fail it identically: `nova/heuristic`
+and `nova/provider` miss the same 12 scenarios, both ElevenLabs cells the same 11. With no
+hold, every fragment the STT commits is a turn boundary and nothing downstream can merge
+it, so roughly 30 points of the suite is what holding buys.
+
+`deepgram-flux/heuristic` at 90% is the exception that makes it an STT × detector fact
+rather than a detector one: Flux holds the fragment provider-side before any detector sees
+it, so the same holdless detector merges nine of the scenarios Nova's cannot. That is why
+the markers are written per cell — a blanket "holdless cannot merge" rule would mark those
+nine as expected failures on Flux and hide any future regression in them.
+
+**All twelve cells now gate.** Previously seven did, and two of those seven compared against
+`pass=1.0` entries recorded before the day's changes, so they would have passed a gate they
+should have failed. What is left is flaky rather than broken and recorded at measured rates:
+`coding_double_pause` on three cells, `medical_barge_in` and `banking_digits_pause` on
+`elevenlabs/lexical`, `food_long_pause` and `coding_pause` on `deepgram-nova/local`. One
+ghost turn survives, on `deepgram-flux/provider` in `medical_simple` — the only one in the
+matrix, and untriaged.
+
+Two things this run does *not* establish, worth stating so the baseline is not over-read.
+Latency and dead air were measured at `--jobs 6`, so they gate only against future runs at
+the same concurrency. And the leak axis has its own baseline at 85%, which is the number to
+watch for echo work — the clean matrix says nothing about it.
+
 Both mechanisms that consume mic energy were ruled out as causes by disabling them:
 the hold's VAD extension (`HOLD_VAD_MAX_EXTENSION_SECS = 0`) and the stale-partial
 watchdog's mic-quiet anchor, separately and together, fail at the same rate. That

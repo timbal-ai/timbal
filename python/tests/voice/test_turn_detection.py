@@ -128,9 +128,22 @@ class TestLikelySttEcho:
         resemblance is admissible. This is the whole mechanism in three lines."""
         detector = HeuristicTurnDetector()
         state = self._state(self.REPLY)
-        assert detector.echo_verdict("authorized retailers.", state)
+        assert detector.echo_verdict("authorized retailers.", state, arm=True)
         for echo in self.GARBLED:
             assert detector.echo_verdict(echo, state), echo
+
+    def test_a_partial_cannot_arm_the_latch(self) -> None:
+        """Regression: `food_long_pause` on two cells, 100% -> 0%.
+
+        In a confirmation flow the user's own partials are verbatim substrings of the
+        reply by construction, so letting a partial count as proof hands the fuzzy
+        branch a loaded gun and it shoots the commit that follows. Suppressing the
+        partial itself is fine and predates this; arming on it is not.
+        """
+        detector = HeuristicTurnDetector()
+        state = self._state("Got it — a large pepperoni pizza.")
+        assert detector.echo_verdict("pepperoni pizza", state)
+        assert not detector.echo_verdict("Pepperoni pizza, please.", state)
 
     def test_the_latch_does_not_leak_across_sessions(self) -> None:
         """Detectors are cloned per session, so proof from one call must not arm another."""
