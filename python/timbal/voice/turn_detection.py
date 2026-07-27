@@ -307,6 +307,25 @@ _ECHO_WINDOW_RATIO = 0.65
 # silence are one- and two-word stock phrases — "Yes.", "Yeah.", "Okay." — while the
 # short barge-ins worth protecting run longer ("Wait, hold on.", "Actually, cancel
 # that.") and carry mic energy regardless. Two words leaves margin on both sides.
+# Single tokens that cannot be a whole turn, whatever the mic heard.
+#
+# Deliberately excludes every one-word utterance that *is* a turn — "No.", "Yes.",
+# "Stop.", "Wait.", "And?", "So?" all carry intent and `banking_short_reject` is
+# literally "No." What remains is a closed class of function words that cannot stand
+# alone: either the first word of an utterance the STT cut off, or the likeliest token
+# for a breath. Observed as `'I'` committing its own turn after a finished one on
+# `deepgram-flux/heuristic` (`banking_digits_pause`, `banking_short_reject`), which
+# neither :func:`_is_garbage_commit` (alphanumeric) nor
+# :func:`_is_unvoiced_hallucination` (the user really had just spoken) can reach.
+_CONTENTLESS_SINGLE_TOKENS = frozenset({"i", "a", "an", "the", "of", "to", "my"})
+
+
+def _is_contentless_single_token(text: str) -> bool:
+    """One function word, alone: a fragment or a mis-transcribed breath, never a turn."""
+    words = _WORD_RE.findall(text)
+    return len(words) == 1 and words[0].lower() in _CONTENTLESS_SINGLE_TOKENS
+
+
 MAX_UNVOICED_COMMIT_WORDS = 2
 
 
@@ -585,6 +604,8 @@ class HeuristicTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
         if _is_hesitation_only(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
+        if _is_contentless_single_token(text):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="contentless")
         # A long commit with zero preceding partials while nothing is playing is
         # almost always an STT hallucination on silence. Uses assistant_active
         # only — pending HOLD must not flip that flag (see TurnState.holding).
@@ -741,6 +762,8 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
         if _is_hesitation_only(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
+        if _is_contentless_single_token(text):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="contentless")
         if self.echo_verdict(text, state, arm=True):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):

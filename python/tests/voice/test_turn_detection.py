@@ -28,12 +28,41 @@ from timbal.voice.turn_detection import (
     TurnDetector,
     TurnState,
     _ends_with_correction_marker,
+    _is_contentless_single_token,
     _is_garbage_commit,
     _is_same_user_utterance_refinement,
     _is_unvoiced_hallucination,
     _likely_stt_echo,
     resolve_turn_detector,
 )
+
+
+class TestContentlessSingleToken:
+    """A lone function word is a fragment; a lone "No." is an answer.
+
+    The negatives are the point. `banking_short_reject` is a turn consisting of the
+    single word "No.", so a filter that keys on length alone would delete a scenario.
+    """
+
+    def test_bare_function_words_are_dropped(self) -> None:
+        for text in ("I", "I.", "the", "A.", "my", "To."):
+            assert _is_contentless_single_token(text), text
+
+    def test_meaningful_one_word_turns_survive(self) -> None:
+        for text in ("No.", "Yes.", "Stop.", "Wait.", "And?", "So?", "Okay.", "You?"):
+            assert not _is_contentless_single_token(text), text
+
+    def test_a_function_word_inside_an_utterance_survives(self) -> None:
+        for text in ("I need help.", "The blue one.", "To account 448."):
+            assert not _is_contentless_single_token(text), text
+
+    async def test_provider_ignores_a_lone_pronoun(self) -> None:
+        """Observed on flux/heuristic: 'I' committing its own turn after a finished one,
+        which is a ghost turn — the assistant answers a word the user did not say."""
+        det = ProviderTurnDetector()
+        decision = await det.on_committed("I", _state())
+        assert decision.action is CommitAction.IGNORE
+        assert decision.reason == "contentless"
 
 
 class TestTrailingCorrectionMarker:

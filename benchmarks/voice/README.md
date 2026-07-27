@@ -1097,6 +1097,57 @@ detector sees them — which is why the defect surfaced on Flux and Nova instead
 such case read at the detector is 630ms of dead air per turn that stops needing to
 be bought.
 
+### Flux's own threshold was never ours to leave alone
+
+`provider` has no hold, so on Flux `eot_threshold` *is* the turn policy — it is the
+only setting in the pipeline that can merge a pause there, and `provider` is the
+pairing Flux exists for. We shipped Deepgram's default and overrode only
+`eot_timeout_ms`, which is the ElevenLabs situation again: a number governing
+turn-taking, in our config, with nobody's measurement behind it.
+
+Unlike the ElevenLabs sweep this one is a curve, monotonic in both columns:
+
+| `eot_threshold` | pause merges | dead air p50 | p95 |
+|---|---:|---:|---:|
+| 0.4 | *rejected: HTTP 400* | — | — |
+| 0.6 | 46% | 448ms | 1409ms |
+| 0.7 (Deepgram's default) | 68% | 635ms | 1034ms |
+| **0.8 (now ships)** | **82%** | 859ms | 1538ms |
+| 0.9 | 91% | 1944ms | 2386ms |
+
+0.8 buys fourteen points for 214ms; 0.9 buys nine more for a further second and lands
+at worse dead air than ElevenLabs, which is the point at which you have stopped tuning
+and started choosing to be slow. 0.7→0.8 is what carries `coding_double_pause`
+(17%→100%), `banking_digits_pause` (83%→100%) and `medical_hesitant_pause` (17%→67%).
+All four Flux cells now gate at 100% with zero ghost turns, dead air p50 677–885ms.
+
+`banking_correction` is 0% at *every* threshold, which is worth more than the ones
+that moved: the lever cannot reach it, so its marker on `flux/provider` is structural
+rather than untuned. And `medical_self_correction` fails on Flux because Flux
+transcribes "no wait" as **"no weight"** — no correction-marker rule can fire on a
+word the STT never produces, which explains that cell without reference to holds at
+all.
+
+Two things fell out of confirming it. Deepgram rejects `eot_threshold=0.4` with a
+400, and the harness passed it through and scored 78 session errors as a 0% row
+instead of reporting invalid config — a sweep can currently spend seven minutes
+measuring nothing. And at 0.8 a stray `'I'` began committing its own turn after a
+finished one on `flux/heuristic`: a more patient threshold holds the turn open long
+enough for Flux to transcribe something in the trailing audio, and a holdless
+detector takes it. That is a ghost turn, the worst class the suite has, and it slipped
+between both existing filters — `_is_garbage_commit` requires non-alphanumeric, and
+`_is_unvoiced_hallucination` requires Silero to have heard nothing, whereas here the
+user genuinely had just spoken. A one-word commit needs neither test:
+`_is_contentless_single_token` drops a closed class of function words that cannot be
+an utterance ("I", "a", "the", "of", "to", "my"), and deliberately not the one-word
+turns that carry intent — `banking_short_reject` *is* the single word "No."
+
+Unexploited, and the obvious way to stop paying the 214ms: Flux emits
+`EagerEndOfTurn` and `TurnResumed`, and `deepgram.py` only logs them. A patient
+threshold plus starting the reply on the eager event would let the LLM work during
+the window Flux spends confirming, which is dead air currently buying nothing but
+confidence.
+
 ## Running
 
 ```bash
