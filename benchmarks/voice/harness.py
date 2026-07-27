@@ -28,6 +28,7 @@ from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any
 
+from degrade import MicPath, active_rms, telephone_state
 from scenario import (
     AwaitAssistantAudio,
     AwaitAssistantDone,
@@ -98,10 +99,15 @@ class HarnessConfig:
     # Fraction of the assistant's own output mixed back into the mic, standing
     # in for imperfect echo cancellation. 0.0 is every run before this one.
     aec_leak: float = 0.0
+    # Noise floor and telephone band between the speaker and the STT. The default
+    # is the identity — studio-clean 16kHz TTS, which is what every number in the
+    # README was measured on and the main reason to be careful quoting them for
+    # real callers.
+    mic_path: MicPath = field(default_factory=MicPath)
 
     @property
     def label(self) -> str:
-        suffix = ""
+        suffix = self.mic_path.label
         if self.aec_leak:
             suffix += f"[leak={self.aec_leak}]"
         for params in (self.detector_params, self.stt_extra):
@@ -208,6 +214,12 @@ class ScriptFeeder:
     Every run before this fed clean user-only audio, which means
     ``_likely_stt_echo`` — the guard that stops the assistant interrupting
     itself on speaker bleed — had never once been exercised.
+
+    ``mic_path`` adds a noise floor and the telephone band. It applies here, at the
+    last moment before the frame leaves, rather than to the clips: a real mic path
+    degrades *everything* it carries — the user, the silence between them, and the
+    echo — and the noise has to keep running through the pauses, since noise that
+    stops when the speaker does would tell the endpointer where the turn ended.
     """
 
     # Cap on buffered assistant audio. TTS generates faster than realtime, so an
@@ -216,12 +228,31 @@ class ScriptFeeder:
     # test than the thing being simulated.
     MAX_LEAK_SECS = 1.0
 
-    def __init__(self, leak_gain: float = 0.0) -> None:
+    def __init__(self, leak_gain: float = 0.0, mic_path: MicPath | None = None) -> None:
         self._pending: deque[bytes] = deque()
         self._leak = bytearray()
         self._leak_gain = leak_gain
         self._max_leak_bytes = int(BYTES_PER_SECOND * self.MAX_LEAK_SECS)
         self._stopped = False
+        self._mic_path = mic_path or MicPath()
+        # One filter state for the whole session, so the codec has no per-frame
+        # transient, and one read position so the bed plays as continuous noise
+        # rather than restarting every 20ms.
+        self._codec_state = telephone_state()
+        self._bed = b""
+        self._bed_pos = 0
+
+    def set_noise_bed(self, bed: bytes) -> None:
+        self._bed = bed
+
+    def _next_noise(self) -> bytes | None:
+        if not self._bed:
+            return None
+        if self._bed_pos + FRAME_BYTES > len(self._bed):
+            self._bed_pos = 0
+        frame = self._bed[self._bed_pos : self._bed_pos + FRAME_BYTES]
+        self._bed_pos += FRAME_BYTES
+        return frame
 
     def push(self, pcm: bytes) -> None:
         self._pending.extend(frames(pcm))
@@ -261,6 +292,12 @@ class ScriptFeeder:
             frame = self._pending.popleft() if self._pending else SILENCE_FRAME
             if (leak := self._next_leak()) is not None:
                 frame = mix_pcm16(frame, leak, self._leak_gain)
+            # Speech and echo first, then the room, then the line: the noise is
+            # picked up by the microphone, so it goes through the codec too.
+            if (noise := self._next_noise()) is not None:
+                frame = mix_pcm16(frame, noise, 1.0)
+            if self._mic_path.telephone:
+                frame = self._mic_path.apply(frame, self._codec_state)
             yield frame
             next_at += FRAME_SECS
             await asyncio.sleep(max(0.0, next_at - time.monotonic()))
@@ -428,7 +465,15 @@ async def run_scenario(
         record_audio=config.dump,
     )
 
-    feeder = ScriptFeeder(leak_gain=config.aec_leak)
+    feeder = ScriptFeeder(leak_gain=config.aec_leak, mic_path=config.mic_path)
+    if config.mic_path.snr_db is not None:
+        # Level the noise against this scenario's own speech, so the same nominal
+        # SNR means the same thing in a scenario that is mostly pause as in one
+        # that is wall-to-wall talking.
+        spoken = b"".join(
+            clips[s.clip_key] for s in scenario.script if isinstance(s, Say) and s.clip_key in clips
+        )
+        feeder.set_noise_bed(config.mic_path.bed(active_rms(spoken)))
     playback = PlaybackSim()
     assistant_speaking = asyncio.Event()
     # session.close() interrupts any reply still playing. That teardown interrupt

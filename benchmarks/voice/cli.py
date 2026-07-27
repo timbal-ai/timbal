@@ -38,6 +38,7 @@ import time
 from dataclasses import dataclass
 
 import structlog
+from degrade import parse_mic_path
 from dotenv import load_dotenv
 from harness import HarnessConfig, RunResult, coerce_param, config_rejection, run_scenario
 from scenario import SCENARIOS, Scenario, select
@@ -152,6 +153,14 @@ async def main() -> int:
         "realistic imperfect echo canceller); exercises the echo suppressor, which clean "
         "user-only audio never does",
     )
+    parser.add_argument(
+        "--mic-path",
+        metavar="SPEC",
+        help="degrade the mic path: comma-separated 'snr=<db>' (noise floor, levelled "
+        "against this scenario's speech), 'pink'|'white', and 'phone' (300-3400Hz + "
+        "G.711). Every baseline in the repo was measured without this, on studio-clean "
+        "16kHz TTS; e.g. --mic-path snr=15,phone",
+    )
     # Reproducing one cell of a sweep with the event stream visible was the missing
     # step between "this value scores worse" and knowing why.
     parser.add_argument(
@@ -200,6 +209,7 @@ async def main() -> int:
             language=args.language,
             dump=args.dump,
             aec_leak=args.aec_leak,
+            mic_path=parse_mic_path(args.mic_path),
             stt_extra=stt_extra,
             detector_params=detector_params,
         )

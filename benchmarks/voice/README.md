@@ -1157,6 +1157,131 @@ threshold plus starting the reply on the eager event would let the LLM work duri
 the window Flux spends confirming, which is dead air currently buying nothing but
 confidence.
 
+### The suite had been grading the default configuration all along without noticing
+
+Every finding above is about a detector someone chose. The interesting question is
+what happens to someone who chooses nothing, and the matrix already answered it —
+the answer was just sitting in a column nobody read as a default.
+
+`timbal.server.voice` only overrode the detector for Flux, where `stt_is_flux`
+forces `provider`. For every other STT, an unset `turn_detector` fell through to
+`resolve_turn_detector(None)`, which is `HeuristicTurnDetector` — the one detector
+that cannot hold. Nova and ElevenLabs commit each fragment of a paused utterance
+separately, so a detector that cannot hold cannot put them back together, and the
+`heuristic` column is where the pause family goes to die. Counting scenarios
+carrying a `known_failure` marker, out of 39:
+
+| STT | `heuristic` | `lexical` | `local` |
+| --- | --- | --- | --- |
+| `deepgram-nova` | 15 broken | 12 | **7** |
+| `elevenlabs` | 14 broken | **6** | 8 |
+
+Fifteen of 39 broken was the shipping default for Nova. It reads as 100% in
+`baseline.json` only because every one of those failures is marked — the markers
+made the default's cost invisible in exactly the metric we gate on. The nine
+scenarios `local` fixes on Nova are all one shape: `coding_pause`,
+`coding_double_pause`, `food_pause`, `food_trailing_preposition`,
+`medical_filler_midway`, `medical_long_utterance`, `support_pause`,
+`support_pause_short`, `support_trailing_conjunction`.
+
+Worse, the two code paths already disagreed. `_warm_voice_models` resolves
+`"local"` when `voice_config` names no detector, so a server with no configuration
+was loading Smart Turn, Namo and Silero at startup and then handing the session a
+detector that used none of them. The cost was being paid and the benefit discarded.
+
+`select_turn_detector_spec` now makes the choice explicitly, by STT, and
+`test_server_voice.py` pins it — including the pre-existing Flux rule, which had no
+test at all. The fallback is `lexical` rather than `local` when `timbal[voice]` is
+absent, because `local` without an audio EOU model returns the heuristic decision
+verbatim (its punctuation fallback sits *behind* the audio branch at
+`turn_detection.py`), so it would have bought nothing.
+
+Left open deliberately: on ElevenLabs, `lexical` is the better of the two by this
+count, and the four scenarios `local` breaks there are all one family —
+`banking_correction`, `banking_digits_pause`, `food_trailing_preposition`,
+`medical_self_correction`. That is the same correction-and-digits family whose
+merges ElevenLabs' 1.2s VAD window performs for us, which suggests Smart Turn
+scores the audio complete and cuts the hold short *before* the provider's window
+merges the correction. Two scenarios is too thin a margin to special-case a
+provider on, and it trades against latency the marker count cannot see: `local` is
+what arms the VAD endpointing fast path, and ElevenLabs already has the worst dead
+air in the matrix. Worth measuring, not guessing.
+
+### Every number above came from a recording booth
+
+The standing caveat on this whole document was that the audio is studio-clean: TTS
+at 16 kHz, no noise floor, full bandwidth, handed straight to the STT. That is what
+makes runs reproducible, and it is also why none of the endpointing values here
+could be called right for a real caller. Both of the thresholds tuned in this
+document — ElevenLabs' `vad_silence_threshold_secs` and Flux's `eot_threshold` —
+decide when speech has *stopped*, which is precisely the judgement a noise floor
+makes harder.
+
+`degrade.py` adds the missing path, applied in `ScriptFeeder.stream` in the order a
+real one applies:
+
+    user speech (+ echo leak)  ->  + noise bed  ->  telephone band  ->  STT
+
+Two details are load-bearing. The noise runs continuously, *through the pauses*:
+noise gated to the clips would be a cue rather than a distractor, telling the
+endpointer exactly where the utterance ended, and would test something easier than
+clean audio rather than harder. And it is levelled per scenario against that
+scenario's own speech (`active_rms`, which ignores silence), so `snr=15` means the
+same thing in a scenario that is 60% deliberate pause as in one that is
+wall-to-wall talking. `snr` is therefore the acoustic SNR at the microphone, not
+the ratio the STT receives — speech and noise lose different amounts to the
+telephone band.
+
+`--verify` earned its keep immediately by failing a check that encoded a wrong
+belief of mine: that pink noise would survive the phone band better than white. It
+is the reverse. At matched broadband level pink puts most of its energy below
+300 Hz, exactly where the codec's high-pass throws it away, so white delivers more
+in-band energy and is the harsher of the two. Pink is still the default because
+rooms are pink; `white` is there to stress the STT.
+
+Not modelled, and worth knowing before quoting any number from this axis: packet
+loss and jitter — a dropped 20 ms frame mid-word is a different failure and
+plausibly the more dangerous one for turn-taking — and accent, which is a TTS voice
+axis rather than a DSP one. This is still English in one voice.
+
+First measurement, `deepgram-flux/provider`, the primary production cell, whole
+suite. The clean row is a control run at the same concurrency, not the stored
+baseline, because parallel runs distort latency and comparing against a serial
+baseline would have attributed that distortion to the noise:
+
+| mic path | passed | ghost turns | dead air p50 | dead air p95 | eou→audio p95 |
+| --- | --- | --- | --- | --- | --- |
+| clean | 27/27 | 0 | 652ms | 1442ms | 312ms |
+| `snr=15,phone` | 25/27 | 0 | 860ms | 2282ms | 690ms |
+| `snr=5,phone` | 25/27 | 0 | 845ms | 2007ms | 465ms |
+
+The reassuring half: turn-taking degrades gracefully in *correctness*. No ghost
+turns at either level, no session errors, and the failures are two scenarios rather
+than a collapse — a 10 dB change in noise barely moves the pass rate, which says
+the cliff is not nearby.
+
+The half that matters more: the cost shows up as latency, and it is large. Dead air
+p50 rises ~200ms and p95 nearly doubles, while `eou→audio` p50 barely moves
+(217 -> 223ms) and its p95 more than doubles. That shape — median flat, tail
+blowing out — is Flux's end-of-turn confidence taking longer to clear a noisy
+signal. Which lands directly on a decision made earlier in this document:
+`eot_threshold=0.8` was chosen on clean audio, on the argument that +214ms of dead
+air bought fourteen points of pause merges. A patient threshold is exactly the
+setting whose cost noise inflates, so that trade needs re-measuring here before it
+can be called right for real callers. Sweeping `eot_threshold` *under* `--mic-path`
+is the obvious next move and is now a one-liner.
+
+`food_trailing_preposition` is the one scenario that fails under noise having
+passed clean, at both levels. It is intermittent rather than deterministic — a
+single repeat merged correctly — and the partials show the mechanism: Flux hears
+"Can you deliver it to" as "Can you do", then emits a stray `--` marker mid-stream,
+so the fragment it endpoints is not the fragment the scenario is about.
+
+Deliberately not done yet: no markers and no baseline for this axis. The leak axis
+earned its marker table only after a first run showed which failures recurred, and
+inventing one here before knowing whether a scenario fails at 15 dB, at 5 dB, or
+only in parallel would be bookkeeping ahead of evidence.
+
 ## Running
 
 ```bash

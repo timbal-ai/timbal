@@ -162,7 +162,8 @@ async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
         elif isinstance(td, str) and td.strip().lower() in ("local", "audio", "smart_turn"):
             detector = resolve_turn_detector(td)
         elif td is None:
-            # Playground often switches to Smart Turn on first Start — warm it.
+            # "local" is the default for non-Flux STT (see the session setup), and
+            # the playground also switches to Smart Turn on first Start.
             detector = resolve_turn_detector("local")
 
         if isinstance(detector, LocalAudioTurnDetector):
@@ -192,6 +193,60 @@ async def voice_page(request: Request) -> HTMLResponse:
     body = json.dumps(meta)
     html = html.replace(_VOICE_HTML_META_TOKEN, body)
     return HTMLResponse(html)
+
+
+def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux: bool) -> Any:
+    """Choose the turn detector for a session: a mode name, instance, or factory.
+
+    ``server_spec`` comes from ``runnable.voice_config`` and may be any of those
+    three. ``client_spec`` comes over the wire and is honoured only as a mode
+    name — a browser must not be able to inject a callable — but is otherwise
+    preferred, so the playground can A/B detectors.
+
+    The choice is made here rather than in
+    :func:`~timbal.voice.turn_detection.resolve_turn_detector` because it turns
+    on the STT: whichever mode is best depends on how well the provider
+    endpoints, and only the session setup knows which provider is in play.
+    """
+    spec = server_spec
+    if isinstance(client_spec, str) and client_spec.strip():
+        spec = client_spec
+    elif client_spec is not None and not isinstance(client_spec, str):
+        logger.warning("voice_ws_bad_turn_detector", error="client turn_detector must be a mode name string")
+
+    mode = spec.strip().lower() if isinstance(spec, str) else None
+    if stt_is_flux:
+        # Flux owns EOU (~260ms). Local/lexical run *after* EndOfTurn and add a
+        # second HOLD tax; they also disable the useful Provider path. Force
+        # provider unless the caller explicitly picked heuristic/raw/provider.
+        if mode is None or mode in ("local", "audio", "smart_turn", "lexical"):
+            if spec is not None:
+                # Includes an instance or factory from voice_config, which this
+                # overrides too — worth saying so rather than silently ignoring.
+                logger.info("voice_ws_flux_overrides_turn_detector", requested=str(spec), using="provider")
+            return "provider"
+        return spec
+    if spec is not None:
+        return spec
+
+    # Nothing chosen. The holdless heuristic is the worst of the four on every
+    # backend that endpoints on silence — 65-69% against 96-100% for detectors
+    # that can hold — because Nova and ElevenLabs commit each fragment of a
+    # paused utterance separately, and only a hold puts them back together.
+    #
+    # The warmup path already resolved "local" for this case, so a server with no
+    # `turn_detector` configured was loading Smart Turn, Namo and Silero at
+    # startup and then handing the session a detector that used none of them.
+    #
+    # Without `timbal[voice]`, `local` returns the heuristic decision verbatim
+    # (its punctuation fallback sits behind the audio-EOU branch), so it would buy
+    # nothing; `lexical` holds an unfinished transcript with no extra deps. Asking
+    # the resolver beats probing imports: the degradation rule stays in one place.
+    from ..voice.turn_detection import resolve_turn_detector
+
+    mode = "local" if getattr(resolve_turn_detector("local"), "audio_eou", None) is not None else "lexical"
+    logger.info("voice_ws_default_turn_detector", using=mode)
+    return mode
 
 
 @router.websocket("/ws")
@@ -318,29 +373,17 @@ async def voice_ws(ws: WebSocket) -> None:
     # a mode name ("heuristic"|"provider"|"local"|"lexical"). The client JSON
     # may additionally select a *mode name* (string only — useful for A/B
     # testing detectors from the playground); instances and factories can never
-    # come over the wire.
+    # come over the wire. When neither picks one, the server chooses by STT
+    # rather than taking ``resolve_turn_detector``'s zero-dep default, because
+    # only here is the STT's endpointing behaviour known.
     from ..voice.turn_detection import resolve_turn_detector
 
     turn_detector = None
-    raw_td = defaults.get("turn_detector")
-    client_td = config.get("turn_detector")
-    if isinstance(client_td, str) and client_td.strip():
-        raw_td = client_td
-    elif client_td is not None and not isinstance(client_td, str):
-        logger.warning("voice_ws_bad_turn_detector", error="client turn_detector must be a mode name string")
-    if stt_is_flux:
-        # Flux owns EOU (~260ms). Local/lexical run *after* EndOfTurn and add
-        # a second HOLD tax; they also disable the useful Provider path. Force
-        # provider unless the client explicitly picked heuristic/raw/provider.
-        td_mode = raw_td.strip().lower() if isinstance(raw_td, str) else None
-        if td_mode is None or td_mode in ("local", "audio", "smart_turn", "lexical"):
-            if td_mode is not None:
-                logger.info(
-                    "voice_ws_flux_overrides_turn_detector",
-                    requested=raw_td,
-                    using="provider",
-                )
-            raw_td = "provider"
+    raw_td = select_turn_detector_spec(
+        defaults.get("turn_detector"),
+        config.get("turn_detector"),
+        stt_is_flux=stt_is_flux,
+    )
     if raw_td is not None:
         try:
             # voice_config is process-wide; VoiceSession clones the resolved

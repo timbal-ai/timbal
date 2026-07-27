@@ -13,10 +13,20 @@ without session changes.
 
 **Modes** (see :func:`resolve_turn_detector`):
 
-* ``heuristic`` (default) — :class:`HeuristicTurnDetector`, no extra deps
+* ``heuristic`` (resolver default) — :class:`HeuristicTurnDetector`, no extra deps
 * ``provider`` — :class:`ProviderTurnDetector`, trust STT/realtime endpointing
 * ``local`` — :class:`LocalAudioTurnDetector` + injectable :class:`AudioEouModel`
 * ``lexical`` — :class:`LexicalTurnDetector`, optional zero-dep text overlay
+
+``heuristic`` is the resolver's default only because it is the one mode that
+needs no extras and makes no assumption about the STT. It is *not* the best
+choice: it cannot hold, so on any STT that endpoints on silence it splits a
+paused utterance into several turns (``benchmarks/voice`` measures 65-69% on
+Nova and ElevenLabs against 96-100% for the holding modes). Pick by STT —
+``provider`` for Deepgram Flux, ``local`` (or ``lexical`` without the
+``timbal[voice]`` extra) for everything else. :mod:`timbal.server.voice` does
+this for you; direct :class:`~timbal.voice.session.VoiceSession` users should
+pass ``turn_detector=`` explicitly.
 
 Provider-native paths (OpenAI ``semantic_vad``, ElevenLabs Scribe VAD commits,
 Deepgram Flux, Gemini Live) map to ``provider`` or a future realtime session

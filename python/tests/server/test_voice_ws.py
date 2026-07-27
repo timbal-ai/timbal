@@ -289,12 +289,14 @@ class TestVoiceWsPlaybackAck:
         app = create_app()
         with TestClient(app) as client:
             with client.websocket_connect("/voice/ws") as ws:
-                ws.send_json({})
+                # Pinned, not defaulted: this asserts what a detector *without* an
+                # audio EOU advertises, so it must not follow the server default.
+                ws.send_json({"turn_detector": "heuristic"})
                 messages = _collect_ws_messages(ws)
 
         started = next(m for m in messages if m["type"] == "session_started")
         assert started["playback_acks"] == "recommended"
-        # Default heuristic detector has no audio EOU model → the local VAD
+        # The heuristic detector has no audio EOU model → the local VAD
         # endpointing fast path never arms, and session_started must say so.
         assert started["vad_endpointing"] is False
 
@@ -530,13 +532,20 @@ class TestVoiceWsClientTurnDetector:
         )
         assert started["turn_detector"] == "LexicalTurnDetector"
 
-    def test_default_is_heuristic_and_advertised(self, monkeypatch, tmp_path: Path) -> None:
+    # A holding detector: which one depends on whether timbal[voice] is installed
+    # (see test_voice_detector_choice.py, which pins that branch directly). The
+    # contract asserted here is that an unconfigured session gets a detector that
+    # *can* hold — the holdless heuristic splits paused utterances into several
+    # turns on any STT that endpoints on silence.
+    _HOLDS = ("LocalAudioTurnDetector", "LexicalTurnDetector")
+
+    def test_default_holds_and_is_advertised(self, monkeypatch, tmp_path: Path) -> None:
         started = self._run_session(monkeypatch, tmp_path, {})
-        assert started["turn_detector"] == "HeuristicTurnDetector"
+        assert started["turn_detector"] in self._HOLDS
 
     def test_non_string_client_value_is_ignored(self, monkeypatch, tmp_path: Path) -> None:
         started = self._run_session(monkeypatch, tmp_path, {"turn_detector": {"evil": True}})
-        assert started["turn_detector"] == "HeuristicTurnDetector"
+        assert started["turn_detector"] in self._HOLDS
 
     def test_unknown_mode_name_falls_back_to_default(self, monkeypatch, tmp_path: Path) -> None:
         started = self._run_session(monkeypatch, tmp_path, {"turn_detector": "quantum"})
@@ -642,7 +651,11 @@ class TestVoiceWsAudioTransport:
         app = create_app()
         with TestClient(app) as client:
             with client.websocket_connect("/voice/ws") as ws:
-                ws.send_json({})
+                # This is a transport test: it needs the injected commit to start a
+                # turn immediately. A holding detector (the server default) would
+                # correctly park unpunctuated "test" for seconds and produce no
+                # audio at all.
+                ws.send_json({"turn_detector": "heuristic"})
                 messages = _collect_ws_messages(ws)
 
         audio_msgs = [m for m in messages if m["type"] == "audio"]
