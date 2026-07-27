@@ -39,7 +39,7 @@ from dataclasses import dataclass
 
 import structlog
 from dotenv import load_dotenv
-from harness import HarnessConfig, RunResult, coerce_param, run_scenario
+from harness import HarnessConfig, RunResult, coerce_param, config_rejection, run_scenario
 from scenario import SCENARIOS, Scenario, select
 from score import (
     RunRecord,
@@ -289,6 +289,23 @@ async def main() -> int:
         cell_records = [r for r in records if r.label == config.label]
         if not cell_records:
             continue
+        # A cell whose every session was refused measured nothing, and a scorecard
+        # would present that as behaviour: `--stt-param eot_threshold=0.4` is outside
+        # Flux's range and reads as a plain 0% cell. Reported before scoring so it
+        # cannot be baselined or gated against.
+        refused = [why for r in cell_records if (why := config_rejection(r.errors))]
+        if refused:
+            print(f"\n{'─' * 72}")
+            every = len(refused) == len(cell_records)
+            scope = "every run" if every else f"{len(refused)}/{len(cell_records)} runs"
+            print(f"{config.label}: {scope} refused by the provider")
+            for why in sorted(set(refused)):
+                print(f"  {why}")
+            exit_code = max(exit_code, 2)
+            # Partial refusals still say something about the runs that connected;
+            # a cell where none did has no behaviour to score.
+            if every:
+                continue
         card = build_scorecard(cell_records)
         cards.append(card)
 

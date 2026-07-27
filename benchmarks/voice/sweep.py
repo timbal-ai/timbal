@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 
 import structlog
 from dotenv import load_dotenv
-from harness import HarnessConfig, coerce_param, run_scenario
+from harness import HarnessConfig, coerce_param, config_rejection, run_scenario
 from scenario import SCENARIOS, Merged, Scenario
 from synth import synthesize_clips, synthesize_fluent
 
@@ -128,10 +128,17 @@ async def main() -> int:
     outcomes = {str(v): Outcome(value=str(v)) for v in values}
     started = time.monotonic()
 
+    rejected: dict[str, str] = {}
+
     async def one(value: object, stt: str, det: str, scenario: Scenario) -> None:
+        if str(value) in rejected:
+            return
         config = HarnessConfig(stt=stt, detector=det, **{param_field: {param_key: value}})
         async with semaphore:
             result = await run_scenario(scenario, clips, config)
+        if why := config_rejection(result.errors):
+            rejected.setdefault(str(value), why)
+            return
         out = outcomes[str(value)]
         out.total += 1
         out.passed += result.passed
@@ -157,6 +164,9 @@ async def main() -> int:
 
     print(f"{args.param:>10}  {'merges':<10} {'':>4}  {'dead air p50':>10}  {'p95':>6}")
     for value in values:
+        if why := rejected.get(str(value)):
+            print(f"  {value!s:>10}  {why}")
+            continue
         print("  " + outcomes[str(value)].summary())
 
     print("\nper scenario (pass rate across cells and repeats)\n")
@@ -165,6 +175,9 @@ async def main() -> int:
     for scenario in scenarios:
         row = ""
         for value in values:
+            if str(value) in rejected:
+                row += f"{'-':>8} "
+                continue
             runs_ = outcomes[str(value)].per_scenario.get(scenario.id, [])
             row += f"{(sum(runs_) / len(runs_) if runs_ else 0):>8.0%} "
         print(f"  {scenario.id:<30}{row}")
@@ -172,7 +185,8 @@ async def main() -> int:
     print(f"\n  elapsed: {time.monotonic() - started:.0f}s")
     print("\n  A winner here is a candidate, not a decision: confirm it against the full")
     print("  12-cell grid and the Flux gate before believing it.")
-    return 0
+    # Non-zero on a rejected value: the sweep did not measure what it was asked to.
+    return 1 if rejected else 0
 
 
 if __name__ == "__main__":

@@ -1129,9 +1129,18 @@ word the STT never produces, which explains that cell without reference to holds
 all.
 
 Two things fell out of confirming it. Deepgram rejects `eot_threshold=0.4` with a
-400, and the harness passed it through and scored 78 session errors as a 0% row
-instead of reporting invalid config — a sweep can currently spend seven minutes
-measuring nothing. And at 0.8 a stray `'I'` began committing its own turn after a
+400, and the harness passed it through and scored 78 refused sessions as a 0% row —
+indistinguishable, in the table above, from a setting that merely merges nothing.
+`SWEEPABLE_STT_KEYS` validates key *names*, and encoding each provider's accepted
+ranges beside them would go stale the first time one changed theirs; noticing the
+refusal does not. `config_rejection` now matches a 4xx on the handshake — and only
+4xx, since a rejected handshake is deterministic for a given config while a timeout
+or a 5xx is the transient the repeats exist to average over. The sweep stops
+scheduling that value and prints the provider's message where the row would go, with
+`-` rather than `0%` in the per-scenario table; `cli.py` reports the cell as refused
+before scoring, so it cannot be baselined or gated against, and exits 2. The cost was
+never the six seconds of wasted runtime — it was a number in a results table that
+looked like a measurement. And at 0.8 a stray `'I'` began committing its own turn after a
 finished one on `flux/heuristic`: a more patient threshold holds the turn open long
 enough for Flux to transcribe something in the trailing audio, and a holdless
 detector takes it. That is a ghost turn, the worst class the suite has, and it slipped

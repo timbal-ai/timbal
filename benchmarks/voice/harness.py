@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import array
 import asyncio
+import re
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any
@@ -275,6 +276,29 @@ SWEEPABLE_STT_KEYS: dict[str, frozenset[str]] = {
     "deepgram-nova": frozenset({"endpointing", "utterance_end_ms", "smart_format", "punctuate", "interim_results"}),
     "deepgram-flux": frozenset({"eot_timeout_ms", "eot_threshold", "eager_eot_threshold"}),
 }
+
+
+_HANDSHAKE_REJECTION = re.compile(r"server rejected WebSocket connection: HTTP (4\d\d)")
+
+
+def config_rejection(errors: Sequence[str]) -> str | None:
+    """The provider refused the configuration, as opposed to the run going badly.
+
+    ``SWEEPABLE_STT_KEYS`` validates key *names*, so a value the provider rejects
+    still runs: `eot_threshold=0.4` is outside Flux's accepted range and every
+    session dies on the handshake, which the sweep then reported as a 0% row
+    indistinguishable from a setting that merely merges nothing. Encoding each
+    provider's accepted ranges here would go stale the first time one changed
+    theirs; noticing the refusal does not.
+
+    Only 4xx. A rejected handshake is deterministic for a given config, so
+    repeating it 77 more times cannot learn anything — whereas a timeout or a 5xx
+    is exactly the transient the repeats exist to average over.
+    """
+    for e in errors:
+        if m := _HANDSHAKE_REJECTION.search(e):
+            return f"provider rejected the connection (HTTP {m.group(1)}): {e}"
+    return None
 
 
 def coerce_param(raw: str) -> float | int | bool | str:
