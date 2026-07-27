@@ -625,6 +625,71 @@ class TestVoiceWsClientTurnDetector:
         assert started["turn_detector"] == "ProviderTurnDetector"
 
 
+class TestVoiceWsTurnTimeoutConfig:
+    """``turn_timeout_secs`` / ``turn_timeout_fallback`` must reach the session."""
+
+    def _capture_session_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        import timbal.voice as voice_pkg
+
+        real = voice_pkg.VoiceSession
+        captured: dict = {}
+
+        class _CapturingSession(real):  # type: ignore[misc, valid-type]
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(voice_pkg, "VoiceSession", _CapturingSession, raising=False)
+        return captured
+
+    def test_turn_timeout_keys_are_plumbed_into_the_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        captured = self._capture_session_kwargs(monkeypatch)
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"turn_timeout_secs": 12, "turn_timeout_fallback": "hold on"})
+                _collect_ws_messages(ws)
+
+        assert captured["turn_timeout_secs"] == 12.0
+        assert captured["turn_timeout_fallback"] == "hold on"
+
+    def test_bad_turn_timeout_value_keeps_the_session_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A non-numeric value must be dropped, not zero the watchdog out."""
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        captured = self._capture_session_kwargs(monkeypatch)
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"turn_timeout_secs": "soon"})
+                messages = _collect_ws_messages(ws)
+
+        assert "turn_timeout_secs" not in captured
+        assert any(m["type"] == "session_started" for m in messages)
+
+
 class TestVoiceWsAudioTransport:
     """Verify audio bytes survive the base64 round-trip over WS."""
 

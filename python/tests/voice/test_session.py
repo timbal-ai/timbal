@@ -536,6 +536,168 @@ class TestErrorPropagation:
 
 
 # ---------------------------------------------------------------------------
+# Tests: agent-turn timeout
+# ---------------------------------------------------------------------------
+
+
+class _HungAgent:
+    """Duck-typed agent whose event stream never yields — models a hung LLM."""
+
+    def __call__(self, **_kwargs: object) -> AsyncIterator[object]:
+        return self._gen()
+
+    async def _gen(self) -> AsyncIterator[object]:
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover — keep this an async generator
+            yield None
+
+
+class _HungTTS(TextToSpeech):
+    """TTS whose synthesize never yields — models a hung synthesis provider."""
+
+    def __init__(self) -> None:
+        self.synthesize_calls: list[str] = []
+
+    async def connect(self, config: AudioOutputConfig) -> None:
+        pass
+
+    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        self.synthesize_calls.append(text)
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover — keep this an async generator
+            yield b""
+
+    async def close(self) -> None:
+        pass
+
+
+class TestTurnTimeout:
+    async def test_hung_agent_times_out_speaks_fallback_and_stays_open(self) -> None:
+        """A silent hung turn must not leave the caller waiting forever.
+
+        Expect: SessionError, spoken fallback, session accepts a second turn.
+        """
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=_HungAgent(),  # type: ignore[arg-type]
+            stt=stt,
+            tts=tts,
+            turn_timeout_secs=0.15,
+            turn_timeout_fallback="Sorry, try again.",
+        )
+        # Swap in a real agent for the *second* turn after the timeout.
+        live_agent = Agent(name="t", model=TestModel(responses=["Recovered."]), tools=[])
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+
+            await stt.inject(TranscriptEvent(type="committed", text="Are you there?"))
+            while not any(isinstance(e, SessionError) and "timed out" in e.message for e in events):
+                await asyncio.sleep(0.01)
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+
+            session.agent = live_agent
+            await stt.inject(TranscriptEvent(type="committed", text="Hello again"))
+            while sum(1 for e in events if isinstance(e, AgentTextDone)) < 2:
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+
+        errors = [e for e in events if isinstance(e, SessionError)]
+        assert any("timed out" in e.message for e in errors)
+        assert "Sorry, try again." in tts.synthesized_texts
+        assert any(isinstance(e, AgentTextDone) and e.text == "Sorry, try again." for e in events)
+        assert session.transcript[-1].role == "assistant"
+        assert "Recovered" in session.transcript[-1].text
+
+    async def test_hung_tts_cannot_hang_the_timeout_rescue(self) -> None:
+        """When the TTS is the hung component, the fallback speak is bounded too.
+
+        An unbounded rescue would hang exactly like the turn it rescues: agent
+        times out, the apology goes to the same dead TTS, and the caller waits
+        forever anyway. Expect: rescue attempted, given up, session closable.
+        """
+        stt = DelayedMockSTT()
+        tts = _HungTTS()
+        session = VoiceSession(
+            agent=_HungAgent(),  # type: ignore[arg-type]
+            stt=stt,
+            tts=tts,
+            turn_timeout_secs=0.15,
+        )
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello?"))
+            while not any(isinstance(e, SessionError) for e in events):
+                await asyncio.sleep(0.01)
+            # The bounded rescue expires after min(turn_timeout_secs, 10s).
+            while not tts.synthesize_calls:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.3)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+
+        assert any(isinstance(e, SessionError) and "timed out" in e.message for e in events)
+        assert tts.synthesize_calls  # rescue was attempted against the dead TTS
+        assert not any(isinstance(e, AgentTextDone) for e in events)  # and abandoned
+        assert not session.transcript or session.transcript[-1].role != "assistant"
+
+    async def test_timeout_disabled_when_secs_non_positive(self) -> None:
+        """``turn_timeout_secs <= 0`` must not arm a deadline."""
+        session, _, _ = _make_session(
+            stt_script=[TranscriptEvent(type="committed", text="Hi")],
+            responses=["Hello!"],
+        )
+        session.turn_timeout_secs = 0
+        events = await _collect_events(session)
+        assert not any(isinstance(e, SessionError) for e in events)
+        assert any(isinstance(e, AgentTextDone) for e in events)
+
+    async def test_fast_turn_unaffected_by_default_timeout(self) -> None:
+        session, _, tts = _make_session(
+            stt_script=[TranscriptEvent(type="committed", text="Hi")],
+            responses=["Hello!"],
+        )
+        assert session.turn_timeout_secs > 0
+        events = await _collect_events(session)
+        assert not any(isinstance(e, SessionError) for e in events)
+        assert any(isinstance(e, AgentTextDone) for e in events)
+        assert tts.synthesized_texts  # real reply, not the timeout fallback
+
+
+# ---------------------------------------------------------------------------
 # Tests: _strip_markdown
 # ---------------------------------------------------------------------------
 

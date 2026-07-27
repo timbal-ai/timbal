@@ -428,6 +428,15 @@ async def voice_ws(ws: WebSocket) -> None:
     # TODO(tool-filler): read a server-side `filler_phrases` voice_config key
     # (list of phrases or `(tool_name) -> str | None` callable) and pass it to
     # `VoiceSession(filler=...)` once tool-call filler speech returns.
+    session_kwargs: dict[str, Any] = {}
+    if "turn_timeout_secs" in merged:
+        try:
+            session_kwargs["turn_timeout_secs"] = float(merged["turn_timeout_secs"])
+        except (TypeError, ValueError):
+            logger.warning("voice_ws_bad_turn_timeout_secs", value=repr(merged.get("turn_timeout_secs")))
+    if "turn_timeout_fallback" in merged:
+        fb = merged["turn_timeout_fallback"]
+        session_kwargs["turn_timeout_fallback"] = None if fb is None else str(fb)
     session = VoiceSession(
         agent=runnable,
         stt=stt,
@@ -437,6 +446,7 @@ async def voice_ws(ws: WebSocket) -> None:
         turn_detector=turn_detector,
         vad_endpointing=vad_endpointing,
         model=model_override,
+        **session_kwargs,
     )
 
     async def _recv_loop() -> None:

@@ -53,6 +53,13 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger("timbal.voice.session")
 
+# Wall-clock cap on a single agent turn (LLM stream + in-turn TTS drains).
+# Without this a hung provider leaves the caller in silence forever.
+DEFAULT_TURN_TIMEOUT_SECS = 60.0
+# Spoken when the turn times out before any audio was produced. Empty / None
+# disables the apology; the session stays open either way.
+DEFAULT_TURN_TIMEOUT_FALLBACK = "Sorry, I lost that for a moment. Could you say that again?"
+
 
 async def _no_audio_score() -> float | None:
     """Audio-EOU scorer for detectors that have none — always abstains.
@@ -375,6 +382,13 @@ class VoiceSession:
     Background tasks spawned via ``run_in_background`` are **not** cancelled;
     the agent decides their lifecycle.
 
+    Turn timeout
+    ------------
+    Each agent turn is capped by ``turn_timeout_secs`` (default 60s). On
+    expiry the session emits :class:`SessionError`, speaks
+    ``turn_timeout_fallback`` when no audio has gone out yet, and stays open
+    for the next user turn. Set ``turn_timeout_secs <= 0`` to disable.
+
     After the session closes, :attr:`transcript` contains the ordered list of
     committed user/assistant text, and (when ``record_audio=True``)
     :attr:`input_audio` / :attr:`output_audio` hold raw PCM bytes.
@@ -392,6 +406,8 @@ class VoiceSession:
         playback_tracker: PlaybackTracker | None = None,
         record_audio: bool = False,
         hold_timeout_secs: float = 1.5,
+        turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
+        turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
         vad_endpointing: bool | VadEndpointer | None = None,
         model: str | None = None,
     ):
@@ -416,6 +432,12 @@ class VoiceSession:
         # a per-decision override. Heuristic/provider never HOLD, so this is inert
         # unless an opt-in detector (local / lexical) is used.
         self.hold_timeout_secs = hold_timeout_secs
+        # Wall-clock cap for one agent turn. ``<= 0`` disables. On expiry the
+        # session emits SessionError, speaks ``turn_timeout_fallback`` if no
+        # audio has gone out yet, and stays open for the next user turn.
+        self.turn_timeout_secs = turn_timeout_secs
+        self.turn_timeout_fallback = turn_timeout_fallback
+        self._turn_deadline: float | None = None
         # VAD endpointing fast path (Silero speech-stop → audio EOU → stt.commit()).
         # None = auto: on when the detector exposes an audio EOU model and the
         # timbal[voice] extra is installed; False = off; True = on (warn when
@@ -1536,10 +1558,28 @@ class VoiceSession:
 
     # -- Internal: agent turn → TTS ----------------------------------------
 
+    async def _await_turn_deadline(self, awaitable: Any) -> Any:
+        """Await ``awaitable``, raising :class:`TimeoutError` if the turn deadline elapses.
+
+        ``turn_timeout_secs <= 0`` disables the deadline. Used for agent
+        ``__anext__`` and in-turn TTS drains so a hung LLM/tool cannot leave
+        the caller in silence indefinitely.
+        """
+        deadline = self._turn_deadline
+        if deadline is None:
+            return await awaitable
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("agent turn timed out")
+        return await asyncio.wait_for(awaitable, timeout=remaining)
+
     async def _run_turn(self, user_text: str) -> None:
         self._is_speaking = True
         self._turn_assistant_text = ""
         self._turn_started_at = time.monotonic()
+        self._turn_deadline = (
+            self._turn_started_at + self.turn_timeout_secs if self.turn_timeout_secs > 0 else None
+        )
         self._turn_index += 1
         self._turn_first_token_at = None
         self._turn_first_audio_at = None
@@ -1571,6 +1611,7 @@ class VoiceSession:
                 user_preview=user_text[:160],
                 resume_from_saved_run_id=(self._last_run_context.id if self._last_run_context else None),
                 saved_run_parent_id=(self._last_run_context.parent_id if self._last_run_context else None),
+                turn_timeout_secs=self.turn_timeout_secs,
                 **_trace_debug_fields(),
             )
             text_buffer = ""
@@ -1582,7 +1623,21 @@ class VoiceSession:
             if self.model:
                 agent_kwargs["model"] = self.model
             agen = self.agent(**agent_kwargs)
-            async for event in agen:
+            # Timed ``__anext__`` so a hung LLM/tool cannot stall forever. The
+            # for-body is unchanged; only the pull is deadline-aware.
+            while True:
+                try:
+                    event = await self._await_turn_deadline(agen.__anext__())
+                except StopAsyncIteration:
+                    turn_phase = "agent_generator_exhausted"
+                    logger.debug(
+                        "turn_agent_loop_complete",
+                        reason="generator_exhausted",
+                        response_chars=len(full_response),
+                        **_trace_debug_fields(),
+                    )
+                    break
+
                 turn_phase = "awaiting_agent_event"
                 if self._cancel_turn.is_set():
                     turn_phase = "cancel_turn_flag_at_iter_start"
@@ -1737,21 +1792,13 @@ class VoiceSession:
                             # so all PCM is queued before post-hook / trace save / finally.
                             if not self._cancel_turn.is_set():
                                 turn_phase = "await_tts_after_llm_output"
-                                await self._await_tts_chain()
+                                await self._await_turn_deadline(self._await_tts_chain())
                                 # Attach provisional metrics: the outer Agent's trace is first
                                 # persisted in its generator ``finally``, before this turn's own
                                 # ``finally`` builds the final numbers. The finally re-saves the
                                 # trace with final metrics; this keeps the intermediate snapshot
                                 # meaningful if the process dies before then.
                                 self._attach_metrics_to_trace(self._build_turn_metrics(user_text, interrupted=False))
-            else:
-                turn_phase = "agent_generator_exhausted"
-                logger.debug(
-                    "turn_agent_loop_complete",
-                    reason="generator_exhausted",
-                    response_chars=len(full_response),
-                    **_trace_debug_fields(),
-                )
 
             # Normally stamped at the .llm OUTPUT event (before the TTS drain);
             # fall back here for runs that never produced one.
@@ -1764,7 +1811,7 @@ class VoiceSession:
 
             if not self._cancel_turn.is_set():
                 turn_phase = "await_tts_before_done"
-                await self._await_tts_chain()
+                await self._await_turn_deadline(self._await_tts_chain())
                 turn_phase = "emit_agent_text_done"
                 if full_response.strip():
                     self._transcript.append(TranscriptEntry(role="assistant", text=full_response))
@@ -1785,6 +1832,35 @@ class VoiceSession:
             )
             turn_phase = f"cancelled_during_{turn_phase}"
             raise
+        except TimeoutError:
+            # Hung LLM / tool / TTS drain hit the wall-clock cap. Surface an
+            # error, speak a short apology if the caller heard nothing, and let
+            # the session stay open for a retry — do not re-raise.
+            turn_phase = "timeout"
+            logger.error(
+                "turn_timeout",
+                timeout_secs=self.turn_timeout_secs,
+                response_chars=len(full_response),
+                had_audio=self._turn_first_audio_at is not None,
+                **_trace_debug_fields(),
+            )
+            await self._emit(SessionError(message=f"Turn timed out after {self.turn_timeout_secs:g}s"))
+            fallback = (self.turn_timeout_fallback or "").strip()
+            if fallback and self._turn_first_audio_at is None and not self._cancel_turn.is_set():
+                try:
+                    await self._abort_tts_stream()
+                    # The hung component may be the TTS itself, in which case an
+                    # unbounded rescue would hang exactly like the turn it is
+                    # rescuing. Bound it; on expiry we give up on the apology.
+                    await asyncio.wait_for(
+                        self._speak(fallback),
+                        timeout=min(self.turn_timeout_secs, 10.0),
+                    )
+                    self._transcript.append(TranscriptEntry(role="assistant", text=fallback))
+                    await self._emit(AgentTextDone(text=fallback))
+                    self._turn_finalized_ok = True
+                except Exception as e:
+                    logger.warning("turn_timeout_fallback_failed", error=str(e), exc_info=True)
         except Exception as e:
             turn_phase = "exception"
             logger.error("turn_error", error=str(e), exc_info=True)
