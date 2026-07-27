@@ -534,6 +534,16 @@ _TRAILING_MODIFIER_FAILURE = (
     "its hold to 0.35s"
 )
 
+# The announced half of the family above: "...447. Sorry." and "...blue pill. No, wait."
+# say outright that a correction is coming, and `local` now holds on that marker alone
+# (trailing_correction_marker). What remains here is timing, not judgement — the hold is
+# armed, and the correction either arrives inside it or does not. Retired the markers on
+# flux/local (banking, 6/6) and nova/local (medical, 6/6) outright.
+_CORRECTION_MARKER_HELD = (
+    "the correction marker now arms a hold, so this is a race rather than a misjudgement: "
+    "the retraction has to arrive inside the short tier"
+)
+
 # Off Flux, Namo alone is not enough to hold a mid-sentence pause. Nova commits a
 # fragment that reads as a finished sentence and `lexical` has no second opinion to
 # contradict it — the audio EOU is exactly what `local` adds, and the gap between
@@ -1160,8 +1170,7 @@ SCENARIOS: list[Scenario] = [
         ],
         known_failure={
             "deepgram-flux/*": _TRAILING_MODIFIER_FAILURE,
-            "deepgram-nova/local": _TRAILING_MODIFIER_FAILURE,
-            "elevenlabs/local": _TRAILING_MODIFIER_FAILURE + " — merged 2/3",
+            "elevenlabs/local": _CORRECTION_MARKER_HELD + " — merged 5/6",
             "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
             "elevenlabs/provider": _NO_HOLD_TO_MERGE,
             "deepgram-nova/heuristic": _NO_HOLD_TO_MERGE,
@@ -1337,11 +1346,10 @@ SCENARIOS: list[Scenario] = [
             NoErrors(),
         ],
         known_failure={
-            "deepgram-flux/local": _TRAILING_MODIFIER_FAILURE,
             "deepgram-flux/provider": _TRAILING_MODIFIER_FAILURE,
-            "deepgram-nova/local": _TRAILING_MODIFIER_FAILURE,
+            "deepgram-nova/local": _CORRECTION_MARKER_HELD + " — merged 4/6",
             "deepgram-nova/lexical": _TRAILING_MODIFIER_FAILURE,
-            "elevenlabs/local": _TRAILING_MODIFIER_FAILURE + " — merged 1/3",
+            "elevenlabs/local": _CORRECTION_MARKER_HELD + " — merged 5/6",
             "deepgram-flux/heuristic": _NO_HOLD_TO_MERGE,
             "elevenlabs/heuristic": _NO_HOLD_TO_MERGE,
             "elevenlabs/provider": _NO_HOLD_TO_MERGE,

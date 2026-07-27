@@ -1025,6 +1025,78 @@ the kind of price that stops anyone taking one. What makes it sound is unchanged
 and unrelated: a baseline records its own concurrency, and latency comparison is
 declined across a mismatch.
 
+### The provider's patience was hiding a sentence we could have read
+
+The 1.2s conclusion above was measured against a harness that tore down mid-hold,
+which penalises exactly the configurations relying on our holds rather than the
+provider's. Re-swept once that was fixed, the aggressive end is nowhere near as bad
+as it looked — 0.3 goes from 47% to 77% — and at `--repeat 3` the shipped value
+looked barely defensible at all:
+
+| `vad_silence_threshold_secs` | pause merges | dead air p50 | p95 |
+|---|---:|---:|---:|
+| 0.3 | 77% | 775ms | 2602ms |
+| 0.5 | 83% | 765ms | **2388ms** |
+| 0.8 | 73% | 962ms | 2924ms |
+| 1.2 (ships) | 85% | 1409ms | 2882ms |
+
+Two points for 642ms is a trade anyone would take. It is also not real: 0.8 scoring
+below both neighbours is the signature of an underpowered measurement, n=78 makes
+two points about 1.5 runs, and at `--repeat 6` on `local` alone the gap reopens to
+94% against 83%. **1.2 stays.** Worth stating plainly because the tempting version
+of this exercise — sweep, take the winner, ship it — would have shipped a 6% merge
+regression on the strength of noise, twice, in opposite directions.
+
+What the tighter sweep bought instead was the *shape* of the disagreement. Nothing
+here is a curve; it is two families pulling opposite ways, each pinned at 0% or 100%
+across all six repeats:
+
+| scenario | 0.5 | 0.6 | 0.8 | 1.2 |
+|---|---:|---:|---:|---:|
+| `medical_self_correction` | 0% | 0% | 0% | 100% |
+| `banking_correction` | 0% | 0% | 0% | 100% |
+| `food_list_pause` | 100% | 100% | 100% | 17% |
+
+The two that collapse are the two the hold-tier sweep could never fix at any value,
+and the trace says why — with `holding=False`, no hold is armed at all, so there was
+never a tier to blame:
+
+```
+commit 'Send it to account 447. Sorry.'   holding=False  → new_turn
+commit '448.'                                            → new_turn, 2 turns, FAIL
+```
+
+Both EOU signals score that finished and both are right: it *is* a complete
+sentence. What makes it incomplete is neither acoustic nor syntactic but discourse
+— "Sorry." and "No, wait." announce a retraction, the way a hedge announces a pause.
+So `local` now holds on a finished sentence plus a trailing correction marker
+regardless of either score (`trailing_correction_marker`, short tier, since the
+correction follows within ~300ms by nature and a false positive should not cost 3s).
+The sentence-then-marker *shape* is the entire safety margin: a bare "Sorry." is
+somebody's whole turn, and "I'm sorry." is an apology.
+
+Measured at `--repeat 6`, at the shipped 1.2, against cells where both scenarios
+were marked known failures:
+
+| | `flux/local` | `nova/local` | `elevenlabs/local` |
+|---|---:|---:|---:|
+| `banking_correction` | **6/6** | 4/6 | 5/6 |
+| `medical_self_correction` | 0/6 | **6/6** | 5/6 |
+
+Two markers retired outright and three downgraded to a race the hold either wins or
+loses. Both Deepgram cells gate at 100%; ElevenLabs holds its 96.8% baseline, and
+the three scenarios that dipped to 2/3 there never trigger the rule once across 9
+runs, so they are the provider variance documented above. It reaches only `local` —
+`LexicalTurnDetector` is a sibling of `LocalAudioTurnDetector`, not a subclass — so
+the improvements visible on `lexical` cells in the same runs are not this change,
+which is its own hint that some markers there are stale.
+
+The threshold question is now a different one. ElevenLabs' 1.2s is not buying
+merges in general, it is buying *these* merges, by absorbing corrections before any
+detector sees them — which is why the defect surfaced on Flux and Nova instead. Each
+such case read at the detector is 630ms of dead air per turn that stops needing to
+be bought.
+
 ## Running
 
 ```bash

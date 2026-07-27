@@ -27,12 +27,48 @@ from timbal.voice.turn_detection import (
     SemanticTurnDetector,
     TurnDetector,
     TurnState,
+    _ends_with_correction_marker,
     _is_garbage_commit,
     _is_same_user_utterance_refinement,
     _is_unvoiced_hallucination,
     _likely_stt_echo,
     resolve_turn_detector,
 )
+
+
+class TestTrailingCorrectionMarker:
+    """A finished sentence plus "Sorry." is the one incompleteness no EOU model sees.
+
+    Both signals score these complete and both are right about the sentence — the
+    speaker is simply not done. The shape requirement is the whole safety margin, so
+    the negatives matter more than the positives here.
+    """
+
+    def test_correction_after_a_finished_sentence(self) -> None:
+        for text in (
+            "Send it to account 447. Sorry.",
+            "I take the blue pill. No, wait.",
+            "Book it for Tuesday. Actually.",
+            "The total is 40. Hold on.",
+        ):
+            assert _ends_with_correction_marker(text), text
+
+    def test_a_bare_marker_is_a_whole_turn(self) -> None:
+        """Holding these buys nothing and costs dead air: there is no sentence in front
+        of the marker, so nothing is being corrected."""
+        for text in ("Sorry.", "Wait, hold on.", "Actually, cancel that.", "Hold on."):
+            assert not _ends_with_correction_marker(text), text
+
+    def test_marker_words_inside_a_sentence_do_not_count(self) -> None:
+        """An apology is not a retraction, and "Actually, Wednesday." is the correction
+        itself rather than the announcement of one."""
+        for text in (
+            "I'm sorry.",
+            "Book it for Tuesday. Actually, Wednesday.",
+            "I need help with my recent order.",
+            "What is your return policy?",
+        ):
+            assert not _ends_with_correction_marker(text), text
 
 from .test_session import MockSTT, MockTTS
 
@@ -722,6 +758,20 @@ class TestLocalAudioTurnDetector:
         det.push_audio(b"\x00\x01" * 8000)
         decision = await det.on_committed("Tell me a story", _state())
         assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+    async def test_trailing_correction_holds_despite_both_signals_complete(self) -> None:
+        """`banking_correction` and `medical_self_correction`, marked on five and four
+        cells: audio scores 0.9, the text is a finished sentence, and the correction that
+        follows becomes a second turn. Nothing else in the detector can catch it, because
+        nothing else is wrong — the sentence really is complete."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.9))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Send it to account 447. Sorry.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "trailing_correction_marker"
+        assert decision.hold_timeout_secs == det.text_incomplete_hold_timeout_secs
         await det.close()
 
     async def test_short_audio_incomplete_text_holds(self) -> None:

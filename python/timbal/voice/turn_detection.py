@@ -479,6 +479,38 @@ def _looks_like_fresh_hold_utterance(text: str) -> bool:
     return True
 
 
+_CORRECTION_MARKERS = frozenset(
+    {"sorry", "no wait", "oh wait", "wait", "actually", "i mean", "scratch that", "my bad", "hold on"}
+)
+_TRAILING_MARKER_RE = re.compile(r"^(?P<head>.*[.!?])\s*(?P<tail>[^.!?]+[.!?]?)$", re.S)
+
+
+def _ends_with_correction_marker(text: str) -> bool:
+    """A finished sentence with a self-correction marker stuck on the end.
+
+    The one case no end-of-utterance model can resolve, because there is nothing to
+    resolve: "Send it to account 447. Sorry." and "I take the blue pill. No, wait."
+    are complete sentences, both EOU signals correctly score them finished, and the
+    speaker is nonetheless mid-thought. What gives it away is discourse, not prosody
+    or syntax — "Sorry." announces a correction the way a hedge announces a pause,
+    which is the same kind of lexical cue :func:`_is_hesitation_only` already reads.
+
+    Deliberately requires the sentence-then-marker *shape* rather than just a marker
+    at the end. A bare "Sorry." is a whole turn and holding it only adds dead air,
+    and "I'm sorry." is an apology rather than a retraction — both fail the head test.
+
+    Found because ElevenLabs hides it: at `vad_silence_threshold_secs=1.2` the provider
+    merges the correction into one commit before any detector sees it, so the defect is
+    invisible there and shows up on Flux and Nova instead. That masking is also what the
+    1.2s default is buying, at ~630ms of dead air on every turn.
+    """
+    m = _TRAILING_MARKER_RE.match(text.strip())
+    if m is None:
+        return False
+    tail = " ".join(_WORD_RE.findall(m.group("tail"))).lower()
+    return tail in _CORRECTION_MARKERS
+
+
 _TERMINAL_END_CHARS = frozenset(".?!。？！")
 
 
@@ -1132,6 +1164,18 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
                     reason="audio_complete_text_incomplete",
                     hold_timeout_secs=min(self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs),
                 )
+            if _ends_with_correction_marker(candidate):
+                # Both signals say finished and both are right about the sentence; the
+                # marker says the speaker is not. Held on the short tier because a
+                # correction follows within a few hundred ms by nature — measured at
+                # ~300ms — so the long hold buys nothing and would cost 3s whenever
+                # the marker misleads.
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=candidate,
+                    reason="trailing_correction_marker",
+                    hold_timeout_secs=min(self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs),
+                )
             return CommitDecision(
                 action=CommitAction.NEW_TURN,
                 text=candidate,
@@ -1163,6 +1207,14 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         if p_text is not None and p_text >= self.TEXT_COMPLETE_TIER_THRESHOLD:
             timeout = min(self.text_complete_hold_timeout_secs, self.hold_timeout_secs)
             reason = "audio_hold_text_complete"
+        logger.debug(
+            "audio_hold_tier",
+            p_audio=round(p, 3),
+            p_text=None if p_text is None else round(p_text, 3),
+            timeout_secs=timeout,
+            reason=reason,
+            text_preview=candidate[:60],
+        )
         return CommitDecision(
             action=CommitAction.HOLD,
             text=candidate,
