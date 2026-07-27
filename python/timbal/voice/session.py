@@ -976,6 +976,39 @@ class VoiceSession:
     # hostage for as long as the session lives.
     MAX_QUIET_SPEECH_SECS = 0.1
 
+    # Trailing window Silero must find quiet before a partial can be called invented.
+    # Shorter than the barge-in window because this fires between utterances, where
+    # the pause is the signal, not during one.
+    HALLUCINATION_QUIET_WINDOW_SECS = 0.5
+
+    def _partial_clobbers_stranded(self, text: str) -> bool:
+        """A partial that is neither the stranded utterance refined nor backed by mic energy.
+
+        ElevenLabs invents stock phrases on trailing silence — ``"Yeah."``, ``"Yes."``,
+        ``"I don't know."`` — and each one costs twice over. It overwrites the real
+        utterance the watchdog would have rescued, and it refreshes the staleness anchor
+        so the watchdog stays disarmed by the very churn it exists to catch. The
+        provider's own VAD silence timer restarts too, so the real words never commit by
+        either route: measured on `medical_barge_in`, the interrupting turn was never
+        committed by anyone.
+
+        Deliberately narrow, because silence alone does not make a partial invented. The
+        watchdog exists for the user who speaks quietly under playback, where an
+        over-eager AEC ducks the mic and *neither* the provider VAD nor Silero registers
+        an utterance — refusing every uncorroborated partial would break the case the
+        thing was built for. So all three must hold: a stranded partial is already
+        waiting, the new text is not that one refined, and Silero heard nothing recent.
+
+        The detector still sees the text; only the rescue payload and its anchor are
+        protected. Deciding whether to interrupt on it is
+        :meth:`_vad_vetoes_barge_in`'s job, and it applies a stricter standard.
+        """
+        if not self._latest_partial_text or self._last_partial_at <= self._last_commit_at:
+            return False
+        if _is_same_user_utterance_refinement(self._latest_partial_text, text):
+            return False
+        return self._mic_quiet_for(self.HALLUCINATION_QUIET_WINDOW_SECS)
+
     def _mic_quiet_for(self, secs: float) -> bool:
         """Silero heard essentially nothing in the trailing ``secs``.
 
@@ -1103,7 +1136,15 @@ class VoiceSession:
                 if event.type == "partial":
                     text = event.text.strip()
                     self._partials_since_last_commit += 1
-                    if text:
+                    if text and self._partial_clobbers_stranded(text):
+                        # INFO on purpose: this is the only trace that a real
+                        # utterance was kept alive against provider churn.
+                        logger.info(
+                            "stt_partial_hallucination_ignored",
+                            text_preview=text[:80],
+                            stranded_preview=self._latest_partial_text[:80],
+                        )
+                    elif text:
                         self._last_partial_at = time.monotonic()
                         self._latest_partial_text = text
                     decision = await self.turn_detector.on_partial(text, self._turn_state())

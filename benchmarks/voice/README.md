@@ -835,6 +835,36 @@ unexpected failures, no errors, and the single ghost is `banking_confirmation` o
 `deepgram-flux/local`, which produced the identical ghost in 1 of 3 repeats before
 the change.
 
+**Most of the remainder turned out to be this harness, not the provider.** Two further
+changes took the same four scenarios from 15/24 to **24/24** with zero ghost turns, and
+the second is the one that mattered.
+
+The first keeps the churn from destroying what the watchdog exists to rescue. A
+hallucinated `"Yeah."` overwrote `_latest_partial_text` and refreshed the staleness
+anchor, so the real utterance was both gone and un-rescuable; a partial is now ignored
+for those two purposes when a stranded partial is already waiting, the new text is not
+that one refined, and Silero heard nothing recent. All three conditions are needed —
+silence alone would break the watchdog's founding case, where the user speaks quietly
+under playback and neither the provider VAD nor Silero registers it. Worth 19/24 alone.
+
+The second: `settle_secs` was a flat 1.0s, and the shortest HOLD tier is 1.2s. A hold
+emits nothing while it debounces — that is the entire point of it — so a quiescence rule
+shorter than the hold cannot distinguish "finished" from "deliberately waiting", and the
+harness tore down mid-hold. The trace is unambiguous: `'Sorry, one more thing.'` commits
+as a 1.5s `lexical_hold` and the run ends before it can fire, scoring as the product
+losing a turn. It is now derived from the detector's own hold timeouts (`local` 3.5s,
+`lexical` 2.0s, the holdless detectors 1.0s) rather than chosen, because the failure
+mode of getting it wrong is invisible and looks like someone else's bug.
+
+That correction is worth stating plainly: the five failures written off above as
+provider variance were substantially mine. The A/B that appeared to exonerate the wait
+changes only compared *whether* a wait resolved, not whether it resolved early, and a
+settle that fires mid-hold resolves perfectly happily. Full suite after both, previously
+unbaselinable: `elevenlabs/local` 61/62, `elevenlabs/lexical` 63/66, no session errors on
+either. Deepgram is unmoved — `flux/lexical` 34/34, `flux/provider` at its usual 26/27,
+and the pause family that stood to lose most from a longer settle is 16/16 across
+`support_pause`, `support_pause_short`, `food_long_pause` and `coding_double_pause`.
+
 Two fixes that looked obvious and measured worse, both worth not re-trying:
 
 | Hypothesis | Result |

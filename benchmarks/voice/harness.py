@@ -340,6 +340,40 @@ def _build_detector(config: HarnessConfig) -> Any:
     return detector
 
 
+def _settle_secs(config: HarnessConfig) -> float:
+    """How long the session must say nothing before a wait accepts what it has.
+
+    Must exceed the longest HOLD the detector can arm, and this is the whole reason
+    the value is derived rather than chosen. A hold emits nothing while it debounces
+    — that is what it is for — so a quiescence rule shorter than the hold cannot tell
+    "the session is finished" from "the session is deliberately waiting", and the
+    harness tears down mid-hold. It reads as the *product* dropping a turn.
+
+    Measured on the ElevenLabs barge-ins, where the interrupting utterance commits as
+    a 1.5s `lexical_hold` against a flat 1.0s settle: 19/24 at 1.0s, 24/24 once the
+    settle clears the hold. Those five were previously written off as provider
+    flakiness, which is what a harness bug looks like from the outside when it only
+    bites the slowest provider.
+
+    Floors at 1.0s to cover the gap between speech ending and the first partial for
+    it (~0.4s on ElevenLabs, the slowest measured here) on detectors that never hold.
+    """
+    detector = resolve_turn_detector(_build_detector(config))
+    holds = [
+        getattr(detector, name, None)
+        # DEFAULT_ included because LexicalTurnDetector passes its class constant
+        # straight into the decision without ever binding an instance attribute.
+        for name in (
+            "hold_timeout_secs",
+            "DEFAULT_HOLD_TIMEOUT_SECS",
+            "text_complete_hold_timeout_secs",
+            "text_incomplete_hold_timeout_secs",
+        )
+    ]
+    longest = max((h for h in holds if isinstance(h, int | float)), default=0.0)
+    return max(1.0, longest + 0.5)
+
+
 async def run_scenario(
     scenario: Scenario,
     clips: dict[str, bytes],
@@ -397,10 +431,7 @@ async def run_scenario(
                 return
             await asyncio.sleep(FRAME_SECS)
 
-    # How long the session must say nothing before a wait accepts what it already
-    # has. Wide enough to cover the gap between speech ending and the first
-    # partial for it (~0.4s on ElevenLabs, the slowest measured here).
-    settle_secs = 1.0
+    settle_secs = _settle_secs(config)
 
     def _settled(events: list[float], after: float) -> bool:
         """Whether the session is done with the speech fed up to ``after``.
