@@ -604,6 +604,13 @@ class TestTurnTimeout:
                 await asyncio.sleep(0.01)
             while not any(isinstance(e, AgentTextDone) for e in events):
                 await asyncio.sleep(0.01)
+            # AgentTextDone is emitted while the turn's ``finally`` is still
+            # retiring it. A commit landing in that window sees an active
+            # assistant and gets dismissed as a trailing crumb of "Are you
+            # there?" — correct product behavior, wrong test timing. Wait for
+            # the turn task itself.
+            while session._current_turn_task is not None and not session._current_turn_task.done():
+                await asyncio.sleep(0.01)
 
             session.agent = live_agent
             await stt.inject(TranscriptEvent(type="committed", text="Hello again"))

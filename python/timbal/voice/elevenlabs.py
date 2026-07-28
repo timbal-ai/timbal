@@ -166,7 +166,14 @@ class ElevenLabsRealtimeSTT(SpeechToText):
             "commit": commit,
             "sample_rate": self._input_config.sample_rate if self._input_config else 16_000,
         }
-        await self._ws.send(json.dumps(msg))
+        try:
+            await self._ws.send(json.dumps(msg))
+        except ConnectionClosed:
+            # Dead socket: drop the audio. Acceptable only because the receive
+            # loop's sentinel is already tearing the session down — and required,
+            # because this path is called from the periodic flusher and from
+            # commit() (VAD endpointing), neither of which may raise.
+            pass
 
     async def _periodic_flush(self) -> None:
         try:
@@ -208,8 +215,13 @@ class ElevenLabsRealtimeSTT(SpeechToText):
                     await self._queue.put(TranscriptEvent(type="error", text=f"STT fatal ({mt}): {err}"))
                     break
         except ConnectionClosed as e:
-            logger.debug("el_stt_ws_closed", error=str(e))
-            await self._queue.put(TranscriptEvent(type="error", text=f"STT connection closed: {e}"))
+            if self._stop.is_set():
+                # Requested teardown; an error event here races session close and
+                # can surface a spurious SessionError on a normal hangup.
+                logger.debug("el_stt_ws_closed", error=str(e))
+            else:
+                logger.warning("el_stt_ws_closed_unrequested", error=str(e))
+                await self._queue.put(TranscriptEvent(type="error", text=f"STT connection closed: {e}"))
         except Exception as e:
             logger.error("el_stt_receive_error", error=str(e), exc_info=True)
             await self._queue.put(TranscriptEvent(type="error", text=f"STT receive error: {e}"))

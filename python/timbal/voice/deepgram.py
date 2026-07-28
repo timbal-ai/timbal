@@ -183,10 +183,14 @@ class _DeepgramSTTBase(SpeechToText):
                     continue
                 await self._handle_message(msg)
         except ConnectionClosed as e:
-            logger.debug("dg_stt_ws_closed", error=str(e))
-            # Deepgram closes normally after CloseStream; only surface abnormal
-            # closures as errors so the session tears down loudly.
-            if not self._stop.is_set() and e.rcvd is not None and e.rcvd.code not in (1000, 1001):
+            if self._stop.is_set():
+                # Requested teardown (close() sent CloseStream); silence is correct.
+                logger.debug("dg_stt_ws_closed", error=str(e))
+            else:
+                # Provider-initiated, any code — 1000/1001 included. The provider
+                # hanging up mid-call is not the user hanging up; ending the
+                # session silently made the two indistinguishable.
+                logger.warning("dg_stt_ws_closed_unrequested", error=str(e))
                 await self._queue.put(TranscriptEvent(type="error", text=f"STT connection closed: {e}"))
         except Exception as e:
             logger.error("dg_stt_receive_error", error=str(e), exc_info=True)
