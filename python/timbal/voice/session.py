@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
+from uuid_extensions import uuid7
 
 from ..core.agent import Agent
 from ..state import get_run_context, set_run_context
@@ -50,6 +51,7 @@ from .turn_detection import (
 if TYPE_CHECKING:
     from .endpointing import VadEndpointer
     from .metrics import TurnMetrics
+    from .recording import CallRecorder
 
 logger = structlog.get_logger("timbal.voice.session")
 
@@ -405,6 +407,8 @@ class VoiceSession:
         turn_detector: TurnDetector | str | None = None,
         playback_tracker: PlaybackTracker | None = None,
         record_audio: bool = False,
+        recorder: CallRecorder | None = None,
+        session_id: str | None = None,
         hold_timeout_secs: float = 1.5,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
@@ -546,6 +550,16 @@ class VoiceSession:
         self._record_audio = record_audio
         self._input_audio_chunks: list[bytes] = []
         self._output_audio_chunks: list[bytes] = []
+        # Persistent call recording (MP3 + manifest; see voice/recording.py).
+        # Distinct from the in-memory record_audio seam above.
+        self.session_id = session_id or uuid7(as_type="str").replace("-", "")
+        self._recorder = recorder
+        #: Wall-clock session start (set when run() begins); transcript offsets
+        #: in the recording manifest and session_transcript are relative to it.
+        self.started_at: float | None = None
+        #: Resolved identity (model, stt, transport, ...) a transport may attach
+        #: for the recording manifest.
+        self.recording_meta: dict[str, Any] | None = None
 
         # -- Per-turn latency metrics (time.monotonic stamps) --------------------
         self._metrics: list[TurnMetrics] = []
@@ -598,6 +612,7 @@ class VoiceSession:
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
         try:
+            self.started_at = time.time()
             self._start_llm_warmup()
             await self.stt.connect(self.audio_input)
             await self.tts.connect(self.audio_output)
@@ -664,6 +679,14 @@ class VoiceSession:
         # buffer is cleared — the truncation in _run_turn's finally needs it.
         if was_active and self._turn_heard_bytes is None:
             self._turn_heard_bytes = max(0, self.playback.played_bytes - self._turn_played_baseline)
+            if self._recorder is not None:
+                # The recording truncates exactly like the transcript does: the
+                # unheard tail of this turn never reaches the file. The recorder
+                # clamps to its queue, so an estimate that lags the drain only
+                # over-keeps a fraction of a second.
+                self._recorder.drop_agent_tail(
+                    max(0, self._turn_audio_bytes - self._turn_heard_bytes)
+                )
         self._is_speaking = False
         if was_active:
             self.playback.on_interrupted()
@@ -1082,6 +1105,8 @@ class VoiceSession:
             async for chunk in audio_in:
                 if self._record_audio:
                     self._input_audio_chunks.append(chunk)
+                if self._recorder is not None:
+                    self._recorder.add_mic(chunk)
                 self.turn_detector.push_audio(chunk)
                 if self._endpointer is not None:
                     self._endpointer.push(chunk)
@@ -2179,6 +2204,8 @@ class VoiceSession:
                 self._turn_audio_bytes += len(chunk)
                 if self._record_audio:
                     self._output_audio_chunks.append(chunk)
+                if self._recorder is not None:
+                    self._recorder.add_agent(chunk)
                 segment_record[1] += len(chunk)
                 await self._emit(AudioOutput(data=chunk))
                 self.playback.on_audio_emitted(len(chunk))
@@ -2414,6 +2441,33 @@ class VoiceSession:
         await self.stt.close()
         await self.tts.close()
         await self.turn_detector.close()
+        await self._finalize_recording()
+
+    async def _finalize_recording(self) -> None:
+        """Flush the call recording and fire the on_saved hook. Never raises."""
+        if self._recorder is None:
+            return
+        try:
+            from .recording import build_manifest
+
+            manifest = build_manifest(
+                session_id=self.session_id,
+                started_at=self.started_at,
+                meta=self.recording_meta,
+                transcript=self._transcript,
+                turns=self._metrics,
+                recorder=self._recorder,
+            )
+            result = self._recorder.close(manifest=manifest)
+        except Exception as e:
+            logger.error("recording_finalize_failed", error=str(e), exc_info=True)
+            return
+        hook = getattr(self._recorder, "on_saved", None)
+        if result is not None and hook is not None:
+            try:
+                await hook(result)
+            except Exception as e:
+                logger.error("recording_on_saved_failed", error=str(e), exc_info=True)
 
 
 def _reconcile_final_assistant_text(streamed: str, final_text: str) -> tuple[str, str | None]:

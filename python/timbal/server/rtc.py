@@ -100,6 +100,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
         runnable, defaults, config, playback_tracker=PacedPlaybackTracker(downlink)
     )
     meta = {"playback_acks": "native", "transport": "webrtc", **meta}
+    session.recording_meta = meta
 
     pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=_ice_servers()))
     _pcs.add(pc)

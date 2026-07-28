@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def _make_tts_class(chunk: bytes = b"\x00\x01" * 16, num_chunks: int = 2):
 # ---------------------------------------------------------------------------
 
 
-def _write_agent_module(tmp_path: Path, *, responses: list[str] | None = None) -> str:
+def _write_agent_module(tmp_path: Path, *, responses: list[str] | None = None, extra: str = "") -> str:
     """Write a temp module with a TestModel Agent and return its import spec."""
     resp_repr = repr(responses or ["Hello from agent!"])
     mod = tmp_path / "voice_agent.py"
@@ -102,6 +103,7 @@ def _write_agent_module(tmp_path: Path, *, responses: list[str] | None = None) -
         "from timbal import Agent\n"
         "from timbal.core.test_model import TestModel\n"
         f"agent = Agent(name='voice_test', model=TestModel(responses={resp_repr}), tools=[])\n"
+        + extra
     )
     return f"{mod.resolve()}::agent"
 
@@ -727,3 +729,92 @@ class TestVoiceWsAudioTransport:
         assert len(audio_msgs) == 1
         decoded = base64.b64decode(audio_msgs[0]["data"])
         assert decoded == pcm_chunk
+
+
+class TestVoiceWsRecording:
+    """Call recording: server-defaults-only config → MP3 + manifest per session."""
+
+    def _run_session(self, monkeypatch, spec: str, hello: dict) -> list[dict]:
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
+        )
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json(hello)
+                return _collect_ws_messages(ws)
+
+    def test_server_configured_recording_writes_audio_and_manifest(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(
+            tmp_path,
+            responses=["Hi there!"],
+            extra=f"agent.voice_config = {{'recording': {{'dir': {str(rec_dir)!r}}}}}\n",
+        )
+        messages = self._run_session(monkeypatch, spec, {"language": "en"})
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        session_id = started["session_id"]
+        assert session_id
+
+        # Files are finalized before session_ended reaches the client.
+        assert (rec_dir / f"{session_id}.mp3").exists()
+        manifest = json.loads((rec_dir / f"{session_id}.json").read_text())
+        assert manifest["session_id"] == session_id
+        assert manifest["meta"]["transport"] == "websocket"
+        assert [e["role"] for e in manifest["transcript"]] == ["user", "assistant"]
+        assert all(e["offset_ms"] >= 0 for e in manifest["transcript"])
+
+        # The wire transcript carries the same timing info.
+        transcript = next(m for m in messages if m["type"] == "session_transcript")
+        assert transcript["started_at"] == pytest.approx(manifest["started_at"])
+        assert all("offset_ms" in e for e in transcript["entries"])
+
+    def test_client_hello_cannot_switch_recording_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)  # no recording in server defaults
+        messages = self._run_session(
+            monkeypatch, spec, {"recording": {"dir": str(rec_dir)}}
+        )
+        assert any(m["type"] == "session_ended" for m in messages)
+        assert not rec_dir.exists()
+
+    def test_env_var_enables_recording(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("TIMBAL_VOICE_RECORDING_DIR", str(rec_dir))
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
+        )
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"language": "en"})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert (rec_dir / f"{started['session_id']}.mp3").exists()

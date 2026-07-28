@@ -37,7 +37,7 @@ _DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 
 def default_voice_config_from_env() -> dict[str, Any]:
     """STT/TTS defaults for ``/voice/ws`` (ElevenLabs). Override with env or ``runnable.voice_config``."""
-    return {
+    cfg: dict[str, Any] = {
         "stt_provider": os.environ.get("TIMBAL_STT_PROVIDER", "elevenlabs"),
         "stt_model": os.environ.get("TIMBAL_STT_MODEL", "scribe_v2_realtime"),
         "tts_model": os.environ.get("TIMBAL_TTS_MODEL", "eleven_flash_v2_5"),
@@ -55,6 +55,12 @@ def default_voice_config_from_env() -> dict[str, Any]:
         },
         "tts_extra": {"auto_mode": True},
     }
+    # Call recording (MP3 + manifest per session). The full dict form — with
+    # layout / bitrate_kbps / on_saved — comes via ``runnable.voice_config``.
+    recording_dir = os.environ.get("TIMBAL_VOICE_RECORDING_DIR")
+    if recording_dir:
+        cfg["recording"] = {"dir": recording_dir}
+    return cfg
 
 
 def merge_voice_config(runnable: Any) -> dict[str, Any]:
@@ -389,6 +395,32 @@ def build_voice_session(
         session_kwargs["turn_timeout_fallback"] = None if fb is None else str(fb)
     if playback_tracker is not None:
         session_kwargs["playback_tracker"] = playback_tracker
+
+    # Call recording is read from the *server* defaults only, never the merged
+    # dict — merge_client_voice_overrides applies client keys freely, and a
+    # browser must not be able to switch recording on or off.
+    recording_cfg = defaults.get("recording")
+    if isinstance(recording_cfg, dict) and recording_cfg.get("dir"):
+        try:
+            from uuid_extensions import uuid7
+
+            from ..voice.recording import CallRecorder
+
+            session_id = uuid7(as_type="str").replace("-", "")
+            session_kwargs["session_id"] = session_id
+            session_kwargs["recorder"] = CallRecorder(
+                Path(recording_cfg["dir"]) / f"{session_id}.mp3",
+                sample_rate=int(merged.get("sample_rate", 16_000)),
+                layout=recording_cfg.get("layout", "mixed"),
+                bitrate_kbps=int(recording_cfg.get("bitrate_kbps", 32)),
+                on_saved=recording_cfg.get("on_saved"),
+            )
+        except ImportError:
+            logger.warning("voice_recording_unavailable", hint="call recording requires timbal[voice] (av + numpy)")
+        except Exception as e:
+            # A misconfigured recorder must not take voice down with it.
+            logger.error("voice_recording_setup_failed", error=str(e), exc_info=True)
+
     session = VoiceSession(
         agent=runnable,
         stt=stt,
@@ -401,6 +433,7 @@ def build_voice_session(
         **session_kwargs,
     )
     meta = {
+        "session_id": session.session_id,
         "stt_provider": stt_provider,
         "stt_model": stt_model,
         "model": llm_model,
@@ -467,13 +500,20 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
     if isinstance(event, SessionError):
         return [{"type": "error", "message": event.message}]
     if isinstance(event, SessionEnded):
-        return [
-            {
-                "type": "session_transcript",
-                "entries": [e.model_dump() for e in session.transcript],
-            },
-            {"type": "session_ended"},
-        ]
+        # Entries carry absolute wall-clock timestamps; offset_ms (relative to
+        # started_at) saves every client the subtraction — it's what a
+        # conversation-review UI actually renders.
+        started_at = getattr(session, "started_at", None)
+        entries = []
+        for e in session.transcript:
+            d = e.model_dump()
+            if started_at is not None:
+                d["offset_ms"] = max(0, round((e.timestamp - started_at) * 1000))
+            entries.append(d)
+        transcript_payload: dict[str, Any] = {"type": "session_transcript", "entries": entries}
+        if started_at is not None:
+            transcript_payload["started_at"] = started_at
+        return [transcript_payload, {"type": "session_ended"}]
     return []
 
 
@@ -533,6 +573,7 @@ async def voice_ws(ws: WebSocket) -> None:
     defaults: dict = getattr(ws.app.state, "voice_config", None) or {}
     session, meta = build_voice_session(runnable, defaults, config)
     meta = {"playback_acks": "recommended", "transport": "websocket", **meta}
+    session.recording_meta = meta
 
     async def _recv_loop() -> None:
         """Read frames from the browser and feed PCM into the audio queue."""
