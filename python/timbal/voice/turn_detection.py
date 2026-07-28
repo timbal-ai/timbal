@@ -56,7 +56,7 @@ from .eou import (
 )
 
 if TYPE_CHECKING:
-    from .session import AudioInputConfig
+    from .providers import AudioInputConfig
 
 logger = structlog.get_logger("timbal.voice.turn_detection")
 

@@ -31,7 +31,7 @@ from pydantic import SecretStr
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from .session import (
+from .providers import (
     AudioInputConfig,
     SpeechToText,
     TranscriptEvent,

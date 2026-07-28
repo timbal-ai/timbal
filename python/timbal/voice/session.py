@@ -22,12 +22,10 @@ import asyncio
 import re
 import time
 import unicodedata
-from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable, AsyncIterator
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
 from uuid_extensions import uuid7
 
 from ..core.agent import Agent
@@ -37,7 +35,29 @@ from ..types.content import TextContent, ToolUseContent
 from ..types.events import OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
 from ..types.message import Message
+from .events import (
+    AgentStatus,
+    AgentTextDelta,
+    AgentTextDone,
+    AudioOutput,
+    SessionEnded,
+    SessionError,
+    SessionInterrupted,
+    SessionStarted,
+    TranscriptCommitted,
+    TranscriptEntry,
+    TranscriptPartial,
+    VoiceSessionEvent,
+)
+from .metrics import TurnMetrics, TurnMetricsEvent
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
+from .providers import (
+    AudioInputConfig,
+    AudioOutputConfig,
+    SpeechToText,
+    TextToSpeech,
+    TTSStream,
+)
 from .turn_detection import (
     CommitAction,
     PartialDecision,
@@ -50,7 +70,6 @@ from .turn_detection import (
 
 if TYPE_CHECKING:
     from .endpointing import VadEndpointer
-    from .metrics import TurnMetrics
     from .recording import CallRecorder
 
 logger = structlog.get_logger("timbal.voice.session")
@@ -159,215 +178,6 @@ def _pending_tts_after_scheduled(scheduled: str, final_assistant: str) -> str:
     if end is not None:
         return final_assistant[end:]
     return ""
-
-
-# ---------------------------------------------------------------------------
-# Events
-# ---------------------------------------------------------------------------
-
-
-class VoiceSessionEvent(BaseModel):
-    """Base for all events emitted by a :class:`VoiceSession`."""
-
-    type: str
-
-
-class SessionStarted(VoiceSessionEvent):
-    type: Literal["session_started"] = "session_started"
-
-
-class SessionEnded(VoiceSessionEvent):
-    type: Literal["session_ended"] = "session_ended"
-
-
-class TranscriptPartial(VoiceSessionEvent):
-    type: Literal["transcript_partial"] = "transcript_partial"
-    text: str
-
-
-class TranscriptCommitted(VoiceSessionEvent):
-    type: Literal["transcript_committed"] = "transcript_committed"
-    text: str
-    # True → rewrite last user bubble (CONTINUE_TURN merge), don't append another.
-    replace: bool = False
-
-
-class AgentTextDelta(VoiceSessionEvent):
-    type: Literal["agent_text_delta"] = "agent_text_delta"
-    text: str
-
-
-class AgentTextDone(VoiceSessionEvent):
-    type: Literal["agent_text_done"] = "agent_text_done"
-    text: str
-
-
-class AgentStatus(VoiceSessionEvent):
-    """Non-transcript status for the UI (e.g. tool calls while the mic is idle)."""
-
-    type: Literal["agent_status"] = "agent_status"
-    text: str
-
-
-class AudioOutput(VoiceSessionEvent):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    type: Literal["audio_output"] = "audio_output"
-    data: bytes
-
-
-class SessionInterrupted(VoiceSessionEvent):
-    type: Literal["interrupted"] = "interrupted"
-    heard_text: str | None = None
-    """Assistant text the user actually heard before the interruption (None if unknown/none)."""
-
-
-class SessionError(VoiceSessionEvent):
-    type: Literal["error"] = "error"
-    message: str
-
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-
-class AudioInputConfig(BaseModel):
-    """Cross-provider STT configuration.
-
-    Generic fields cover the common surface across providers.
-    Provider-specific knobs go in ``extra``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    model: str | None = None
-    language: str | None = None
-    sample_rate: int = 16_000
-    encoding: str = "pcm_s16le"
-    extra: dict[str, Any] = Field(default_factory=dict)
-
-
-class AudioOutputConfig(BaseModel):
-    """Cross-provider TTS configuration.
-
-    Generic fields cover the common surface across providers.
-    Provider-specific knobs go in ``extra``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    model: str | None = None
-    voice: str | None = None
-    sample_rate: int = 16_000
-    encoding: str = "pcm_s16le"
-    extra: dict[str, Any] = Field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Provider ABCs
-# ---------------------------------------------------------------------------
-
-
-class TranscriptEvent(BaseModel):
-    """Single event from an STT provider."""
-
-    type: Literal["partial", "committed", "error"]
-    text: str
-
-
-class SpeechToText(ABC):
-    """Abstract STT provider.
-
-    Lifecycle: ``connect`` → push audio / consume ``events`` → ``close``.
-    """
-
-    @abstractmethod
-    async def connect(self, config: AudioInputConfig) -> None: ...
-
-    @abstractmethod
-    async def push_audio(self, chunk: bytes) -> None: ...
-
-    @abstractmethod
-    async def commit(self) -> None: ...
-
-    @abstractmethod
-    def events(self) -> AsyncIterator[TranscriptEvent]: ...
-
-    @abstractmethod
-    async def close(self) -> None: ...
-
-
-class TTSStream(ABC):
-    """One streaming synthesis unit (e.g. an ElevenLabs *context*): text is fed
-    incrementally while audio is read concurrently from :meth:`audio`.
-
-    Contract:
-
-    * ``feed`` may be called any number of times (in order).
-    * ``end`` signals no more text; ``audio()`` finishes once the provider
-      drains the remaining synthesis.
-    * ``abort`` (barge-in) stops generation ASAP and unblocks ``audio()``.
-    * All methods are idempotent-safe after ``end``/``abort``.
-    """
-
-    @abstractmethod
-    async def feed(self, text: str) -> None: ...
-
-    @abstractmethod
-    async def end(self) -> None: ...
-
-    @abstractmethod
-    async def abort(self) -> None: ...
-
-    @abstractmethod
-    def audio(self) -> AsyncIterator[bytes]: ...
-
-
-class TextToSpeech(ABC):
-    """Abstract TTS provider.
-
-    Lifecycle: ``connect`` → ``synthesize`` (repeatable) → ``close``.
-    """
-
-    @abstractmethod
-    async def connect(self, config: AudioOutputConfig) -> None: ...
-
-    @abstractmethod
-    def synthesize(self, text: str) -> AsyncIterator[bytes]: ...
-
-    def open_stream(self) -> TTSStream | None:
-        """Optional capability: a per-reply streaming context.
-
-        Providers that support incremental text input with prosody continuity
-        (ElevenLabs multi-context WS) return a fresh :class:`TTSStream` per
-        call; the session then feeds each flush into ONE context instead of
-        synthesizing independent segments — independent segments each get
-        "final sentence" intonation and an audible seam between them.
-        Default ``None`` → the session falls back to per-segment
-        ``synthesize``.
-        """
-        return None
-
-    @abstractmethod
-    async def close(self) -> None: ...
-
-
-# ---------------------------------------------------------------------------
-# VoiceSession
-# ---------------------------------------------------------------------------
-
-
-class TranscriptEntry(BaseModel):
-    """Single entry in the session transcript."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    role: Literal["user", "assistant"]
-    text: str
-    timestamp: float = Field(default_factory=time.time)
-    # TODO(tool-filler): re-add `filler: bool = False` when tool-call filler
-    # speech returns, so transcript entries for spoken latency-masking phrases
-    # ("let me check that") are distinguishable from real reply text.
 
 
 class VoiceSession:
@@ -1937,8 +1747,6 @@ class VoiceSession:
                 # attached to the trace before it is persisted.
                 interrupted = self._cancel_turn.is_set() or turn_phase.startswith("cancelled_during")
                 try:
-                    from .metrics import TurnMetricsEvent
-
                     turn_metrics = self._build_turn_metrics(user_text, interrupted=interrupted)
                     self._metrics.append(turn_metrics)
                     self._attach_metrics_to_trace(turn_metrics)
@@ -2362,7 +2170,6 @@ class VoiceSession:
 
     def _build_turn_metrics(self, user_text: str, *, interrupted: bool) -> TurnMetrics:
         """Compute :class:`TurnMetrics` from the current turn's monotonic stamps."""
-        from .metrics import TurnMetrics
 
         def _ms(t0: float | None, t1: float | None) -> float | None:
             if t0 is None or t1 is None:
@@ -2371,8 +2178,10 @@ class VoiceSession:
 
         eou = self._turn_eou_at or None
         eou_to_first_audio = _ms(eou, self._turn_first_audio_at)
+        ctx = get_run_context()
         return TurnMetrics(
             turn_index=self._turn_index,
+            run_id=ctx.id if ctx is not None else None,
             user_text_chars=len(user_text),
             eou_to_llm_first_token_ms=_ms(eou, self._turn_first_token_at),
             eou_to_tts_first_byte_ms=eou_to_first_audio,

@@ -25,7 +25,7 @@ from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription  #
 from aiortc.mediastreams import AudioStreamTrack  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from timbal.server.http import create_app  # noqa: E402
-from timbal.voice.session import (  # noqa: E402
+from timbal.voice import (  # noqa: E402
     AudioInputConfig,
     SpeechToText,
     TranscriptEvent,

@@ -10,9 +10,7 @@ from contextlib import aclosing
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
-from timbal.voice.metrics import TurnMetricsEvent
-from timbal.voice.playback import PlaybackTracker
-from timbal.voice.session import (
+from timbal.voice import (
     AgentTextDelta,
     AgentTextDone,
     AudioInputConfig,
@@ -29,8 +27,10 @@ from timbal.voice.session import (
     TTSStream,
     VoiceSession,
     VoiceSessionEvent,
-    _strip_markdown,
 )
+from timbal.voice.metrics import TurnMetricsEvent
+from timbal.voice.playback import PlaybackTracker
+from timbal.voice.session import _strip_markdown
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,
@@ -895,6 +895,7 @@ class TestTurnMetrics:
         assert len(records) == 1
         persisted = records[0]["spans"][0]["metadata"]["voice_turn_metrics"]
         assert persisted == live.model_dump()
+        assert live.run_id == records[0]["run_id"]
 
     async def test_metrics_emitted_after_agent_text_done(self) -> None:
         session, _, _ = _make_session(

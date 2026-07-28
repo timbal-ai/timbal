@@ -11,6 +11,7 @@ import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from timbal.voice import AudioInputConfig
 from timbal.voice.deepgram import (
     _AUDIO_FLUSH_BYTES,
     DEFAULT_FLUX_MODEL,
@@ -23,7 +24,6 @@ from timbal.voice.deepgram import (
     stt_provider_id,
 )
 from timbal.voice.elevenlabs import ElevenLabsRealtimeSTT
-from timbal.voice.session import AudioInputConfig
 
 
 def _drain(stt) -> list:

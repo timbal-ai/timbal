@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from timbal.server.http import create_app
-from timbal.voice.session import (
+from timbal.voice import (
     AudioInputConfig,
     AudioOutputConfig,
     SpeechToText,

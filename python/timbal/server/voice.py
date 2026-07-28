@@ -198,7 +198,7 @@ async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
             detector = resolve_turn_detector("local")
 
         if isinstance(detector, LocalAudioTurnDetector):
-            from ..voice.session import AudioInputConfig
+            from ..voice.providers import AudioInputConfig
 
             await detector.start(AudioInputConfig(sample_rate=16_000))
             await SileroVad().start(sample_rate=16_000)
@@ -306,7 +306,7 @@ def build_voice_session(
         stt_provider_id,
     )
     from ..voice.elevenlabs import ElevenLabsStreamTTS
-    from ..voice.session import AudioInputConfig, AudioOutputConfig
+    from ..voice.providers import AudioInputConfig, AudioOutputConfig
     from ..voice.turn_detection import resolve_turn_detector
 
     merged = merge_client_voice_overrides(defaults, client_config)

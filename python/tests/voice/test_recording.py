@@ -170,7 +170,7 @@ class TestSessionIntegration:
 
         from timbal import Agent
         from timbal.core.test_model import TestModel
-        from timbal.voice.session import (
+        from timbal.voice import (
             AgentTextDone,
             SessionStarted,
             TranscriptEvent,
@@ -246,7 +246,7 @@ class TestSessionBargeIn:
 
         from timbal import Agent
         from timbal.core.test_model import TestModel
-        from timbal.voice.session import SessionStarted, TranscriptEvent, VoiceSession
+        from timbal.voice import SessionStarted, TranscriptEvent, VoiceSession
 
         from .test_session import DelayedMockSTT, MockTTS
 
@@ -295,7 +295,7 @@ class TestSessionBargeIn:
 
 class TestManifest:
     def test_manifest_written_next_to_the_audio_with_refreshed_duration(self, tmp_path: Path) -> None:
-        from timbal.voice.session import TranscriptEntry
+        from timbal.voice import TranscriptEntry
 
         rec = CallRecorder(tmp_path / "call.mp3", sample_rate=SR)
         rec.add_mic(_silence(0.5))

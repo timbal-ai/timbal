@@ -17,19 +17,17 @@ from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.voice import (
     AudioInputConfig,
+    AudioOutputConfig,
     LocalAudioTurnDetector,
+    SpeechToText,
+    TextToSpeech,
+    TranscriptEvent,
     VadEndpointer,
     VoiceSession,
     endpointing_delay,
 )
 from timbal.voice.eou import AudioEouModel
 from timbal.voice.metrics import TurnMetricsEvent
-from timbal.voice.session import (
-    AudioOutputConfig,
-    SpeechToText,
-    TextToSpeech,
-    TranscriptEvent,
-)
 
 # ---------------------------------------------------------------------------
 # Fakes
