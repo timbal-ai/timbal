@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from harness import RunResult
-from scenario import Scenario, best_window, normalize, similarity
+from scenario import Scenario, attributable
 
 HERE = Path(__file__).parent
 RESULTS_DIR = HERE / "results"
@@ -93,37 +93,19 @@ class RunRecord:
         return json.dumps(asdict(self))
 
 
-# Below this, window matching is not evidence: a one- or two-word needle finds a
-# passable window in almost any script, and a spurious lone "I" turn (Flux emits
-# them) is a real defect that has to stay countable.
-MIN_GHOST_WINDOW_WORDS = 3
-
-
 def count_ghost_turns(result: RunResult, scenario: Scenario, min_similarity: float = 0.6) -> int:
     """Committed turns whose content the script never said.
 
     Tracked as a metric independent of whether a scenario declared the matching
     expectation — a hallucinated transcript is worth knowing about everywhere.
 
-    Matched against a *window* of the whole script rather than any single spoken
-    entry, because turn boundaries are the thing under test and rarely line up
-    with script boundaries. Comparing per entry mis-scored both directions: a
-    correct three-fragment merge ("The build fails when I import the module.
-    Inside a test.") is ~2.5x longer than any fragment of `coding_double_pause`
-    and resembled none of them, so five cells reported a hallucinated turn for
-    the merge the scenario asserts — while a run-on split into three commits
-    counted two ghosts for the same reason inverted. Both were gating.
+    Attribution is `scenario.attributable`, the same rule `NoGhostTurns` checks:
+    the two used to diverge (per-entry there, windowed here), so a run could fail
+    the expectation while gating zero ghost turns, or the reverse. The rationale
+    for window matching lives on the helper.
     """
     spoken = scenario.texts()
-    script = " ".join(spoken)
-    ghosts = 0
-    for text in result.committed:
-        if len(normalize(text).split()) >= MIN_GHOST_WINDOW_WORDS:
-            attributable = best_window(script, text) >= min_similarity
-        else:
-            attributable = any(similarity(text, said) >= min_similarity for said in spoken)
-        ghosts += not attributable
-    return ghosts
+    return sum(not attributable(text, spoken, min_similarity) for text in result.committed)
 
 
 def record(
@@ -316,7 +298,12 @@ def format_grid(cards: list[Scorecard], records: list[RunRecord]) -> str:
     labels = [c.label for c in cards]
     by_cell: dict[str, dict[str, list[RunRecord]]] = {label: {} for label in labels}
     for r in records:
-        cell = by_cell.get(f"{r.stt}/{r.detector}")
+        # Match on the full cell label, not a rebuilt stt/detector: the label carries
+        # axis suffixes ([leak=0.15], swept params), and scorecards are keyed by it —
+        # stripping them here left every axis run matching no column, a matrix of `·`
+        # under correct per-cell scorecards. Same fallback as build_scorecard for
+        # result files written before labels were recorded.
+        cell = by_cell.get(r.label or f"{r.stt}/{r.detector}")
         if cell is not None:
             cell.setdefault(r.scenario, []).append(r)
 
@@ -361,7 +348,10 @@ def cross_cell_flaky(records: list[RunRecord]) -> list[str]:
     """
     by_cell_scenario: dict[tuple[str, str], list[RunRecord]] = {}
     for r in records:
-        by_cell_scenario.setdefault((f"{r.stt}/{r.detector}", r.scenario), []).append(r)
+        # Keyed by full label so distinct axis runs (a leak cell and its clean
+        # counterpart, two sweep values) are never pooled — pooled, a scenario that
+        # deterministically passes one and fails the other would read as flaky.
+        by_cell_scenario.setdefault((r.label or f"{r.stt}/{r.detector}", r.scenario), []).append(r)
     flaky = set()
     for (label, scenario), runs in by_cell_scenario.items():
         if len(runs) < 2:

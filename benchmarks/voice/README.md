@@ -851,7 +851,11 @@ boundaries. Turns under three words keep the per-entry rule: a one-word needle
 finds a passable window in almost any script, and a spurious lone `"I"` turn —
 which Flux really does emit — has to stay countable. Across all 38 speaking
 scenarios, replayed both as one perfect merge and as perfect per-entry turns,
-neither shape now registers a ghost.
+neither shape now registers a ghost. The rule lives in `scenario.attributable`
+and is shared by the `NoGhostTurns` expectation and the gated count — the
+expectation had silently kept the per-entry comparison, so the same run could
+fail `NoGhostTurns` on a correct merge while gating zero ghost turns, or the
+reverse on a split.
 
 **Chasing two apparent flakes found the harness had been mis-measuring
 ElevenLabs on the whole pause family.** 69 failures in the matrix read
@@ -895,11 +899,28 @@ cost 4 runs in a 111-run cell, `medical_barge_in_twice` taking 46s to fail on
 three turns it had already committed correctly.
 
 So a wait resolves on either: something arriving after the speech, or the session
-going quiet for 1.0s with something already in hand. The fallback covers the
+going quiet with something already in hand. The fallback covers the
 early commit, and also covers a final `Say` that correctly produces nothing —
 which previously only avoided a timeout by accident, because a stale event
 satisfied it. `food_backchannel`'s workaround of dropping the step entirely is no
 longer load-bearing, though it is left in place.
+
+Two holes survived that fix, both the original bug wearing the new clock.
+"Something arriving after the speech" does not say *whose* speech: the late
+commit for an earlier fragment — the very event the watermark fell for — also
+lands after the last `Say` ends whenever the provider's commit lag exceeds the
+fragment gap, and satisfied the timed wait just as instantly. And the quiet
+fallback floored at 1.0s on holdless detectors while ElevenLabs' shipped
+endpointer waits 1.2s of silence before committing, so "quiet with something in
+hand" could describe a commit 200ms from landing, with only an older utterance's
+commit in hand. Both are closed by reading what the provider is still doing
+rather than guessing from timestamps: a partial newer than everything in hand
+means speech is still being transcribed — a commit or a deliberate suppression
+is pending — so the wait stays open until that commit lands or the partial goes
+stale for `settle_secs`; and `settle_secs` itself now also derives from the
+STT's own endpointing delay (`vad_silence_threshold_secs` and friends), for the
+same reason it derives from the detector's holds: the failure mode of choosing
+it by hand is invisible and reads as the provider dropping a turn.
 
 Under the fix `medical_filler_midway` on `elevenlabs/provider` reports the same
 thing 3/3: a split, no errors, nothing lost. `food_long_pause` on

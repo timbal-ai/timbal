@@ -153,6 +153,11 @@ class RunResult:
     # Monotonic timestamp of the most recent speech end, consumed by the next
     # commit. Not an output; internal to the measurement.
     speech_ended_at: float | None = None
+    # Arrival of the newest partial. A partial newer than every commit means the
+    # provider is still transcribing something — a commit (or a deliberate
+    # suppression) is pending — and a wait must not read the session as settled.
+    # See `_settled` in `run_scenario`. Internal to the measurement.
+    last_partial_at: float = 0.0
 
     @property
     def passed(self) -> bool:
@@ -432,7 +437,21 @@ def _settle_secs(config: HarnessConfig) -> float:
         )
     ]
     longest = max((h for h in holds if isinstance(h, int | float)), default=0.0)
-    return max(1.0, longest + 0.5)
+    # The provider's own endpointer is a hold too, and the floor has to clear it:
+    # ElevenLabs ships vad_silence_threshold_secs=1.2, so on a holdless detector a
+    # 1.0s quiescence rule declared "settled, with something in hand" while the
+    # commit for the newest speech was ~0.2s from landing — and the something in
+    # hand was an *older* utterance's commit. Same reasoning as the detector
+    # holds above: derived rather than chosen, because the failure mode is
+    # invisible and reads as the provider dropping a turn.
+    extra = stt_config(config.stt, config.language, config.stt_extra).extra
+    provider_secs = max(
+        float(extra.get("vad_silence_threshold_secs", 0.0)),
+        float(extra.get("endpointing", 0.0)) / 1000,
+        float(extra.get("utterance_end_ms", 0.0)) / 1000,
+        float(extra.get("eot_timeout_ms", 0.0)) / 1000,
+    )
+    return max(1.0, longest + 0.5, provider_secs + 0.5)
 
 
 async def run_scenario(
@@ -505,9 +524,19 @@ async def run_scenario(
     def _settled(events: list[float], after: float) -> bool:
         """Whether the session is done with the speech fed up to ``after``.
 
-        Anything arriving after that instant is the answer, since mic audio is
-        paced at realtime and the provider cannot have been sent a clip it has
-        not received yet.
+        Anything arriving after that instant is *usually* the answer, since mic
+        audio is paced at realtime and the provider cannot have been sent a clip
+        it has not received yet. Usually, because the converse event looks
+        identical: a commit for *earlier* speech can land that late too —
+        ElevenLabs commits ~1.6s after speech ends, longer than the fragment gap
+        in every pause scenario — and resolving on it tears the session down
+        with the newest speech's commit still in flight, the same
+        phantom-content-loss bias the timed wait replaced the watermark to fix.
+        In flight is observable: the provider streams partials for speech it has
+        not committed yet, so a partial newer than everything in hand keeps the
+        wait open until the commit lands or the partial goes stale for
+        ``settle_secs`` — past that it is a stranded partial, the product's
+        problem to report rather than the harness's to wait on.
 
         Otherwise the provider may simply have answered early — it can have all
         the audio it needs before the harness finishes handing the clip over, and
@@ -517,11 +546,14 @@ async def run_scenario(
         covers that, and covers a last `Say` that correctly produces nothing at
         all, which used to depend on a stale event to avoid timing out.
         """
+        now = time.monotonic()
+        if result.last_partial_at > max([after, *events]) and now - result.last_partial_at < settle_secs:
+            return False
         if any(t > after for t in events):
             return True
         if not events:
             return False
-        return time.monotonic() - max(after, result.last_event_at) >= settle_secs
+        return now - max(after, result.last_event_at) >= settle_secs
 
     async def drive() -> None:
         last_say_ended = 0.0
@@ -621,7 +653,7 @@ def _observe(
     elif isinstance(event, SessionStarted):
         emit("session_started")
     elif isinstance(event, TranscriptPartial):
-        result.last_event_at = time.monotonic()
+        result.last_event_at = result.last_partial_at = time.monotonic()
         emit("partial", f'"{event.text}"')
     elif isinstance(event, TranscriptCommitted):
         result.last_event_at = time.monotonic()

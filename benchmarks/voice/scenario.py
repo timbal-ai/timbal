@@ -161,6 +161,32 @@ def best_window(haystack: str, needle: str) -> float:
     return max(SequenceMatcher(None, joined, w).ratio() for w in windows)
 
 
+# Below this, window matching is not evidence: a one- or two-word needle finds a
+# passable window in almost any script, and a spurious lone "I" turn (Flux emits
+# them) is a real defect that has to stay countable.
+MIN_GHOST_WINDOW_WORDS = 3
+
+
+def attributable(text: str, spoken: list[str], min_similarity: float) -> bool:
+    """Whether a committed turn's content is something the script actually said.
+
+    Matched against a *window* of the whole script rather than any single spoken
+    entry, because turn boundaries are the thing under test and rarely line up
+    with script boundaries: a correct three-fragment merge is ~2.5x longer than
+    any fragment of `coding_double_pause` and resembles none of them, while a
+    run-on split into three commits fails the same way inverted.
+
+    The one attribution rule, shared by :class:`NoGhostTurns` and
+    ``count_ghost_turns`` in score.py. They used to disagree — the expectation
+    compared per entry while the gate used a window — so the same run could fail
+    `NoGhostTurns` on a correct merge yet gate zero ghost turns, or the reverse
+    on a split.
+    """
+    if len(normalize(text).split()) >= MIN_GHOST_WINDOW_WORDS:
+        return best_window(" ".join(spoken), text) >= min_similarity
+    return any(similarity(text, said) >= min_similarity for said in spoken)
+
+
 # ---------------------------------------------------------------------------
 # Expectations
 # ---------------------------------------------------------------------------
@@ -239,17 +265,15 @@ class NoGhostTurns:
     """Every committed turn resembles something the script actually said.
 
     Catches transcripts invented from echo, noise or a mis-fired watchdog.
+    Attribution is :func:`attributable` — window-matched against the whole
+    script, identically to the gated ghost-turn count in score.py.
     """
 
     min_similarity: float = 0.6
 
     def check(self, result: RunResult, scenario: Scenario) -> str | None:
         spoken = scenario.texts()
-        ghosts = [
-            text
-            for text in result.committed
-            if not any(similarity(text, said) >= self.min_similarity for said in spoken)
-        ]
+        ghosts = [text for text in result.committed if not attributable(text, spoken, self.min_similarity)]
         if ghosts:
             return f"turns not present in the script: {ghosts}"
         return None
