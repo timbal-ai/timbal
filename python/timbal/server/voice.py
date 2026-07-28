@@ -55,12 +55,37 @@ def default_voice_config_from_env() -> dict[str, Any]:
         },
         "tts_extra": {"auto_mode": True},
     }
-    # Call recording (MP3 + manifest per session). The full dict form — with
-    # layout / bitrate_kbps / on_saved — comes via ``runnable.voice_config``.
-    recording_dir = os.environ.get("TIMBAL_VOICE_RECORDING_DIR")
-    if recording_dir:
-        cfg["recording"] = {"dir": recording_dir}
     return cfg
+
+
+def _recording_config_from_env() -> dict[str, Any]:
+    """Recording knobs the platform injects as env vars.
+
+    Deliberately *not* part of :func:`default_voice_config_from_env`: that
+    runs once at server boot, while serverless session boxes can be
+    CRIU-restored from a warm snapshot with env arriving at restore time.
+    Recording env must therefore be read per session (call sites are in
+    :func:`build_voice_session`).
+    """
+    cfg: dict[str, Any] = {}
+    if recording_dir := os.environ.get("TIMBAL_VOICE_RECORDING_DIR"):
+        cfg["dir"] = recording_dir
+    if layout := os.environ.get("TIMBAL_VOICE_RECORDING_LAYOUT"):
+        cfg["layout"] = layout
+    if bitrate := os.environ.get("TIMBAL_VOICE_RECORDING_BITRATE_KBPS"):
+        cfg["bitrate_kbps"] = bitrate
+    return cfg
+
+
+# Platform identity env → manifest ``meta`` keys. Makes recording files
+# self-describing for sweeper ingest and crash recovery (platform ask).
+_RECORDING_IDENTITY_ENV = (
+    ("TIMBAL_ORG_ID", "org_id"),
+    ("TIMBAL_PROJECT_ID", "project_id"),
+    ("TIMBAL_PROJECT_ENV_ID", "project_env_id"),
+    ("TIMBAL_APP_ID", "app_id"),
+    ("TIMBAL_PROJECT_REV", "project_rev"),
+)
 
 
 def merge_voice_config(runnable: Any) -> dict[str, Any]:
@@ -396,16 +421,27 @@ def build_voice_session(
     if playback_tracker is not None:
         session_kwargs["playback_tracker"] = playback_tracker
 
-    # Call recording is read from the *server* defaults only, never the merged
-    # dict — merge_client_voice_overrides applies client keys freely, and a
-    # browser must not be able to switch recording on or off.
-    recording_cfg = defaults.get("recording")
-    if isinstance(recording_cfg, dict) and recording_cfg.get("dir"):
+    # Call recording is read from *server* config only — env (per session,
+    # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win)
+    # — never from the merged dict: merge_client_voice_overrides applies
+    # client keys freely, and a browser must not be able to switch recording
+    # on or off.
+    user_recording = defaults.get("recording")
+    recording_cfg = {
+        **_recording_config_from_env(),
+        **(user_recording if isinstance(user_recording, dict) else {}),
+    }
+    if recording_cfg.get("dir"):
         try:
             from uuid_extensions import uuid7
 
             from ..voice.recording import CallRecorder
 
+            on_saved = recording_cfg.get("on_saved")
+            if on_saved is None and os.environ.get("TIMBAL_VOICE_RECORDING_UPLOAD") == "platform":
+                from .recording_upload import platform_recording_upload_hook
+
+                on_saved = platform_recording_upload_hook()
             session_id = uuid7(as_type="str").replace("-", "")
             session_kwargs["session_id"] = session_id
             session_kwargs["recorder"] = CallRecorder(
@@ -413,7 +449,8 @@ def build_voice_session(
                 sample_rate=int(merged.get("sample_rate", 16_000)),
                 layout=recording_cfg.get("layout", "mixed"),
                 bitrate_kbps=int(recording_cfg.get("bitrate_kbps", 32)),
-                on_saved=recording_cfg.get("on_saved"),
+                on_saved=on_saved,
+                meta={k: v for env_key, k in _RECORDING_IDENTITY_ENV if (v := os.environ.get(env_key))} or None,
             )
         except ImportError:
             logger.warning("voice_recording_unavailable", hint="call recording requires timbal[voice] (av + numpy)")

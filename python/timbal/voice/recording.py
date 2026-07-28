@@ -75,6 +75,7 @@ class CallRecorder:
         layout: Literal["mixed", "split"] = "mixed",
         bitrate_kbps: int = 32,
         on_saved: Any = None,
+        meta: dict[str, Any] | None = None,
     ) -> None:
         if layout not in ("mixed", "split"):
             raise ValueError(f"layout must be 'mixed' or 'split', got {layout!r}")
@@ -87,6 +88,9 @@ class CallRecorder:
         self._bitrate_kbps = bitrate_kbps
         #: Optional async callable awaited by the session after files are written.
         self.on_saved = on_saved
+        #: Extra manifest ``meta`` entries (e.g. platform identity: org_id,
+        #: project_id, ...) merged under the session's own recording_meta.
+        self.meta = meta
 
         self._channel_layout = "mono" if layout == "mixed" else "stereo"
         self._container = av.open(str(self._path), mode="w")
@@ -210,7 +214,12 @@ class CallRecorder:
                 manifest["audio"]["duration_secs"] = round(self.duration_secs, 3)
             manifest_path = self._path.with_suffix(".json")
             try:
-                manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
+                # Atomic (tmp + rename): sweepers treat "manifest exists" as
+                # "recording complete", so a half-written json must never be
+                # observable.
+                tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
+                tmp_path.write_text(json.dumps(manifest, indent=2, default=str))
+                tmp_path.replace(manifest_path)
             except Exception as e:
                 manifest_path = None
                 logger.error("recording_manifest_failed", error=str(e))
@@ -291,7 +300,7 @@ def build_manifest(
         "session_id": session_id,
         "started_at": t0,
         "ended_at": time.time(),
-        "meta": dict(meta or {}),
+        "meta": {**(recorder.meta or {}), **(meta or {})},
         "transcript": entries,
         "turns": [m.model_dump() for m in turns],
         "audio": {

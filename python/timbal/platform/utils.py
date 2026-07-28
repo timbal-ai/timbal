@@ -1,7 +1,7 @@
 import asyncio
 import json as json_lib
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, Literal
 
 import httpx
@@ -97,7 +97,7 @@ def _resolve_url_and_headers(
 
 
 async def _request(
-    method: Literal["GET", "POST", "PATCH", "DELETE"],
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"],
     path: str,
     headers: dict[str, str] = {},
     params: dict[str, Any] | None = None,
@@ -105,10 +105,21 @@ async def _request(
     content: bytes | None = None,
     files: dict[str, tuple[str, bytes, str]] | None = None,
     max_retries: int = 3,
+    backoff: Callable[[int], float] | None = None,
+    timeout: httpx.Timeout | float | None = None,
     service: str | None = None,
 ) -> Any:
-    """Utility function for making HTTP requests."""
+    """Utility function for making HTTP requests.
+
+    ``backoff`` overrides the retry delay: called with the 0-based attempt
+    index, returns seconds to wait (default: 0.1s doubling). A ``Retry-After``
+    on 429 still wins when longer. ``timeout`` overrides the default
+    ``Timeout(10.0, read=None)`` — e.g. large multipart uploads need an
+    unbounded write timeout.
+    """
     url, headers = _resolve_url_and_headers(service, path, headers)
+    if timeout is None:
+        timeout = httpx.Timeout(10.0, read=None)
     payload_kwargs = {}
     # `is not None` so an empty dict still sends a JSON body + Content-Type
     # (parameterless POSTs would otherwise 415 Unsupported Media Type).
@@ -121,7 +132,7 @@ async def _request(
 
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None)) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 res = await client.request(
                     method,
                     url,
@@ -154,7 +165,8 @@ async def _request(
                     f"  Response body: {error_body or None}",
                     status_code=exc.response.status_code,
                 ) from exc
-            wait_time = 0.1 * (2**attempt)  # Exponential backoff: 100ms, 200ms, 400ms
+            # Default exponential backoff: 100ms, 200ms, 400ms
+            wait_time = backoff(attempt) if backoff is not None else 0.1 * (2**attempt)
             if exc.response.status_code == 429:
                 retry_after = exc.response.headers.get("Retry-After")
                 if retry_after is not None:
@@ -173,7 +185,7 @@ async def _request(
             # Retry on any other error (network, timeout, etc.)
             if attempt == max_retries:
                 raise
-            wait_time = 0.1 * (2**attempt)
+            wait_time = backoff(attempt) if backoff is not None else 0.1 * (2**attempt)
             logger.warning(
                 f"Request failed, retrying in {wait_time:.1f}s",
                 attempt=attempt + 1,

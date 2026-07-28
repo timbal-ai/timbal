@@ -226,11 +226,24 @@ agent.voice_config = {
 }
 ```
 
-or set **`TIMBAL_VOICE_RECORDING_DIR=recordings`** (dir only, defaults for the rest). Requires the `timbal[voice]` extra (av + numpy); without it the server logs a warning and runs the call unrecorded.
+or via env (the platform's config surface — all read **per session**, never cached at boot, so late-injected env e.g. after a CRIU restore still applies):
+
+| Env var | Meaning |
+|---|---|
+| `TIMBAL_VOICE_RECORDING_DIR` | Enables recording; files land here. |
+| `TIMBAL_VOICE_RECORDING_LAYOUT` | `mixed` (default) or `split`. |
+| `TIMBAL_VOICE_RECORDING_BITRATE_KBPS` | MP3 bitrate, default `32`. |
+| `TIMBAL_VOICE_RECORDING_UPLOAD` | `platform` → push files to the platform API after each call (see below). |
+
+Keys in `voice_config["recording"]` win over env, per key. Requires the `timbal[voice]` extra (av + numpy); without it the server logs a warning and runs the call unrecorded.
+
+When `TIMBAL_ORG_ID` / `TIMBAL_PROJECT_ID` / `TIMBAL_PROJECT_ENV_ID` / `TIMBAL_APP_ID` / `TIMBAL_PROJECT_REV` are present in env, they are stamped into the manifest `meta` (as `org_id`, `project_id`, ...) so the files are self-describing for ingest.
 
 Per session, keyed by the `session_id` from `session_started`:
 
 - **`{session_id}.mp3`** — mic and TTS mixed on the real call timeline. TTS synthesizes faster than real time, so the agent side is paced by the mic clock; on barge-in the **unheard tail is dropped** exactly like `interrupted.heard_text` truncates the text (exact on WebRTC, ack/estimate-based on WS). Encoded progressively — a crashed process still leaves a playable file.
-- **`{session_id}.json`** — manifest: `session_id`, `started_at`/`ended_at`, resolved config (`transport`, `model`, `stt_provider`, ...), `transcript` entries with `offset_ms`, `turns` (the full `TurnMetrics` per turn), and the audio descriptor (`layout`, `sample_rate`, `bitrate_kbps`, `duration_secs`).
+- **`{session_id}.json`** — manifest: `session_id`, `started_at`/`ended_at`, resolved config (`transport`, `model`, `stt_provider`, ...), `transcript` entries with `offset_ms`, `turns` (the full `TurnMetrics` per turn), and the audio descriptor (`layout`, `sample_rate`, `bitrate_kbps`, `duration_secs`). Written **atomically** (tmp + rename) and always *after* the MP3 is finalized — "manifest exists" reliably means "recording complete"; an MP3 without a manifest is a crashed call, playable up to the crash.
 
 `on_saved` fires after both files are written (e.g. upload to platform storage and delete the local copy); its failures are logged, never crash the session.
+
+**Platform push** (`TIMBAL_VOICE_RECORDING_UPLOAD=platform`): after each call, a background task PUTs both files as multipart to `{host}/orgs/{org}/projects/{project}/sessions/{session_id}` — host, Bearer credential and org/project resolved by the standard `resolve_platform_config` (env / ~/.timbal), fresh per session. 2xx → local files deleted; 4xx → keep files, log, no retry; 5xx/429/network → exponential backoff (1s base, ×5, cap 5 min, ~1h budget). Uploads never block session teardown, and files are only deleted after a confirmed 2xx — a crash mid-upload leaves them intact for re-ingest. A user-provided `on_saved` in `voice_config` takes precedence over the platform push.

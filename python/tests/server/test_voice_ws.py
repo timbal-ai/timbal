@@ -734,10 +734,12 @@ class TestVoiceWsAudioTransport:
 class TestVoiceWsRecording:
     """Call recording: server-defaults-only config → MP3 + manifest per session."""
 
-    def _run_session(self, monkeypatch, spec: str, hello: dict) -> list[dict]:
+    def _run_session(self, monkeypatch, spec: str, hello: dict, extra_env: dict | None = None) -> list[dict]:
         monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
         for k in VOICE_ENV_KEYS:
             monkeypatch.delenv(k, raising=False)
+        for k, v in (extra_env or {}).items():
+            monkeypatch.setenv(k, v)
         monkeypatch.setattr(
             "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
             _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
@@ -818,3 +820,90 @@ class TestVoiceWsRecording:
 
         started = next(m for m in messages if m["type"] == "session_started")
         assert (rec_dir / f"{started['session_id']}.mp3").exists()
+
+    def test_env_knobs_set_layout_and_bitrate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        messages = self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={
+                "TIMBAL_VOICE_RECORDING_DIR": str(rec_dir),
+                "TIMBAL_VOICE_RECORDING_LAYOUT": "split",
+                "TIMBAL_VOICE_RECORDING_BITRATE_KBPS": "64",
+            },
+        )
+        started = next(m for m in messages if m["type"] == "session_started")
+        manifest = json.loads((rec_dir / f"{started['session_id']}.json").read_text())
+        assert manifest["audio"]["layout"] == "split"
+        assert manifest["audio"]["bitrate_kbps"] == 64
+
+    def test_user_voice_config_wins_over_env_knobs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(
+            tmp_path,
+            extra=f"agent.voice_config = {{'recording': {{'dir': {str(rec_dir)!r}, 'layout': 'mixed'}}}}\n",
+        )
+        messages = self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={"TIMBAL_VOICE_RECORDING_LAYOUT": "split"},
+        )
+        started = next(m for m in messages if m["type"] == "session_started")
+        manifest = json.loads((rec_dir / f"{started['session_id']}.json").read_text())
+        assert manifest["audio"]["layout"] == "mixed"
+
+    def test_platform_identity_env_is_stamped_into_manifest_meta(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        messages = self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={
+                "TIMBAL_VOICE_RECORDING_DIR": str(rec_dir),
+                "TIMBAL_ORG_ID": "org-9",
+                "TIMBAL_PROJECT_ID": "proj-7",
+                "TIMBAL_PROJECT_ENV_ID": "env-3",
+                "TIMBAL_APP_ID": "app-1",
+                "TIMBAL_PROJECT_REV": "rev-42",
+            },
+        )
+        started = next(m for m in messages if m["type"] == "session_started")
+        # Identity lands in the manifest (self-describing files for sweeper
+        # ingest), not in the wire payload.
+        assert "org_id" not in started
+        manifest = json.loads((rec_dir / f"{started['session_id']}.json").read_text())
+        assert manifest["meta"]["org_id"] == "org-9"
+        assert manifest["meta"]["project_id"] == "proj-7"
+        assert manifest["meta"]["project_env_id"] == "env-3"
+        assert manifest["meta"]["app_id"] == "app-1"
+        assert manifest["meta"]["project_rev"] == "rev-42"
+        assert manifest["meta"]["transport"] == "websocket"  # session meta still wins/merges
+
+    def test_no_tmp_manifest_left_behind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """The manifest write is atomic (tmp + rename) — sweepers key on json presence."""
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={"TIMBAL_VOICE_RECORDING_DIR": str(rec_dir)},
+        )
+        assert not list(rec_dir.glob("*.tmp"))
+        assert len(list(rec_dir.glob("*.json"))) == 1
