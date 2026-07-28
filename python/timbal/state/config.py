@@ -67,7 +67,7 @@ class PlatformConfig(BaseModel):
 
     host: str
     """Platform host."""
-    cdn: str = "content.timbal.ai"
+    cdn: str = "timbalusercontent.com"
     """CDN host."""
     auth: PlatformAuth
     """Platform authentication configuration."""

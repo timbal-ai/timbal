@@ -503,7 +503,9 @@ class TestFileContentName:
         assert fc.name == "Q3 Report.pdf"
 
     def test_name_defaults_from_url_basename(self) -> None:
-        fc = FileContent(file=File("https://content.timbal.ai/tmp/abc/Q3_Report.pdf"))
+        # .invalid TLD: never resolves, so a bug that triggers the fetcher fails fast
+        # instead of hitting the production CDN.
+        fc = FileContent(file=File("https://cdn.invalid/tmp/abc/Q3_Report.pdf"))
         assert fc.name == "Q3_Report.pdf"
 
     def test_name_url_basename_is_url_decoded(self) -> None:

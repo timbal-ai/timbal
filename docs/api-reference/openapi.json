@@ -1020,6 +1020,782 @@
         ]
       }
     },
+    "/orgs/{org_id}/alarms": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "List metric alarms",
+        "description": "The metric alarms you can see in this org, with current state and channels.\n\nFiltered per alarm, not per request: org-level alarms (credits, org-wide spend) need `alarms.read`, and an alarm tagged to a project needs `projects.alarms.read` on that project. Holding one and not the other returns the matching subset rather than a `403`, so a role scoped to a single project sees exactly that project's alarms.",
+        "operationId": "list_org_alarms",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of alarms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgAlarmsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Create a metric alarm",
+        "description": "Create a metric alarm with a threshold over evaluation periods.\n\nSet `denominator_metric_name` for a **rate** rather than a count: the datapoint becomes `metric_name / denominator_metric_name` and `threshold` reads as a fraction (`0.05` = 5%). Prefer this for anything that scales with traffic — a fixed error count pages at 3am once the org grows. Pair it with `min_sample_count` so a single failure in a quiet minute isn't a 100% error rate.\n\nBoth series must be binned on the same clock, since they are divided period by period. For outcome rates that means `app.run.terminal_count` — runs that *finished* in the period — and not `app.run.count`, which counts runs that *started* and includes ones still running. Mismatched pairs are rejected.\n\nRatio alarms also require `stat` `sum` or `count`. The stat is applied to each series and the two results divided, so only stats that add up across the minutes in a period come out as a rate — `avg` would divide two means and `min`/`max` would take their extremes from different minutes. Other stats are rejected rather than silently producing a number that isn't a rate.\n\nA sustained incident only ever notifies once, so repeat messages mean the alarm is flapping. Three levers fix that, and which one depends on the metric: `clear_threshold` (fire high, clear low) for continuous series like rates and latencies; `datapoints_to_alarm` for spiky ones that cross the line briefly; and `missing_data: \"ignore\"` for sparse ones, where a minute with no traffic is absence of evidence rather than a recovery.\n\nUse `GET /orgs/{org_id}/metrics/catalog` to see which metric names and labels this org is actually emitting. Two metrics won't be listed until you alarm on them: `org.credits.usage_pct` (percent of the billing period's prepaid budget consumed) and `org.credits.remaining` (credits left in it) are only sampled for orgs that have an enabled alarm on one, since the underlying read is the billing gate's and too heavy to run speculatively. Both are levels sampled once a minute, so use `max`, `avg` or `min` — `sum` would add one reading per minute in the period and is rejected. `org.credits.remaining` goes negative under overage.\n\nPercent and headroom are worth having separately: 95% of a large budget can still be thousands of credits, while 50% of a small one is one bad afternoon. For burn *volume* rather than budget position, alarm on `org.credits.spend` with `sum` — that one carries `project_id` and `workforce_id` dims, so it can scope to a single project or workforce the way a budget can't.\n\nFor latency, `stat` accepts any percentile from `p0.1` to `p99.9`, in tenths. Equivalent spellings are fine (`p95.0` is accepted and comes back as `p95`), but anything finer than a tenth is rejected rather than rounded, so an alarm never silently watches a different point than the one you asked for. These are exact, computed over the individual run durations rather than interpolated from bins, which is also why they are limited to `app.run.duration_ms`, cannot be a ratio, and cannot carry `label`, `project_env_id` or `dims.deployment_id` — a run row has no such column, so those filters would silently widen the alarm to everything. Prefer a high percentile over `avg` for latency: an average hides the tail that users actually notice, and hides it harder as traffic grows.\n\nTwo different project fields, gated separately. Top-level `project_id` is ownership — who may see and edit the alarm afterwards — and setting it requires `projects.alarms.manage` on that project, while leaving it out makes an org-level alarm and requires `alarms.manage`. `dims.project_id` only narrows which metric bins are read, but it still exposes that project's numbers through the alarm's notifications, so it requires `projects.alarms.read` on the project it names.",
+        "operationId": "create_org_alarm",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAlarmReq"
+              },
+              "examples": {
+                "Credits budget above 80%": {
+                  "value": {
+                    "name": "Credits usage",
+                    "metric_name": "org.credits.usage_pct",
+                    "stat": "max",
+                    "period_seconds": 300,
+                    "comparison": "gte",
+                    "threshold": 80,
+                    "clear_threshold": 70,
+                    "datapoints_to_alarm": 1,
+                    "evaluation_periods": 1,
+                    "channel": {
+                      "type": "email",
+                      "config": {
+                        "to": "finance@example.com"
+                      }
+                    }
+                  }
+                },
+                "Deployment down": {
+                  "value": {
+                    "name": "API down — production",
+                    "metric_name": "deployment.health",
+                    "dims": {
+                      "project_env_id": "559"
+                    },
+                    "stat": "avg",
+                    "period_seconds": 120,
+                    "comparison": "lt",
+                    "threshold": 0.5,
+                    "missing_data": "breaching",
+                    "channel": {
+                      "type": "slack",
+                      "config": {
+                        "token": "xoxb-1234567890123-1234567890123",
+                        "channel": "C0123456789"
+                      }
+                    }
+                  }
+                },
+                "Error count": {
+                  "value": {
+                    "name": "Support agent errors",
+                    "metric_name": "app.run.errors",
+                    "dims": {
+                      "workforce_id": "123"
+                    },
+                    "stat": "sum",
+                    "period_seconds": 300,
+                    "comparison": "gte",
+                    "threshold": 5,
+                    "datapoints_to_alarm": 2,
+                    "evaluation_periods": 3,
+                    "channel": {
+                      "type": "email",
+                      "config": {
+                        "to": "ops@example.com"
+                      }
+                    }
+                  }
+                },
+                "Error rate above 5%": {
+                  "value": {
+                    "name": "Support agent error rate",
+                    "metric_name": "app.run.errors",
+                    "denominator_metric_name": "app.run.terminal_count",
+                    "min_sample_count": 20,
+                    "dims": {
+                      "workforce_id": "123"
+                    },
+                    "stat": "sum",
+                    "period_seconds": 300,
+                    "comparison": "gt",
+                    "threshold": 0.05,
+                    "clear_threshold": 0.03,
+                    "datapoints_to_alarm": 2,
+                    "evaluation_periods": 3,
+                    "channel": {
+                      "type": "email",
+                      "config": {
+                        "to": "ops@example.com"
+                      }
+                    }
+                  }
+                },
+                "Fewer than 1000 credits left": {
+                  "value": {
+                    "name": "Credits headroom",
+                    "metric_name": "org.credits.remaining",
+                    "stat": "min",
+                    "period_seconds": 300,
+                    "comparison": "lt",
+                    "threshold": 1000,
+                    "clear_threshold": 5000,
+                    "datapoints_to_alarm": 1,
+                    "evaluation_periods": 1,
+                    "channel": {
+                      "type": "email",
+                      "config": {
+                        "to": "finance@example.com"
+                      }
+                    }
+                  }
+                },
+                "Sparse metric, no false recovery": {
+                  "value": {
+                    "name": "Checkout tool failures",
+                    "metric_name": "trace.tool_errors",
+                    "dims": {
+                      "workforce_id": "123",
+                      "label": "charge_card"
+                    },
+                    "stat": "sum",
+                    "period_seconds": 60,
+                    "comparison": "gt",
+                    "threshold": 5,
+                    "missing_data": "ignore",
+                    "channel": {
+                      "type": "slack",
+                      "config": {
+                        "token": "xoxb-1234567890123-1234567890123",
+                        "channel": "C0123456789"
+                      }
+                    }
+                  }
+                },
+                "p99 latency": {
+                  "value": {
+                    "name": "Checkout p99 latency",
+                    "metric_name": "app.run.duration_ms",
+                    "dims": {
+                      "workforce_id": "123"
+                    },
+                    "stat": "p99",
+                    "period_seconds": 300,
+                    "comparison": "gt",
+                    "threshold": 8000,
+                    "clear_threshold": 6000,
+                    "datapoints_to_alarm": 2,
+                    "evaluation_periods": 3,
+                    "channel": {
+                      "type": "email",
+                      "config": {
+                        "to": "ops@example.com"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Alarm and channel link created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateAlarmOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/alarms/health": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Find alarms that stopped receiving data",
+        "description": "For every enabled alarm, when the metric series behind it last produced a datapoint.\n\nAnswers the one question an alarm's own `state` cannot: is it still watching anything? Under the default `not_breaching` policy an alarm whose metric stopped being emitted — a deleted workforce, a disabled trace filter, a renamed metric — sits at `ok` indefinitely and looks identical to one that is genuinely healthy.\n\n`stale` marks silence lasting ten evaluation windows (minimum one hour), which is long enough that a quiet-but-live series won't trip it. A brand-new alarm reads as stale until its first datapoint, which is accurate: it cannot fire yet.\n\nFor a ratio alarm, `last_datapoint_at` is the **older** of the two series, since a period only yields a datapoint where both sides have one. A live numerator over a dead denominator is therefore reported as stale — every period resolves to a missing ratio, so the alarm is blind despite one of its series still flowing. `denominator_last_datapoint_at` tells you which side went quiet.\n\nCovers the same alarms `GET /orgs/{org_id}/alarms` returns for you, so `healthy` and `stale_count` describe your visible subset — a project-scoped caller gets their project's blind spots, not the org's.",
+        "operationId": "get_org_alarms_health",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-alarm data health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgAlarmsHealthResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/alarms/{alarm_id}": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Get a metric alarm",
+        "description": "One alarm's configuration, current state and linked channels.\n\nSame shape as an entry in `GET /orgs/{org_id}/alarms`, for refreshing a detail view without refetching the whole list.\n\nNeeds `alarms.read` for an org-level alarm, or `projects.alarms.read` on the owning project for a project alarm.",
+        "operationId": "get_org_alarm",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alarm_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The alarm",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Alarm not found for this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Delete a metric alarm",
+        "description": "Delete a metric alarm and its channel links.\n\nNeeds `alarms.manage` for an org-level alarm, or `projects.alarms.manage` on the owning project for a project alarm.",
+        "operationId": "delete_org_alarm",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alarm_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Alarm deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Update a metric alarm",
+        "description": "Update alarm thresholds, evaluation settings, or enabled state.\n\n`clear_threshold` is the one field where `null` differs from omitting the key: send `null` to drop the hysteresis, omit it to leave it as is. It is validated against the resulting `threshold` and `comparison`, so patching either side of the pair alone can't invert them.\n\n`metric_name` and `denominator_metric_name` are not patchable: changing what an alarm watches would leave its state and history describing a different question, so define a new alarm instead.\n\n`enabled: true` requires at least one attached channel. Channels may be detached freely while an alarm is disabled, so this is what stops that from re-enabling an alarm that evaluates and records transitions with nowhere to notify.\n\nThe alarm's owning project is not patchable either, so the permission needed here is fixed for the life of the alarm: `alarms.manage` when it is org-level, `projects.alarms.manage` on the owner when it is not.",
+        "operationId": "update_org_alarm",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alarm_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAlarmReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Alarm updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/alarms/{alarm_id}/channels": {
+      "post": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Attach a channel to an alarm",
+        "description": "Attach another notification channel to an alarm, so one condition reaches several destinations (page Slack and email the on-call, say).\n\nAccepts the same channel shape as alarm creation: `{ \"id\": \u003Cchannel id\u003E }` to reuse an existing channel, or inline `type` + `config` to create one. Inline channels identical to an existing row are deduped rather than duplicated.\n\nIdempotent — re-attaching a channel that is already linked returns `already_linked: true` and changes nothing.\n\nGated by the alarm, not the channel: `alarms.manage` for an org-level alarm, `projects.alarms.manage` on the owner for a project alarm. Channels themselves are org-wide, so a project-scoped caller can point their alarm at any existing channel — attaching one is a routing decision about their alarm, whereas creating or deleting the channel row needs `notification_channels.manage`.",
+        "operationId": "add_org_alarm_channel",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alarm_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannelReq"
+              },
+              "examples": {
+                "New Slack channel": {
+                  "value": {
+                    "type": "slack",
+                    "name": "oncall-pages",
+                    "config": {
+                      "token": "xoxb-1234567890123-1234567890123",
+                      "channel": "C0123456789"
+                    }
+                  }
+                },
+                "Reuse an existing channel": {
+                  "value": {
+                    "id": "13"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Channel attached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddAlarmChannelOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Alarm not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/alarms/{alarm_id}/channels/{channel_id}": {
+      "delete": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Detach a channel from an alarm",
+        "description": "Detach a channel from an alarm. The `NotificationChannels` row itself is left alone — other alarms and notification rules may still be using it.\n\nRemoving the **last** channel from an enabled alarm is rejected: it would keep evaluating and recording transitions while notifying nobody, which looks healthy from the outside. To swap a sole channel, attach the replacement first; to silence an alarm, `PATCH` it with `enabled: false`.",
+        "operationId": "remove_org_alarm_channel",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alarm_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Channel detached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Would leave an enabled alarm with no channels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Alarm not found, or channel not linked to it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/alarms/{alarm_id}/history": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "List alarm state transitions",
+        "description": "State transition history for an alarm, newest first.\n\nNeeds `alarms.read` for an org-level alarm, or `projects.alarms.read` on the owning project for a project alarm.",
+        "operationId": "get_org_alarm_history",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alarm_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max transitions to return (newest first). Default 50, max 500.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transition history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmHistoryResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/analytics/costs": {
       "get": {
         "tags": [
@@ -1759,6 +2535,218 @@
           },
           "500": {
             "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/channels": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "List delivery channels for the org",
+        "description": "List the organization's delivery channels — the addresses alarms can notify (email inboxes, Slack channels).\n\nChannels carry no conditions of their own. What to watch and when to fire lives on the alarm; this is only where the message goes.",
+        "operationId": "list_org_channels",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channels for the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgChannelsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "Create a delivery channel",
+        "description": "Create a delivery channel for this org, or reuse an existing one.\n\nChannels dedupe on `(type, config)`: posting the same Slack channel twice returns the original row with `channel_action: \"reused\"` rather than creating a near-duplicate. Attach the returned `id` to an alarm via `POST /orgs/{org_id}/alarms/{alarm_id}/channels`.",
+        "operationId": "create_org_channel",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNotificationChannelReq"
+              },
+              "examples": {
+                "Email": {
+                  "value": {
+                    "type": "email",
+                    "name": "Finance inbox",
+                    "config": {
+                      "to": "finance@example.com"
+                    }
+                  }
+                },
+                "Slack": {
+                  "value": {
+                    "type": "slack",
+                    "name": "Deploy alerts",
+                    "config": {
+                      "token": "xoxb-1234567890123-1234567890123",
+                      "channel": "C0123456789"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Channel created or reused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateNotificationChannelOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/channels/{channel_id}": {
+      "delete": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "Delete a delivery channel",
+        "description": "Delete a delivery channel for the organization.\n\nRefused with `409` while alarms still reference the channel; `force: true` deletes anyway and unlinks them. The one case `force` will not do is strip the last channel from an *enabled* alarm — that alarm would go on evaluating and recording state transitions with nowhere to send them. Attach a replacement channel or disable the alarm first.",
+        "operationId": "delete_org_channel",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional force-delete flag.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteChannelBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Channel deleted"
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -2873,6 +3861,73 @@
         ]
       }
     },
+    "/orgs/{org_id}/connectors/{connector_id}/local-config": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /orgs/{org_id}/connectors/{connector_id}/local-config`",
+        "description": "Push replacement connections/filesystems maps to a connector box.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LocalConfigReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Config push dispatched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocalConfigRes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty payload (neither map present)"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Connector not found"
+          },
+          "422": {
+            "description": "Connector offline (`code: connector_offline`)"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/connectors/{connector_id}/query": {
       "post": {
         "tags": [
@@ -3007,6 +4062,57 @@
         ]
       }
     },
+    "/orgs/{org_id}/connectors/{connector_id}/revoke": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /orgs/{org_id}/connectors/{connector_id}/revoke`",
+        "description": "Revoke a connector's credential and remove it from the fleet.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connector revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeRes"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Connector not found, or already revoked"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/connectors/{connector_id}/syncs": {
       "post": {
         "tags": [
@@ -3064,7 +4170,7 @@
             "description": "Connector or KB not found"
           },
           "422": {
-            "description": "Source unsupported by connector"
+            "description": "Source or full-refresh extraction unsupported by connector"
           }
         },
         "security": [
@@ -3237,6 +4343,68 @@
           },
           "404": {
             "description": "Sync not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/connectors/{connector_id}/syncs/{sync_id}/run": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`POST /orgs/{org_id}/connectors/{connector_id}/syncs/{sync_id}/run`",
+        "description": "Run a connector sync immediately.",
+        "operationId": "run_now",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sync_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Run dispatched (`dispatched: true`) or queued for the instance holding the connector's socket (`dispatched: false`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSyncRes"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Sync not found"
+          },
+          "422": {
+            "description": "Sync paused or auto-disabled (`sync_disabled`), or a run is already active (`run_active`)"
           }
         },
         "security": [
@@ -7285,6 +8453,640 @@
         ]
       }
     },
+    "/orgs/{org_id}/metrics": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Query a metric series",
+        "description": "Time-bucketed count/sum/avg/min/max for one metric, with optional dimension filters.\n\nNeeds `analytics.read` for an unrestricted query. Passing `project_id` also accepts `projects.alarms.read` on that project, so a project-scoped role can read the series behind its own alarms.",
+        "operationId": "get_org_metrics",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Metric to read, e.g. `app.run.errors`, `deployment.health`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "period_seconds",
+            "in": "query",
+            "description": "Bucket size in seconds (multiple of 60). Default 60.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start (epoch milliseconds). Default: 100 buckets before `to`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end (epoch milliseconds). Default: now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Filter to one project. Omit to aggregate across projects.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "project_env_id",
+            "in": "query",
+            "description": "Filter to one environment.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "deployment_id",
+            "in": "query",
+            "description": "Filter to one deployment.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "workforce_id",
+            "in": "query",
+            "description": "Filter to one agent/workflow app (`OrgsApps.id`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "description": "Filter to one label — the span name behind a trace-derived metric\n(`llm`, `get_address`). Omit to sum across every label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metric series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgMetricsResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/metrics/catalog": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "List observed metrics",
+        "description": "Metric names and label values actually recorded for this org in the recent past. Use it to populate a metric picker: `GET /orgs/{org_id}/metrics` requires a name, and alarms reference names that only exist once something has emitted them.\n\n`origin` separates the two kinds: `system` metrics (`app.*`, `deployment.*`, `org.*`) are emitted by the platform and have no configuration, while `custom` ones come from a metric definition — see `definition_ids` for the config behind them.\n\nThis reports what is *flowing*, not what is configured, so the two can disagree in both directions: a definition that has never matched a span will not appear, and a deleted definition's series stays until its bins age out.\n\nNeeds `analytics.read` for the org-wide catalog. Passing `project_id` narrows it to series carrying that project's dimension and accepts `projects.alarms.read` there instead, so a project-scoped role gets a working metric picker. That view omits series with no project dimension, `org.credits.*` among them — which are org-level metrics that caller cannot alarm on anyway.",
+        "operationId": "get_org_metrics_catalog",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "description": "How far back to look for observed metrics. Default 24, max 720.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Only metrics carrying this project's dimension. Also lowers the\npermission needed from `analytics.read` to `projects.alarms.read` on\nthis project.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Observed metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgMetricsCatalogResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/metrics/definitions": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "List custom metric definitions",
+        "description": "The org's custom metric definitions and their current predicates.\n\n`project_id` filters to what is *in effect* for that project, which includes org-wide definitions (those with no `project_id`) since they run against that project's runs too.\n\nThis lists configuration, not data. A definition that has never matched a span appears here but not in `GET /orgs/{org_id}/metrics/catalog`.\n\nFiltered per definition the same way `GET /orgs/{org_id}/alarms` is: org-wide definitions need `alarms.read`, project ones need `projects.alarms.read` on the owner. So a project-scoped caller sees their own definitions but not the org-wide ones that also run against their runs, even with `project_id` set.",
+        "operationId": "list_org_metric_definitions",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Only definitions in effect for this project. Omit for every definition\nin the org.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of definitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListMetricDefinitionsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Define a custom metric",
+        "description": "Define a metric of your own, emitted as runs land. Once it exists it behaves like any platform metric: readable through `GET /orgs/{org_id}/metrics`, listed in the catalog with `origin: custom`, and alarmable with no extra setup.\n\nThe definition is a span predicate over each completed run's trace. Span paths are `{workforce}.{step}` and matching is on the **leaf**: use `llm` or `get_address`, not the full path. Predicate fields AND together and all are optional — omitting every one matches every non-root span.\n\n`metric_name` is forced under the reserved `trace.` prefix so a definition cannot shadow a platform series. Set `label_source` to `span_name` to break the metric out per step, then point an alarm at a single step with `dims.label`.\n\nDefinitions are **not retroactive**: matching happens as runs arrive, so a new definition only sees traces written after it. Dry-run it against stored traces first with `POST /orgs/{org_id}/metrics/definitions/preview`. Note also that only sum/count/avg/min/max are available on the result — percentiles are not derivable from metric bins.\n\nSet `project_id` to scope the definition to one project, which also makes it editable by holders of `projects.alarms.manage` there. Leaving it out defines an org-wide metric that runs against every project's traces, and needs `alarms.manage`.",
+        "operationId": "create_org_metric_definition",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMetricDefinitionReq"
+              },
+              "examples": {
+                "Failing tool calls, per tool": {
+                  "value": {
+                    "name": "Tool errors",
+                    "metric_name": "tool_errors",
+                    "has_error": true,
+                    "value_source": "count",
+                    "label_source": "span_name"
+                  }
+                },
+                "Output token burn on LLM spans": {
+                  "value": {
+                    "name": "Output tokens",
+                    "metric_name": "output_tokens",
+                    "span_name": "llm",
+                    "value_source": "usage:output_text_tokens"
+                  }
+                },
+                "Slow retrieval steps": {
+                  "value": {
+                    "name": "Slow lookups",
+                    "metric_name": "slow_lookup_ms",
+                    "span_name_prefix": "get_",
+                    "min_duration_ms": 2000,
+                    "value_source": "duration_ms",
+                    "label_source": "span_name"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Definition created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricDefinitionOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/metrics/definitions/preview": {
+      "post": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Dry-run a custom metric definition",
+        "description": "Run a candidate predicate against recent stored traces without saving it, and see what it would have recorded.\n\nDefinitions are not retroactive, so a saved predicate that matches nothing looks identical to one that matches nothing *yet*. This answers that before you commit: which spans matched, what values they'd contribute, and how many distinct labels the metric would carry.\n\nSamples the newest runs (20 by default, 50 max) — enough to tell a working predicate from a broken one, not a measurement of the true rate. Pass `workforce_id` to make the sample representative of the agent you're actually matching. This is the only endpoint that reads stored traces, which is why it is capped; do not poll it.\n\nBecause it returns trace content, `project_id` doubles as the permission target: omit it and the sample spans the whole org, which needs `alarms.manage`; set it and the sample is capped to that project, which needs `projects.alarms.manage` there. A caller scoped to one project must therefore pass it.",
+        "operationId": "preview_org_metric_definition",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewMetricDefinitionReq"
+              },
+              "examples": {
+                "Per-step latency": {
+                  "value": {
+                    "workforce_id": "42",
+                    "value_source": "duration_ms",
+                    "label_source": "span_name"
+                  }
+                },
+                "Which tools are failing": {
+                  "value": {
+                    "workforce_id": "42",
+                    "has_error": true,
+                    "value_source": "count",
+                    "label_source": "span_name"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the definition would record",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewMetricDefinitionOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/metrics/definitions/{definition_id}": {
+      "delete": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Delete a custom metric definition",
+        "description": "Stop emitting a custom metric. Takes effect within one flush interval (~10s).\n\nBins the definition already wrote are kept — they are real observations — and age out with normal metric retention, so the series stays readable and keeps appearing in the catalog for a while with no definition behind it. Alarms pointing at the metric are left alone and will fall to `insufficient_data` once the series stops.\n\nNeeds `alarms.manage` for an org-wide definition, or `projects.alarms.manage` on the owning project for a project one.",
+        "operationId": "delete_org_metric_definition",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "definition_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Definition deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "Rename or enable/disable a custom metric definition",
+        "description": "Only the name and the enabled flag are mutable. The predicate and destination metric are fixed at creation: changing them would splice two different meanings into one series with nothing marking the seam, so a changed definition should be a new definition.\n\nDisabling stops new observations within one flush interval (~10s). Bins already written stay and age out with normal metric retention.\n\nThe owning project is not mutable either, so the permission needed here is fixed: `alarms.manage` for an org-wide definition, `projects.alarms.manage` on the owner for a project one.",
+        "operationId": "update_org_metric_definition",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "definition_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMetricDefinitionReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Definition updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/models/policies": {
       "get": {
         "tags": [
@@ -7465,419 +9267,6 @@
                 }
               }
             }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/notifications/channels": {
-      "get": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "List notification channels for the org",
-        "description": "List notification channels for the organization.",
-        "operationId": "list_org_notification_channels",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Channels for the org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListOrgNotificationChannelsResBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "Create a notification channel",
-        "description": "Create or reuse a notification channel for this org.",
-        "operationId": "create_org_notification_channel",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateNotificationChannelReq"
-              },
-              "examples": {
-                "Email": {
-                  "value": {
-                    "type": "email",
-                    "name": "Finance inbox",
-                    "config": {
-                      "to": "finance@example.com"
-                    }
-                  }
-                },
-                "Slack": {
-                  "value": {
-                    "type": "slack",
-                    "name": "Deploy alerts",
-                    "config": {
-                      "token": "xoxb-1234567890123-1234567890123",
-                      "channel": "C0123456789"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Channel created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateNotificationChannelOut"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/notifications/channels/{channel_id}": {
-      "delete": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "Delete a notification channel.",
-        "description": "Delete a notification channel for the organization.",
-        "operationId": "delete_org_notification_channel",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "channel_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "Optional force-delete flag.",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeleteChannelBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "Channel deleted"
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/notifications/rules": {
-      "get": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "List org-wide notification rules",
-        "description": "List org-wide notification rules with their linked channels.",
-        "operationId": "list_org_notification_rules",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List of rules with channels",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListOrgNotificationRulesResBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "Create an org-wide notification rule",
-        "description": "Create an org-wide notification rule.",
-        "operationId": "create_org_notification_rule",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateNotificationRuleReq"
-              },
-              "examples": {
-                "Email channel": {
-                  "value": {
-                    "name": "Credits usage alert",
-                    "event_type": "org.credits.usage",
-                    "cooldown_seconds": 3600,
-                    "condition": {
-                      "threshold_pct": 80
-                    },
-                    "channel": {
-                      "type": "email",
-                      "config": {
-                        "to": "finance@example.com"
-                      }
-                    }
-                  }
-                },
-                "Slack channel": {
-                  "value": {
-                    "name": "Credits usage to Slack",
-                    "event_type": "org.credits.usage",
-                    "channel": {
-                      "type": "slack",
-                      "config": {
-                        "token": "xoxb-1234567890123-1234567890123",
-                        "channel": "C0123456789"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Rule and channel link created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateNotificationRuleOut"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/notifications/rules/{rule_id}": {
-      "delete": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "Delete an org-wide notification rule",
-        "description": "Delete an org-wide notification rule.",
-        "operationId": "delete_org_notification_rule",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "rule_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Rule deleted"
           },
           "403": {
             "description": "Forbidden",
@@ -10596,207 +11985,6 @@
         ]
       }
     },
-    "/orgs/{org_id}/projects/{project_id}/notifications/rules": {
-      "get": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "List project notification rules",
-        "description": "List notification rules scoped to a project.",
-        "operationId": "list_project_notification_rules",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List of rules with channels",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListProjectNotificationRulesResBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "Create a project-scoped notification rule",
-        "description": "Create a project-scoped notification rule.",
-        "operationId": "create_project_notification_rule",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateNotificationRuleReq"
-              },
-              "examples": {
-                "Email channel": {
-                  "value": {
-                    "name": "Deployment failures",
-                    "event_type": "project.deployment.failed",
-                    "cooldown_seconds": 3600,
-                    "channel": {
-                      "type": "email",
-                      "config": {
-                        "to": "oncall@example.com"
-                      }
-                    }
-                  }
-                },
-                "Slack channel": {
-                  "value": {
-                    "name": "Deployment failures to Slack",
-                    "event_type": "project.deployment.failed",
-                    "channel": {
-                      "type": "slack",
-                      "config": {
-                        "token": "xoxb-1234567890123-1234567890123",
-                        "channel": "C0123456789"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Rule and channel link created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateNotificationRuleOut"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/projects/{project_id}/notifications/rules/{rule_id}": {
-      "delete": {
-        "tags": [
-          "notifications"
-        ],
-        "summary": "Delete a project-scoped notification rule",
-        "description": "Delete a project-scoped notification rule.",
-        "operationId": "delete_project_notification_rule",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "rule_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Rule deleted"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
     "/orgs/{org_id}/projects/{project_id}/runs": {
       "get": {
         "tags": [
@@ -12704,6 +13892,297 @@
           }
         }
       },
+      "AddAlarmChannelOut": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "channel_action",
+          "already_linked"
+        ],
+        "properties": {
+          "already_linked": {
+            "type": "boolean",
+            "description": "`true` when this channel was already attached, so the call changed\nnothing. Linking is idempotent — retries must not create duplicates,\nwhich would notify the same destination twice per transition."
+          },
+          "channel_action": {
+            "$ref": "#/components/schemas/ChannelAction",
+            "description": "How the underlying `NotificationChannels` row was resolved: referenced\nby `id`, deduped onto an identical existing row, or inserted."
+          },
+          "channel_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "AlarmComparison": {
+        "type": "string",
+        "enum": [
+          "gt",
+          "gte",
+          "lt",
+          "lte"
+        ]
+      },
+      "AlarmDataHealth": {
+        "type": "object",
+        "description": "An enabled alarm and when the series behind it last produced a datapoint.",
+        "required": [
+          "id",
+          "name",
+          "metric_name",
+          "state",
+          "stale"
+        ],
+        "properties": {
+          "denominator_last_datapoint_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "denominator_metric_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set only for ratio alarms, so a caller can tell which side went quiet."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_datapoint_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When this alarm could last have evaluated a period.\n\nFor a ratio alarm this is the *older* of the two series, because\n`ratio_datapoints` yields a datapoint only where both sides have one —\nreporting the numerator alone would call an alarm healthy while every\nperiod actually resolves to missing.\n\n`null` = no evaluable period within the metric retention horizon, which\nfor a ratio alarm includes \"one of the two series never reported\"."
+          },
+          "metric_name": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "The series has been silent long enough that the alarm is almost\ncertainly watching something that no longer exists.\n\nSilence is counted from the alarm's creation when that is later than\n`last_datapoint_at`, so a freshly created alarm is not accused of being\nblind before it has had a chance to see anything. Same judgement\n`crate::alarms::staleness` notifies on."
+          },
+          "state": {
+            "$ref": "#/components/schemas/AlarmState"
+          }
+        }
+      },
+      "AlarmDims": {
+        "type": "object",
+        "description": "Metric dimension filters. Omitted = aggregate across that dimension.\n\nNot `Copy` since `label` is owned.",
+        "properties": {
+          "deployment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Metrics.label` — the span name behind a trace-derived metric. Scopes\nthe alarm to one tool/step instead of the sum over every span the\nfilter matched."
+          },
+          "project_env_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workforce_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent / workflow app (`OrgsApps.id`)."
+          }
+        }
+      },
+      "AlarmHistoryResBody": {
+        "type": "object",
+        "title": "AlarmHistoryResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/alarms/{alarm_id}/history`.",
+        "required": [
+          "history"
+        ],
+        "properties": {
+          "history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlarmStateHistoryOut"
+            }
+          }
+        }
+      },
+      "AlarmOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "metric_name",
+          "min_sample_count",
+          "dims",
+          "stat",
+          "period_seconds",
+          "comparison",
+          "threshold",
+          "datapoints_to_alarm",
+          "evaluation_periods",
+          "missing_data",
+          "state",
+          "enabled",
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationChannelOut"
+            }
+          },
+          "clear_threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Set when this alarm uses hysteresis; see [`CreateAlarmReq`]."
+          },
+          "comparison": {
+            "$ref": "#/components/schemas/AlarmComparison"
+          },
+          "datapoints_to_alarm": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "denominator_metric_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when this is a ratio alarm; see [`CreateAlarmReq`]."
+          },
+          "dims": {
+            "$ref": "#/components/schemas/AlarmDims"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "evaluation_periods": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "metric_name": {
+            "type": "string"
+          },
+          "min_sample_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "missing_data": {
+            "$ref": "#/components/schemas/MissingDataPolicy"
+          },
+          "name": {
+            "type": "string"
+          },
+          "period_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "project_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Project this alarm belongs to; omitted for org-level alarms."
+          },
+          "stat": {
+            "$ref": "#/components/schemas/AlarmStat"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AlarmState"
+          },
+          "state_changed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "threshold": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "AlarmStat": {
+        "type": "string",
+        "description": "Aggregation applied to each evaluation period. Percentiles run from p0.1 to p99.9 in tenths; equivalent spellings such as p95.0 are accepted and returned canonically as p95, while a finer value such as p95.05 is rejected rather than rounded. They are exact rather than interpolated from bins, so they are only available on app.run.duration_ms and cannot be used with denominator_metric_name.",
+        "examples": [
+          "p99"
+        ],
+        "pattern": "^(avg|sum|count|min|max|p\\d+(\\.\\d+)?)$"
+      },
+      "AlarmState": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "alarm",
+          "insufficient_data"
+        ]
+      },
+      "AlarmStateHistoryOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "from_state",
+          "to_state",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "from_state": {
+            "$ref": "#/components/schemas/AlarmState"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Evaluation evidence: per-period values, threshold, breaching count."
+          },
+          "to_state": {
+            "$ref": "#/components/schemas/AlarmState"
+          }
+        }
+      },
       "AllowedAction": {
         "type": "object",
         "description": "One action a principal is effectively allowed to perform, with the\nrole attachments that grant it.",
@@ -13174,7 +14653,7 @@
       },
       "ChannelAction": {
         "type": "string",
-        "description": "How the rule was wired to `NotificationChannels` for this create call.",
+        "description": "How the request was wired to `NotificationChannels`.",
         "enum": [
           "linked",
           "reused",
@@ -13854,6 +15333,124 @@
           }
         }
       },
+      "CreateAlarmOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "channel_id",
+          "channel_action"
+        ],
+        "properties": {
+          "channel_action": {
+            "$ref": "#/components/schemas/ChannelAction"
+          },
+          "channel_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CreateAlarmReq": {
+        "type": "object",
+        "description": "Body for **POST** `/orgs/{org_id}/alarms`.",
+        "required": [
+          "name",
+          "metric_name",
+          "stat",
+          "comparison",
+          "threshold",
+          "channel"
+        ],
+        "properties": {
+          "channel": {
+            "$ref": "#/components/schemas/CreateChannelReq",
+            "description": "Channel: inline `type` + `config`, or reuse with `{ \"id\": \u003Cchannel id\u003E }` (same org)."
+          },
+          "clear_threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Hysteresis: once in `alarm`, a period only stops counting as breaching\nonce it clears *this* value rather than `threshold`. Must sit on the\nnon-breaching side of `threshold` — below it for `gt`/`gte`, above for\n`lt`/`lte`.\n\nFire at `0.05` and clear at `0.03`, and a metric hovering on 5% produces\none transition instead of one per swing. Without it the only defences\nagainst flapping are a longer `period_seconds` or a higher\n`datapoints_to_alarm`, both of which also delay the *first* detection."
+          },
+          "comparison": {
+            "$ref": "#/components/schemas/AlarmComparison"
+          },
+          "datapoints_to_alarm": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Datapoints that must breach out of the last `evaluation_periods`."
+          },
+          "denominator_metric_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Turns the alarm into a **ratio** condition: each period's datapoint\nbecomes `metric_name / denominator_metric_name`, read with the same\ndims, stat and period. `threshold` is then a rate — `0.05` for a 5%\nerror rate, not `5`.\n\nPair it with `min_sample_count`; see that field."
+          },
+          "dims": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AlarmDims"
+              }
+            ]
+          },
+          "evaluation_periods": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "metric_name": {
+            "type": "string",
+            "description": "Metric to watch, e.g. `app.run.errors`, `deployment.health`,\n`org.credits.spend`. The numerator when `denominator_metric_name` is set."
+          },
+          "min_sample_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minimum denominator for a ratio period to count. Below it (or at zero)\nthe period has no datapoint and follows `missing_data`.\n\nExists because ratios are meaningless on tiny samples: 1 error out of 1\nrun is 100%. Set it to the smallest traffic level you'd actually act on."
+          },
+          "missing_data": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MissingDataPolicy",
+                "description": "Omit to get a policy chosen from the metric: `ignore` for `trace.*`\n(sparse — a gap is absence of data, not a recovery) and `not_breaching`\nfor everything else."
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "period_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Length of one evaluation period in seconds (multiple of 60, \u003E= 60)."
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Scope the alarm to a project. Omit for an org-level alarm."
+          },
+          "stat": {
+            "$ref": "#/components/schemas/AlarmStat"
+          },
+          "threshold": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "CreateBackupRequest": {
         "type": "object",
         "properties": {
@@ -13869,6 +15466,7 @@
       },
       "CreateChannelReq": {
         "type": "object",
+        "description": "Channel reference embedded in another resource's create body (alarms).\nEither reuse by `id`, or supply `type` + `config` inline.",
         "properties": {
           "config": {
             "type": "object",
@@ -14213,6 +15811,78 @@
           }
         }
       },
+      "CreateMetricDefinitionReq": {
+        "type": "object",
+        "description": "Body for **POST** `/orgs/{org_id}/metrics/definitions`.\n\nEvery predicate field is optional and they AND together. All omitted means\n\"every non-root span\", which paired with `label_source: span_name` gives a\nper-step call count — a reasonable first definition.",
+        "required": [
+          "name",
+          "metric_name"
+        ],
+        "properties": {
+          "has_error": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` = only errored spans, `false` = only clean ones, omitted = both."
+          },
+          "label_source": {
+            "type": "string",
+            "description": "`none` (default) or `span_name` to break the metric out per step."
+          },
+          "metric_name": {
+            "type": "string",
+            "description": "Destination metric. `trace.` is prepended when missing."
+          },
+          "min_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Only spans at least this slow. Spans still running never match."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human label for the definition itself, unique within the org."
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Scope to one project. Omit to apply across the org."
+          },
+          "source": {
+            "$ref": "#/components/schemas/MetricDefinitionSource",
+            "description": "Defaults to `trace_span`, the only source today."
+          },
+          "span_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Exact span name — the leaf of the span path (`llm`, `get_address`),\nnot the full `{workforce}.{step}`."
+          },
+          "span_name_prefix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Span-name prefix, for matching a family of tools (`get_`)."
+          },
+          "status_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value_source": {
+            "type": "string",
+            "description": "`count` (default), `duration_ms`, or `usage:\u003Ckey\u003E`."
+          }
+        }
+      },
       "CreateModelPolicyBody": {
         "type": "object",
         "description": "Request body for `POST /orgs/{org_id}/models/policies`.",
@@ -14262,7 +15932,7 @@
       },
       "CreateNotificationChannelReq": {
         "type": "object",
-        "description": "Body for **POST** `/orgs/{org_id}/notifications/channels` (standalone channel; same validation as inline rule channel, no `id`).",
+        "description": "Body for **POST** `/orgs/{org_id}/channels` (standalone channel; same validation as an inline alarm channel, no `id`).",
         "properties": {
           "config": {
             "type": "object"
@@ -14275,58 +15945,6 @@
           },
           "type": {
             "$ref": "#/components/schemas/NotificationChannelType"
-          }
-        }
-      },
-      "CreateNotificationRuleOut": {
-        "type": "object",
-        "required": [
-          "id",
-          "channel_id",
-          "channel_action"
-        ],
-        "properties": {
-          "channel_action": {
-            "$ref": "#/components/schemas/ChannelAction"
-          },
-          "channel_id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
-      },
-      "CreateNotificationRuleReq": {
-        "type": "object",
-        "description": "Body for POST org-wide or project-scoped notification rules (same shape).",
-        "required": [
-          "name",
-          "event_type",
-          "channel"
-        ],
-        "properties": {
-          "channel": {
-            "$ref": "#/components/schemas/CreateChannelReq",
-            "description": "Channel: inline `type` + `config`, or reuse with `{ \"id\": \u003Cchannel id\u003E }` (same org)."
-          },
-          "condition": {
-            "type": [
-              "object",
-              "null"
-            ]
-          },
-          "cooldown_seconds": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "event_type": {
-            "$ref": "#/components/schemas/NotificationEventType"
-          },
-          "name": {
-            "type": "string"
           }
         }
       },
@@ -14474,7 +16092,25 @@
         "properties": {
           "dest_table": {
             "type": "string",
-            "description": "Destination table inside the KB. Must not pre-exist: the first run\ncreates it, later runs append."
+            "description": "Destination table inside the KB. Created by the first run when it\ndoesn't exist yet; when it does, `existing_dest` decides whether the\nsync continues it or rebuilds it."
+          },
+          "existing_dest": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExistingDest",
+                "description": "How to treat a `dest_table` that already exists. Defaults to `adopt`.\nOnly meaningful for an incremental sync — a full-refresh one replaces the\ndestination on every run by definition."
+              }
+            ]
+          },
+          "initial_cursor": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Checkpoint to continue an existing `dest_table` from, overriding the one\nread off the table itself. Only valid when the table exists and\n`existing_dest` is `adopt` — for a table the sync still has to build,\nuse `start_cursor`. Same shape as `start_cursor`."
           },
           "interval_secs": {
             "type": "integer",
@@ -14511,16 +16147,36 @@
               "object",
               "null"
             ],
-            "description": "Optional lower bound for the **first** run: only rows with\n`cursor_column \u003E= start_cursor` are pulled (e.g. seed a timestamp to\nbackfill \"from last month on\" instead of the whole table). Ignored on\nlater runs — the advancing cursor takes over. Shape matches the job\n`cursor` (e.g. `{\"kind\":\"timestamp\",\"value\":\"2026-06-01T00:00:00Z\"}`)."
+            "description": "Optional lower bound for the **first** run when it builds the table:\nonly rows with `cursor_column \u003E= start_cursor` are pulled (e.g. seed a\ntimestamp to backfill \"from last month on\" instead of the whole table).\nIgnored on later runs — the advancing cursor takes over — and ignored\nwhen the sync adopts an existing table. Shape matches the job `cursor`\n(e.g. `{\"kind\":\"timestamp\",\"value\":\"2026-06-01T00:00:00Z\"}`). Not valid\non a full-refresh sync (no `cursor_column` to bound)."
           }
         }
       },
       "CreateSyncRes": {
         "type": "object",
         "required": [
-          "sync_id"
+          "sync_id",
+          "adopted_dest_table",
+          "key_columns"
         ],
         "properties": {
+          "adopted_dest_table": {
+            "type": "boolean",
+            "description": "`true` when the sync continues an existing destination table instead of\nbuilding it on the first run."
+          },
+          "initial_cursor": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The checkpoint the first run resumes from when the destination was\nadopted; `null` otherwise (including an adopted table that was empty)."
+          },
+          "key_columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Primary-key columns the sync will merge on. Inherited from an adopted\ntable's own key when the request didn't declare one."
+          },
           "sync_id": {
             "type": "string"
           }
@@ -14706,7 +16362,7 @@
               "boolean",
               "null"
             ],
-            "description": "When `true`, delete even if rules reference this channel (cascading unlink)."
+            "description": "When `true`, delete even if alarms reference this channel (cascading\nunlink). Still refused when it would leave an enabled alarm with no\nchannels."
           }
         }
       },
@@ -15721,6 +17377,14 @@
         "enum": [
           "worktree",
           "git"
+        ]
+      },
+      "ExistingDest": {
+        "type": "string",
+        "description": "What to do when `dest_table` already holds data — typically because a\none-off job extracted it and the sync is being added afterwards to keep it\nfresh.",
+        "enum": [
+          "adopt",
+          "replace"
         ]
       },
       "FilesystemsRes": {
@@ -17948,6 +19612,53 @@
           }
         }
       },
+      "ListMetricDefinitionsResBody": {
+        "type": "object",
+        "title": "ListOrgMetricDefinitionsResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/metrics/definitions`.",
+        "required": [
+          "definitions"
+        ],
+        "properties": {
+          "definitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricDefinitionOut"
+            }
+          }
+        }
+      },
+      "ListOrgAlarmsResBody": {
+        "type": "object",
+        "title": "ListOrgAlarmsResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/alarms`.",
+        "required": [
+          "alarms"
+        ],
+        "properties": {
+          "alarms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlarmOut"
+            }
+          }
+        }
+      },
+      "ListOrgChannelsResBody": {
+        "type": "object",
+        "title": "ListOrgChannelsResponse",
+        "required": [
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationChannelOut"
+            }
+          }
+        }
+      },
       "ListOrgContactsResBody": {
         "type": "object",
         "required": [
@@ -17973,37 +19684,6 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ModelPolicy"
-            }
-          }
-        }
-      },
-      "ListOrgNotificationChannelsResBody": {
-        "type": "object",
-        "title": "ListOrgNotificationChannelsResponse",
-        "required": [
-          "channels"
-        ],
-        "properties": {
-          "channels": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NotificationChannelOut"
-            }
-          }
-        }
-      },
-      "ListOrgNotificationRulesResBody": {
-        "type": "object",
-        "title": "ListOrgNotificationRulesResponse",
-        "description": "Wrapper for **GET** `/orgs/{org_id}/notifications/rules` — org-scoped rules only (`project_id` is null in storage).",
-        "required": [
-          "rules"
-        ],
-        "properties": {
-          "rules": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NotificationRuleOut"
             }
           }
         }
@@ -18077,22 +19757,6 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AcePolicy"
-            }
-          }
-        }
-      },
-      "ListProjectNotificationRulesResBody": {
-        "type": "object",
-        "title": "ListProjectNotificationRulesResponse",
-        "description": "Wrapper for **GET** `/orgs/{org_id}/projects/{project_id}/notifications/rules`.",
-        "required": [
-          "rules"
-        ],
-        "properties": {
-          "rules": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NotificationRuleOut"
             }
           }
         }
@@ -18262,6 +19926,245 @@
           }
         }
       },
+      "LocalConfigReq": {
+        "type": "object",
+        "properties": {
+          "connections": {
+            "type": "object",
+            "description": "`connection_ref` → connection object, same shape as the `connections`\nmap in the connector's `config.json` (e.g. `{ \"kind\": \"postgres\",\n\"dsn\": \"...\", \"query\": \"read\" }`). When present, **replaces** the\nconnector's whole local connections map. Absent = keep local."
+          },
+          "filesystems": {
+            "type": "object",
+            "description": "`filesystem_ref` → filesystem root object, same shape as the\n`filesystems` map in `config.json` (e.g. `{ \"path\": \"/srv/exports\" }`).\nWhen present, **replaces** the connector's whole local filesystems map.\nAbsent = keep local."
+          }
+        }
+      },
+      "LocalConfigRes": {
+        "type": "object",
+        "required": [
+          "dispatched",
+          "connections",
+          "filesystems"
+        ],
+        "properties": {
+          "connections": {
+            "type": "boolean",
+            "description": "Which maps were included in the push."
+          },
+          "dispatched": {
+            "type": "boolean",
+            "description": "Always true on a 202 — the connector validates/acks asynchronously\nover the channel and restarts to apply; watch the fleet listing for it\nto reconnect."
+          },
+          "filesystems": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MetricBinOut": {
+        "type": "object",
+        "description": "One aggregated time bucket of a metric series.",
+        "required": [
+          "ts",
+          "count",
+          "sum"
+        ],
+        "properties": {
+          "avg": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Observations in the bucket."
+          },
+          "max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "sum": {
+            "type": "number",
+            "format": "double"
+          },
+          "ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bucket start (epoch milliseconds)."
+          }
+        }
+      },
+      "MetricCatalogEntry": {
+        "type": "object",
+        "description": "One metric name observed in the window, with the labels seen under it.",
+        "required": [
+          "name",
+          "origin",
+          "definition_ids",
+          "labels",
+          "label_count",
+          "observations",
+          "last_seen"
+        ],
+        "properties": {
+          "definition_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Definitions feeding this series, for linking a custom metric to the\nconfig behind it. Empty for system metrics, and for a custom series\nwhose definition was deleted while its bins age out."
+          },
+          "label_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct labels observed, even when `labels` was truncated. A number\nfar above the cap means a filter is minting labels from something\nunbounded."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Distinct `label` values observed, capped — see `label_count` for the\ntrue total. Empty for metrics that don't use the label dimension."
+          },
+          "last_seen": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Most recent bin (epoch milliseconds)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "observations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Observations recorded in the window."
+          },
+          "origin": {
+            "$ref": "#/components/schemas/MetricOrigin",
+            "description": "`system` for platform series, `custom` for org-defined ones."
+          }
+        }
+      },
+      "MetricDefinitionOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "metric_name",
+          "source",
+          "value_source",
+          "label_source",
+          "enabled",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "has_error": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "label_source": {
+            "type": "string",
+            "description": "`none` or `span_name`."
+          },
+          "metric_name": {
+            "type": "string"
+          },
+          "min_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Project scope; omitted when the filter applies to the whole org."
+          },
+          "source": {
+            "$ref": "#/components/schemas/MetricDefinitionSource",
+            "description": "Always `trace_span` today; see [`MetricDefinitionSource`]."
+          },
+          "span_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "span_name_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value_source": {
+            "type": "string",
+            "description": "`count`, `duration_ms`, or `usage:\u003Ckey\u003E`."
+          }
+        }
+      },
+      "MetricDefinitionSource": {
+        "type": "string",
+        "description": "Where a definition draws its observations from.\n\nOne variant today. It is in the payload from the start so that adding a\nsecond source is an additive change to this enum instead of a new resource\nalongside `/metrics/definitions` — the reason the endpoint is named for\nmetrics rather than for traces.",
+        "enum": [
+          "trace_span"
+        ]
+      },
+      "MetricOrigin": {
+        "type": "string",
+        "description": "Who defines a metric series.\n\nThe distinction the API cares about is editability, not data source: system\nseries are emitted by the crons and probes and have no configuration to\nshow, custom ones are backed by a definition the org can change.",
+        "enum": [
+          "system",
+          "custom"
+        ]
+      },
+      "MissingDataPolicy": {
+        "type": "string",
+        "enum": [
+          "not_breaching",
+          "breaching",
+          "insufficient",
+          "ignore"
+        ]
+      },
       "ModelPolicy": {
         "type": "object",
         "description": "An organization policy rule restricting LLM provider or model usage.",
@@ -18359,56 +20262,6 @@
           "email",
           "slack"
         ]
-      },
-      "NotificationEventType": {
-        "type": "string",
-        "enum": [
-          "org.credits.usage",
-          "project.deployment.failed",
-          "project.deployment.running"
-        ]
-      },
-      "NotificationRuleOut": {
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "event_type",
-          "cooldown_seconds",
-          "enabled",
-          "channels"
-        ],
-        "properties": {
-          "channels": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NotificationChannelOut"
-            }
-          },
-          "condition": {
-            "type": [
-              "object",
-              "null"
-            ]
-          },
-          "cooldown_seconds": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "event_type": {
-            "$ref": "#/components/schemas/NotificationEventType"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          }
-        }
       },
       "Org": {
         "type": "object",
@@ -18542,6 +20395,33 @@
           },
           "role": {
             "type": "string"
+          }
+        }
+      },
+      "OrgAlarmsHealthResBody": {
+        "type": "object",
+        "title": "OrgAlarmsHealthResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/alarms/health`.",
+        "required": [
+          "healthy",
+          "stale_count",
+          "alarms"
+        ],
+        "properties": {
+          "alarms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlarmDataHealth"
+            }
+          },
+          "healthy": {
+            "type": "boolean",
+            "description": "`false` when any enabled alarm is `stale`."
+          },
+          "stale_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of `alarms` are stale, so a caller can alert on the count\nwithout walking the list."
           }
         }
       },
@@ -18726,6 +20606,65 @@
           "csm",
           "other"
         ]
+      },
+      "OrgMetricsCatalogResBody": {
+        "type": "object",
+        "title": "OrgMetricsCatalogResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/metrics/catalog`.",
+        "required": [
+          "hours",
+          "metrics"
+        ],
+        "properties": {
+          "hours": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricCatalogEntry"
+            }
+          }
+        }
+      },
+      "OrgMetricsResBody": {
+        "type": "object",
+        "title": "OrgMetricsResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/metrics`.",
+        "required": [
+          "name",
+          "period_seconds",
+          "from",
+          "to",
+          "bins"
+        ],
+        "properties": {
+          "bins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricBinOut"
+            },
+            "description": "Buckets with data, ascending; empty buckets are omitted."
+          },
+          "from": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Range start (epoch milliseconds)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "period_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Range end (epoch milliseconds)."
+          }
+        }
       },
       "OrgPreview": {
         "type": "object",
@@ -19120,6 +21059,168 @@
               "null"
             ],
             "description": "Phone number. Pass null to clear."
+          }
+        }
+      },
+      "PreviewLabelOut": {
+        "type": "object",
+        "description": "What the filter would have recorded for one label.",
+        "required": [
+          "count",
+          "sum",
+          "min",
+          "max"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` when `label_source` is `none`."
+          },
+          "max": {
+            "type": "number",
+            "format": "double"
+          },
+          "min": {
+            "type": "number",
+            "format": "double"
+          },
+          "sum": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "PreviewMetricDefinitionOut": {
+        "type": "object",
+        "required": [
+          "runs_sampled",
+          "runs_matched",
+          "observations",
+          "labels",
+          "samples"
+        ],
+        "properties": {
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewLabelOut"
+            },
+            "description": "Per-label aggregates, exactly as they'd land in `Metrics`. More than a\nhandful of entries here means `label_source: span_name` over a\nhigh-cardinality predicate — every label is another bin per minute."
+          },
+          "observations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total matching spans across the sample."
+          },
+          "runs_matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, how many produced at least one observation."
+          },
+          "runs_sampled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Runs with a trace that were actually inspected."
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewSampleOut"
+            }
+          }
+        }
+      },
+      "PreviewMetricDefinitionReq": {
+        "type": "object",
+        "description": "Body for **POST** `/orgs/{org_id}/metrics/definitions/preview`.\n\nThe same predicate fields as create, minus everything about persistence.",
+        "properties": {
+          "has_error": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "label_source": {
+            "type": "string"
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Runs to inspect, newest first. Default 20, max 50."
+          },
+          "min_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sample runs from one project only."
+          },
+          "span_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "span_name_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value_source": {
+            "type": "string"
+          },
+          "workforce_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sample runs from one agent/workflow (`OrgsApps.id`). Strongly\nrecommended: it makes the sample representative of what you're\nfiltering, instead of whatever the org ran most recently."
+          }
+        }
+      },
+      "PreviewSampleOut": {
+        "type": "object",
+        "description": "One matched span, for eyeballing that the predicate hit what was intended.",
+        "required": [
+          "run_id",
+          "span_name",
+          "value"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "span_name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number",
+            "format": "double"
           }
         }
       },
@@ -19981,7 +22082,7 @@
               "string",
               "null"
             ],
-            "description": "Monotonic column for incremental extraction (`id`, `updated_at`, ...).\nOmit for a *snapshot* (full-scan) job: one unordered pass over the whole\ntable, no checkpoint/resume — for tables with no usable cursor (requires\nthe connector to advertise `extract:snapshot`, 0.1.25+)."
+            "description": "Monotonic column for incremental extraction (`id`, `updated_at`, ...).\nOmit for a *snapshot* (full-scan) pass over the whole table, unordered\nand with no checkpoint/resume — for tables with no usable cursor\n(requires the connector to advertise `extract:snapshot`, 0.1.25+). On a\nsync that makes every run a full refresh of the destination."
           },
           "schema": {
             "type": [
@@ -20137,6 +22238,28 @@
           "start_time": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "RevokeRes": {
+        "type": "object",
+        "required": [
+          "connector_id",
+          "disconnected",
+          "stopped_syncs"
+        ],
+        "properties": {
+          "connector_id": {
+            "type": "string"
+          },
+          "disconnected": {
+            "type": "boolean",
+            "description": "Whether a live channel connection was torn down here. `false` just means\nthe box was already offline — its credential is dead either way, so a\nreconnect is refused."
+          },
+          "stopped_syncs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Enabled syncs that were pointing at this connector. They are left in\nplace but stop dispatching, since picking due syncs skips revoked\nconnectors. Recreate them against a replacement connector — recreating\nagainst the same `dest_table` adopts the rows already there."
           }
         }
       },
@@ -20461,6 +22584,29 @@
           },
           "workforce": {
             "$ref": "#/components/schemas/WorkforcePreview"
+          }
+        }
+      },
+      "RunSyncRes": {
+        "type": "object",
+        "required": [
+          "sync_id",
+          "dispatched"
+        ],
+        "properties": {
+          "dispatched": {
+            "type": "boolean",
+            "description": "`true`: a run left for the connector on this request; `job_id` is set.\n`false`: the connector's socket lives on another control-plane instance\n(or the box is briefly offline), so the run was queued instead — the\ninstance holding the socket dispatches it on its next scheduler tick\n(~30s), or on reconnect."
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The dispatched run's `ConnectorJobs` id — poll it via the jobs routes.\n`null` when the run was queued (`dispatched: false`); the queued run's\njob appears at the top of `recent_runs` once it fires."
+          },
+          "sync_id": {
+            "type": "string"
           }
         }
       },
@@ -20890,13 +23036,13 @@
           "connection_ref",
           "source_schema",
           "source_table",
-          "cursor_column",
           "key_columns",
           "kb_uid",
           "dest_table",
           "interval_secs",
           "enabled",
           "has_cursor",
+          "consecutive_failures",
           "created_at",
           "updated_at"
         ],
@@ -20907,22 +23053,38 @@
           "connector_id": {
             "type": "string"
           },
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Failed runs since the last completed one. Non-zero means retries are\nbacking off (the effective interval doubles per failure, capped at an\nhour); at 10 the sync is disabled with `disabled_reason` set."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
           },
           "cursor_column": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` for a full-refresh sync: it has no checkpoint, so every run\nre-reads the source table and rebuilds `dest_table`."
           },
           "dest_table": {
             "type": "string"
+          },
+          "disabled_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the control plane disabled this sync (auto-disable after consecutive\nfailures, last error included). `null` when `enabled`, and for operator\npauses. Cleared on re-enable."
           },
           "enabled": {
             "type": "boolean"
           },
           "has_cursor": {
             "type": "boolean",
-            "description": "Whether a cursor checkpoint has been committed (i.e. the sync has pulled\nat least one batch). The raw cursor is intentionally not exposed."
+            "description": "Whether the sync holds a resume checkpoint — committed by a landed batch,\nor seeded at creation when it adopted an existing destination table. Its\nnext run resumes rather than rebuilding. The raw cursor is intentionally\nnot exposed."
           },
           "id": {
             "type": "string"
@@ -21213,6 +23375,97 @@
         ],
         "description": "Deterministic tool invocation attached to a policy. `params` values of\nthe form `\"$var_id\"` are resolved from extracted context variables at\ninference time; `$var_id` tokens embedded in longer strings (template\nparams, e.g. a SQL string) interpolate in place."
       },
+      "UpdateAlarmReq": {
+        "type": "object",
+        "description": "Body for **PATCH** `/orgs/{org_id}/alarms/{alarm_id}` — all fields optional.",
+        "properties": {
+          "clear_threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Double-option so `null` clears the hysteresis and an absent key leaves\nit alone — a plain `Option` can't tell those apart."
+          },
+          "comparison": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AlarmComparison"
+              }
+            ]
+          },
+          "datapoints_to_alarm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "evaluation_periods": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "min_sample_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "missing_data": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MissingDataPolicy"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "period_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "stat": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AlarmStat"
+              }
+            ]
+          },
+          "threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
       "UpdateEnvConfigReqBody": {
         "type": "object",
         "required": [
@@ -21323,6 +23576,24 @@
             ]
           },
           "scopes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateMetricDefinitionReq": {
+        "type": "object",
+        "description": "Body for **PATCH** `/orgs/{org_id}/metrics/definitions/{id}`.\n\nOnly the knobs that are safe to change in place. The predicate and the\ndestination metric are immutable: editing them would splice two different\nmeanings into one series with no marker at the seam, so a changed\ndefinition should be a new definition.",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
             "type": [
               "string",
               "null"
@@ -21441,6 +23712,7 @@
           "interval_starts_at",
           "interval_ends_at",
           "n_success",
+          "n_warning",
           "n_error",
           "n_running",
           "n_timeout",
@@ -21474,6 +23746,11 @@
           "n_users": {
             "type": "integer",
             "format": "int64"
+          },
+          "n_warning": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Completed runs where an intermediate step errored. Disjoint from both\n`n_success` and `n_error`, so totals still add up."
           },
           "p50": {
             "type": [
@@ -21594,6 +23871,7 @@
           "user_name",
           "user_email",
           "n_success",
+          "n_warning",
           "n_error",
           "n_running",
           "n_timeout",
@@ -21621,6 +23899,11 @@
           "n_timeout": {
             "type": "integer",
             "format": "int64"
+          },
+          "n_warning": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Completed runs where an intermediate step errored. Disjoint from both\n`n_success` and `n_error`, so totals still add up."
           },
           "usd": {
             "type": "number",
@@ -21711,6 +23994,10 @@
           "envs"
         ],
         "properties": {
+          "applies_to_all_envs": {
+            "type": "boolean",
+            "description": "Whether the variable applies to every environment, including\nenvironments created later."
+          },
           "description": {
             "type": [
               "string",
@@ -21901,12 +24188,20 @@
       "description": "Action Control Engine (ACE) operations"
     },
     {
+      "name": "alarms",
+      "description": "Metric series and threshold alarms"
+    },
+    {
       "name": "analytics",
       "description": "Org and project analytics"
     },
     {
       "name": "billing",
       "description": "Subscriptions, usage, and payment-related operations"
+    },
+    {
+      "name": "channels",
+      "description": "Delivery channels alarms notify through"
     },
     {
       "name": "content",
