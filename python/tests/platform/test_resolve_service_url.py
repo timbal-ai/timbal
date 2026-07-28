@@ -34,6 +34,8 @@ def _isolated_env(monkeypatch, tmp_path):
     monkeypatch.delenv("TIMBAL_API_HOST", raising=False)
     monkeypatch.delenv("TIMBAL_ORG_ID", raising=False)
     monkeypatch.delenv("TIMBAL_PROJECT_ENV_ID", raising=False)
+    monkeypatch.delenv("TIMBAL_PROJECT_ENV_ORIGIN", raising=False)
+    monkeypatch.delenv("TIMBAL_DEPLOYMENTS_DOMAIN", raising=False)
     monkeypatch.delenv("TIMBAL_START_API_PORT", raising=False)
     monkeypatch.delenv("TIMBAL_START_UI_PORT", raising=False)
     monkeypatch.delenv("TIMBAL_START_WORKFORCE", raising=False)
@@ -102,17 +104,17 @@ class TestRemote:
 
     def test_api(self):
         url, headers = _resolve_url_and_headers("api", "users", {})
-        assert url == "https://proj-env-454.deployments.timbal.ai/api/users"
+        assert url == "https://e454.deployments.timbal.ai/api/users"
         assert headers["Authorization"] == "Bearer sk-test"
 
     def test_ui(self):
         url, headers = _resolve_url_and_headers("ui", "index", {})
-        assert url == "https://proj-env-454.deployments.timbal.ai/index"
+        assert url == "https://e454.deployments.timbal.ai/index"
         assert headers["Authorization"] == "Bearer sk-test"
 
     def test_workforce_member(self):
         url, headers = _resolve_url_and_headers("agent-abc", "run", {})
-        assert url == "https://proj-env-454.deployments.timbal.ai/api/workforce/agent-abc/run"
+        assert url == "https://e454.deployments.timbal.ai/api/workforce/agent-abc/run"
         assert headers["Authorization"] == "Bearer sk-test"
 
     def test_raises_without_platform_config(self, monkeypatch):
@@ -141,12 +143,12 @@ class TestRemoteTakesPrecedence:
     def test_api_remote_over_local(self, monkeypatch):
         monkeypatch.setenv("TIMBAL_START_API_PORT", "3001")
         url, _ = _resolve_url_and_headers("api", "users", {})
-        assert url == "https://proj-env-454.deployments.timbal.ai/api/users"
+        assert url == "https://e454.deployments.timbal.ai/api/users"
 
     def test_workforce_remote_over_local(self, monkeypatch):
         monkeypatch.setenv("TIMBAL_START_WORKFORCE", "abc123:4455")
         url, _ = _resolve_url_and_headers("abc123", "run", {})
-        assert url == "https://proj-env-454.deployments.timbal.ai/api/workforce/abc123/run"
+        assert url == "https://e454.deployments.timbal.ai/api/workforce/abc123/run"
 
 
 class TestNoConfig:

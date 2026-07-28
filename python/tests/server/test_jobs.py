@@ -25,7 +25,7 @@ class MockRunnable:
 
 
 class TestJob:
-    def test_job_init(self):
+    async def test_job_init(self):
         """Test Job initialization."""
         task = asyncio.Future()
         queue = asyncio.Queue()
