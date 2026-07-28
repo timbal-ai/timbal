@@ -168,5 +168,39 @@ Once per turn — after `agent_text_done`, and also when the turn is interrupted
 ### What this is not
 
 - Not the bundled **`GET /voice/`** HTML demo — only the **`/voice/ws`** contract.
-- Not REST/SSE for the live voice loop; real-time voice uses this WebSocket.
+- Not REST/SSE for the live voice loop; real-time voice uses this WebSocket (or WebRTC, below).
 - The LLM/agent runs on the server; the client only captures audio, plays TTS, and renders text events.
+
+## Voice over WebRTC: `POST /voice/rtc`
+
+The same voice session over WebRTC instead of a WebSocket. Requires the **`timbal[voice]`** extra (which ships aiortc) on the server — without it the route answers **501** with an install hint. The bundled playground has a transport dropdown that exercises this path.
+
+**Why choose it over `/voice/ws`:** Opus instead of raw PCM (~10x less bandwidth), jitter buffering and packet-loss concealment on lossy/mobile networks, and **server-paced playback** — the server sends TTS at real time from its own clock, so it always knows exactly what the caller has heard. Barge-in truncation (`interrupted.heard_text`, memory truncation) is exact with **no playback acks**, and the unspoken tail of an interrupted reply is dropped server-side instead of asking the client to clear buffers.
+
+### Signaling
+
+One HTTP round trip, WHIP-style — no trickle ICE (wait for ICE gathering to complete before posting the offer):
+
+```
+POST /voice/rtc
+{ "sdp": "<offer sdp>", "type": "offer", "config": { ...same keys as the WS config frame... } }
+
+200 → { "sdp": "<answer sdp>", "type": "answer" }
+400 → bad offer / no audio track / runnable is not an Agent
+501 → timbal[voice] extra (aiortc) not installed
+```
+
+The offer **must** contain:
+
+- **One audio track** — the mic. Sent Opus-encoded; the server decodes and resamples to the session rate, so the client-side `sample_rate` config key is irrelevant on this transport. Keep `echoCancellation: true` in `getUserMedia` constraints.
+- **A data channel** (any label) — created by the client so its SCTP m-line rides the offer. All non-audio session events arrive here as JSON: the exact payloads of the WS protocol, except there are **no `audio` messages** (TTS is a real audio track the browser plays natively) and **no `playback` acks** (`session_started.playback_acks` is `"native"`, and `transport` is `"webrtc"`).
+
+The server answers with the TTS audio track on the same m-line. Client teardown = close the peer connection; server teardown (session end/error) closes the connection and fires `session_ended` on the data channel first.
+
+### ICE configuration
+
+| Env var | Meaning |
+|---|---|
+| `TIMBAL_STUN_URL` | STUN server; defaults to `stun:stun.l.google.com:19302`. Set to empty to disable (loopback/LAN). |
+| `TIMBAL_TURN_URL` | Optional TURN server for clients behind symmetric NATs. |
+| `TIMBAL_TURN_USERNAME` / `TIMBAL_TURN_PASSWORD` | TURN credentials. |

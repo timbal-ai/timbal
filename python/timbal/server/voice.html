@@ -102,6 +102,13 @@
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(0,0,0,.07);
   }
+  .panel select:disabled {
+    color: var(--text-muted);
+    background: var(--bg);
+    border-color: var(--border);
+    cursor: not-allowed;
+    opacity: 0.65;
+  }
   .model-picker {
     display: flex;
     flex-direction: column;
@@ -601,6 +608,13 @@
           <option value="raw">Raw (no filters)</option>
         </select>
       </label>
+      <label class="field">
+        <span class="field-label">Transport</span>
+        <select id="transport-select" aria-label="Transport" title="How audio moves — applied on the next Start. WebRTC uses Opus tracks (server needs timbal[voice]); noise suppression runs in the browser's own pipeline there, so the RNNoise option applies to WebSocket only.">
+          <option value="ws">WebSocket (PCM)</option>
+          <option value="webrtc">WebRTC (Opus)</option>
+        </select>
+      </label>
       <p class="panel-note">Echo cancellation stays on in every mode. Settings apply on the next Start.</p>
     </aside>
   </div>
@@ -632,6 +646,28 @@ tdSelect.onchange = () => {
   // Applied on the next Start (no reload) — modes are fixed per WebSocket hello.
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
 };
+
+const transportSelect = document.getElementById('transport-select');
+const TRANSPORT_STORAGE_KEY = 'timbal-voice-transport';
+transportSelect.value = new URLSearchParams(location.search).get('transport')
+  || localStorage.getItem(TRANSPORT_STORAGE_KEY) || 'ws';
+if (!transportSelect.value) transportSelect.value = 'ws';
+function syncNsForTransport() {
+  // WebRTC sends the raw mic track, so the worklet's RNNoise output never
+  // reaches the wire — the transport forces browser noise suppression
+  // (startMic mirrors this). Gray the control out instead of lying with it.
+  const rtc = transportSelect.value === 'webrtc';
+  nsSelect.disabled = rtc;
+  nsSelect.title = rtc
+    ? 'Not configurable over WebRTC — the browser applies its own noise suppression to the mic track.'
+    : "Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.";
+}
+transportSelect.onchange = () => {
+  // Applied on the next Start — a live session keeps its transport.
+  localStorage.setItem(TRANSPORT_STORAGE_KEY, transportSelect.value);
+  syncNsForTransport();
+};
+syncNsForTransport();
 
 const sttSelect = document.getElementById('stt-select');
 const STT_STORAGE_KEY = 'timbal-voice-stt-provider';
@@ -822,6 +858,8 @@ function initRunnableStrip() {
 }
 
 let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
+/** WebRTC transport state: the peer connection and the element playing the server's TTS track. */
+let pc = null, remoteAudioEl = null;
 /** False until WS is open, config frame sent, and AudioContext is running (worklet processes mic). */
 let micAudioToWs = false;
 let nextPlayTime = 0;
@@ -1098,7 +1136,9 @@ async function startMic(deviceId) {
   if (analyser) { analyser.disconnect(); analyser = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
 
-  const nsMode = nsSelect.value;
+  // WebRTC ships the raw getUserMedia track; RNNoise lives in the worklet
+  // and would be silently bypassed — force the browser suppressor instead.
+  const nsMode = transportSelect.value === 'webrtc' ? 'browser' : nsSelect.value;
   let useRnnoise = nsMode === 'rnnoise';
   if (useRnnoise && rnnoiseAssets === null) {
     try {
@@ -1199,7 +1239,12 @@ async function startMic(deviceId) {
 
 micSelect.onchange = () => {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'mic_change'}));
-  startMic(micSelect.value);
+  void startMic(micSelect.value).then(() => {
+    // On WebRTC the pc holds the (now stopped) old track — swap in the new one.
+    const track = micStream?.getAudioTracks()[0];
+    const sender = pc?.getSenders?.().find((s) => s.track?.kind === 'audio');
+    if (sender && track) void sender.replaceTrack(track);
+  });
 };
 
 navigator.mediaDevices.addEventListener('devicechange', async () => {
@@ -1252,6 +1297,17 @@ async function endSession({ userInitiated = false, silent = false } = {}) {
     sock.onmessage = null;
     try { sock.close(); } catch (_) {}
   }
+  if (pc) {
+    const conn = pc;
+    pc = null;
+    conn.onconnectionstatechange = null;
+    conn.ontrack = null;
+    try { conn.close(); } catch (_) {}
+  }
+  if (remoteAudioEl) {
+    try { remoteAudioEl.pause(); remoteAudioEl.srcObject = null; } catch (_) {}
+    remoteAudioEl = null;
+  }
   if (worklet) { try { worklet.disconnect(); } catch (_) {} worklet = null; }
   if (currentSource) { try { currentSource.disconnect(); } catch (_) {} currentSource = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
@@ -1300,6 +1356,30 @@ btnSession.onclick = () => {
   void startSession();
 };
 
+/** Config keys shared by the WS hello and the RTC offer body. */
+function sessionConfigPayload() {
+  const cfg = {};
+  if (tdSelect.value) cfg.turn_detector = tdSelect.value;
+  if (sttSelect.value) cfg.stt_provider = sttSelect.value;
+  if (modelSelect.value) cfg.model = modelSelect.value;
+  return cfg;
+}
+
+/** Fresh-session UI/playback state, shared by both transports. */
+function resetSessionUi() {
+  transcriptEl.innerHTML = '';
+  window._assistantEl = null;
+  window._lastAssistantEl = null;
+  window._turnBubbles = [];
+  window._replyDone = false;
+  partialEl = null;
+  statusEl = null;
+  resetPlaybackTracking();
+  suppressAssistantAudio = false;
+  stopAssistantAudio();
+  sessionReady = false;
+}
+
 async function start() {
   const gen = startGen;
   setConn('connecting', 'Getting ready', 'Microphone and server connection…');
@@ -1315,6 +1395,11 @@ async function start() {
     await startMic(preferred);
     if (gen !== startGen) return;
     await populateDevices();
+  }
+
+  if (transportSelect.value === 'webrtc') {
+    await startRtc(gen);
+    return;
   }
 
   setConn('connecting', 'Connecting', 'Opening WebSocket to this server…');
@@ -1338,23 +1423,9 @@ async function start() {
     const ctxRate = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
     const sr = rnnoiseCtxActive ? Math.round(ctxRate / 3) : ctxRate;
     sessionSampleRate = sr;
-    const hello = { sample_rate: sr };
-    if (tdSelect.value) hello.turn_detector = tdSelect.value;
-    if (sttSelect.value) hello.stt_provider = sttSelect.value;
-    if (modelSelect.value) hello.model = modelSelect.value;
-    ws.send(JSON.stringify(hello));
-    transcriptEl.innerHTML = '';
-    window._assistantEl = null;
-    window._lastAssistantEl = null;
-    window._turnBubbles = [];
-    window._replyDone = false;
-    partialEl = null;
-    statusEl = null;
+    ws.send(JSON.stringify({ sample_rate: sr, ...sessionConfigPayload() }));
+    resetSessionUi();
     setConn('live', 'Starting…', 'Loading STT / turn models (first session can take a few seconds)…');
-    resetPlaybackTracking();
-    suppressAssistantAudio = false;
-    stopAssistantAudio();
-    sessionReady = false;
     if (playbackAckTimer) clearInterval(playbackAckTimer);
     playbackAckTimer = setInterval(() => sendPlaybackAck(false), PLAYBACK_ACK_INTERVAL_MS);
     const tryArmMic = async () => {
@@ -1420,7 +1491,13 @@ async function start() {
       console.error('voice ws: bad json', err);
       return;
     }
-    switch (msg.type) {
+    handleServerMessage(msg);
+  };
+}
+
+/** One handler for both transports: WS frames and RTC data-channel messages. */
+function handleServerMessage(msg) {
+  switch (msg.type) {
       case 'session_started':
         sessionReady = true;
         {
@@ -1531,8 +1608,95 @@ async function start() {
       case 'session_ended':
         setConn('ended', 'Session ended', 'Click Start for a new session.');
         break;
+  }
+}
+
+async function startRtc(gen) {
+  setConn('connecting', 'Connecting', 'Negotiating WebRTC with this server…');
+  pc = new RTCPeerConnection();
+  const conn = pc;
+
+  // Raw mic track (browser AEC/NS applied via getUserMedia constraints). The
+  // worklet graph from startMic keeps driving the level meter; its PCM output
+  // goes nowhere because micAudioToWs stays false on this transport.
+  pc.addTrack(micStream.getAudioTracks()[0], micStream);
+
+  // The server binds to whatever channel the offer carries — creating it
+  // here puts the SCTP m-line in the offer.
+  const dc = pc.createDataChannel('events');
+  dc.onmessage = (e) => {
+    if (gen !== startGen) return;
+    let msg;
+    try {
+      msg = JSON.parse(e.data);
+    } catch (err) {
+      console.error('voice rtc: bad json', err);
+      return;
+    }
+    handleServerMessage(msg);
+  };
+
+  pc.ontrack = (e) => {
+    // TTS arrives as a real audio track: the browser handles decode, jitter
+    // and clock — no playPCM, no playback acks (the server paces playback
+    // itself, so barge-in truncation is exact without them).
+    remoteAudioEl = remoteAudioEl || new Audio();
+    remoteAudioEl.autoplay = true;
+    remoteAudioEl.srcObject = e.streams[0] || new MediaStream([e.track]);
+    remoteAudioEl.play?.().catch(() => { /* autoplay policy — resumes on gesture */ });
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (gen !== startGen || pc !== conn) return;
+    if (['failed', 'closed', 'disconnected'].includes(conn.connectionState)) {
+      sessionReady = false;
+      micViz.classList.remove('active');
+      if (connVisual === 'ended' || connVisual === 'error') { updateEmptyState(); return; }
+      if (userEndedSession) {
+        setConn('ended', 'Session ended', 'Click Start for a new session.');
+      } else {
+        setConn('ended', 'Disconnected', 'Connection closed. Click Start for a new session.');
+      }
+      updateEmptyState();
     }
   };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  // One-round-trip signaling: wait for ICE gathering so the offer is complete
+  // (bounded — host candidates alone are enough against a local server).
+  if (pc.iceGatheringState !== 'complete') {
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 2000);
+      pc.addEventListener('icegatheringstatechange', () => {
+        if (conn.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+      });
+    });
+  }
+  if (gen !== startGen) return;
+
+  const resp = await fetch('/voice/rtc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sdp: conn.localDescription.sdp,
+      type: 'offer',
+      config: sessionConfigPayload(),
+    }),
+  });
+  if (!resp.ok) {
+    let detail = `Server answered ${resp.status}.`;
+    try { detail = (await resp.json()).error || detail; } catch (_) {}
+    if (resp.status === 501) detail += ' Install it: uv pip install "timbal[voice]".';
+    throw new Error(detail);
+  }
+  const answer = await resp.json();
+  if (gen !== startGen) return;
+  await conn.setRemoteDescription(answer);
+
+  resetSessionUi();
+  setConn('live', 'Starting…', 'Loading STT / turn models (first session can take a few seconds)…');
+  updateEmptyState();
 }
 
 initRunnableStrip();
