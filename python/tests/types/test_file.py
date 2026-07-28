@@ -821,3 +821,25 @@ class TestLazyFetchSafety:
             with pytest.raises(ConnectionError):
                 file.read()
         assert mock_get.call_count == 1
+
+    def test_half_constructed_file_repr_and_close_are_safe(self) -> None:
+        """A File whose __init__ raised before _setup() (invalid source) leaves an
+        object with none of its internal slots set. repr()/str()/close() run on it
+        during GC/unraisable-hook handling must not recurse or raise — this was a
+        RecursionError on Windows/py3.13."""
+        f = io.IOBase.__new__(File)  # bypass __init__: no slots set at all
+        assert str(f) == "File(uninitialized)"
+        assert repr(f) == "File(source=File(uninitialized))"
+        f.close()  # must be a no-op, not raise AttributeError into __del__
+        with pytest.raises(AttributeError):
+            _ = f.__source_scheme__
+
+    def test_invalid_source_gc_does_not_raise_unraisable(self, recwarn) -> None:
+        """Constructing File with an invalid source raises, and the half-built
+        object being finalized must not surface an unraisable exception."""
+        import gc
+
+        for _ in range(50):
+            with pytest.raises(ValueError):
+                File("not://a/real/scheme/at/all")
+        gc.collect()  # would trigger the RecursionError via __del__ -> close/repr

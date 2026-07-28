@@ -228,20 +228,31 @@ class File(io.IOBase):
         object.__setattr__(self, "__content_type__", content_type)
 
     def __str__(self) -> str:
-        if self.__source_scheme__ == "bytes":
-            ext_info = f"{self.__source_extension__}" if self.__source_extension__ else ""
-            return f"io.IOBase({ext_info})"
-        return self.__source__
+        try:
+            if self.__source_scheme__ == "bytes":
+                ext_info = f"{self.__source_extension__}" if self.__source_extension__ else ""
+                return f"io.IOBase({ext_info})"
+            return self.__source__
+        except AttributeError:
+            # Half-constructed File (e.g. __init__ raised before _setup). Keep
+            # repr() safe so finalization/unraisable-hook paths don't blow up.
+            return "File(uninitialized)"
 
     def __repr__(self) -> str:
         return f"File(source={str(self)})"
 
     def __getattr__(self, name: str) -> Any:
         """Proxy attribute access through to the wrapped file object."""
-        if name == "__IOBase_closed":
-            # io.IOBase's C internals probe this during finalization and closed
-            # checks; it must never trigger the lazy fetcher. AttributeError
-            # means "not closed", matching the unset state.
+        if name.startswith("__"):
+            # Never route a dunder / internal slot to the lazy fetcher: the
+            # private slots (__fileobj__, __source_scheme__, __wrapped__, ...) and
+            # CPython's own finalizer probes (__IOBase_closed, which starts with
+            # "__" but does not end with "__") all land here only when genuinely
+            # unset — e.g. a File whose __init__ raised before _setup() ran, being
+            # repr'd or finalized. Fetching would be wrong, and re-entering via
+            # __wrapped__ (whose getter itself raises AttributeError when
+            # __fileobj__ is unset) recurses until RecursionError. Proxied file
+            # attributes (read, name, seek, ...) never start with "__".
             raise AttributeError(name)
         if name == "extension":
             return object.__getattribute__(self, "__source_extension__")
@@ -334,9 +345,14 @@ class File(io.IOBase):
 
         io.IOBase.__del__ calls close() at garbage collection; this must never
         trigger the lazy fetcher (a real network request for URL sources) just
-        to close content that was never loaded.
+        to close content that was never loaded, nor raise for a File whose
+        __init__ failed before _setup() ran — an exception escaping close()
+        propagates into __del__ and becomes an unraisable exception.
         """
-        fileobj = object.__getattribute__(self, "__fileobj__")
+        try:
+            fileobj = object.__getattribute__(self, "__fileobj__")
+        except AttributeError:
+            return
         if fileobj is not None:
             fileobj.close()
 
