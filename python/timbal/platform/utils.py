@@ -46,7 +46,13 @@ def _resolve_url_and_headers(
         if not run_context.platform_config:
             raise ValueError("No platform config available for platform API calls.")
         platform_config = run_context.platform_config
-        base = f"https://proj-env-{env_id}.deployments.timbal.ai"
+        # e{env_id} is the canonical public host for a project env. TIMBAL_PROJECT_ENV_ORIGIN
+        # (full origin) or TIMBAL_DEPLOYMENTS_DOMAIN let the platform override this at deploy
+        # time so a future domain-scheme change doesn't require an SDK release.
+        base = os.environ.get("TIMBAL_PROJECT_ENV_ORIGIN")
+        if not base:
+            domain = os.environ.get("TIMBAL_DEPLOYMENTS_DOMAIN", "deployments.timbal.ai")
+            base = f"https://e{env_id}.{domain}"
         if service == "api":
             url = f"{base}/api/{path}"
         elif service == "ui":

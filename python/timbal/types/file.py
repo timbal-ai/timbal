@@ -38,8 +38,9 @@ def _is_local_path(source: str) -> bool:
 
 # Hosts serving platform-persisted content. URLs on these hosts are already
 # durable — re-uploading them via POST /files is wasteful and (worse) renames
-# the object using the encoded basename. `platform_config.cdn` is checked too,
-# but its default ("content.timbal.ai") predates the timbalusercontent.com move.
+# the object using the encoded basename. `platform_config.cdn` is checked too;
+# content.timbal.ai is kept here so URLs minted before the timbalusercontent.com
+# move (or configs still pinning the old host) are still recognized.
 _PLATFORM_CDN_HOSTS = ("timbalusercontent.com", "content.timbal.ai")
 
 
@@ -199,6 +200,7 @@ class File(io.IOBase):
         object.__setattr__(self, "__source_scheme__", source_scheme)
         object.__setattr__(self, "__source_extension__", source_extension)
         object.__setattr__(self, "__fetcher__", fetcher)
+        object.__setattr__(self, "__fetch_error__", None)
         object.__setattr__(self, "__persisted__", None)
 
         if isinstance(source, io.IOBase):
@@ -226,16 +228,32 @@ class File(io.IOBase):
         object.__setattr__(self, "__content_type__", content_type)
 
     def __str__(self) -> str:
-        if self.__source_scheme__ == "bytes":
-            ext_info = f"{self.__source_extension__}" if self.__source_extension__ else ""
-            return f"io.IOBase({ext_info})"
-        return self.__source__
+        try:
+            if self.__source_scheme__ == "bytes":
+                ext_info = f"{self.__source_extension__}" if self.__source_extension__ else ""
+                return f"io.IOBase({ext_info})"
+            return self.__source__
+        except AttributeError:
+            # Half-constructed File (e.g. __init__ raised before _setup). Keep
+            # repr() safe so finalization/unraisable-hook paths don't blow up.
+            return "File(uninitialized)"
 
     def __repr__(self) -> str:
         return f"File(source={str(self)})"
 
     def __getattr__(self, name: str) -> Any:
         """Proxy attribute access through to the wrapped file object."""
+        if name.startswith("__"):
+            # Never route a dunder / internal slot to the lazy fetcher: the
+            # private slots (__fileobj__, __source_scheme__, __wrapped__, ...) and
+            # CPython's own finalizer probes (__IOBase_closed, which starts with
+            # "__" but does not end with "__") all land here only when genuinely
+            # unset — e.g. a File whose __init__ raised before _setup() ran, being
+            # repr'd or finalized. Fetching would be wrong, and re-entering via
+            # __wrapped__ (whose getter itself raises AttributeError when
+            # __fileobj__ is unset) recurses until RecursionError. Proxied file
+            # attributes (read, name, seek, ...) never start with "__".
+            raise AttributeError(name)
         if name == "extension":
             return object.__getattribute__(self, "__source_extension__")
         elif name == "persisted":
@@ -246,6 +264,11 @@ class File(io.IOBase):
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Proxy attribute assignment through to the wrapped file object."""
+        if name in ("__IOBase_closed", "_finalizing"):
+            # Set by io.IOBase's C finalizer/close(); keep these on this
+            # instance rather than proxying, which would trigger the lazy fetcher.
+            object.__setattr__(self, name, value)
+            return
         if hasattr(type(self), name):
             object.__setattr__(self, name, value)
         else:
@@ -288,10 +311,25 @@ class File(io.IOBase):
         """Get the underlying file object, fetching it if necessary."""
         fileobj = object.__getattribute__(self, "__fileobj__")
         if fileobj is None:
+            # A failed fetch is cached and re-raised: every proxied attribute access
+            # lands here, so without this a broken URL is re-fetched on each access.
+            # getattr with default: an AttributeError escaping this property would
+            # send Python back through __getattr__ and recurse. Also covers Files
+            # constructed without _setup (e.g. via __new__ in tests).
+            try:
+                fetch_error = object.__getattribute__(self, "__fetch_error__")
+            except AttributeError:
+                fetch_error = None
+            if fetch_error is not None:
+                raise fetch_error
             fetcher = object.__getattribute__(self, "__fetcher__")
             if fetcher is None:
                 raise ValueError("File object is not properly initialized.")
-            fileobj = fetcher()
+            try:
+                fileobj = fetcher()
+            except Exception as e:
+                object.__setattr__(self, "__fetch_error__", e)
+                raise
             # Some libraries (e.g. openai) require file-like objects to have the name property defined.
             if not hasattr(fileobj, "name"):
                 fileext = object.__getattribute__(self, "__source_extension__")
@@ -301,6 +339,22 @@ class File(io.IOBase):
                 object.__setattr__(self, "__content_type__", fileobj.__content_type__)
             object.__setattr__(self, "__fileobj__", fileobj)
         return fileobj
+
+    def close(self) -> None:
+        """Close the wrapped file object if it was ever materialized.
+
+        io.IOBase.__del__ calls close() at garbage collection; this must never
+        trigger the lazy fetcher (a real network request for URL sources) just
+        to close content that was never loaded, nor raise for a File whose
+        __init__ failed before _setup() ran — an exception escaping close()
+        propagates into __del__ and becomes an unraisable exception.
+        """
+        try:
+            fileobj = object.__getattribute__(self, "__fileobj__")
+        except AttributeError:
+            return
+        if fileobj is not None:
+            fileobj.close()
 
     # Overwrite some io.IOBase methods to proxy to the wrapped file object (explicitly).
     def readable(self) -> bool:

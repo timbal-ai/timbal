@@ -249,34 +249,6 @@
                 ]
               },
               {
-                "group": "Connectors",
-                "pages": [
-                  "api-reference/orgs/connectors/list",
-                  "api-reference/orgs/connectors/get",
-                  "api-reference/orgs/connectors/enrollment-tokens/create",
-                  "api-reference/orgs/connectors/jobs/list",
-                  "api-reference/orgs/connectors/jobs/create",
-                  "api-reference/orgs/connectors/jobs/stop",
-                  "api-reference/orgs/connectors/syncs/list",
-                  "api-reference/orgs/connectors/syncs/create",
-                  "api-reference/orgs/connectors/syncs/get",
-                  "api-reference/orgs/connectors/syncs/update",
-                  "api-reference/orgs/connectors/syncs/delete",
-                  "api-reference/orgs/connectors/browse/connections",
-                  "api-reference/orgs/connectors/browse/tables",
-                  "api-reference/orgs/connectors/browse/table",
-                  "api-reference/orgs/connectors/browse/columns",
-                  "api-reference/orgs/connectors/browse/filesystems/list",
-                  "api-reference/orgs/connectors/browse/filesystems/entries",
-                  "api-reference/orgs/connectors/browse/filesystems/search",
-                  "api-reference/orgs/connectors/browse/filesystems/summary",
-                  "api-reference/orgs/connectors/filesystems/copy",
-                  "api-reference/orgs/connectors/query",
-                  "api-reference/orgs/connectors/rebind",
-                  "api-reference/orgs/connectors/update"
-                ]
-              },
-              {
                 "group": "Content",
                 "pages": ["api-reference/orgs/content/sign"]
               },
@@ -363,17 +335,6 @@
                   "api-reference/orgs/scim-tokens/create",
                   "api-reference/orgs/scim-tokens/revoke"
                 ]
-              },
-              {
-                "group": "Notifications",
-                "pages": [
-                  "api-reference/orgs/notifications/list-rules",
-                  "api-reference/orgs/notifications/create-rule",
-                  "api-reference/orgs/notifications/delete-rule",
-                  "api-reference/orgs/notifications/list-channels",
-                  "api-reference/orgs/notifications/create-channel",
-                  "api-reference/orgs/notifications/delete-channel"
-                ]
               }
             ]
           },
@@ -417,31 +378,7 @@
                   "api-reference/projects/environments/get-metrics",
                   "api-reference/projects/environments/stop",
                   "api-reference/projects/environments/deployments/list",
-                  "api-reference/projects/environments/logs",
-                  {
-                    "group": "Evals",
-                    "pages": [
-                      "api-reference/projects/environments/evals/definitions",
-                      {
-                        "group": "Jobs",
-                        "pages": [
-                          "api-reference/projects/environments/evals/jobs/list",
-                          "api-reference/projects/environments/evals/jobs/get",
-                          "api-reference/projects/environments/evals/jobs/create"
-                        ]
-                      },
-                      {
-                        "group": "Runs",
-                        "pages": [
-                          "api-reference/projects/environments/evals/runs/list",
-                          "api-reference/projects/environments/evals/runs/get",
-                          "api-reference/projects/environments/evals/runs/events",
-                          "api-reference/projects/environments/evals/runs/create",
-                          "api-reference/projects/environments/evals/runs/delete"
-                        ]
-                      }
-                    ]
-                  }
+                  "api-reference/projects/environments/logs"
                 ]
               },
               {
@@ -451,14 +388,6 @@
                   "api-reference/projects/runs/get",
                   "api-reference/projects/runs/reactions-list",
                   "api-reference/projects/runs/reactions-add"
-                ]
-              },
-              {
-                "group": "Notifications",
-                "pages": [
-                  "api-reference/projects/notifications/list-rules",
-                  "api-reference/projects/notifications/create-rule",
-                  "api-reference/projects/notifications/delete-rule"
                 ]
               },
               {
@@ -559,6 +488,30 @@
             ]
           },
           {
+            "group": "Evals",
+            "pages": [
+              "api-reference/evals/definitions",
+              {
+                "group": "Jobs",
+                "pages": [
+                  "api-reference/evals/jobs/list",
+                  "api-reference/evals/jobs/get",
+                  "api-reference/evals/jobs/create"
+                ]
+              },
+              {
+                "group": "Runs",
+                "pages": [
+                  "api-reference/evals/runs/list",
+                  "api-reference/evals/runs/get",
+                  "api-reference/evals/runs/events",
+                  "api-reference/evals/runs/create",
+                  "api-reference/evals/runs/delete"
+                ]
+              }
+            ]
+          },
+          {
             "group": "ACE",
             "tag": "Pro",
             "pages": [
@@ -576,6 +529,99 @@
                   "api-reference/ace/jobs/get",
                   "api-reference/ace/jobs/cancel",
                   "api-reference/ace/jobs/retry"
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Alarms",
+            "pages": [
+              "api-reference/alarms/list",
+              "api-reference/alarms/create",
+              "api-reference/alarms/get",
+              "api-reference/alarms/update",
+              "api-reference/alarms/delete",
+              "api-reference/alarms/health",
+              "api-reference/alarms/history",
+              "api-reference/alarms/attach-channel",
+              "api-reference/alarms/detach-channel",
+              {
+                "group": "Channels",
+                "pages": [
+                  "api-reference/alarms/channels/list",
+                  "api-reference/alarms/channels/create",
+                  "api-reference/alarms/channels/delete"
+                ]
+              },
+              {
+                "group": "Metrics",
+                "pages": [
+                  "api-reference/alarms/metrics/query",
+                  "api-reference/alarms/metrics/catalog",
+                  {
+                    "group": "Definitions",
+                    "pages": [
+                      "api-reference/alarms/metrics/definitions/list",
+                      "api-reference/alarms/metrics/definitions/create",
+                      "api-reference/alarms/metrics/definitions/preview",
+                      "api-reference/alarms/metrics/definitions/update",
+                      "api-reference/alarms/metrics/definitions/delete"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Connectors",
+            "pages": [
+              "api-reference/connectors/list",
+              "api-reference/connectors/get",
+              "api-reference/connectors/update",
+              "api-reference/connectors/local-config",
+              "api-reference/connectors/query",
+              "api-reference/connectors/rebind",
+              "api-reference/connectors/revoke",
+              "api-reference/connectors/filesystems/copy",
+              {
+                "group": "Enrollment Tokens",
+                "pages": ["api-reference/connectors/enrollment-tokens/create"]
+              },
+              {
+                "group": "Jobs",
+                "pages": [
+                  "api-reference/connectors/jobs/list",
+                  "api-reference/connectors/jobs/create",
+                  "api-reference/connectors/jobs/stop"
+                ]
+              },
+              {
+                "group": "Syncs",
+                "pages": [
+                  "api-reference/connectors/syncs/list",
+                  "api-reference/connectors/syncs/create",
+                  "api-reference/connectors/syncs/get",
+                  "api-reference/connectors/syncs/update",
+                  "api-reference/connectors/syncs/delete",
+                  "api-reference/connectors/syncs/run"
+                ]
+              },
+              {
+                "group": "Browse",
+                "pages": [
+                  "api-reference/connectors/browse/connections",
+                  "api-reference/connectors/browse/tables",
+                  "api-reference/connectors/browse/table",
+                  "api-reference/connectors/browse/columns",
+                  {
+                    "group": "Filesystems",
+                    "pages": [
+                      "api-reference/connectors/browse/filesystems/list",
+                      "api-reference/connectors/browse/filesystems/entries",
+                      "api-reference/connectors/browse/filesystems/search",
+                      "api-reference/connectors/browse/filesystems/summary"
+                    ]
+                  }
                 ]
               }
             ]

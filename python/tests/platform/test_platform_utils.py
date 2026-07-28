@@ -46,6 +46,8 @@ def _isolated_env(monkeypatch):
     """Strip all relevant env vars and reset the run-context before each test."""
     for var in (
         "TIMBAL_PROJECT_ENV_ID",
+        "TIMBAL_PROJECT_ENV_ORIGIN",
+        "TIMBAL_DEPLOYMENTS_DOMAIN",
         "TIMBAL_START_API_PORT",
         "TIMBAL_START_UI_PORT",
         "TIMBAL_START_WORKFORCE",
@@ -90,7 +92,7 @@ class TestResolveUrlAndHeaders:
         cfg = _make_platform_config()
         _run_context_with_config(cfg)
         url, headers = _resolve_url_and_headers("api", "health", {})
-        assert url == "https://proj-env-env42.deployments.timbal.ai/api/health"
+        assert url == "https://eenv42.deployments.timbal.ai/api/health"
         assert "Authorization" in headers
 
     def test_service_ui_with_env_id(self, monkeypatch):
@@ -98,7 +100,7 @@ class TestResolveUrlAndHeaders:
         cfg = _make_platform_config()
         _run_context_with_config(cfg)
         url, headers = _resolve_url_and_headers("ui", "dashboard", {})
-        assert url == "https://proj-env-env42.deployments.timbal.ai/dashboard"
+        assert url == "https://eenv42.deployments.timbal.ai/dashboard"
         assert "Authorization" in headers
 
     def test_service_worker_with_env_id_uses_workforce_gateway(self, monkeypatch):
@@ -106,7 +108,32 @@ class TestResolveUrlAndHeaders:
         cfg = _make_platform_config()
         _run_context_with_config(cfg)
         url, _ = _resolve_url_and_headers("myworker", "run", {})
-        assert url == "https://proj-env-env42.deployments.timbal.ai/api/workforce/myworker/run"
+        assert url == "https://eenv42.deployments.timbal.ai/api/workforce/myworker/run"
+
+    def test_project_env_origin_override(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_PROJECT_ENV_ID", "env42")
+        monkeypatch.setenv("TIMBAL_PROJECT_ENV_ORIGIN", "https://custom.example.com")
+        cfg = _make_platform_config()
+        _run_context_with_config(cfg)
+        url, _ = _resolve_url_and_headers("myworker", "run", {})
+        assert url == "https://custom.example.com/api/workforce/myworker/run"
+
+    def test_deployments_domain_override(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_PROJECT_ENV_ID", "env42")
+        monkeypatch.setenv("TIMBAL_DEPLOYMENTS_DOMAIN", "deployments.staging.timbal.ai")
+        cfg = _make_platform_config()
+        _run_context_with_config(cfg)
+        url, _ = _resolve_url_and_headers("api", "health", {})
+        assert url == "https://eenv42.deployments.staging.timbal.ai/api/health"
+
+    def test_project_env_origin_takes_priority_over_domain(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_PROJECT_ENV_ID", "env42")
+        monkeypatch.setenv("TIMBAL_PROJECT_ENV_ORIGIN", "https://custom.example.com")
+        monkeypatch.setenv("TIMBAL_DEPLOYMENTS_DOMAIN", "deployments.staging.timbal.ai")
+        cfg = _make_platform_config()
+        _run_context_with_config(cfg)
+        url, _ = _resolve_url_and_headers("ui", "dashboard", {})
+        assert url == "https://custom.example.com/dashboard"
 
     # --- service set, no env_id (local dev) ---------------------------------
 
