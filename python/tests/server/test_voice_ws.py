@@ -745,6 +745,10 @@ class TestVoiceWsRecording:
             _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
         )
         monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        # Holding detectors (server default) park unpunctuated "Hello" and
+        # can end the session with zero TTS — empty MP3 close then flakes on
+        # Windows. Pin heuristic like the audio transport tests.
+        hello = {"turn_detector": "heuristic", **hello}
         app = create_app()
         with TestClient(app) as client:
             with client.websocket_connect("/voice/ws") as ws:
@@ -815,7 +819,7 @@ class TestVoiceWsRecording:
         app = create_app()
         with TestClient(app) as client:
             with client.websocket_connect("/voice/ws") as ws:
-                ws.send_json({"language": "en"})
+                ws.send_json({"language": "en", "turn_detector": "heuristic"})
                 messages = _collect_ws_messages(ws)
 
         started = next(m for m in messages if m["type"] == "session_started")

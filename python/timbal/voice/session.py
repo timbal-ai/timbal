@@ -1589,6 +1589,14 @@ class VoiceSession:
         ``turn_timeout_secs <= 0`` disables the deadline. Used for agent
         ``__anext__`` and in-turn TTS drains so a hung LLM/tool cannot leave
         the caller in silence indefinitely.
+
+        Uses :func:`asyncio.timeout` (same-task) rather than
+        :func:`asyncio.wait_for`. On Python 3.11 ``wait_for`` wraps the
+        awaitable in a child Task, so ``set_run_context`` inside the agent
+        generator is discarded when the wait returns — ``_last_run_context``
+        stays ``None``, metrics never attach to the trace, and barge-in
+        truncation cannot rewrite memory. 3.12+ rewrote ``wait_for`` onto
+        ``timeout`` and hid the bug; keep the same-task form everywhere.
         """
         deadline = self._turn_deadline
         if deadline is None:
@@ -1596,7 +1604,14 @@ class VoiceSession:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("agent turn timed out")
-        return await asyncio.wait_for(awaitable, timeout=remaining)
+        try:
+            async with asyncio.timeout(remaining):
+                return await awaitable
+        except TimeoutError:
+            # Re-raise as a bare TimeoutError so the turn's ``except TimeoutError``
+            # path stays distinct from an inner CancelledError / BaseExceptionGroup
+            # that ``asyncio.timeout`` can surface on some versions.
+            raise TimeoutError("agent turn timed out") from None
 
     async def _run_turn(self, user_text: str) -> None:
         self._is_speaking = True
@@ -1877,10 +1892,8 @@ class VoiceSession:
                     # The hung component may be the TTS itself, in which case an
                     # unbounded rescue would hang exactly like the turn it is
                     # rescuing. Bound it; on expiry we give up on the apology.
-                    await asyncio.wait_for(
-                        self._speak(fallback),
-                        timeout=min(self.turn_timeout_secs, 10.0),
-                    )
+                    async with asyncio.timeout(min(self.turn_timeout_secs, 10.0)):
+                        await self._speak(fallback)
                     self._transcript.append(TranscriptEntry(role="assistant", text=fallback))
                     await self._emit(AgentTextDone(text=fallback))
                     self._turn_finalized_ok = True

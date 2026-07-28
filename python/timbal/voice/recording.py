@@ -196,6 +196,14 @@ class CallRecorder:
                     tail = bytes(self._agent_pending)
                     self._agent_pending.clear()
                     self._write(b"\x00" * len(tail), tail)
+                # PyAV/libmp3lame on Windows unlinks the output when the
+                # container closes with zero packets. Pad one silence frame
+                # so empty sessions still leave a playable artifact next to
+                # the manifest (sweepers key on both files existing).
+                if self._samples_written == 0:
+                    n = (self._stream.codec_context.frame_size or _MP3_FRAME_SAMPLES) * 2
+                    silence = b"\x00" * n
+                    self._write(silence, silence)
                 self._flush()
             except Exception as e:
                 self._failed = True

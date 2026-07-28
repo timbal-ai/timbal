@@ -148,6 +148,16 @@ class TestRobustness:
         rec.add_agent(_tone(1.0))
         assert rec.close() is first
 
+    def test_empty_close_still_leaves_a_playable_file(self, tmp_path: Path) -> None:
+        """Zero-packet MP3 close deletes the file on Windows; pad silence."""
+        path = tmp_path / "empty.mp3"
+        rec = CallRecorder(path, sample_rate=SR)
+        result = rec.close()
+        assert result is not None
+        assert path.exists()
+        assert path.stat().st_size > 0
+        assert result.duration_secs > 0
+
     def test_rejects_bad_layout(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="layout"):
             CallRecorder(tmp_path / "call.mp3", layout="both")  # type: ignore[arg-type]
