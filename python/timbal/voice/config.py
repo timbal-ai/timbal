@@ -34,6 +34,43 @@ def _default_stt_extra() -> dict[str, Any]:
     }
 
 
+DEFAULT_FILLER_SYSTEM_PROMPT = (
+    "You write the one short phrase a voice assistant says out loud while it looks something "
+    "up for the user. Reply with ONLY the phrase: a few natural spoken words, no quotes. "
+    "Match the language the user is speaking. Do not answer the question and do not mention "
+    'tool or function names — just signal you are on it (like "One sec, let me check that.").'
+)
+
+
+class FillerConfig(BaseModel):
+    """Spoken tool-call filler: a short LLM-generated phrase masks tool dead air.
+
+    Generation starts the moment a tool call is detected; the phrase is only
+    spoken if the tool is still running after ``delay_secs`` and nothing else
+    has been said this turn.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    """``{"enabled": false}`` lets a client switch off a server-default filler
+    (plain ``None`` can't cross the override merge — ``None`` means "unset")."""
+    system_prompt: str = DEFAULT_FILLER_SYSTEM_PROMPT
+    model: Any = None
+    """Generator LLM ("provider/model", or a TestModel in tests).
+    None → the session's LLM; set something fast/cheap for best latency."""
+    delay_secs: float = Field(default=1.0, ge=0.0)
+    """Grace period — tools that finish sooner never get a filler."""
+    timeout_secs: float = Field(default=5.0, gt=0.0)
+    """Generation deadline (after the delay); expiry skips the filler silently."""
+    repeat_secs: float | None = Field(default=None, gt=0.0)
+    """Re-arm on prolonged silence: if the turn is still running and nothing
+    has been spoken for this long since the previous filler, say a short
+    follow-up ("still on it…"). ``None`` → one filler per turn, max."""
+    max_per_turn: int = Field(default=3, ge=1)
+    """Hard cap on fillers per turn (first one included) when repeating."""
+
+
 class AmbientAudioConfig(BaseModel):
     """Looped background sound mixed into the agent's output.
 
@@ -96,3 +133,5 @@ class VoiceConfig(BaseModel):
     recording: RecordingConfig | None = None
     ambient: AmbientAudioConfig | None = None
     """None → no background audio."""
+    filler: FillerConfig | None = None
+    """None → no spoken tool-call fillers. ``{}`` enables with defaults."""

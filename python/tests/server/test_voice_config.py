@@ -17,7 +17,7 @@ from timbal import __version__ as timbal_version
 from timbal.server import voice as voice_routes
 from timbal.server.http import create_app, lifespan
 from timbal.utils import ImportSpec
-from timbal.voice.config import DEFAULT_VOICE_ID, RecordingConfig, VoiceConfig
+from timbal.voice.config import DEFAULT_VOICE_ID, FillerConfig, RecordingConfig, VoiceConfig
 
 from .voice_env import VOICE_ENV_KEYS
 
@@ -138,6 +138,54 @@ class TestMergeVoiceConfig:
             voice_config = {"turn_detector": sentinel}
 
         assert voice_routes.merge_voice_config(R()).turn_detector is sentinel
+
+    def test_filler_deep_merges_over_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Agent's partial filler dict must not drop platform TIMBAL_VOICE_FILLER_* settings."""
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SYSTEM_PROMPT", "PLATFORM PROMPT")
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_MODEL", "openai/gpt-4o-mini")
+
+        class R:
+            voice_config = {"filler": {"delay_secs": 2.0}}
+
+        merged = voice_routes.merge_voice_config(R())
+        assert merged.filler.system_prompt == "PLATFORM PROMPT"
+        assert merged.filler.model == "openai/gpt-4o-mini"
+        assert merged.filler.delay_secs == 2.0
+
+    def test_empty_filler_dict_keeps_env_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SYSTEM_PROMPT", "PLATFORM PROMPT")
+
+        class R:
+            voice_config = {"filler": {}}
+
+        assert voice_routes.merge_voice_config(R()).filler.system_prompt == "PLATFORM PROMPT"
+
+    def test_filler_via_voice_config_instance_merges_sparsely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset FillerConfig fields (e.g. the default prompt) must not clobber env values."""
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SYSTEM_PROMPT", "PLATFORM PROMPT")
+
+        class R:
+            voice_config = VoiceConfig(filler=FillerConfig(delay_secs=2.0))
+
+        merged = voice_routes.merge_voice_config(R())
+        assert merged.filler.system_prompt == "PLATFORM PROMPT"
+        assert merged.filler.delay_secs == 2.0
+
+    def test_filler_without_env_uses_agent_values(self) -> None:
+        class R:
+            voice_config = {"filler": {"delay_secs": 0.5}}
+
+        merged = voice_routes.merge_voice_config(R())
+        assert merged.filler.delay_secs == 0.5
+
+    def test_invalid_filler_key_fails_fast(self) -> None:
+        class R:
+            voice_config = {"filler": {"phrases": ["nope"]}}
+
+        with pytest.raises(ValidationError, match="phrases"):
+            voice_routes.merge_voice_config(R())
 
 
 class TestMergeClientVoiceOverrides:

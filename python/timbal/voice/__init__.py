@@ -2,6 +2,7 @@
 
 from .config import (
     AmbientAudioConfig,
+    FillerConfig,
     RecordingConfig,
     VoiceConfig,
 )
@@ -20,6 +21,7 @@ from .events import (
     AgentTextDelta,
     AgentTextDone,
     AudioOutput,
+    FillerSpoken,
     SessionEnded,
     SessionError,
     SessionInterrupted,
@@ -110,6 +112,8 @@ __all__ = [
     "DeepgramNovaSTT",
     "ElevenLabsRealtimeSTT",
     "EouPredictor",
+    "FillerConfig",
+    "FillerSpoken",
     "HeuristicTurnDetector",
     "LexicalTurnDetector",
     "LocalAudioTurnDetector",
