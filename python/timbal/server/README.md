@@ -54,9 +54,9 @@ Whether acks were received is reported per turn in `metrics.playback_acks_receiv
 
 ### Config overrides
 
-Optional **first** text frame: a JSON object merged on top of `app.state.voice_config`, which is built at startup from environment defaults and optional `runnable.voice_config` on the loaded agent (`http` lifespan).
+Optional **first** text frame: a JSON object merged on top of `app.state.voice_config`, which is built at startup from environment defaults and optional `runnable.voice_config` on the loaded agent (`http` lifespan). Server-side `voice_config` (a dict, zero-arg callable, or `timbal.voice.VoiceConfig`) is validated strictly at startup — an unknown key fails server boot instead of being silently ignored.
 
-Only send keys you need; omitted keys keep server defaults.
+Only send keys you need; omitted keys keep server defaults. Client keys are allowlist-filtered (`CLIENT_SETTABLE_VOICE_FIELDS`): the table below plus `model` (per-session LLM override, `"provider/model"`), `turn_timeout_secs`, and `turn_timeout_fallback` (`""` disables the spoken apology). Anything else — notably `recording` — is server policy and is ignored with a log line.
 
 | Key           | Description |
 |---------------|-------------|
@@ -64,7 +64,7 @@ Only send keys you need; omitted keys keep server defaults.
 | `stt_model`   | Speech-to-text model id (ElevenLabs realtime `scribe_*`, Deepgram `flux-general-en`/`flux-general-multi`/`nova-3*`). Model ids that don't belong to the selected provider are ignored (provider default used). |
 | `tts_model`   | Text-to-speech model id. |
 | `voice`       | ElevenLabs voice id string. |
-| `language`    | e.g. `"es"`. |
+| `language`    | e.g. `"es"`. Unset → provider auto-detect. |
 | `sample_rate` | Hz; STT/TTS audio use this unless extended later. |
 | `encoding`    | Default `"pcm_s16le"`. |
 | `stt_extra`   | Object merged with default STT options (e.g. VAD). |

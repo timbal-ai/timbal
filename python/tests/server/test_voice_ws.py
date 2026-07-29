@@ -491,7 +491,7 @@ class TestVoiceWsTurnDetectorIsolation:
         shared = _TrackingDetector()
         app = create_app()
         with TestClient(app) as client:
-            app.state.voice_config = {**(app.state.voice_config or {}), "turn_detector": shared}
+            app.state.voice_config = app.state.voice_config.model_copy(update={"turn_detector": shared})
             for _ in range(2):
                 with client.websocket_connect("/voice/ws") as ws:
                     ws.send_json({})
@@ -518,7 +518,7 @@ class TestVoiceWsClientTurnDetector:
         app = create_app()
         with TestClient(app) as client:
             if server_td is not None:
-                app.state.voice_config = {**(app.state.voice_config or {}), "turn_detector": server_td}
+                app.state.voice_config = app.state.voice_config.model_copy(update={"turn_detector": server_td})
             with client.websocket_connect("/voice/ws") as ws:
                 ws.send_json(hello)
                 messages = _collect_ws_messages(ws)

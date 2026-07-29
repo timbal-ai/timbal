@@ -25,6 +25,7 @@ AGENT_FIELDS = {
     "api_key",
     "model_params",  # Deprecated, kept for backward compatibility
     "skills_path",
+    "voice_config",  # dict consumed by the voice server (merge_voice_config)
 }
 
 

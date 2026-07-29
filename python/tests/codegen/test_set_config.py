@@ -99,6 +99,17 @@ class TestAgentConfig:
         ns = _exec_agent(output)
         assert ns["agent"].description == "A helpful agent"
 
+    def test_set_voice_config(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"voice_config": {"language": "en", "turn_detector": "local", "tts_extra": {"auto_mode": True}}})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].voice_config == {"language": "en", "turn_detector": "local", "tts_extra": {"auto_mode": True}}
+
     def test_set_max_iter(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent

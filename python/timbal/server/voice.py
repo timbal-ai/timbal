@@ -2,10 +2,11 @@
 
 Serves ``GET /voice`` (HTML) and ``/voice/ws`` for the same runnable as ``/run``.
 Defaults come from :func:`default_voice_config_from_env` and optional
-``runnable.voice_config`` (dict or callable); the client can override with a JSON
-first message on the socket.
+``runnable.voice_config`` (dict, callable, or :class:`VoiceConfig`); the client
+can override allowlisted keys with a JSON first message on the socket.
 
-Heavy imports (``VoiceSession``, ElevenLabs) load on first WebSocket connection only.
+Heavy imports (``VoiceSession``, ElevenLabs) load on first WebSocket connection
+only — ``timbal.voice.config`` itself is import-light.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 from .. import __version__ as timbal_version
+from ..voice.config import RecordingConfig, VoiceConfig
 
 logger = structlog.get_logger("timbal.server.voice")
 
@@ -31,31 +33,21 @@ router = APIRouter(prefix="/voice", tags=["voice"])
 
 _HTML_PATH = Path(__file__).parent / "voice.html"
 
-# Override with ELEVENLABS_VOICE_ID / TIMBAL_VOICE_ID (cloned/custom voices are account-specific).
-_DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 
-
-def default_voice_config_from_env() -> dict[str, Any]:
-    """STT/TTS defaults for ``/voice/ws`` (ElevenLabs). Override with env or ``runnable.voice_config``."""
-    cfg: dict[str, Any] = {
-        "stt_provider": os.environ.get("TIMBAL_STT_PROVIDER", "elevenlabs"),
-        "stt_model": os.environ.get("TIMBAL_STT_MODEL", "scribe_v2_realtime"),
-        "tts_model": os.environ.get("TIMBAL_TTS_MODEL", "eleven_flash_v2_5"),
-        "voice": (os.environ.get("ELEVENLABS_VOICE_ID") or os.environ.get("TIMBAL_VOICE_ID") or _DEFAULT_VOICE_ID),
-        "language": os.environ.get("TIMBAL_VOICE_LANGUAGE", "es"),
-        "sample_rate": 16_000,
-        "stt_extra": {
-            "commit_strategy": "vad",
-            # 100ms is what ElevenLabs' own realtime examples use. 300ms made
-            # short replies ("work.", "yes.") transcribe as partials but never
-            # commit — the session then stalls until the user speaks again.
-            "min_speech_duration_ms": 100,
-            "vad_silence_threshold_secs": 1.2,
-            "vad_threshold": 0.4,
-        },
-        "tts_extra": {"auto_mode": True},
-    }
-    return cfg
+def default_voice_config_from_env() -> VoiceConfig:
+    """:class:`VoiceConfig` defaults, with env overrides where set."""
+    kwargs: dict[str, Any] = {}
+    if v := os.environ.get("TIMBAL_STT_PROVIDER"):
+        kwargs["stt_provider"] = v
+    if v := os.environ.get("TIMBAL_STT_MODEL"):
+        kwargs["stt_model"] = v
+    if v := os.environ.get("TIMBAL_TTS_MODEL"):
+        kwargs["tts_model"] = v
+    if v := os.environ.get("ELEVENLABS_VOICE_ID") or os.environ.get("TIMBAL_VOICE_ID"):
+        kwargs["voice"] = v
+    if v := os.environ.get("TIMBAL_VOICE_LANGUAGE"):
+        kwargs["language"] = v
+    return VoiceConfig(**kwargs)
 
 
 def _recording_config_from_env() -> dict[str, Any]:
@@ -88,29 +80,69 @@ _RECORDING_IDENTITY_ENV = (
 )
 
 
-def merge_voice_config(runnable: Any) -> dict[str, Any]:
-    """Env defaults, then optional ``runnable.voice_config`` dict or ``lambda -> dict``."""
+def merge_voice_config(runnable: Any) -> VoiceConfig:
+    """Env defaults, then optional ``runnable.voice_config`` (dict, callable, or ``VoiceConfig``).
+
+    Validated strictly: an unknown key or bad value raises at server boot
+    instead of silently falling back to defaults on the first call.
+    """
     base = default_voice_config_from_env()
     vc = getattr(runnable, "voice_config", None)
     if callable(vc):
         vc = vc()
+    if isinstance(vc, VoiceConfig):
+        vc = vc.model_dump(include=vc.model_fields_set)
     if not isinstance(vc, dict):
         return base
     skip = frozenset({"stt_extra", "tts_extra"})
-    merged = {
-        **base,
+    data = {
+        **base.model_dump(),
         **{k: v for k, v in vc.items() if v is not None and k not in skip},
     }
     if isinstance(vc.get("stt_extra"), dict):
-        merged["stt_extra"] = {**base.get("stt_extra", {}), **vc["stt_extra"]}
+        data["stt_extra"] = {**base.stt_extra, **vc["stt_extra"]}
     if isinstance(vc.get("tts_extra"), dict):
-        merged["tts_extra"] = {**base.get("tts_extra", {}), **vc["tts_extra"]}
-    return merged
+        data["tts_extra"] = {**base.tts_extra, **vc["tts_extra"]}
+    return VoiceConfig(**data)
 
 
-def merge_client_voice_overrides(server_defaults: dict[str, Any], client: dict[str, Any]) -> dict[str, Any]:
-    """Apply optional first WebSocket JSON message over ``app.state.voice_config``."""
-    return {**server_defaults, **{k: v for k, v in client.items() if v is not None}}
+# Keys a browser may override via the WS/RTC hello. Everything else —
+# ``recording`` above all — is server policy. ``turn_detector`` is negotiated
+# separately in :func:`select_turn_detector_spec` (mode names only, never
+# callables). ``model`` is deliberately client-settable for the playground
+# model picker; trim this set in deployments where the client is untrusted.
+CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
+    "stt_provider",
+    "stt_model",
+    "tts_model",
+    "voice",
+    "language",
+    "sample_rate",
+    "encoding",
+    "stt_extra",
+    "tts_extra",
+    "vad_endpointing",
+    "model",
+    "turn_timeout_secs",
+    "turn_timeout_fallback",
+})
+
+
+def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str, Any]) -> VoiceConfig:
+    """Apply the optional first WebSocket JSON message over the server config.
+
+    Allowlist-filtered. Values are deliberately NOT re-validated here — client
+    input gets per-key guards with fallbacks in :func:`build_voice_session`,
+    so one bad value degrades that knob instead of closing the socket.
+    """
+    updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
+    ignored = sorted(
+        k for k, v in client.items()
+        if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k != "turn_detector"
+    )
+    if ignored:
+        logger.info("voice_client_config_ignored", keys=ignored)
+    return server_defaults.model_copy(update=updates)
 
 
 def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, Any]:
@@ -147,7 +179,7 @@ def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, A
 _VOICE_HTML_META_TOKEN = "__TIMBAL_VOICE_RUNNABLE_META_JSON__"
 
 
-async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
+async def warmup_voice_stack(voice_config: VoiceConfig) -> None:
     """Background warmup at server boot so the first voice session starts fast.
 
     Two tiers, both best-effort:
@@ -186,7 +218,7 @@ async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
         from ..voice.turn_detection import LocalAudioTurnDetector, resolve_turn_detector
         from ..voice.vad import SileroVad
 
-        td = voice_config.get("turn_detector")
+        td = voice_config.turn_detector
         detector = None
         if isinstance(td, LocalAudioTurnDetector):
             detector = td
@@ -282,7 +314,7 @@ def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux
 
 def build_voice_session(
     runnable: Any,
-    defaults: dict[str, Any],
+    defaults: VoiceConfig,
     client_config: dict[str, Any],
     *,
     playback_tracker: Any = None,
@@ -311,8 +343,8 @@ def build_voice_session(
 
     merged = merge_client_voice_overrides(defaults, client_config)
 
-    stt_provider = merged.get("stt_provider")
-    stt_model_requested = merged.get("stt_model")
+    stt_provider = merged.stt_provider
+    stt_model_requested = merged.stt_model
     try:
         stt = resolve_stt(stt_provider, model=stt_model_requested)
     except ValueError as e:
@@ -332,24 +364,27 @@ def build_voice_session(
     stt_model = effective_stt_model(stt, stt_model_requested)
     tts = ElevenLabsStreamTTS()
 
-    stt_extra = dict(merged.get("stt_extra", {}))
+    # Client extras are unvalidated (model_copy in the merge): tolerate a
+    # non-dict rather than 500-ing the socket.
+    stt_extra = dict(merged.stt_extra) if isinstance(merged.stt_extra, dict) else {}
+    tts_extra = dict(merged.tts_extra) if isinstance(merged.tts_extra, dict) else {}
     if stt_is_flux:
         # Scribe-tuned VAD knobs don't apply to Flux's turn machine.
         for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
             stt_extra.pop(k, None)
     audio_in = AudioInputConfig(
         model=stt_model,
-        language=merged.get("language"),
-        sample_rate=merged.get("sample_rate", 16_000),
-        encoding=merged.get("encoding", "pcm_s16le"),
+        language=merged.language,
+        sample_rate=merged.sample_rate,
+        encoding=merged.encoding,
         extra=stt_extra,
     )
     audio_out = AudioOutputConfig(
-        model=merged.get("tts_model"),
-        voice=merged.get("voice"),
-        sample_rate=merged.get("sample_rate", 16_000),
-        encoding=merged.get("encoding", "pcm_s16le"),
-        extra=merged.get("tts_extra", {}),
+        model=merged.tts_model,
+        voice=merged.voice,
+        sample_rate=merged.sample_rate,
+        encoding=merged.encoding,
+        extra=tts_extra,
     )
 
     # ``runnable.voice_config`` may supply a TurnDetector instance, factory, or
@@ -361,7 +396,7 @@ def build_voice_session(
     # only here is the STT's endpointing behaviour known.
     turn_detector = None
     raw_td = select_turn_detector_spec(
-        defaults.get("turn_detector"),
+        defaults.turn_detector,
         client_config.get("turn_detector"),
         stt_is_flux=stt_is_flux,
     )
@@ -377,7 +412,7 @@ def build_voice_session(
     # Optional bool: force the local VAD endpointing fast path on/off. Default
     # (absent / non-bool) is auto — on when the detector has an audio EOU model
     # and timbal[voice] is installed. Client hello may override the server value.
-    vad_endpointing = merged.get("vad_endpointing")
+    vad_endpointing = merged.vad_endpointing
     if not isinstance(vad_endpointing, bool):
         vad_endpointing = None
     if stt_is_flux:
@@ -386,7 +421,7 @@ def build_voice_session(
         vad_endpointing = False
 
     # Playground / client may override the Agent's LLM for this session only.
-    raw_model = merged.get("model")
+    raw_model = merged.model
     model_override = (
         raw_model.strip()
         if isinstance(raw_model, str) and "/" in raw_model.strip()
@@ -400,7 +435,7 @@ def build_voice_session(
         stt=type(stt).__name__,
         stt_provider=stt_provider,
         stt_model=stt_model,
-        stt_model_requested=merged.get("stt_model"),
+        stt_model_requested=merged.stt_model,
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
@@ -410,34 +445,34 @@ def build_voice_session(
     # (list of phrases or `(tool_name) -> str | None` callable) and pass it to
     # `VoiceSession(filler=...)` once tool-call filler speech returns.
     session_kwargs: dict[str, Any] = {}
-    if "turn_timeout_secs" in merged:
+    if merged.turn_timeout_secs is not None:
         try:
-            session_kwargs["turn_timeout_secs"] = float(merged["turn_timeout_secs"])
+            session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
         except (TypeError, ValueError):
-            logger.warning("voice_ws_bad_turn_timeout_secs", value=repr(merged.get("turn_timeout_secs")))
-    if "turn_timeout_fallback" in merged:
-        fb = merged["turn_timeout_fallback"]
-        session_kwargs["turn_timeout_fallback"] = None if fb is None else str(fb)
+            logger.warning("voice_ws_bad_turn_timeout_secs", value=repr(merged.turn_timeout_secs))
+    if merged.turn_timeout_fallback is not None:
+        # "" disables the spoken apology; None means "VoiceSession default".
+        session_kwargs["turn_timeout_fallback"] = str(merged.turn_timeout_fallback)
     if playback_tracker is not None:
         session_kwargs["playback_tracker"] = playback_tracker
 
     # Call recording is read from *server* config only — env (per session,
-    # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win)
-    # — never from the merged dict: merge_client_voice_overrides applies
-    # client keys freely, and a browser must not be able to switch recording
-    # on or off.
-    user_recording = defaults.get("recording")
-    recording_cfg = {
+    # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).
+    # ``recording`` is not in CLIENT_SETTABLE_VOICE_FIELDS: a browser must not
+    # be able to switch recording on or off.
+    user_recording = defaults.recording
+    recording_data = {
         **_recording_config_from_env(),
-        **(user_recording if isinstance(user_recording, dict) else {}),
+        **(user_recording.model_dump(include=user_recording.model_fields_set) if user_recording else {}),
     }
-    if recording_cfg.get("dir"):
+    if recording_data.get("dir"):
         try:
             from uuid_extensions import uuid7
 
             from ..voice.recording import CallRecorder
 
-            on_saved = recording_cfg.get("on_saved")
+            recording_cfg = RecordingConfig(**recording_data)
+            on_saved = recording_cfg.on_saved
             if on_saved is None and os.environ.get("TIMBAL_VOICE_RECORDING_UPLOAD") == "platform":
                 from .recording_upload import platform_recording_upload_hook
 
@@ -445,10 +480,10 @@ def build_voice_session(
             session_id = uuid7(as_type="str").replace("-", "")
             session_kwargs["session_id"] = session_id
             session_kwargs["recorder"] = CallRecorder(
-                Path(recording_cfg["dir"]) / f"{session_id}.mp3",
-                sample_rate=int(merged.get("sample_rate", 16_000)),
-                layout=recording_cfg.get("layout", "mixed"),
-                bitrate_kbps=int(recording_cfg.get("bitrate_kbps", 32)),
+                Path(recording_cfg.dir) / f"{session_id}.mp3",
+                sample_rate=int(merged.sample_rate),
+                layout=recording_cfg.layout,
+                bitrate_kbps=recording_cfg.bitrate_kbps,
                 on_saved=on_saved,
                 meta={k: v for env_key, k in _RECORDING_IDENTITY_ENV if (v := os.environ.get(env_key))} or None,
             )
@@ -607,7 +642,7 @@ async def voice_ws(ws: WebSocket) -> None:
     except Exception as e:
         logger.warning("voice_ws_first_frame_error", error=str(e))
 
-    defaults: dict = getattr(ws.app.state, "voice_config", None) or {}
+    defaults: VoiceConfig = getattr(ws.app.state, "voice_config", None) or VoiceConfig()
     session, meta = build_voice_session(runnable, defaults, config)
     meta = {"playback_acks": "recommended", "transport": "websocket", **meta}
     session.recording_meta = meta
