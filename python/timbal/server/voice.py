@@ -111,10 +111,15 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
     if callable(vc):
         vc = vc()
     if isinstance(vc, VoiceConfig):
-        vc = vc.model_dump(include=vc.model_fields_set)
+        dumped = vc.model_dump(include=vc.model_fields_set)
+        # Top-level ``include`` dumps nested models in full; redo filler
+        # sparsely so unset fields don't clobber env values in the merge below.
+        if isinstance(vc.filler, FillerConfig):
+            dumped["filler"] = vc.filler.model_dump(include=vc.filler.model_fields_set)
+        vc = dumped
     if not isinstance(vc, dict):
         return base
-    skip = frozenset({"stt_extra", "tts_extra"})
+    skip = frozenset({"stt_extra", "tts_extra", "filler"})
     data = {
         **base.model_dump(),
         **{k: v for k, v in vc.items() if v is not None and k not in skip},
@@ -123,6 +128,14 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
         data["stt_extra"] = {**base.stt_extra, **vc["stt_extra"]}
     if isinstance(vc.get("tts_extra"), dict):
         data["tts_extra"] = {**base.tts_extra, **vc["tts_extra"]}
+    filler = vc.get("filler")
+    if isinstance(filler, FillerConfig):
+        filler = filler.model_dump(include=filler.model_fields_set)
+    if isinstance(filler, dict):
+        base_filler = base.filler.model_dump(include=base.filler.model_fields_set) if base.filler else {}
+        data["filler"] = {**base_filler, **filler}
+    elif filler is not None:
+        data["filler"] = filler
     return VoiceConfig(**data)
 
 
