@@ -20,9 +20,9 @@ class TranscriptEntry(BaseModel):
     role: Literal["user", "assistant"]
     text: str
     timestamp: float = Field(default_factory=time.time)
-    # TODO(tool-filler): re-add `filler: bool = False` when tool-call filler
-    # speech returns, so transcript entries for spoken latency-masking phrases
-    # ("let me check that") are distinguishable from real reply text.
+    filler: bool = False
+    """True for spoken latency-masking phrases ("let me check that") —
+    part of what was said on the call, but not real reply text."""
 
 
 class VoiceSessionEvent(BaseModel):
@@ -65,6 +65,16 @@ class AgentStatus(VoiceSessionEvent):
     """Non-transcript status for the UI (e.g. tool calls while the mic is idle)."""
 
     type: Literal["agent_status"] = "agent_status"
+    text: str
+
+
+class FillerSpoken(VoiceSessionEvent):
+    """A latency-masking phrase was spoken while a tool runs.
+
+    Separate from ``AgentTextDelta``/``AgentTextDone`` so clients can render it
+    dimmed and never treat it as part of the reply."""
+
+    type: Literal["filler"] = "filler"
     text: str
 
 

@@ -52,6 +52,11 @@ class TurnMetrics(BaseModel):
     """True when this turn's committed transcript was forced by the local VAD
     endpointing fast path (Silero + audio EOU) rather than the STT provider's
     own silence debounce — the ``eou_to_*`` numbers then start earlier."""
+    filler_spoken: bool = False
+    """True when a tool-call filler phrase was spoken this turn — the
+    ``eou_to_first_audio_ms`` stamp then reflects the filler, not the reply."""
+    filler_count: int = 0
+    """How many filler phrases were spoken (>1 with ``repeat_secs`` on)."""
 
 
 class TurnMetricsEvent(VoiceSessionEvent):

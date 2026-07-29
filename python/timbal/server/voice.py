@@ -23,11 +23,12 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import ValidationError
 
 from .. import __version__ as timbal_version
 from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
-from ..voice.config import RecordingConfig, VoiceConfig
+from ..voice.config import FillerConfig, RecordingConfig, VoiceConfig
 
 logger = structlog.get_logger("timbal.server.voice")
 
@@ -53,6 +54,19 @@ def default_voice_config_from_env() -> VoiceConfig:
         kwargs["ambient"] = {"source": v}
         if vol := os.environ.get("TIMBAL_VOICE_AMBIENT_VOLUME"):
             kwargs["ambient"]["volume"] = vol
+    filler: dict[str, Any] = {}
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_SYSTEM_PROMPT"):
+        filler["system_prompt"] = v
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_MODEL"):
+        filler["model"] = v
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_DELAY_SECS"):
+        filler["delay_secs"] = v
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_REPEAT_SECS"):
+        filler["repeat_secs"] = v
+    # TIMBAL_VOICE_FILLER=1 enables with defaults; any detail var implies it.
+    enabled = os.environ.get("TIMBAL_VOICE_FILLER", "").strip().lower()
+    if enabled in ("1", "true", "yes", "on") or (filler and enabled not in ("0", "false", "no", "off")):
+        kwargs["filler"] = filler
     return VoiceConfig(**kwargs)
 
 
@@ -131,6 +145,7 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "model",
     "turn_timeout_secs",
     "turn_timeout_fallback",
+    "filler",
 })
 
 
@@ -140,6 +155,9 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     Allowlist-filtered. Values are deliberately NOT re-validated here — client
     input gets per-key guards with fallbacks in :func:`build_voice_session`,
     so one bad value degrades that knob instead of closing the socket.
+    ``filler`` is the exception: it's a nested model, so it is deep-merged over
+    the server default (a client tweaking ``delay_secs`` keeps the server's
+    custom ``system_prompt``) and validated here — invalid → keep server's.
     """
     updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
     ignored = sorted(
@@ -148,6 +166,17 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     )
     if ignored:
         logger.info("voice_client_config_ignored", keys=ignored)
+    if "filler" in updates:
+        base = server_defaults.filler
+        merged_filler = {
+            **(base.model_dump(include=base.model_fields_set) if base is not None else {}),
+            **(updates["filler"] if isinstance(updates["filler"], dict) else {}),
+        }
+        try:
+            updates["filler"] = FillerConfig.model_validate(merged_filler)
+        except ValidationError:
+            logger.info("voice_client_filler_invalid", value=repr(updates["filler"]))
+            del updates["filler"]
     return server_defaults.model_copy(update=updates)
 
 
@@ -485,10 +514,9 @@ def build_voice_session(
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
     )
 
-    # TODO(tool-filler): read a server-side `filler_phrases` voice_config key
-    # (list of phrases or `(tool_name) -> str | None` callable) and pass it to
-    # `VoiceSession(filler=...)` once tool-call filler speech returns.
     session_kwargs: dict[str, Any] = {}
+    if merged.filler is not None and merged.filler.enabled:
+        session_kwargs["filler"] = merged.filler
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
@@ -578,6 +606,7 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         AgentTextDelta,
         AgentTextDone,
         AudioOutput,
+        FillerSpoken,
         SessionEnded,
         SessionError,
         SessionInterrupted,
@@ -607,6 +636,8 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         return [payload]
     if isinstance(event, AgentStatus):
         return [{"type": "agent_status", "text": event.text}]
+    if isinstance(event, FillerSpoken):
+        return [{"type": "filler", "text": event.text}]
     if isinstance(event, AgentTextDelta):
         return [{"type": "agent_text_delta", "text": event.text}]
     if isinstance(event, AgentTextDone):
