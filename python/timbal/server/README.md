@@ -189,6 +189,7 @@ POST /voice/rtc
 
 200 → { "sdp": "<answer sdp>", "type": "answer" }
 400 → bad offer / no audio track / runnable is not an Agent
+409 → single-session server already served (or is serving) its one session
 501 → timbal[voice] extra (aiortc) not installed
 ```
 
@@ -206,6 +207,17 @@ The server answers with the TTS audio track on the same m-line. Client teardown 
 | `TIMBAL_STUN_URL` | STUN server; defaults to `stun:stun.l.google.com:19302`. Set to empty to disable (loopback/LAN). |
 | `TIMBAL_TURN_URL` | Optional TURN server for clients behind symmetric NATs. |
 | `TIMBAL_TURN_USERNAME` / `TIMBAL_TURN_PASSWORD` | TURN credentials. |
+| `TIMBAL_VOICE_RTC_FORCE_RELAY` | `1` → relay-only ICE: allocate on the TURN server above, skip STUN, and strip host/srflx candidates from the answer SDP. For servers on private subnets (serverless boxes) where every non-relay candidate is unreachable dead weight that slows the browser's ICE convergence. Requires `TIMBAL_TURN_URL` — without it (or if the TURN allocation yields no relay candidate) the server logs an error and answers with all candidates instead of an unconnectable SDP. |
+
+## Single-session lifetime (serverless voice boxes)
+
+`TIMBAL_VOICE_SINGLE_SESSION=1` makes the server process serve **exactly one voice session and then exit 0** — for deployments that spawn one process per call and reap the box on process exit (the platform cannot see a WebRTC call: media flows browser ↔ TURN ↔ box, so the process must own its lifetime). Applies to both transports; whichever session arrives first (WS or RTC) owns the process.
+
+- **Exit on session end.** When the one session ends (peer connection `failed`/`closed`, WebSocket closed, or the session ends server-side), the process finalizes — including waiting for the [platform recording push](#call-recording) to finish, since the process is the only thing holding that data — and exits 0.
+- **Exit if nobody ever connects.** If no media connection is established within `TIMBAL_VOICE_IDLE_EXIT_SECS` (default `60`) of server start, exit 0. The window runs boot → *media established*, so an offer whose ICE never completes also exits after the window.
+- **Refuse a second session.** While a session is live or after one has been served: `POST /voice/rtc` → **409**, `/voice/ws` → close **1008**. An offer rejected with 400 (bad SDP, no audio track) never became a session and does not consume the slot.
+
+All lifetime exits are code 0; env is read at server start (never at import time), so CRIU-restored processes with late-injected env behave identically.
 
 ## Ambient background audio
 

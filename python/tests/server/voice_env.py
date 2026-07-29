@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-# Env vars that affect ``default_voice_config_from_env`` / ``merge_voice_config``.
+# Env vars that affect voice server behavior: ``default_voice_config_from_env``
+# / ``merge_voice_config``, the single-session lifetime, and RTC ICE.
 VOICE_ENV_KEYS = (
     "TIMBAL_STT_PROVIDER",
     "TIMBAL_STT_MODEL",
@@ -21,4 +22,10 @@ VOICE_ENV_KEYS = (
     "TIMBAL_VOICE_FILLER_MODEL",
     "TIMBAL_VOICE_FILLER_DELAY_SECS",
     "TIMBAL_VOICE_FILLER_REPEAT_SECS",
+    "TIMBAL_VOICE_SINGLE_SESSION",
+    "TIMBAL_VOICE_IDLE_EXIT_SECS",
+    "TIMBAL_VOICE_RTC_FORCE_RELAY",
+    "TIMBAL_TURN_URL",
+    "TIMBAL_TURN_USERNAME",
+    "TIMBAL_TURN_PASSWORD",
 )

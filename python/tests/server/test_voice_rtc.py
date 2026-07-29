@@ -209,6 +209,81 @@ class TestVoiceRtcRoundTrip:
         assert types[-1] == "session_ended"
 
 
+class TestVoiceRtcSingleSession:
+    async def test_one_call_then_exit_zero_then_409(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """TIMBAL_VOICE_SINGLE_SESSION: serve the call, exit 0, refuse a second offer."""
+        _setup_env(monkeypatch, tmp_path, responses=["Hi there!"])
+        monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
+        exits: list[int] = []
+        monkeypatch.setattr("timbal.server.single_session._exit_process", exits.append)
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_delayed_stt_class(
+                [(0.2, TranscriptEvent(type="committed", text="Hello"))],
+                end_after=1.5,
+            ),
+        )
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsStreamTTS",
+            _make_tts_class(chunk=b"\x01\x02" * 800, num_chunks=2),
+        )
+
+        app = create_app()
+        with TestClient(app) as client:
+            messages, _ = await _rtc_call(client)
+            assert messages[-1]["type"] == "session_ended"
+
+            # The driver's finally (→ guard.finish) runs after the pc closes.
+            for _ in range(100):
+                if exits:
+                    break
+                await asyncio.sleep(0.05)
+            assert exits == [0]
+
+            # One process = one session: the 409 fires before any SDP work.
+            resp = await asyncio.to_thread(
+                client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"}
+            )
+            assert resp.status_code == 409
+
+    async def test_409_while_a_session_is_live(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
+        exits: list[int] = []
+        monkeypatch.setattr("timbal.server.single_session._exit_process", exits.append)
+
+        app = create_app()
+        with TestClient(app) as client:
+            assert app.state.single_session_guard.claim()  # a session is live
+            resp = await asyncio.to_thread(
+                client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"}
+            )
+        assert resp.status_code == 409
+        assert exits == []
+
+    async def test_rejected_offer_releases_the_slot(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A 400 offer never became a session — the slot must reopen."""
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
+        exits: list[int] = []
+        monkeypatch.setattr("timbal.server.single_session._exit_process", exits.append)
+
+        app = create_app()
+        with TestClient(app) as client:
+            resp = await asyncio.to_thread(
+                client.post, "/voice/rtc", json={"sdp": "not sdp at all", "type": "offer"}
+            )
+            assert resp.status_code == 400
+            assert app.state.single_session_guard.claim()
+        assert exits == []
+
+
 class TestVoiceRtcSignalingErrors:
     def test_rejects_body_without_an_offer(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _setup_env(monkeypatch, tmp_path)

@@ -44,14 +44,39 @@ router = APIRouter(prefix="/voice", tags=["voice"])
 _pcs: set[Any] = set()
 _drivers: set[asyncio.Task] = set()
 
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-def _ice_servers() -> list[Any]:
+
+def _force_relay() -> bool:
+    """``TIMBAL_VOICE_RTC_FORCE_RELAY=1`` *and* a TURN server is configured.
+
+    Serverless boxes sit in private subnets: host candidates are private IPs
+    and srflx can't receive unsolicited inbound, so every non-relay candidate
+    is dead weight that slows the browser's ICE convergence. Without a TURN
+    server relay-only would leave *no* reachable candidate, so a misconfigured
+    flag degrades (loudly) to normal gathering instead of a broken answer.
+    """
+    if os.environ.get("TIMBAL_VOICE_RTC_FORCE_RELAY", "").strip().lower() not in _TRUTHY:
+        return False
+    if not os.environ.get("TIMBAL_TURN_URL"):
+        logger.error(
+            "voice_rtc_force_relay_without_turn",
+            hint="TIMBAL_VOICE_RTC_FORCE_RELAY=1 requires TIMBAL_TURN_URL/"
+            "TIMBAL_TURN_USERNAME/TIMBAL_TURN_PASSWORD; serving all candidates",
+        )
+        return False
+    return True
+
+
+def _ice_servers(*, relay_only: bool = False) -> list[Any]:
     from aiortc import RTCIceServer
 
     servers = []
-    # Empty TIMBAL_STUN_URL disables STUN (loopback/tests); unset keeps the default.
+    # Empty TIMBAL_STUN_URL disables STUN (loopback/tests); unset keeps the
+    # default. Relay-only skips STUN entirely — srflx would be filtered from
+    # the answer anyway, so gathering it just burns signaling budget.
     stun_url = os.environ.get("TIMBAL_STUN_URL", "stun:stun.l.google.com:19302")
-    if stun_url:
+    if stun_url and not relay_only:
         servers.append(RTCIceServer(urls=stun_url))
     turn_url = os.environ.get("TIMBAL_TURN_URL")
     if turn_url:
@@ -63,6 +88,41 @@ def _ice_servers() -> list[Any]:
             )
         )
     return servers
+
+
+def _strip_non_relay_candidates(sdp: str) -> str:
+    """Drop host/srflx ``a=candidate`` lines from an answer, keeping relay only.
+
+    aiortc has no ``iceTransportPolicy``: it always gathers host candidates,
+    so relay-only has to be enforced on the answer SDP. The browser only
+    forms pairs with candidates it was told about, so filtering here is
+    enough — aiortc's internal host candidates are never checked.
+
+    Degrades to the unfiltered SDP when filtering would leave no candidates
+    (e.g. the TURN allocation failed): a slow answer beats an unconnectable
+    one. The check is global rather than per m-section because all sections
+    share one gather (BUNDLE) and therefore identical candidate sets.
+    """
+    lines = sdp.split("\r\n")
+    kept: list[str] = []
+    removed = relayed = 0
+    for line in lines:
+        if line.startswith("a=candidate:"):
+            if " typ relay" in line:
+                relayed += 1
+            else:
+                removed += 1
+                continue
+        kept.append(line)
+    if removed and not relayed:
+        logger.warning(
+            "voice_rtc_force_relay_no_relay_candidates",
+            hint="TURN allocation yielded no relay candidates; answering with all candidates",
+        )
+        return sdp
+    if removed:
+        logger.debug("voice_rtc_relay_filtered", removed=removed, relay=relayed)
+    return "\r\n".join(kept)
 
 
 @router.post("/rtc")
@@ -93,6 +153,14 @@ async def voice_rtc(request: Request) -> JSONResponse:
         logger.error("voice_rtc_rejected", reason="runnable is not an Agent", type=type(runnable).__name__)
         return JSONResponse(status_code=400, content={"error": "Voice requires an Agent runnable."})
 
+    guard = getattr(request.app.state, "single_session_guard", None)
+    if guard is not None and not guard.claim():
+        logger.info("voice_rtc_rejected", reason="single-session server already served its session")
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Single-session server: a voice session was already served."},
+        )
+
     defaults = getattr(request.app.state, "voice_config", None) or VoiceConfig()
     sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
 
@@ -103,7 +171,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
     meta = {"playback_acks": "native", "transport": "webrtc", **meta}
     session.recording_meta = meta
 
-    pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=_ice_servers()))
+    force_relay = _force_relay()
+    pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=_ice_servers(relay_only=force_relay)))
     _pcs.add(pc)
 
     mic_track: Any = None
@@ -145,7 +214,11 @@ async def voice_rtc(request: Request) -> JSONResponse:
     @pc.on("connectionstatechange")
     async def on_connectionstatechange() -> None:
         logger.debug("voice_rtc_connection_state", state=pc.connectionState)
-        if pc.connectionState in ("failed", "closed"):
+        if pc.connectionState == "connected" and guard is not None:
+            # Media established: the single-session idle-exit window (boot →
+            # media connected) no longer applies.
+            guard.mark_connected()
+        if pc.connectionState in ("failed", "closed", "disconnected"):
             # Client is gone: end the session now rather than waiting for the
             # STT provider to time out on silence. Idempotent when the driver
             # already closed it.
@@ -155,6 +228,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
     except Exception as e:
         _pcs.discard(pc)
+        if guard is not None:
+            guard.release()
         logger.warning("voice_rtc_bad_offer", error=str(e))
         return JSONResponse(status_code=400, content={"error": f"Invalid SDP offer: {e}"})
 
@@ -162,6 +237,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
         _pcs.discard(pc)
         with contextlib.suppress(Exception):
             await pc.close()
+        if guard is not None:
+            guard.release()
         return JSONResponse(status_code=400, content={"error": "Offer must contain an audio track."})
 
     # After setRemoteDescription, so the TTS track reuses the offer's audio
@@ -176,30 +253,38 @@ async def voice_rtc(request: Request) -> JSONResponse:
         # connectionstatechange, so this only times out on a client that
         # connected but never offered a data channel.
         try:
-            await asyncio.wait_for(channel_ready.wait(), timeout=15.0)
-        except TimeoutError:
-            logger.warning("voice_rtc_no_datachannel")
-            with contextlib.suppress(Exception):
-                await pc.close()
-            _pcs.discard(pc)
-            return
-        mic_pcm = track_to_pcm(mic_track, sample_rate=sample_rate)
-        try:
-            async with aclosing(session.run(mic_pcm)) as events:
-                async for event in events:
-                    if isinstance(event, AudioOutput):
-                        downlink.write(event.data)
-                        continue
-                    for payload in event_to_payloads(event, session, meta):
-                        _dc_send(payload)
-        except Exception as e:
-            logger.error("voice_rtc_session_error", error=str(e), exc_info=True)
+            try:
+                await asyncio.wait_for(channel_ready.wait(), timeout=15.0)
+            except TimeoutError:
+                logger.warning("voice_rtc_no_datachannel")
+                with contextlib.suppress(Exception):
+                    await pc.close()
+                _pcs.discard(pc)
+                return
+            mic_pcm = track_to_pcm(mic_track, sample_rate=sample_rate)
+            try:
+                async with aclosing(session.run(mic_pcm)) as events:
+                    async for event in events:
+                        if isinstance(event, AudioOutput):
+                            downlink.write(event.data)
+                            continue
+                        for payload in event_to_payloads(event, session, meta):
+                            _dc_send(payload)
+            except Exception as e:
+                logger.error("voice_rtc_session_error", error=str(e), exc_info=True)
+            finally:
+                downlink.stop()
+                with contextlib.suppress(Exception):
+                    await pc.close()
+                _pcs.discard(pc)
+                logger.info("voice_rtc_disconnected")
         finally:
-            downlink.stop()
-            with contextlib.suppress(Exception):
-                await pc.close()
-            _pcs.discard(pc)
-            logger.info("voice_rtc_disconnected")
+            # Single-session box: this offer was the one session, however it
+            # ended (call finished, ICE never completed, no data channel) —
+            # finalize (recording already pushed by session cleanup above)
+            # and exit 0 so the platform reaps the box.
+            if guard is not None:
+                await guard.finish()
 
     driver = asyncio.create_task(_drive())
     _drivers.add(driver)
@@ -208,7 +293,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
     answer = await pc.createAnswer()
     # Completes ICE gathering before returning — the answer is complete.
     await pc.setLocalDescription(answer)
+    answer_sdp = pc.localDescription.sdp
+    if force_relay:
+        answer_sdp = _strip_non_relay_candidates(answer_sdp)
     logger.info("voice_rtc_connected")
-    return JSONResponse(
-        content={"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-    )
+    return JSONResponse(content={"sdp": answer_sdp, "type": pc.localDescription.type})

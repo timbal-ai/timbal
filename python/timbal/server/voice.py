@@ -695,6 +695,15 @@ async def voice_ws(ws: WebSocket) -> None:
         await ws.close(code=1008, reason="Voice requires an Agent runnable")
         return
 
+    guard = getattr(ws.app.state, "single_session_guard", None)
+    if guard is not None:
+        if not guard.claim():
+            logger.info("voice_ws_rejected", reason="single-session server already served its session")
+            await ws.close(code=1008, reason="Single-session server: a voice session was already served")
+            return
+        # On this transport the socket *is* the media connection.
+        guard.mark_connected()
+
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
     # Read the config hello. Protocol frames ("playback" acks, "audio",
@@ -827,3 +836,5 @@ async def voice_ws(ws: WebSocket) -> None:
         except Exception as e:
             logger.debug("voice_session_close_suppressed", error=str(e))
         logger.info("voice_ws_disconnected")
+        if guard is not None:
+            await guard.finish()

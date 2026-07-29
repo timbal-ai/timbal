@@ -40,6 +40,11 @@ async def lifespan(
     app.state.runnable = runnable
     app.state.job_store = JobStore()
     app.state.voice_config = merge_voice_config(runnable)
+    # Serverless voice boxes: serve one session, then exit (env read here at
+    # server start — post-CRIU-restore — never at import time).
+    from .single_session import init_single_session_guard
+
+    app.state.single_session_guard = init_single_session_guard()
     # Voice warmup off the boot path: pre-import the voice stack (and pre-load
     # the local turn-detection models when server-configured) so the first
     # voice session doesn't pay those costs. No-op-ish for non-voice usage.
@@ -54,6 +59,8 @@ async def lifespan(
     finally:
         if warmup_task is not None and not warmup_task.done():
             warmup_task.cancel()
+        if app.state.single_session_guard is not None:
+            app.state.single_session_guard.shutdown()
 
 
 def create_app() -> FastAPI:
