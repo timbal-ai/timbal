@@ -265,6 +265,30 @@ class TestVoiceRtcSingleSession:
         assert resp.status_code == 409
         assert exits == []
 
+    async def test_setup_crash_releases_the_slot(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A 500 between claim() and the driver task must not park the box in a
+        claimed state: the slot reopens and the idle timer bounds the lifetime."""
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
+        exits: list[int] = []
+        monkeypatch.setattr("timbal.server.single_session._exit_process", exits.append)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("recorder misconfigured")
+
+        monkeypatch.setattr("timbal.server.rtc.build_voice_session", _boom)
+
+        app = create_app()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = await asyncio.to_thread(
+                client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"}
+            )
+            assert resp.status_code == 500
+            assert app.state.single_session_guard.claim()
+        assert exits == []
+
     async def test_rejected_offer_releases_the_slot(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

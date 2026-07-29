@@ -161,92 +161,109 @@ async def voice_rtc(request: Request) -> JSONResponse:
             content={"error": "Single-session server: a voice session was already served."},
         )
 
-    defaults = getattr(request.app.state, "voice_config", None) or VoiceConfig()
-    sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
-
-    downlink = PcmQueueTrack(sample_rate=sample_rate)
-    session, meta = build_voice_session(
-        runnable, defaults, config, playback_tracker=PacedPlaybackTracker(downlink)
-    )
-    meta = {"playback_acks": "native", "transport": "webrtc", **meta}
-    session.recording_meta = meta
-
-    force_relay = _force_relay()
-    pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=_ice_servers(relay_only=force_relay)))
-    _pcs.add(pc)
-
-    mic_track: Any = None
-    channel: Any = None
-    channel_ready = asyncio.Event()
-    # Session events can fire before SCTP is up; buffer until the client's
-    # data channel arrives.
-    pending_payloads: list[str] = []
-
-    def _dc_send(payload: dict) -> None:
-        msg = json.dumps(payload)
-        if channel is not None and channel.readyState == "open":
-            try:
-                channel.send(msg)
-            except Exception as e:
-                logger.debug("voice_rtc_dc_send_failed", error=str(e), msg_type=payload.get("type"))
-        else:
-            pending_payloads.append(msg)
-
-    @pc.on("track")
-    def on_track(track: Any) -> None:
-        nonlocal mic_track
-        if track.kind == "audio" and mic_track is None:
-            mic_track = track
-
-    @pc.on("datachannel")
-    def on_datachannel(ch: Any) -> None:
-        nonlocal channel
-        channel = ch
-        for msg in pending_payloads:
-            try:
-                ch.send(msg)
-            except Exception as e:
-                logger.debug("voice_rtc_dc_flush_failed", error=str(e))
-                break
-        pending_payloads.clear()
-        channel_ready.set()
-
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange() -> None:
-        logger.debug("voice_rtc_connection_state", state=pc.connectionState)
-        if pc.connectionState == "connected" and guard is not None:
-            # Media established: the single-session idle-exit window (boot →
-            # media connected) no longer applies.
-            guard.mark_connected()
-        if pc.connectionState in ("failed", "closed"):
-            # Client is gone: end the session now rather than waiting for the
-            # STT provider to time out on silence. Idempotent when the driver
-            # already closed it. Deliberately *not* "disconnected": per W3C
-            # semantics that's a possibly-transient ICE blip that can return
-            # to "connected" (aiortc doesn't emit it today, but if it ever
-            # does, tearing down a recoverable call would be wrong).
-            await session.close()
-
+    pc: Any = None
     try:
-        await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
-    except Exception as e:
-        _pcs.discard(pc)
+        defaults = getattr(request.app.state, "voice_config", None) or VoiceConfig()
+        sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
+
+        downlink = PcmQueueTrack(sample_rate=sample_rate)
+        session, meta = build_voice_session(
+            runnable, defaults, config, playback_tracker=PacedPlaybackTracker(downlink)
+        )
+        meta = {"playback_acks": "native", "transport": "webrtc", **meta}
+        session.recording_meta = meta
+
+        force_relay = _force_relay()
+        pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=_ice_servers(relay_only=force_relay)))
+        _pcs.add(pc)
+
+        mic_track: Any = None
+        channel: Any = None
+        channel_ready = asyncio.Event()
+        # Session events can fire before SCTP is up; buffer until the client's
+        # data channel arrives.
+        pending_payloads: list[str] = []
+
+        def _dc_send(payload: dict) -> None:
+            msg = json.dumps(payload)
+            if channel is not None and channel.readyState == "open":
+                try:
+                    channel.send(msg)
+                except Exception as e:
+                    logger.debug("voice_rtc_dc_send_failed", error=str(e), msg_type=payload.get("type"))
+            else:
+                pending_payloads.append(msg)
+
+        @pc.on("track")
+        def on_track(track: Any) -> None:
+            nonlocal mic_track
+            if track.kind == "audio" and mic_track is None:
+                mic_track = track
+
+        @pc.on("datachannel")
+        def on_datachannel(ch: Any) -> None:
+            nonlocal channel
+            channel = ch
+            for msg in pending_payloads:
+                try:
+                    ch.send(msg)
+                except Exception as e:
+                    logger.debug("voice_rtc_dc_flush_failed", error=str(e))
+                    break
+            pending_payloads.clear()
+            channel_ready.set()
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange() -> None:
+            logger.debug("voice_rtc_connection_state", state=pc.connectionState)
+            if pc.connectionState == "connected" and guard is not None:
+                # Media established: the single-session idle-exit window (boot →
+                # media connected) no longer applies.
+                guard.mark_connected()
+            if pc.connectionState in ("failed", "closed"):
+                # Client is gone: end the session now rather than waiting for the
+                # STT provider to time out on silence. Idempotent when the driver
+                # already closed it. Deliberately *not* "disconnected": per W3C
+                # semantics that's a possibly-transient ICE blip that can return
+                # to "connected" (aiortc doesn't emit it today, but if it ever
+                # does, tearing down a recoverable call would be wrong).
+                await session.close()
+
+        try:
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+        except Exception as e:
+            _pcs.discard(pc)
+            if guard is not None:
+                guard.release()
+            logger.warning("voice_rtc_bad_offer", error=str(e))
+            return JSONResponse(status_code=400, content={"error": f"Invalid SDP offer: {e}"})
+
+        if mic_track is None:
+            _pcs.discard(pc)
+            with contextlib.suppress(Exception):
+                await pc.close()
+            if guard is not None:
+                guard.release()
+            return JSONResponse(status_code=400, content={"error": "Offer must contain an audio track."})
+
+        # After setRemoteDescription, so the TTS track reuses the offer's audio
+        # transceiver instead of adding a second m-line the client never offered.
+        pc.addTrack(downlink)
+    except Exception:
+        # A setup crash after claim() (build_voice_session, pc construction,
+        # addTrack) must not park the box in a claimed state with no
+        # finish(): reopen the slot and let the 500 out — the idle timer is
+        # still armed (media never connected), so the box lifetime stays
+        # bounded. Once the driver task below exists, lifetime is its
+        # finish()'s responsibility instead, never a release. The 400 paths
+        # above return (not raise) and do their own release.
+        if pc is not None:
+            _pcs.discard(pc)
+            with contextlib.suppress(Exception):
+                await pc.close()
         if guard is not None:
             guard.release()
-        logger.warning("voice_rtc_bad_offer", error=str(e))
-        return JSONResponse(status_code=400, content={"error": f"Invalid SDP offer: {e}"})
-
-    if mic_track is None:
-        _pcs.discard(pc)
-        with contextlib.suppress(Exception):
-            await pc.close()
-        if guard is not None:
-            guard.release()
-        return JSONResponse(status_code=400, content={"error": "Offer must contain an audio track."})
-
-    # After setRemoteDescription, so the TTS track reuses the offer's audio
-    # transceiver instead of adding a second m-line the client never offered.
-    pc.addTrack(downlink)
+        raise
 
     async def _drive() -> None:
         # Do not start the session before the transport is usable: STT starts
