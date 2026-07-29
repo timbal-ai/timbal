@@ -1868,10 +1868,16 @@ class VoiceSession:
 
     def _filler_ok_to_speak(self) -> bool:
         """The turn is still live and nothing has been spoken since the last
-        filler (baselines are 0 before the first one — nothing spoken at all)."""
+        filler (baselines are 0 before the first one — nothing spoken at all).
+
+        ``_turn_assistant_text`` matters too: streamed deltas can sit in the
+        TTS buffer below the flush threshold (nothing *scheduled* yet), but a
+        spoken preamble is coming — a filler on top of it would double-talk.
+        """
         return (
             not self._cancel_turn.is_set()
             and not self._turn_finalized_ok
+            and not self._turn_assistant_text
             and not self._turn_tts_scheduled_text
             and self._turn_tts_segments == self._turn_filler_segments_baseline
             and self._turn_audio_bytes == self._turn_filler_audio_baseline
@@ -1945,10 +1951,16 @@ class VoiceSession:
             raise
 
     async def _speak_filler_task(self, phrase: str, tool_name: str) -> None:
-        self._turn_filler_count += 1
+        # Text goes in *before* synthesis: audio can start (and echo back
+        # through the mic) mid-``_speak``, so suppression must already know
+        # the phrase even if we're cancelled halfway through it.
         self._turn_filler_text = f"{self._turn_filler_text} {phrase}".strip()
         logger.info("filler_speak", phrase=phrase, tool=tool_name, **_trace_debug_fields())
         await self._speak(phrase, filler=True)
+        # Everything below commits only after synthesis finishes: a turn
+        # cancelled mid-speak must not count a filler that never reached the
+        # transcript or the client.
+        self._turn_filler_count += 1
         # Follow-up condition is "nothing spoken since this filler" — snapshot
         # what the filler itself contributed.
         self._turn_filler_segments_baseline = self._turn_tts_segments

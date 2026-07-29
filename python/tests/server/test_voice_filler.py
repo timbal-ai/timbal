@@ -137,6 +137,20 @@ class TestFillerTurnFlow:
         assert not any(e.filler for e in session.transcript)
         assert session.metrics[-1].filler_spoken is False
 
+    async def test_short_unflushed_preamble_suppresses_filler(self) -> None:
+        """A streamed preamble below the TTS flush threshold (nothing scheduled
+        yet) still means a spoken reply is coming — no filler on top of it."""
+        first = Message(
+            role="assistant",
+            content=[TextContent(text="Sure,"), ToolUseContent(id="c1", name="lookup", input={"q": "x"})],
+            stop_reason="tool_use",
+        )
+        session = _make_session(filler=_default_filler(), responses=[first, "The answer is 42."])
+        await session._run_turn("what is the answer?")
+
+        assert not any(e.filler for e in session.transcript)
+        assert session.metrics[-1].filler_spoken is False
+
     async def test_generation_failure_is_silent(self) -> None:
         def _boom(messages):
             raise RuntimeError("generator down")
@@ -315,6 +329,46 @@ class TestFillerInternals:
         assert phrase == "Un momento."
         assert "que tiempo hace?" in seen[0][-1].collect_text()
         assert session._filler_agent.system_prompt == "CUSTOM PROMPT"
+
+    def test_buffered_assistant_text_blocks_filler(self) -> None:
+        session = _make_session(filler=_default_filler())
+        assert session._filler_ok_to_speak() is True
+        session._turn_assistant_text = "Sure,"  # streamed delta, below flush threshold
+        assert session._turn_tts_scheduled_text == ""
+        assert session._filler_ok_to_speak() is False
+
+    async def test_cancel_mid_speech_commits_nothing(self) -> None:
+        """Cancelled during synthesis → no count / transcript entry / event;
+        the phrase stays in ``_turn_filler_text`` for echo suppression."""
+        from timbal.voice import FillerSpoken, TextToSpeech
+
+        class BlockingTTS(TextToSpeech):
+            async def connect(self, config) -> None:
+                pass
+
+            async def close(self) -> None:
+                pass
+
+            async def synthesize(self, text: str):  # noqa: ARG002
+                await asyncio.sleep(30)
+                yield b"\x00" * 32
+
+        agent = Agent(name="voice_test", model=TestModel(responses=["hi"]), tools=[])
+        session = VoiceSession(
+            agent, _make_stt_class()(), BlockingTTS(), turn_detector="heuristic", filler=_default_filler()
+        )
+        task = asyncio.create_task(session._speak_filler_task(PHRASE, "lookup"))
+        await asyncio.sleep(0.05)  # let it get into _speak
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert session._turn_filler_count == 0
+        assert not any(e.filler for e in session.transcript)
+        assert not any(
+            isinstance(session._event_queue.get_nowait(), FillerSpoken)
+            for _ in range(session._event_queue.qsize())
+        )
+        assert PHRASE in session._turn_filler_text
 
     async def test_echo_suppression_sees_filler_text(self) -> None:
         session = _make_session()
