@@ -88,7 +88,14 @@ class SingleSessionGuard:
             idle_exit_secs=self.idle_exit_secs,
             session_claimed=self._claimed,
         )
-        _exit_process(0)
+        # Detach before finish(): its shutdown() cancels self._idle_task,
+        # which is this very task — cancelling ourselves would abort the
+        # upload drain mid-flight.
+        self._idle_task = None
+        # Exit through finish(), not a bare _exit_process: the exit must
+        # never race an in-flight recording upload, even in states that
+        # shouldn't leave one behind while the timer is still armed.
+        await self.finish()
 
     def claim(self) -> bool:
         """Reserve the one session slot; False while live or after it was served."""

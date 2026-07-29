@@ -12,6 +12,7 @@ without the aiortc dependency; the WebRTC side of the guard is covered in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from pathlib import Path
 
@@ -68,6 +69,26 @@ class TestSingleSessionGuard:
         guard.start()
         assert guard.claim()
         await asyncio.sleep(0.2)
+        assert exits == [0]
+
+    async def test_idle_exit_waits_for_recording_uploads(self, exits: list[int]) -> None:
+        """The idle path must exit through finish(): never race an in-flight PUT."""
+        from timbal.server import recording_upload
+
+        uploaded = asyncio.Event()
+
+        async def _slow_upload() -> None:
+            await asyncio.sleep(0.1)
+            uploaded.set()
+
+        task = asyncio.create_task(_slow_upload())
+        recording_upload._upload_tasks.add(task)
+        task.add_done_callback(recording_upload._upload_tasks.discard)
+
+        guard = SingleSessionGuard(idle_exit_secs=0.05)
+        guard.start()
+        await asyncio.sleep(0.4)
+        assert uploaded.is_set()
         assert exits == [0]
 
     async def test_mark_connected_disarms_the_idle_timer(self, exits: list[int]) -> None:
@@ -160,6 +181,28 @@ class TestSingleSessionOverWebSocket:
                 with pytest.raises(WebSocketDisconnect) as excinfo:
                     ws2.receive_json()
             assert excinfo.value.code == 1008
+
+    def test_session_build_failure_still_exits(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exits: list[int]
+    ) -> None:
+        """An exception between claim() and the session's own teardown must not
+        leave the process alive: the idle timer is already disarmed by then."""
+        _setup_ws_env(monkeypatch, tmp_path)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("recorder misconfigured")
+
+        monkeypatch.setattr("timbal.server.voice.build_voice_session", _boom)
+
+        app = create_app()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            with contextlib.suppress(Exception), client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({})
+                ws.receive_json()
+            deadline = time.monotonic() + 5.0
+            while not exits and time.monotonic() < deadline:
+                time.sleep(0.02)
+        assert exits == [0]
 
     def test_idle_exit_when_nobody_connects(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exits: list[int]

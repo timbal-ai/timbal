@@ -218,10 +218,13 @@ async def voice_rtc(request: Request) -> JSONResponse:
             # Media established: the single-session idle-exit window (boot →
             # media connected) no longer applies.
             guard.mark_connected()
-        if pc.connectionState in ("failed", "closed", "disconnected"):
+        if pc.connectionState in ("failed", "closed"):
             # Client is gone: end the session now rather than waiting for the
             # STT provider to time out on silence. Idempotent when the driver
-            # already closed it.
+            # already closed it. Deliberately *not* "disconnected": per W3C
+            # semantics that's a possibly-transient ICE blip that can return
+            # to "connected" (aiortc doesn't emit it today, but if it ever
+            # does, tearing down a recoverable call would be wrong).
             await session.close()
 
     try:
