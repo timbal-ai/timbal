@@ -37,7 +37,7 @@ _DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 
 def default_voice_config_from_env() -> dict[str, Any]:
     """STT/TTS defaults for ``/voice/ws`` (ElevenLabs). Override with env or ``runnable.voice_config``."""
-    return {
+    cfg: dict[str, Any] = {
         "stt_provider": os.environ.get("TIMBAL_STT_PROVIDER", "elevenlabs"),
         "stt_model": os.environ.get("TIMBAL_STT_MODEL", "scribe_v2_realtime"),
         "tts_model": os.environ.get("TIMBAL_TTS_MODEL", "eleven_flash_v2_5"),
@@ -55,6 +55,37 @@ def default_voice_config_from_env() -> dict[str, Any]:
         },
         "tts_extra": {"auto_mode": True},
     }
+    return cfg
+
+
+def _recording_config_from_env() -> dict[str, Any]:
+    """Recording knobs the platform injects as env vars.
+
+    Deliberately *not* part of :func:`default_voice_config_from_env`: that
+    runs once at server boot, while serverless session boxes can be
+    CRIU-restored from a warm snapshot with env arriving at restore time.
+    Recording env must therefore be read per session (call sites are in
+    :func:`build_voice_session`).
+    """
+    cfg: dict[str, Any] = {}
+    if recording_dir := os.environ.get("TIMBAL_VOICE_RECORDING_DIR"):
+        cfg["dir"] = recording_dir
+    if layout := os.environ.get("TIMBAL_VOICE_RECORDING_LAYOUT"):
+        cfg["layout"] = layout
+    if bitrate := os.environ.get("TIMBAL_VOICE_RECORDING_BITRATE_KBPS"):
+        cfg["bitrate_kbps"] = bitrate
+    return cfg
+
+
+# Platform identity env → manifest ``meta`` keys. Makes recording files
+# self-describing for sweeper ingest and crash recovery (platform ask).
+_RECORDING_IDENTITY_ENV = (
+    ("TIMBAL_ORG_ID", "org_id"),
+    ("TIMBAL_PROJECT_ID", "project_id"),
+    ("TIMBAL_PROJECT_ENV_ID", "project_env_id"),
+    ("TIMBAL_APP_ID", "app_id"),
+    ("TIMBAL_PROJECT_REV", "project_rev"),
+)
 
 
 def merge_voice_config(runnable: Any) -> dict[str, Any]:
@@ -162,11 +193,12 @@ async def warmup_voice_stack(voice_config: dict[str, Any]) -> None:
         elif isinstance(td, str) and td.strip().lower() in ("local", "audio", "smart_turn"):
             detector = resolve_turn_detector(td)
         elif td is None:
-            # Playground often switches to Smart Turn on first Start — warm it.
+            # "local" is the default for non-Flux STT (see the session setup), and
+            # the playground also switches to Smart Turn on first Start.
             detector = resolve_turn_detector("local")
 
         if isinstance(detector, LocalAudioTurnDetector):
-            from ..voice.session import AudioInputConfig
+            from ..voice.providers import AudioInputConfig
 
             await detector.start(AudioInputConfig(sample_rate=16_000))
             await SileroVad().start(sample_rate=16_000)
@@ -194,26 +226,79 @@ async def voice_page(request: Request) -> HTMLResponse:
     return HTMLResponse(html)
 
 
-@router.websocket("/ws")
-async def voice_ws(ws: WebSocket) -> None:
-    from ..core.agent import Agent
-    from ..voice import (
-        AgentStatus,
-        AgentTextDelta,
-        AgentTextDone,
-        AudioInputConfig,
-        AudioOutput,
-        AudioOutputConfig,
-        SessionEnded,
-        SessionError,
-        SessionInterrupted,
-        SessionStarted,
-        TranscriptCommitted,
-        TranscriptPartial,
-        TurnMetricsEvent,
-        VoiceSession,
-        VoiceSessionEvent,
-    )
+def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux: bool) -> Any:
+    """Choose the turn detector for a session: a mode name, instance, or factory.
+
+    ``server_spec`` comes from ``runnable.voice_config`` and may be any of those
+    three. ``client_spec`` comes over the wire and is honoured only as a mode
+    name — a browser must not be able to inject a callable — but is otherwise
+    preferred, so the playground can A/B detectors.
+
+    The choice is made here rather than in
+    :func:`~timbal.voice.turn_detection.resolve_turn_detector` because it turns
+    on the STT: whichever mode is best depends on how well the provider
+    endpoints, and only the session setup knows which provider is in play.
+    """
+    spec = server_spec
+    if isinstance(client_spec, str) and client_spec.strip():
+        spec = client_spec
+    elif client_spec is not None and not isinstance(client_spec, str):
+        logger.warning("voice_ws_bad_turn_detector", error="client turn_detector must be a mode name string")
+
+    mode = spec.strip().lower() if isinstance(spec, str) else None
+    if stt_is_flux:
+        # Flux owns EOU (~260ms). Local/lexical run *after* EndOfTurn and add a
+        # second HOLD tax; they also disable the useful Provider path. Force
+        # provider unless the caller explicitly picked heuristic/raw/provider.
+        if mode is None or mode in ("local", "audio", "smart_turn", "lexical"):
+            if spec is not None:
+                # Includes an instance or factory from voice_config, which this
+                # overrides too — worth saying so rather than silently ignoring.
+                logger.info("voice_ws_flux_overrides_turn_detector", requested=str(spec), using="provider")
+            return "provider"
+        return spec
+    if spec is not None:
+        return spec
+
+    # Nothing chosen. The holdless heuristic is the worst of the four on every
+    # backend that endpoints on silence — 65-69% against 96-100% for detectors
+    # that can hold — because Nova and ElevenLabs commit each fragment of a
+    # paused utterance separately, and only a hold puts them back together.
+    #
+    # The warmup path already resolved "local" for this case, so a server with no
+    # `turn_detector` configured was loading Smart Turn, Namo and Silero at
+    # startup and then handing the session a detector that used none of them.
+    #
+    # Without `timbal[voice]`, `local` returns the heuristic decision verbatim
+    # (its punctuation fallback sits behind the audio-EOU branch), so it would buy
+    # nothing; `lexical` holds an unfinished transcript with no extra deps. Asking
+    # the resolver beats probing imports: the degradation rule stays in one place.
+    from ..voice.turn_detection import resolve_turn_detector
+
+    mode = "local" if getattr(resolve_turn_detector("local"), "audio_eou", None) is not None else "lexical"
+    logger.info("voice_ws_default_turn_detector", using=mode)
+    return mode
+
+
+def build_voice_session(
+    runnable: Any,
+    defaults: dict[str, Any],
+    client_config: dict[str, Any],
+    *,
+    playback_tracker: Any = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Resolve voice config into a ``VoiceSession`` plus ``session_started`` metadata.
+
+    Transport-agnostic: the WebSocket handler and the WebRTC route both call
+    this with their own client config dict. ``playback_tracker`` lets a paced
+    transport substitute its own position source for the default
+    client-acked estimate.
+
+    Returns ``(session, meta)`` where ``meta`` holds the resolved identity
+    keys (``stt_provider``, ``stt_model``, ``model``, ``turn_detector``) that
+    transports include in their ``session_started`` payload.
+    """
+    from ..voice import VoiceSession
     from ..voice.deepgram import (
         DeepgramFluxSTT,
         effective_stt_model,
@@ -221,6 +306,258 @@ async def voice_ws(ws: WebSocket) -> None:
         stt_provider_id,
     )
     from ..voice.elevenlabs import ElevenLabsStreamTTS
+    from ..voice.providers import AudioInputConfig, AudioOutputConfig
+    from ..voice.turn_detection import resolve_turn_detector
+
+    merged = merge_client_voice_overrides(defaults, client_config)
+
+    stt_provider = merged.get("stt_provider")
+    stt_model_requested = merged.get("stt_model")
+    try:
+        stt = resolve_stt(stt_provider, model=stt_model_requested)
+    except ValueError as e:
+        logger.warning(
+            "voice_ws_bad_stt_provider",
+            error=str(e),
+            requested_provider=stt_provider,
+            requested_model=stt_model_requested,
+        )
+        # Fallback must not keep a Flux/Nova model id on the ElevenLabs wire,
+        # or the client/config log will claim Deepgram while Scribe runs.
+        stt = resolve_stt("elevenlabs")
+        stt_model_requested = None
+    stt_is_flux = isinstance(stt, DeepgramFluxSTT)
+    # Config id for clients/logs (``deepgram-flux``), not the class name.
+    stt_provider = stt_provider_id(stt)
+    stt_model = effective_stt_model(stt, stt_model_requested)
+    tts = ElevenLabsStreamTTS()
+
+    stt_extra = dict(merged.get("stt_extra", {}))
+    if stt_is_flux:
+        # Scribe-tuned VAD knobs don't apply to Flux's turn machine.
+        for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
+            stt_extra.pop(k, None)
+    audio_in = AudioInputConfig(
+        model=stt_model,
+        language=merged.get("language"),
+        sample_rate=merged.get("sample_rate", 16_000),
+        encoding=merged.get("encoding", "pcm_s16le"),
+        extra=stt_extra,
+    )
+    audio_out = AudioOutputConfig(
+        model=merged.get("tts_model"),
+        voice=merged.get("voice"),
+        sample_rate=merged.get("sample_rate", 16_000),
+        encoding=merged.get("encoding", "pcm_s16le"),
+        extra=merged.get("tts_extra", {}),
+    )
+
+    # ``runnable.voice_config`` may supply a TurnDetector instance, factory, or
+    # a mode name ("heuristic"|"provider"|"local"|"lexical"). The client JSON
+    # may additionally select a *mode name* (string only — useful for A/B
+    # testing detectors from the playground); instances and factories can never
+    # come over the wire. When neither picks one, the server chooses by STT
+    # rather than taking ``resolve_turn_detector``'s zero-dep default, because
+    # only here is the STT's endpointing behaviour known.
+    turn_detector = None
+    raw_td = select_turn_detector_spec(
+        defaults.get("turn_detector"),
+        client_config.get("turn_detector"),
+        stt_is_flux=stt_is_flux,
+    )
+    if raw_td is not None:
+        try:
+            # voice_config is process-wide; VoiceSession clones the resolved
+            # detector so concurrent connections never share buffers/lifecycle.
+            turn_detector = resolve_turn_detector(raw_td)
+        except (TypeError, ValueError) as e:
+            logger.warning("voice_ws_bad_turn_detector", error=str(e))
+    turn_detector_label = type(turn_detector).__name__ if turn_detector is not None else "HeuristicTurnDetector"
+
+    # Optional bool: force the local VAD endpointing fast path on/off. Default
+    # (absent / non-bool) is auto — on when the detector has an audio EOU model
+    # and timbal[voice] is installed. Client hello may override the server value.
+    vad_endpointing = merged.get("vad_endpointing")
+    if not isinstance(vad_endpointing, bool):
+        vad_endpointing = None
+    if stt_is_flux:
+        # Flux has no force-commit (commit() is a no-op); the Silero fast path
+        # would just burn CPU scoring audio it can never act on.
+        vad_endpointing = False
+
+    # Playground / client may override the Agent's LLM for this session only.
+    raw_model = merged.get("model")
+    model_override = (
+        raw_model.strip()
+        if isinstance(raw_model, str) and "/" in raw_model.strip()
+        else None
+    )
+    llm_model = model_override or (
+        str(runnable.model) if isinstance(getattr(runnable, "model", None), str) else None
+    )
+    logger.info(
+        "voice_session_config",
+        stt=type(stt).__name__,
+        stt_provider=stt_provider,
+        stt_model=stt_model,
+        stt_model_requested=merged.get("stt_model"),
+        model=llm_model,
+        turn_detector=turn_detector_label,
+        vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
+    )
+
+    # TODO(tool-filler): read a server-side `filler_phrases` voice_config key
+    # (list of phrases or `(tool_name) -> str | None` callable) and pass it to
+    # `VoiceSession(filler=...)` once tool-call filler speech returns.
+    session_kwargs: dict[str, Any] = {}
+    if "turn_timeout_secs" in merged:
+        try:
+            session_kwargs["turn_timeout_secs"] = float(merged["turn_timeout_secs"])
+        except (TypeError, ValueError):
+            logger.warning("voice_ws_bad_turn_timeout_secs", value=repr(merged.get("turn_timeout_secs")))
+    if "turn_timeout_fallback" in merged:
+        fb = merged["turn_timeout_fallback"]
+        session_kwargs["turn_timeout_fallback"] = None if fb is None else str(fb)
+    if playback_tracker is not None:
+        session_kwargs["playback_tracker"] = playback_tracker
+
+    # Call recording is read from *server* config only — env (per session,
+    # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win)
+    # — never from the merged dict: merge_client_voice_overrides applies
+    # client keys freely, and a browser must not be able to switch recording
+    # on or off.
+    user_recording = defaults.get("recording")
+    recording_cfg = {
+        **_recording_config_from_env(),
+        **(user_recording if isinstance(user_recording, dict) else {}),
+    }
+    if recording_cfg.get("dir"):
+        try:
+            from uuid_extensions import uuid7
+
+            from ..voice.recording import CallRecorder
+
+            on_saved = recording_cfg.get("on_saved")
+            if on_saved is None and os.environ.get("TIMBAL_VOICE_RECORDING_UPLOAD") == "platform":
+                from .recording_upload import platform_recording_upload_hook
+
+                on_saved = platform_recording_upload_hook()
+            session_id = uuid7(as_type="str").replace("-", "")
+            session_kwargs["session_id"] = session_id
+            session_kwargs["recorder"] = CallRecorder(
+                Path(recording_cfg["dir"]) / f"{session_id}.mp3",
+                sample_rate=int(merged.get("sample_rate", 16_000)),
+                layout=recording_cfg.get("layout", "mixed"),
+                bitrate_kbps=int(recording_cfg.get("bitrate_kbps", 32)),
+                on_saved=on_saved,
+                meta={k: v for env_key, k in _RECORDING_IDENTITY_ENV if (v := os.environ.get(env_key))} or None,
+            )
+        except ImportError:
+            logger.warning("voice_recording_unavailable", hint="call recording requires timbal[voice] (av + numpy)")
+        except Exception as e:
+            # A misconfigured recorder must not take voice down with it.
+            logger.error("voice_recording_setup_failed", error=str(e), exc_info=True)
+
+    session = VoiceSession(
+        agent=runnable,
+        stt=stt,
+        tts=tts,
+        audio_input=audio_in,
+        audio_output=audio_out,
+        turn_detector=turn_detector,
+        vad_endpointing=vad_endpointing,
+        model=model_override,
+        **session_kwargs,
+    )
+    meta = {
+        "session_id": session.session_id,
+        "stt_provider": stt_provider,
+        "stt_model": stt_model,
+        "model": llm_model,
+        "turn_detector": turn_detector_label,
+    }
+    return session, meta
+
+
+def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[dict[str, Any]]:
+    """Map one ``VoiceSessionEvent`` to the JSON payloads a transport sends.
+
+    Shared by the WebSocket handler and the WebRTC data channel — the wire
+    format is identical. ``AudioOutput`` is serialized as base64 here; a paced
+    transport (WebRTC) intercepts it *before* calling this and feeds the PCM
+    to its audio track instead.
+
+    ``meta`` is the dict from :func:`build_voice_session`, extended by the
+    transport with its own keys (``transport``, ``playback_acks``).
+    """
+    from ..voice import (
+        AgentStatus,
+        AgentTextDelta,
+        AgentTextDone,
+        AudioOutput,
+        SessionEnded,
+        SessionError,
+        SessionInterrupted,
+        SessionStarted,
+        TranscriptCommitted,
+        TranscriptPartial,
+        TurnMetricsEvent,
+    )
+
+    if isinstance(event, SessionStarted):
+        return [
+            {
+                "type": "session_started",
+                **meta,
+                # The endpointer arms during session startup (before this event
+                # is emitted), so this reflects the real state — not the
+                # requested config.
+                "vad_endpointing": session._endpointer is not None,
+            }
+        ]
+    if isinstance(event, TranscriptPartial):
+        return [{"type": "transcript_partial", "text": event.text}]
+    if isinstance(event, TranscriptCommitted):
+        payload: dict[str, Any] = {"type": "transcript_committed", "text": event.text}
+        if event.replace:
+            payload["replace"] = True
+        return [payload]
+    if isinstance(event, AgentStatus):
+        return [{"type": "agent_status", "text": event.text}]
+    if isinstance(event, AgentTextDelta):
+        return [{"type": "agent_text_delta", "text": event.text}]
+    if isinstance(event, AgentTextDone):
+        return [{"type": "agent_text_done", "text": event.text}]
+    if isinstance(event, AudioOutput):
+        return [{"type": "audio", "data": base64.b64encode(event.data).decode("ascii")}]
+    if isinstance(event, TurnMetricsEvent):
+        return [{"type": "metrics", "metrics": event.metrics.model_dump()}]
+    if isinstance(event, SessionInterrupted):
+        return [{"type": "interrupted", "heard_text": event.heard_text}]
+    if isinstance(event, SessionError):
+        return [{"type": "error", "message": event.message}]
+    if isinstance(event, SessionEnded):
+        # Entries carry absolute wall-clock timestamps; offset_ms (relative to
+        # started_at) saves every client the subtraction — it's what a
+        # conversation-review UI actually renders.
+        started_at = getattr(session, "started_at", None)
+        entries = []
+        for e in session.transcript:
+            d = e.model_dump()
+            if started_at is not None:
+                d["offset_ms"] = max(0, round((e.timestamp - started_at) * 1000))
+            entries.append(d)
+        transcript_payload: dict[str, Any] = {"type": "session_transcript", "entries": entries}
+        if started_at is not None:
+            transcript_payload["started_at"] = started_at
+        return [transcript_payload, {"type": "session_ended"}]
+    return []
+
+
+@router.websocket("/ws")
+async def voice_ws(ws: WebSocket) -> None:
+    from ..core.agent import Agent
+    from ..voice import SessionInterrupted, VoiceSessionEvent
 
     await ws.accept()
     logger.info("voice_ws_connected")
@@ -271,130 +608,9 @@ async def voice_ws(ws: WebSocket) -> None:
         logger.warning("voice_ws_first_frame_error", error=str(e))
 
     defaults: dict = getattr(ws.app.state, "voice_config", None) or {}
-    merged = merge_client_voice_overrides(defaults, config)
-
-    stt_provider = merged.get("stt_provider")
-    stt_model_requested = merged.get("stt_model")
-    try:
-        stt = resolve_stt(stt_provider, model=stt_model_requested)
-    except ValueError as e:
-        logger.warning(
-            "voice_ws_bad_stt_provider",
-            error=str(e),
-            requested_provider=stt_provider,
-            requested_model=stt_model_requested,
-        )
-        # Fallback must not keep a Flux/Nova model id on the ElevenLabs wire,
-        # or the client/config log will claim Deepgram while Scribe runs.
-        stt = resolve_stt("elevenlabs")
-        stt_model_requested = None
-    stt_is_flux = isinstance(stt, DeepgramFluxSTT)
-    # Config id for clients/logs (``deepgram-flux``), not the class name.
-    stt_provider = stt_provider_id(stt)
-    stt_model = effective_stt_model(stt, stt_model_requested)
-    tts = ElevenLabsStreamTTS()
-
-    stt_extra = dict(merged.get("stt_extra", {}))
-    if stt_is_flux:
-        # Scribe-tuned VAD knobs don't apply to Flux's turn machine.
-        for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
-            stt_extra.pop(k, None)
-    audio_in = AudioInputConfig(
-        model=stt_model,
-        language=merged.get("language"),
-        sample_rate=merged.get("sample_rate", 16_000),
-        encoding=merged.get("encoding", "pcm_s16le"),
-        extra=stt_extra,
-    )
-    audio_out = AudioOutputConfig(
-        model=merged.get("tts_model"),
-        voice=merged.get("voice"),
-        sample_rate=merged.get("sample_rate", 16_000),
-        encoding=merged.get("encoding", "pcm_s16le"),
-        extra=merged.get("tts_extra", {}),
-    )
-
-    # ``runnable.voice_config`` may supply a TurnDetector instance, factory, or
-    # a mode name ("heuristic"|"provider"|"local"|"lexical"). The client JSON
-    # may additionally select a *mode name* (string only — useful for A/B
-    # testing detectors from the playground); instances and factories can never
-    # come over the wire.
-    from ..voice.turn_detection import resolve_turn_detector
-
-    turn_detector = None
-    raw_td = defaults.get("turn_detector")
-    client_td = config.get("turn_detector")
-    if isinstance(client_td, str) and client_td.strip():
-        raw_td = client_td
-    elif client_td is not None and not isinstance(client_td, str):
-        logger.warning("voice_ws_bad_turn_detector", error="client turn_detector must be a mode name string")
-    if stt_is_flux:
-        # Flux owns EOU (~260ms). Local/lexical run *after* EndOfTurn and add
-        # a second HOLD tax; they also disable the useful Provider path. Force
-        # provider unless the client explicitly picked heuristic/raw/provider.
-        td_mode = raw_td.strip().lower() if isinstance(raw_td, str) else None
-        if td_mode is None or td_mode in ("local", "audio", "smart_turn", "lexical"):
-            if td_mode is not None:
-                logger.info(
-                    "voice_ws_flux_overrides_turn_detector",
-                    requested=raw_td,
-                    using="provider",
-                )
-            raw_td = "provider"
-    if raw_td is not None:
-        try:
-            # voice_config is process-wide; VoiceSession clones the resolved
-            # detector so concurrent connections never share buffers/lifecycle.
-            turn_detector = resolve_turn_detector(raw_td)
-        except (TypeError, ValueError) as e:
-            logger.warning("voice_ws_bad_turn_detector", error=str(e))
-    turn_detector_label = type(turn_detector).__name__ if turn_detector is not None else "HeuristicTurnDetector"
-
-    # Optional bool: force the local VAD endpointing fast path on/off. Default
-    # (absent / non-bool) is auto — on when the detector has an audio EOU model
-    # and timbal[voice] is installed. Client hello may override the server value.
-    vad_endpointing = merged.get("vad_endpointing")
-    if not isinstance(vad_endpointing, bool):
-        vad_endpointing = None
-    if stt_is_flux:
-        # Flux has no force-commit (commit() is a no-op); the Silero fast path
-        # would just burn CPU scoring audio it can never act on.
-        vad_endpointing = False
-
-    # Playground / client may override the Agent's LLM for this session only.
-    raw_model = merged.get("model")
-    model_override = (
-        raw_model.strip()
-        if isinstance(raw_model, str) and "/" in raw_model.strip()
-        else None
-    )
-    llm_model = model_override or (
-        str(runnable.model) if isinstance(getattr(runnable, "model", None), str) else None
-    )
-    logger.info(
-        "voice_ws_session_config",
-        stt=type(stt).__name__,
-        stt_provider=stt_provider,
-        stt_model=stt_model,
-        stt_model_requested=merged.get("stt_model"),
-        model=llm_model,
-        turn_detector=turn_detector_label,
-        vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
-    )
-
-    # TODO(tool-filler): read a server-side `filler_phrases` voice_config key
-    # (list of phrases or `(tool_name) -> str | None` callable) and pass it to
-    # `VoiceSession(filler=...)` once tool-call filler speech returns.
-    session = VoiceSession(
-        agent=runnable,
-        stt=stt,
-        tts=tts,
-        audio_input=audio_in,
-        audio_output=audio_out,
-        turn_detector=turn_detector,
-        vad_endpointing=vad_endpointing,
-        model=model_override,
-    )
+    session, meta = build_voice_session(runnable, defaults, config)
+    meta = {"playback_acks": "recommended", "transport": "websocket", **meta}
+    session.recording_meta = meta
 
     async def _recv_loop() -> None:
         """Read frames from the browser and feed PCM into the audio queue."""
@@ -459,68 +675,16 @@ async def voice_ws(ws: WebSocket) -> None:
     async def _handle(event: VoiceSessionEvent) -> None:
         """Forward session events to the browser over WebSocket."""
         nonlocal warned_ack_degraded
-        if isinstance(event, SessionStarted):
-            # ``playback_acks`` advertises that the server understands
-            # ``{"type": "playback", "played_ms": ...}`` and expects clients that
-            # play audio to send them (see server/README.md).
-            await _send_json(
-                {
-                    "type": "session_started",
-                    "playback_acks": "recommended",
-                    # Config id (``elevenlabs`` / ``deepgram-flux`` / …), not
-                    # the STT class name — matches playground select values.
-                    "stt_provider": stt_provider,
-                    "stt_model": stt_model,
-                    "model": llm_model,
-                    "turn_detector": turn_detector_label,
-                    # The endpointer arms during session startup (before this
-                    # event is emitted), so this reflects the real state — not
-                    # the requested config.
-                    "vad_endpointing": session._endpointer is not None,
-                }
+        if isinstance(event, SessionInterrupted) and not warned_ack_degraded and not session.playback.ack_received:
+            warned_ack_degraded = True
+            logger.warning(
+                "voice_ws_truncation_degraded",
+                hint="client sent no playback acks before a barge-in; heard-text "
+                "truncation used the wall-clock estimate. Send "
+                '{"type": "playback", "played_ms": ...} every ~250ms while audio plays.',
             )
-        elif isinstance(event, TranscriptPartial):
-            await _send_json({"type": "transcript_partial", "text": event.text})
-        elif isinstance(event, TranscriptCommitted):
-            payload: dict = {"type": "transcript_committed", "text": event.text}
-            if event.replace:
-                payload["replace"] = True
+        for payload in event_to_payloads(event, session, meta):
             await _send_json(payload)
-        elif isinstance(event, AgentStatus):
-            await _send_json({"type": "agent_status", "text": event.text})
-        elif isinstance(event, AgentTextDelta):
-            await _send_json({"type": "agent_text_delta", "text": event.text})
-        elif isinstance(event, AgentTextDone):
-            await _send_json({"type": "agent_text_done", "text": event.text})
-        elif isinstance(event, AudioOutput):
-            await _send_json(
-                {
-                    "type": "audio",
-                    "data": base64.b64encode(event.data).decode("ascii"),
-                }
-            )
-        elif isinstance(event, TurnMetricsEvent):
-            await _send_json({"type": "metrics", "metrics": event.metrics.model_dump()})
-        elif isinstance(event, SessionInterrupted):
-            if not warned_ack_degraded and not session.playback.ack_received:
-                warned_ack_degraded = True
-                logger.warning(
-                    "voice_ws_truncation_degraded",
-                    hint="client sent no playback acks before a barge-in; heard-text "
-                    "truncation used the wall-clock estimate. Send "
-                    '{"type": "playback", "played_ms": ...} every ~250ms while audio plays.',
-                )
-            await _send_json({"type": "interrupted", "heard_text": event.heard_text})
-        elif isinstance(event, SessionError):
-            await _send_json({"type": "error", "message": event.message})
-        elif isinstance(event, SessionEnded):
-            await _send_json(
-                {
-                    "type": "session_transcript",
-                    "entries": [e.model_dump() for e in session.transcript],
-                }
-            )
-            await _send_json({"type": "session_ended"})
 
     recv_task = asyncio.create_task(_recv_loop())
     try:

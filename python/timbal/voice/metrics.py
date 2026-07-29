@@ -15,7 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from .session import VoiceSessionEvent
+from .events import VoiceSessionEvent
 
 
 class TurnMetrics(BaseModel):
@@ -24,6 +24,8 @@ class TurnMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     turn_index: int
+    run_id: str | None = None
+    """Id of the agent run this turn produced, to join metrics against the trace."""
     user_text_chars: int
     eou_to_llm_first_token_ms: float | None = None
     """Committed transcript -> first LLM text delta."""

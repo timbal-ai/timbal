@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from contextlib import aclosing
 
+import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.voice import TranscriptEvent, VoiceSession, VoiceSessionEvent
 from timbal.voice.eou import AudioEouModel, PunctuationEouPredictor, TextEouPredictor
-from timbal.voice.session import TranscriptEvent, VoiceSession, VoiceSessionEvent
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,
@@ -26,12 +27,217 @@ from timbal.voice.turn_detection import (
     SemanticTurnDetector,
     TurnDetector,
     TurnState,
+    _ends_with_correction_marker,
+    _is_contentless_single_token,
     _is_garbage_commit,
     _is_same_user_utterance_refinement,
+    _is_unvoiced_hallucination,
+    _likely_stt_echo,
     resolve_turn_detector,
 )
 
+
+class TestContentlessSingleToken:
+    """A lone function word is a fragment; a lone "No." is an answer.
+
+    The negatives are the point. `banking_short_reject` is a turn consisting of the
+    single word "No.", so a filter that keys on length alone would delete a scenario.
+    """
+
+    def test_bare_function_words_are_dropped(self) -> None:
+        for text in ("I", "I.", "the", "A.", "my", "To."):
+            assert _is_contentless_single_token(text), text
+
+    def test_meaningful_one_word_turns_survive(self) -> None:
+        for text in ("No.", "Yes.", "Stop.", "Wait.", "And?", "So?", "Okay.", "You?"):
+            assert not _is_contentless_single_token(text), text
+
+    def test_a_function_word_inside_an_utterance_survives(self) -> None:
+        for text in ("I need help.", "The blue one.", "To account 448."):
+            assert not _is_contentless_single_token(text), text
+
+    async def test_provider_ignores_a_lone_pronoun(self) -> None:
+        """Observed on flux/heuristic: 'I' committing its own turn after a finished one,
+        which is a ghost turn — the assistant answers a word the user did not say."""
+        det = ProviderTurnDetector()
+        decision = await det.on_committed("I", _state())
+        assert decision.action is CommitAction.IGNORE
+        assert decision.reason == "contentless"
+
+
+class TestTrailingCorrectionMarker:
+    """A finished sentence plus "Sorry." is the one incompleteness no EOU model sees.
+
+    Both signals score these complete and both are right about the sentence — the
+    speaker is simply not done. The shape requirement is the whole safety margin, so
+    the negatives matter more than the positives here.
+    """
+
+    def test_correction_after_a_finished_sentence(self) -> None:
+        for text in (
+            "Send it to account 447. Sorry.",
+            "I take the blue pill. No, wait.",
+            "Book it for Tuesday. Actually.",
+            "The total is 40. Hold on.",
+        ):
+            assert _ends_with_correction_marker(text), text
+
+    def test_a_bare_marker_is_a_whole_turn(self) -> None:
+        """Holding these buys nothing and costs dead air: there is no sentence in front
+        of the marker, so nothing is being corrected."""
+        for text in ("Sorry.", "Wait, hold on.", "Actually, cancel that.", "Hold on."):
+            assert not _ends_with_correction_marker(text), text
+
+    def test_marker_words_inside_a_sentence_do_not_count(self) -> None:
+        """An apology is not a retraction, and "Actually, Wednesday." is the correction
+        itself rather than the announcement of one."""
+        for text in (
+            "I'm sorry.",
+            "Book it for Tuesday. Actually, Wednesday.",
+            "I need help with my recent order.",
+            "What is your return policy?",
+        ):
+            assert not _ends_with_correction_marker(text), text
+
 from .test_session import MockSTT, MockTTS
+
+
+class TestUnvoicedHallucination:
+    """A silent mic may veto ElevenLabs' inventions, and nothing else.
+
+    The filter runs without the ``_vad_evidence`` gate, so what stops it suppressing
+    real speech is only its narrowness. These pin that: the phrases are the ones
+    actually observed committed on trailing silence, and the negatives are the short
+    barge-ins nearby in length that must survive.
+    """
+
+    @staticmethod
+    def _state(*, mic_speech: bool | None) -> TurnState:
+        return TurnState(
+            assistant_active=False,
+            audio_playing=False,
+            assistant_text="",
+            active_user_text="",
+            seconds_since_turn_start=1.0,
+            seconds_since_last_commit=1.4,
+            partials_since_last_commit=2,
+            mic_speech_since_last_commit=mic_speech,
+        )
+
+    @pytest.mark.parametrize("text", ["Yes.", "Yeah.", "Okay.", "Bye.", "I don't."])
+    def test_silent_mic_vetoes_stock_phrases(self, text: str) -> None:
+        assert _is_unvoiced_hallucination(text, self._state(mic_speech=False))
+
+    @pytest.mark.parametrize("text", ["Stop.", "Yes.", "Wait, hold on.", "Actually, cancel that."])
+    def test_mic_energy_admits_everything(self, text: str) -> None:
+        """A real interruption carries energy, which is what makes the filter safe:
+        even a one-word "Stop." is untouchable once Silero has heard it."""
+        assert not _is_unvoiced_hallucination(text, self._state(mic_speech=True))
+
+    @pytest.mark.parametrize("text", ["Wait, hold on.", "Actually, cancel that.", "No, the white one."])
+    def test_longer_barge_ins_survive_a_silent_mic(self, text: str) -> None:
+        """The second belt: over two words, VAD alone cannot drop it. Silero misses
+        quiet speech, and losing a real instruction costs more than a ghost turn."""
+        assert not _is_unvoiced_hallucination(text, self._state(mic_speech=False))
+
+    def test_no_opinion_never_suppresses(self) -> None:
+        """``None`` is no endpointer or too long a gap to judge — distinct from False,
+        and reading it as False would drop turns on every session without Silero."""
+        assert not _is_unvoiced_hallucination("Yeah.", self._state(mic_speech=None))
+
+
+class TestLikelySttEcho:
+    """Garbled echo must be suppressed, but only in a session shown to leak.
+
+    The transcripts are real, from ``--aec-leak`` runs. What they pin is the split
+    between the two branches: verbatim echo is evidence and always counts, garbled
+    echo is a guess that stays disarmed until the verbatim branch has fired.
+    """
+
+    REPLY = (
+        "Our return policy allows returns within thirty days of purchase, provided "
+        "the item is unused and you still have the original receipt or a valid proof "
+        "of purchase from one of our authorized retailers."
+    )
+    SEGFAULT_REPLY = "A segfault means bad memory access."
+    GARBLED = (
+        "Our retailers.",
+        "Arise retailers.",
+        "Advised retailers.",
+        "advertised retailers.",
+        "Archives to retailers.",
+        "has aroused retailers.",
+    )
+
+    @staticmethod
+    def _state(reply: str) -> TurnState:
+        return TurnState(
+            assistant_active=True,
+            audio_playing=True,
+            assistant_text=reply,
+            active_user_text="",
+            seconds_since_turn_start=2.0,
+            seconds_since_last_commit=2.0,
+            partials_since_last_commit=1,
+        )
+
+    def test_garbled_echo_needs_a_leaking_session(self) -> None:
+        """Unlatched, none of these may be suppressed: the same scores are produced by
+        a user repeating the assistant, and dropping their turn is the worse error."""
+        detector = HeuristicTurnDetector()
+        for echo in self.GARBLED:
+            assert not detector.echo_verdict(echo, self._state(self.REPLY)), echo
+
+    def test_verbatim_echo_arms_the_garbled_branch(self) -> None:
+        """One verbatim leak is proof the mic hears the speaker, and from then on
+        resemblance is admissible. This is the whole mechanism in three lines."""
+        detector = HeuristicTurnDetector()
+        state = self._state(self.REPLY)
+        assert detector.echo_verdict("authorized retailers.", state, arm=True)
+        for echo in self.GARBLED:
+            assert detector.echo_verdict(echo, state), echo
+
+    def test_a_partial_cannot_arm_the_latch(self) -> None:
+        """Regression: `food_long_pause` on two cells, 100% -> 0%.
+
+        In a confirmation flow the user's own partials are verbatim substrings of the
+        reply by construction, so letting a partial count as proof hands the fuzzy
+        branch a loaded gun and it shoots the commit that follows. Suppressing the
+        partial itself is fine and predates this; arming on it is not.
+        """
+        detector = HeuristicTurnDetector()
+        state = self._state("Got it — a large pepperoni pizza.")
+        assert detector.echo_verdict("pepperoni pizza", state)
+        assert not detector.echo_verdict("Pepperoni pizza, please.", state)
+
+    def test_the_latch_does_not_leak_across_sessions(self) -> None:
+        """Detectors are cloned per session, so proof from one call must not arm another."""
+        leaking = HeuristicTurnDetector()
+        assert leaking.echo_verdict("authorized retailers.", self._state(self.REPLY))
+        assert not HeuristicTurnDetector().echo_verdict("Our retailers.", self._state(self.REPLY))
+
+    def test_genuine_barge_ins_survive_even_when_latched(self) -> None:
+        detector = HeuristicTurnDetector()
+        state = self._state(self.REPLY)
+        detector.echo_verdict("authorized retailers.", state)
+        for real in ("Actually, cancel that.", "Wait, hold on.", "Okay, never mind.", "Okay, thanks."):
+            assert not detector.echo_verdict(real, state), real
+
+    def test_assistant_repeating_the_user_is_not_echo(self) -> None:
+        """The regression that produced the latch. `food_long_pause` lost the user's
+        order to a confirmation containing it, on a clean run where no echo existed —
+        and it scores 0.67, inside the range real echo occupies, so only the absence
+        of proof can save it."""
+        reply = "Got it — a large pepperoni pizza."
+        assert not HeuristicTurnDetector().echo_verdict("Pepperoni pizza, please.", self._state(reply))
+
+    def test_verbatim_branch_is_exact_only(self) -> None:
+        assert _likely_stt_echo("memory access.", self.SEGFAULT_REPLY)
+        assert not _likely_stt_echo("and memory access.", self.SEGFAULT_REPLY)
+
+    def test_no_assistant_text_is_never_echo(self) -> None:
+        assert not HeuristicTurnDetector().echo_verdict("Our retailers.", self._state(""))
+
 
 # ---------------------------------------------------------------------------
 # Moved heuristic functions (ported from test_voice_session_stt_refinement.py)
@@ -478,11 +684,12 @@ class TestLocalAudioTurnDetector:
 
     async def test_incomplete_audio_complete_text_short_hold(self) -> None:
         """Confidence tier: Smart Turn under-scores short closers ("Thank you."
-        p=0.036 live) — terminal punctuation disagrees, so the hold shrinks to
-        the short tier instead of eating the full budget as dead air.
+        p=0.036 live) — terminal punctuation disagrees, so the hold shrinks
+        below the full budget instead of eating all of it as dead air.
 
-        Keep this well under the incomplete-text HOLD (1.2s): VAD has usually
-        already waited, and a second 1.2s tax is the cold-start "slow" feel.
+        The tier was 0.35s until the sweep retuned it to 1.2s, which is also
+        what the incomplete-text tier costs: the two now differ only in the
+        logged reason, and "short" means short of ``hold_timeout_secs`` alone.
         """
         det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.1))
         await det.start(type("C", (), {"sample_rate": 16000})())
@@ -491,8 +698,8 @@ class TestLocalAudioTurnDetector:
         assert decision.action is CommitAction.HOLD
         assert decision.reason == "audio_hold_text_complete"
         assert decision.hold_timeout_secs == det.text_complete_hold_timeout_secs
-        assert det.text_complete_hold_timeout_secs == 0.35
-        assert det.text_complete_hold_timeout_secs < det.text_incomplete_hold_timeout_secs
+        assert det.text_complete_hold_timeout_secs == 1.2
+        assert det.text_complete_hold_timeout_secs <= det.text_incomplete_hold_timeout_secs
         assert det.text_complete_hold_timeout_secs < det.hold_timeout_secs
         # Per-session clones keep the knob.
         assert det.clone().text_complete_hold_timeout_secs == det.text_complete_hold_timeout_secs
@@ -580,6 +787,20 @@ class TestLocalAudioTurnDetector:
         det.push_audio(b"\x00\x01" * 8000)
         decision = await det.on_committed("Tell me a story", _state())
         assert decision.action is CommitAction.NEW_TURN
+        await det.close()
+
+    async def test_trailing_correction_holds_despite_both_signals_complete(self) -> None:
+        """`banking_correction` and `medical_self_correction`, marked on five and four
+        cells: audio scores 0.9, the text is a finished sentence, and the correction that
+        follows becomes a second turn. Nothing else in the detector can catch it, because
+        nothing else is wrong — the sentence really is complete."""
+        det = LocalAudioTurnDetector(audio_eou=_FixedAudioEou(0.9))
+        await det.start(type("C", (), {"sample_rate": 16000})())
+        det.push_audio(b"\x00\x01" * 8000)
+        decision = await det.on_committed("Send it to account 447. Sorry.", _state())
+        assert decision.action is CommitAction.HOLD
+        assert decision.reason == "trailing_correction_marker"
+        assert decision.hold_timeout_secs == det.text_incomplete_hold_timeout_secs
         await det.close()
 
     async def test_short_audio_incomplete_text_holds(self) -> None:

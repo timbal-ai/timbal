@@ -10,9 +10,7 @@ from contextlib import aclosing
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
-from timbal.voice.metrics import TurnMetricsEvent
-from timbal.voice.playback import PlaybackTracker
-from timbal.voice.session import (
+from timbal.voice import (
     AgentTextDelta,
     AgentTextDone,
     AudioInputConfig,
@@ -29,8 +27,10 @@ from timbal.voice.session import (
     TTSStream,
     VoiceSession,
     VoiceSessionEvent,
-    _strip_markdown,
 )
+from timbal.voice.metrics import TurnMetricsEvent
+from timbal.voice.playback import PlaybackTracker
+from timbal.voice.session import _strip_markdown
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,
@@ -536,6 +536,175 @@ class TestErrorPropagation:
 
 
 # ---------------------------------------------------------------------------
+# Tests: agent-turn timeout
+# ---------------------------------------------------------------------------
+
+
+class _HungAgent:
+    """Duck-typed agent whose event stream never yields — models a hung LLM."""
+
+    def __call__(self, **_kwargs: object) -> AsyncIterator[object]:
+        return self._gen()
+
+    async def _gen(self) -> AsyncIterator[object]:
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover — keep this an async generator
+            yield None
+
+
+class _HungTTS(TextToSpeech):
+    """TTS whose synthesize never yields — models a hung synthesis provider."""
+
+    def __init__(self) -> None:
+        self.synthesize_calls: list[str] = []
+
+    async def connect(self, config: AudioOutputConfig) -> None:
+        pass
+
+    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        self.synthesize_calls.append(text)
+        await asyncio.Event().wait()
+        if False:  # pragma: no cover — keep this an async generator
+            yield b""
+
+    async def close(self) -> None:
+        pass
+
+
+class TestTurnTimeout:
+    async def test_hung_agent_times_out_speaks_fallback_and_stays_open(self) -> None:
+        """A silent hung turn must not leave the caller waiting forever.
+
+        Expect: SessionError, spoken fallback, session accepts a second turn.
+        """
+        stt = DelayedMockSTT()
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=_HungAgent(),  # type: ignore[arg-type]
+            stt=stt,
+            tts=tts,
+            turn_timeout_secs=0.15,
+            turn_timeout_fallback="Sorry, try again.",
+        )
+        # Swap in a real agent for the *second* turn after the timeout.
+        live_agent = Agent(name="t", model=TestModel(responses=["Recovered."]), tools=[])
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+
+            await stt.inject(TranscriptEvent(type="committed", text="Are you there?"))
+            while not any(isinstance(e, SessionError) and "timed out" in e.message for e in events):
+                await asyncio.sleep(0.01)
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            # AgentTextDone is emitted while the turn's ``finally`` is still
+            # retiring it. A commit landing in that window sees an active
+            # assistant and gets dismissed as a trailing crumb of "Are you
+            # there?" — correct product behavior, wrong test timing. Wait for
+            # the turn task itself.
+            while session._current_turn_task is not None and not session._current_turn_task.done():
+                await asyncio.sleep(0.01)
+
+            session.agent = live_agent
+            await stt.inject(TranscriptEvent(type="committed", text="Hello again"))
+            while sum(1 for e in events if isinstance(e, AgentTextDone)) < 2:
+                await asyncio.sleep(0.01)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+
+        errors = [e for e in events if isinstance(e, SessionError)]
+        assert any("timed out" in e.message for e in errors)
+        assert "Sorry, try again." in tts.synthesized_texts
+        assert any(isinstance(e, AgentTextDone) and e.text == "Sorry, try again." for e in events)
+        assert session.transcript[-1].role == "assistant"
+        assert "Recovered" in session.transcript[-1].text
+
+    async def test_hung_tts_cannot_hang_the_timeout_rescue(self) -> None:
+        """When the TTS is the hung component, the fallback speak is bounded too.
+
+        An unbounded rescue would hang exactly like the turn it rescues: agent
+        times out, the apology goes to the same dead TTS, and the caller waits
+        forever anyway. Expect: rescue attempted, given up, session closable.
+        """
+        stt = DelayedMockSTT()
+        tts = _HungTTS()
+        session = VoiceSession(
+            agent=_HungAgent(),  # type: ignore[arg-type]
+            stt=stt,
+            tts=tts,
+            turn_timeout_secs=0.15,
+        )
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Hello?"))
+            while not any(isinstance(e, SessionError) for e in events):
+                await asyncio.sleep(0.01)
+            # The bounded rescue expires after min(turn_timeout_secs, 10s).
+            while not tts.synthesize_calls:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.3)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=5)
+
+        assert any(isinstance(e, SessionError) and "timed out" in e.message for e in events)
+        assert tts.synthesize_calls  # rescue was attempted against the dead TTS
+        assert not any(isinstance(e, AgentTextDone) for e in events)  # and abandoned
+        assert not session.transcript or session.transcript[-1].role != "assistant"
+
+    async def test_timeout_disabled_when_secs_non_positive(self) -> None:
+        """``turn_timeout_secs <= 0`` must not arm a deadline."""
+        session, _, _ = _make_session(
+            stt_script=[TranscriptEvent(type="committed", text="Hi")],
+            responses=["Hello!"],
+        )
+        session.turn_timeout_secs = 0
+        events = await _collect_events(session)
+        assert not any(isinstance(e, SessionError) for e in events)
+        assert any(isinstance(e, AgentTextDone) for e in events)
+
+    async def test_fast_turn_unaffected_by_default_timeout(self) -> None:
+        session, _, tts = _make_session(
+            stt_script=[TranscriptEvent(type="committed", text="Hi")],
+            responses=["Hello!"],
+        )
+        assert session.turn_timeout_secs > 0
+        events = await _collect_events(session)
+        assert not any(isinstance(e, SessionError) for e in events)
+        assert any(isinstance(e, AgentTextDone) for e in events)
+        assert tts.synthesized_texts  # real reply, not the timeout fallback
+
+
+# ---------------------------------------------------------------------------
 # Tests: _strip_markdown
 # ---------------------------------------------------------------------------
 
@@ -726,6 +895,7 @@ class TestTurnMetrics:
         assert len(records) == 1
         persisted = records[0]["spans"][0]["metadata"]["voice_turn_metrics"]
         assert persisted == live.model_dump()
+        assert live.run_id == records[0]["run_id"]
 
     async def test_metrics_emitted_after_agent_text_done(self) -> None:
         session, _, _ = _make_session(
@@ -1559,6 +1729,19 @@ class _FakeEndpointer:
         pass
 
 
+def _arm_vad(session: VoiceSession, endpointer: object | None) -> None:
+    """Attach a fake endpointer *and* the evidence flag that gates its use.
+
+    ``_vad_evidence`` is a separate flag set by ``_maybe_start_endpointer``
+    only when the detector carries an audio EOU model, because the endpointer
+    now also arms for text-only detectors that must not inherit the veto
+    behaviours. Assigning ``_endpointer`` alone therefore exercises the
+    no-evidence path — which is how three tests here went red unnoticed.
+    """
+    session._endpointer = endpointer  # type: ignore[assignment]
+    session._vad_evidence = endpointer is not None
+
+
 class TestVadBargeInVeto:
     """STT hallucinates plausible phrases from silence (observed live:
     'Not, not too bad, mate.' while nobody spoke) — they pass every text gate
@@ -1568,16 +1751,16 @@ class TestVadBargeInVeto:
     def test_veto_matrix(self) -> None:
         session, _, _ = _make_session()
         # No endpointer (heuristic mode, no Silero) → never veto.
-        session._endpointer = None
+        _arm_vad(session, None)
         assert session._vad_vetoes_barge_in("no stop that") is False
         # VAD armed but unhealthy/starved (None) → no evidence, never veto.
-        session._endpointer = _FakeEndpointer(None)
+        _arm_vad(session, _FakeEndpointer(None))
         assert session._vad_vetoes_barge_in("no stop that") is False
         # Real speech energy present → allow the barge-in.
-        session._endpointer = _FakeEndpointer(1.0)
+        _arm_vad(session, _FakeEndpointer(1.0))
         assert session._vad_vetoes_barge_in("no stop that") is False
         # Armed, healthy, and the mic was silent → hallucination, veto.
-        session._endpointer = _FakeEndpointer(0.0)
+        _arm_vad(session, _FakeEndpointer(0.0))
         assert session._vad_vetoes_barge_in("no stop that") is True
 
     async def _run_barge_in_scenario(self, speech_secs: float | None) -> tuple[VoiceSession, list[VoiceSessionEvent]]:
@@ -1590,7 +1773,7 @@ class TestVadBargeInVeto:
         tts = SlowMockTTS(delay=0.05, num_chunks=6)
         tracker = FakePlaybackTracker()
         session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
-        session._endpointer = _FakeEndpointer(speech_secs)
+        _arm_vad(session, _FakeEndpointer(speech_secs))
 
         events: list[VoiceSessionEvent] = []
 
@@ -1763,7 +1946,7 @@ class TestHoldExpiryTiming:
         )
         session._hold_partial_grace_secs = grace_secs
         if endpointer is not None:
-            session._endpointer = endpointer  # type: ignore[assignment]
+            _arm_vad(session, endpointer)
 
         events: list[VoiceSessionEvent] = []
         elapsed = 0.0
@@ -1851,6 +2034,39 @@ class TestHoldExpiryTiming:
         )
         assert elapsed < 0.8, (
             f"hold expiry took {elapsed:.2f}s — pre-commit VAD speech stretched the grace"
+        )
+
+    async def test_live_mic_extends_hold_without_any_partial(self) -> None:
+        """Measured on ElevenLabs at a 0.3s VAD threshold: an interior pause
+        commits the fragment, then the next fragment's audio is in flight for
+        over a second before the STT emits a partial for it. Extending only on
+        partials loses that race and the hold fires mid-sentence, splitting the
+        utterance — so mic energy alone has to be enough.
+        """
+
+        class _LiveSpeechEP:
+            """Mic is hot *now*; the STT has produced nothing for it yet."""
+
+            def speech_secs_in_window(self, window_secs: float) -> float:  # noqa: ARG002
+                return 0.5
+
+            def notify_committed(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        elapsed, _ = await self._run_hold_scenario(
+            grace_secs=2.0,
+            timeout_secs=0.2,
+            partial_after_commit_delay=None,
+            endpointer=_LiveSpeechEP(),
+        )
+        # Speech never stops, so the extension runs to its cap and no further:
+        # unbounded, the assistant's own echo could hold a turn open forever.
+        assert elapsed > 1.0, f"hold expired after {elapsed:.2f}s while the mic was live"
+        assert elapsed < VoiceSession.HOLD_VAD_MAX_EXTENSION_SECS + 1.5, (
+            f"hold ran {elapsed:.2f}s — the extension cap is not holding"
         )
 
     async def test_dangling_token_hold_is_dropped_on_expiry(self) -> None:
@@ -2018,3 +2234,60 @@ class TestStalePartialSweeper:
 
         assert session.transcript[0].role == "user"
         assert session.transcript[0].text == "What are you doing?"
+
+    async def _run_churn_scenario(self, endpointer: object) -> tuple[_StuckPartialSTT, VoiceSession]:
+        """Stranded partial while the provider keeps emitting *new* partials
+        faster than the stale threshold, so transcript staleness never accrues.
+        """
+        agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
+        stt = _StuckPartialSTT()
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS())
+        session._stale_partial_poll_secs = 0.05
+        session._stale_partial_commit_secs = 0.4
+        _arm_vad(session, endpointer)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            stt.pending_text = "Sorry, one more thing."
+            # 0.1s apart against a 0.4s threshold: every hallucination resets the
+            # anchor well before it can expire.
+            for text in ("Sorry, one more thing.", "Yeah.", "I don't know.", "Yeah.", "Mm.", "Yeah."):
+                await stt.inject(TranscriptEvent(type="partial", text=text))
+                await asyncio.sleep(0.1)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+        return stt, session
+
+    async def test_partial_churn_does_not_disarm_sweeper(self) -> None:
+        """Measured on ElevenLabs barge-ins: it hallucinates on trailing silence,
+        and each invented partial both restarts its own VAD silence timer (so it
+        never commits) and refreshes this sweeper's anchor (so the rescue never
+        fires). The user's interruption was lost outright in 8 of 12 runs. A quiet
+        mic has to be enough to conclude the provider is not going to commit.
+        """
+        stt, session = await self._run_churn_scenario(_FakeEndpointer(0.0))
+        assert stt.commit_calls >= 1, "churning partials kept the sweeper disarmed"
+        assert any(e.role == "user" and e.text == "Sorry, one more thing." for e in session.transcript)
+
+    async def test_live_mic_still_defers_the_sweeper(self) -> None:
+        """The mirror of the above: partials arriving while the mic is genuinely
+        hot mean the user is still talking, and force-committing there would cut
+        them off mid-utterance. Only *silence* may substitute for staleness.
+        """
+        stt, _ = await self._run_churn_scenario(_FakeEndpointer(0.5))
+        assert stt.commit_calls == 0, "sweeper force-committed while the user was still speaking"

@@ -120,9 +120,7 @@ def _prepare_text_for_namo(text: str) -> tuple[str, float | None]:
 
 
 @lru_cache(maxsize=4)
-def _load_bundle(
-    repo_id: str, filename: str, cpu_count: int, max_length: int
-) -> tuple[ort.InferenceSession, object]:
+def _load_bundle(repo_id: str, filename: str, cpu_count: int, max_length: int) -> tuple[ort.InferenceSession, object]:
     """One (ort session, tokenizer) per repo — shared process-wide."""
     path = _hf_download_cached_first(repo_id, filename)
     logger.debug("namo_loading_model", path=path, repo_id=repo_id)
@@ -179,11 +177,7 @@ class NamoTextEouPredictor(TextEouPredictor):
         model_path: str | None = None,
         cpu_count: int = 1,
     ) -> None:
-        self.repo_id = (
-            repo_id
-            or os.environ.get("TIMBAL_NAMO_REPO_ID")
-            or DEFAULT_REPO_ID
-        )
+        self.repo_id = repo_id or os.environ.get("TIMBAL_NAMO_REPO_ID") or DEFAULT_REPO_ID
         self.model_path = model_path
         self.cpu_count = cpu_count
         self.max_length = _MAX_LENGTH_BY_REPO.get(self.repo_id, _DEFAULT_MAX_LENGTH)

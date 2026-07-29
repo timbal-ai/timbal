@@ -10,6 +10,20 @@ from .eou import (
     PunctuationEouPredictor,
     TextEouPredictor,
 )
+from .events import (
+    AgentStatus,
+    AgentTextDelta,
+    AgentTextDone,
+    AudioOutput,
+    SessionEnded,
+    SessionError,
+    SessionInterrupted,
+    SessionStarted,
+    TranscriptCommitted,
+    TranscriptEntry,
+    TranscriptPartial,
+    VoiceSessionEvent,
+)
 from .metrics import (
     TurnMetrics,
     TurnMetricsEvent,
@@ -18,32 +32,20 @@ from .playback import (
     BufferedPlaybackTracker,
     PlaybackTracker,
 )
+from .providers import (
+    AudioInputConfig,
+    AudioOutputConfig,
+    SpeechToText,
+    TextToSpeech,
+    TranscriptEvent,
+    TTSStream,
+)
 from .realtime import (
     RealtimeEvent,
     RealtimeModel,
     RealtimeSession,
 )
-from .session import (
-    AgentStatus,
-    AgentTextDelta,
-    AgentTextDone,
-    AudioInputConfig,
-    AudioOutput,
-    AudioOutputConfig,
-    SessionEnded,
-    SessionError,
-    SessionInterrupted,
-    SessionStarted,
-    SpeechToText,
-    TextToSpeech,
-    TranscriptCommitted,
-    TranscriptEntry,
-    TranscriptEvent,
-    TranscriptPartial,
-    TTSStream,
-    VoiceSession,
-    VoiceSessionEvent,
-)
+from .session import VoiceSession
 from .turn_detection import (
     CommitAction,
     CommitDecision,

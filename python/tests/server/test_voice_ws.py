@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from timbal.server.http import create_app
-from timbal.voice.session import (
+from timbal.voice import (
     AudioInputConfig,
     AudioOutputConfig,
     SpeechToText,
@@ -94,7 +95,7 @@ def _make_tts_class(chunk: bytes = b"\x00\x01" * 16, num_chunks: int = 2):
 # ---------------------------------------------------------------------------
 
 
-def _write_agent_module(tmp_path: Path, *, responses: list[str] | None = None) -> str:
+def _write_agent_module(tmp_path: Path, *, responses: list[str] | None = None, extra: str = "") -> str:
     """Write a temp module with a TestModel Agent and return its import spec."""
     resp_repr = repr(responses or ["Hello from agent!"])
     mod = tmp_path / "voice_agent.py"
@@ -102,6 +103,7 @@ def _write_agent_module(tmp_path: Path, *, responses: list[str] | None = None) -
         "from timbal import Agent\n"
         "from timbal.core.test_model import TestModel\n"
         f"agent = Agent(name='voice_test', model=TestModel(responses={resp_repr}), tools=[])\n"
+        + extra
     )
     return f"{mod.resolve()}::agent"
 
@@ -289,12 +291,14 @@ class TestVoiceWsPlaybackAck:
         app = create_app()
         with TestClient(app) as client:
             with client.websocket_connect("/voice/ws") as ws:
-                ws.send_json({})
+                # Pinned, not defaulted: this asserts what a detector *without* an
+                # audio EOU advertises, so it must not follow the server default.
+                ws.send_json({"turn_detector": "heuristic"})
                 messages = _collect_ws_messages(ws)
 
         started = next(m for m in messages if m["type"] == "session_started")
         assert started["playback_acks"] == "recommended"
-        # Default heuristic detector has no audio EOU model → the local VAD
+        # The heuristic detector has no audio EOU model → the local VAD
         # endpointing fast path never arms, and session_started must say so.
         assert started["vad_endpointing"] is False
 
@@ -530,13 +534,20 @@ class TestVoiceWsClientTurnDetector:
         )
         assert started["turn_detector"] == "LexicalTurnDetector"
 
-    def test_default_is_heuristic_and_advertised(self, monkeypatch, tmp_path: Path) -> None:
+    # A holding detector: which one depends on whether timbal[voice] is installed
+    # (see test_voice_detector_choice.py, which pins that branch directly). The
+    # contract asserted here is that an unconfigured session gets a detector that
+    # *can* hold — the holdless heuristic splits paused utterances into several
+    # turns on any STT that endpoints on silence.
+    _HOLDS = ("LocalAudioTurnDetector", "LexicalTurnDetector")
+
+    def test_default_holds_and_is_advertised(self, monkeypatch, tmp_path: Path) -> None:
         started = self._run_session(monkeypatch, tmp_path, {})
-        assert started["turn_detector"] == "HeuristicTurnDetector"
+        assert started["turn_detector"] in self._HOLDS
 
     def test_non_string_client_value_is_ignored(self, monkeypatch, tmp_path: Path) -> None:
         started = self._run_session(monkeypatch, tmp_path, {"turn_detector": {"evil": True}})
-        assert started["turn_detector"] == "HeuristicTurnDetector"
+        assert started["turn_detector"] in self._HOLDS
 
     def test_unknown_mode_name_falls_back_to_default(self, monkeypatch, tmp_path: Path) -> None:
         started = self._run_session(monkeypatch, tmp_path, {"turn_detector": "quantum"})
@@ -616,6 +627,71 @@ class TestVoiceWsClientTurnDetector:
         assert started["turn_detector"] == "ProviderTurnDetector"
 
 
+class TestVoiceWsTurnTimeoutConfig:
+    """``turn_timeout_secs`` / ``turn_timeout_fallback`` must reach the session."""
+
+    def _capture_session_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        import timbal.voice as voice_pkg
+
+        real = voice_pkg.VoiceSession
+        captured: dict = {}
+
+        class _CapturingSession(real):  # type: ignore[misc, valid-type]
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(voice_pkg, "VoiceSession", _CapturingSession, raising=False)
+        return captured
+
+    def test_turn_timeout_keys_are_plumbed_into_the_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        captured = self._capture_session_kwargs(monkeypatch)
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"turn_timeout_secs": 12, "turn_timeout_fallback": "hold on"})
+                _collect_ws_messages(ws)
+
+        assert captured["turn_timeout_secs"] == 12.0
+        assert captured["turn_timeout_fallback"] == "hold on"
+
+    def test_bad_turn_timeout_value_keeps_the_session_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A non-numeric value must be dropped, not zero the watchdog out."""
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        captured = self._capture_session_kwargs(monkeypatch)
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"turn_timeout_secs": "soon"})
+                messages = _collect_ws_messages(ws)
+
+        assert "turn_timeout_secs" not in captured
+        assert any(m["type"] == "session_started" for m in messages)
+
+
 class TestVoiceWsAudioTransport:
     """Verify audio bytes survive the base64 round-trip over WS."""
 
@@ -642,10 +718,196 @@ class TestVoiceWsAudioTransport:
         app = create_app()
         with TestClient(app) as client:
             with client.websocket_connect("/voice/ws") as ws:
-                ws.send_json({})
+                # This is a transport test: it needs the injected commit to start a
+                # turn immediately. A holding detector (the server default) would
+                # correctly park unpunctuated "test" for seconds and produce no
+                # audio at all.
+                ws.send_json({"turn_detector": "heuristic"})
                 messages = _collect_ws_messages(ws)
 
         audio_msgs = [m for m in messages if m["type"] == "audio"]
         assert len(audio_msgs) == 1
         decoded = base64.b64decode(audio_msgs[0]["data"])
         assert decoded == pcm_chunk
+
+
+class TestVoiceWsRecording:
+    """Call recording: server-defaults-only config → MP3 + manifest per session."""
+
+    def _run_session(self, monkeypatch, spec: str, hello: dict, extra_env: dict | None = None) -> list[dict]:
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        for k, v in (extra_env or {}).items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
+        )
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        # Holding detectors (server default) park unpunctuated "Hello" and
+        # can end the session with zero TTS — empty MP3 close then flakes on
+        # Windows. Pin heuristic like the audio transport tests.
+        hello = {"turn_detector": "heuristic", **hello}
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json(hello)
+                return _collect_ws_messages(ws)
+
+    def test_server_configured_recording_writes_audio_and_manifest(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(
+            tmp_path,
+            responses=["Hi there!"],
+            extra=f"agent.voice_config = {{'recording': {{'dir': {str(rec_dir)!r}}}}}\n",
+        )
+        messages = self._run_session(monkeypatch, spec, {"language": "en"})
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        session_id = started["session_id"]
+        assert session_id
+
+        # Files are finalized before session_ended reaches the client.
+        assert (rec_dir / f"{session_id}.mp3").exists()
+        manifest = json.loads((rec_dir / f"{session_id}.json").read_text())
+        assert manifest["session_id"] == session_id
+        assert manifest["meta"]["transport"] == "websocket"
+        assert [e["role"] for e in manifest["transcript"]] == ["user", "assistant"]
+        assert all(e["offset_ms"] >= 0 for e in manifest["transcript"])
+
+        # The wire transcript carries the same timing info.
+        transcript = next(m for m in messages if m["type"] == "session_transcript")
+        assert transcript["started_at"] == pytest.approx(manifest["started_at"])
+        assert all("offset_ms" in e for e in transcript["entries"])
+
+    def test_client_hello_cannot_switch_recording_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)  # no recording in server defaults
+        messages = self._run_session(
+            monkeypatch, spec, {"recording": {"dir": str(rec_dir)}}
+        )
+        assert any(m["type"] == "session_ended" for m in messages)
+        assert not rec_dir.exists()
+
+    def test_env_var_enables_recording(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("TIMBAL_VOICE_RECORDING_DIR", str(rec_dir))
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class([TranscriptEvent(type="committed", text="Hello")]),
+        )
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"language": "en", "turn_detector": "heuristic"})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert (rec_dir / f"{started['session_id']}.mp3").exists()
+
+    def test_env_knobs_set_layout_and_bitrate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        messages = self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={
+                "TIMBAL_VOICE_RECORDING_DIR": str(rec_dir),
+                "TIMBAL_VOICE_RECORDING_LAYOUT": "split",
+                "TIMBAL_VOICE_RECORDING_BITRATE_KBPS": "64",
+            },
+        )
+        started = next(m for m in messages if m["type"] == "session_started")
+        manifest = json.loads((rec_dir / f"{started['session_id']}.json").read_text())
+        assert manifest["audio"]["layout"] == "split"
+        assert manifest["audio"]["bitrate_kbps"] == 64
+
+    def test_user_voice_config_wins_over_env_knobs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(
+            tmp_path,
+            extra=f"agent.voice_config = {{'recording': {{'dir': {str(rec_dir)!r}, 'layout': 'mixed'}}}}\n",
+        )
+        messages = self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={"TIMBAL_VOICE_RECORDING_LAYOUT": "split"},
+        )
+        started = next(m for m in messages if m["type"] == "session_started")
+        manifest = json.loads((rec_dir / f"{started['session_id']}.json").read_text())
+        assert manifest["audio"]["layout"] == "mixed"
+
+    def test_platform_identity_env_is_stamped_into_manifest_meta(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        messages = self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={
+                "TIMBAL_VOICE_RECORDING_DIR": str(rec_dir),
+                "TIMBAL_ORG_ID": "org-9",
+                "TIMBAL_PROJECT_ID": "proj-7",
+                "TIMBAL_PROJECT_ENV_ID": "env-3",
+                "TIMBAL_APP_ID": "app-1",
+                "TIMBAL_PROJECT_REV": "rev-42",
+            },
+        )
+        started = next(m for m in messages if m["type"] == "session_started")
+        # Identity lands in the manifest (self-describing files for sweeper
+        # ingest), not in the wire payload.
+        assert "org_id" not in started
+        manifest = json.loads((rec_dir / f"{started['session_id']}.json").read_text())
+        assert manifest["meta"]["org_id"] == "org-9"
+        assert manifest["meta"]["project_id"] == "proj-7"
+        assert manifest["meta"]["project_env_id"] == "env-3"
+        assert manifest["meta"]["app_id"] == "app-1"
+        assert manifest["meta"]["project_rev"] == "rev-42"
+        assert manifest["meta"]["transport"] == "websocket"  # session meta still wins/merges
+
+    def test_no_tmp_manifest_left_behind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """The manifest write is atomic (tmp + rename) — sweepers key on json presence."""
+        pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
+        rec_dir = tmp_path / "recordings"
+        spec = _write_agent_module(tmp_path)
+        self._run_session(
+            monkeypatch, spec, {"language": "en"},
+            extra_env={"TIMBAL_VOICE_RECORDING_DIR": str(rec_dir)},
+        )
+        assert not list(rec_dir.glob("*.tmp"))
+        assert len(list(rec_dir.glob("*.json"))) == 1

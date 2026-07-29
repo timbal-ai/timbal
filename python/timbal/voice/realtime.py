@@ -52,21 +52,15 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable, AsyncIterator
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-if TYPE_CHECKING:
-    from .metrics import TurnMetrics
-
-from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
-from .session import (
+from .events import (
     AgentTextDelta,
     AgentTextDone,
-    AudioInputConfig,
     AudioOutput,
-    AudioOutputConfig,
     SessionEnded,
     SessionError,
     SessionInterrupted,
@@ -76,6 +70,9 @@ from .session import (
     TranscriptPartial,
     VoiceSessionEvent,
 )
+from .metrics import TurnMetrics, TurnMetricsEvent
+from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
+from .providers import AudioInputConfig, AudioOutputConfig
 
 logger = structlog.get_logger("timbal.voice.realtime")
 
@@ -382,9 +379,7 @@ class RealtimeSession:
         if self._turn_text or self._turn_audio_bytes:
             # S2S interleaves text and audio without segment boundaries: map the
             # heard position proportionally over the whole turn.
-            heard_text = map_played_bytes_to_text(
-                [(self._turn_text, self._turn_audio_bytes)], heard_bytes
-            )
+            heard_text = map_played_bytes_to_text([(self._turn_text, self._turn_audio_bytes)], heard_bytes)
         if self._turn_active:
             if heard_text:
                 self._transcript.append(TranscriptEntry(role="assistant", text=heard_text))
@@ -412,8 +407,6 @@ class RealtimeSession:
         await self._emit(SessionInterrupted(heard_text=heard_text))
 
     async def _emit_turn_metrics(self, *, interrupted: bool, heard_bytes: int | None = None) -> None:
-        from .metrics import TurnMetrics, TurnMetricsEvent
-
         def _ms(t0: float | None, t1: float | None) -> float | None:
             if t0 is None or t1 is None:
                 return None

@@ -16,10 +16,10 @@ from timbal.voice import LocalAudioTurnDetector, resolve_turn_detector  # noqa: 
 from timbal.voice import turn_detection as turn_detection_module  # noqa: E402
 from timbal.voice.eou import PunctuationEouPredictor  # noqa: E402
 from timbal.voice.namo import (  # noqa: E402
+    _ACK_FORCE_P,
     DEFAULT_REPO_ID,
     MULTILINGUAL_REPO_ID,
     NamoTextEouPredictor,
-    _ACK_FORCE_P,
     _prepare_text_for_namo,
 )
 

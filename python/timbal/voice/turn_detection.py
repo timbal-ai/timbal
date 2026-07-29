@@ -13,10 +13,20 @@ without session changes.
 
 **Modes** (see :func:`resolve_turn_detector`):
 
-* ``heuristic`` (default) — :class:`HeuristicTurnDetector`, no extra deps
+* ``heuristic`` (resolver default) — :class:`HeuristicTurnDetector`, no extra deps
 * ``provider`` — :class:`ProviderTurnDetector`, trust STT/realtime endpointing
 * ``local`` — :class:`LocalAudioTurnDetector` + injectable :class:`AudioEouModel`
 * ``lexical`` — :class:`LexicalTurnDetector`, optional zero-dep text overlay
+
+``heuristic`` is the resolver's default only because it is the one mode that
+needs no extras and makes no assumption about the STT. It is *not* the best
+choice: it cannot hold, so on any STT that endpoints on silence it splits a
+paused utterance into several turns (``benchmarks/voice`` measures 65-69% on
+Nova and ElevenLabs against 96-100% for the holding modes). Pick by STT —
+``provider`` for Deepgram Flux, ``local`` (or ``lexical`` without the
+``timbal[voice]`` extra) for everything else. :mod:`timbal.server.voice` does
+this for you; direct :class:`~timbal.voice.session.VoiceSession` users should
+pass ``turn_detector=`` explicitly.
 
 Provider-native paths (OpenAI ``semantic_vad``, ElevenLabs Scribe VAD commits,
 Deepgram Flux, Gemini Live) map to ``provider`` or a future realtime session
@@ -46,7 +56,7 @@ from .eou import (
 )
 
 if TYPE_CHECKING:
-    from .session import AudioInputConfig
+    from .providers import AudioInputConfig
 
 logger = structlog.get_logger("timbal.voice.turn_detection")
 
@@ -70,6 +80,18 @@ class TurnState(BaseModel):
     """User text of the in-flight turn, or the pending HOLD fragment when holding."""
     seconds_since_turn_start: float
     seconds_since_last_commit: float
+    mic_speech_since_last_commit: bool | None = None
+    """Whether local VAD heard the user speak since the previous commit.
+
+    ``None`` is "no opinion" — no VAD, or too long a gap to judge — and must never
+    be read as ``False``.
+    """
+    seconds_since_assistant_active: float | None = None
+    """Seconds since the assistant was last speaking, or ``None`` while it still is.
+
+    ``None`` also covers "has never spoken", so a detector must treat it as "no echo
+    is possible" rather than "long ago".
+    """
     partials_since_last_commit: int
     """Partial transcripts seen since the previous committed transcript."""
     holding: bool = False
@@ -119,6 +141,53 @@ class TurnDetector(ABC):
 
     def push_audio(self, chunk: bytes) -> None:  # noqa: B027
         """Raw mic PCM, for detectors that run local VAD / audio models."""
+
+    _echo_leak_seen: bool = False
+    """This session has produced verbatim echo, so its AEC demonstrably leaks."""
+
+    def echo_verdict(self, text: str, state: TurnState, *, arm: bool = False) -> bool:
+        """Whether ``text`` is the assistant hearing itself.
+
+        Two branches with very different standing. A verbatim substring of what is
+        playing is direct evidence and always counts. Garbled resemblance is a guess,
+        and only allowed once this session has produced verbatim echo at least once.
+
+        The gate exists because the base rate is everything here. When AEC works — a
+        browser, a headset, most calls — there is no echo in the signal at all, so
+        *every* fuzzy suppression is a false positive by construction, and the cost is
+        the user's turn being silently dropped. When AEC leaks, echo is not a one-off
+        but a property of the session, and the verbatim branch will see it. So rather
+        than asking the unanswerable per-utterance question, ask the easy per-session
+        one first and let the answer arm the aggressive filter.
+
+        Found the hard way. With the fuzzy branch unconditional, `food_long_pause`
+        lost the user's "pepperoni pizza please." to a reply of "Got it — a large
+        pepperoni pizza." on a *clean* run with no leak injected at all — the
+        suppressor firing on echo that could not exist.
+
+        The residual risk is the mirror image: a microphone that leaks only
+        distorted, never verbatim, never arms the fuzzy branch and keeps its ghost
+        turns. That is the better failure to have, and worth stating plainly because
+        the leak corpus behind these thresholds is synthetic — ``--aec-leak`` mixes a
+        scaled copy of the TTS into the mic, which yields cleaner substrings than a
+        real speaker in a real room, and so flatters this design.
+        """
+        if not _echo_window_open(state):
+            return False
+        if _likely_stt_echo(text, state.assistant_text):
+            # Only a commit is allowed to arm the latch. A partial is text the STT is
+            # still revising, and reading it as evidence about the *microphone* is a
+            # category error that costs a turn: in a confirmation flow the user's own
+            # partials are verbatim substrings of the reply by construction. `Pepperoni`
+            # then `Pepperoni pizza` against "Got it — a large pepperoni pizza." armed
+            # the latch on a clean run, and the now-armed resemblance branch ate the
+            # commit that followed. Length cannot tell those apart either — the echo
+            # this exists to catch is `memory access` at 13 chars, the false proof is
+            # `pepperoni pizza` at 15.
+            if arm:
+                self._echo_leak_seen = True
+            return True
+        return self._echo_leak_seen and _resembles_stt_echo(text, state.assistant_text)
 
     def clone(self) -> TurnDetector:
         """Per-session copy for shared configs (server ``voice_config``).
@@ -184,10 +253,31 @@ def _is_garbage_commit(text: str) -> bool:
 # "no", "sí", "ok", "ya" must never match.
 _HESITATION_TOKENS = frozenset(
     {
-        "uh", "uhh", "uhhh", "um", "umm", "ummm", "uhm", "uhum",
-        "hm", "hmm", "hmmm", "mm", "mmm", "mhm", "mmhm",
-        "er", "erm", "eh", "ehh", "ehm", "em",
-        "ah", "ahh", "ahhh", "aah",
+        "uh",
+        "uhh",
+        "uhhh",
+        "um",
+        "umm",
+        "ummm",
+        "uhm",
+        "uhum",
+        "hm",
+        "hmm",
+        "hmmm",
+        "mm",
+        "mmm",
+        "mhm",
+        "mmhm",
+        "er",
+        "erm",
+        "eh",
+        "ehh",
+        "ehm",
+        "em",
+        "ah",
+        "ahh",
+        "ahhh",
+        "aah",
     }
 )
 _HESITATION_WORD_RE = re.compile(r"[a-zà-öø-ÿ']+")
@@ -207,22 +297,158 @@ def _normalize_echo(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+# Similarity between a commit and the best-aligned same-length window of the
+# assistant's recent speech, above which the commit is treated as echo.
+#
+# Calibrated on transcripts from `--aec-leak` runs, not chosen: garbled echo of a
+# known reply scores 0.68-1.00 ("archives to retailers." / "advised retailers." /
+# "add memory access.") and genuine barge-ins against the same replies score
+# 0.24-0.58 ("wait, hold on." 0.43, "stop." 0.40). The two classes do not overlap,
+# and 0.65 sits in the gap nearer the echo side on purpose: suppressing real speech
+# makes the assistant uninterruptible, which is the worse failure of the two.
+#
+# The tightest case is `coding_barge_in_echo` at 0.58, where the user quotes the
+# assistant's own words back ("sorry, the module cache?") — genuinely ambiguous from
+# text alone, and the scenario exists to keep that margin honest.
+_ECHO_WINDOW_RATIO = 0.65
+
+
+# Longest commit a silent mic is allowed to veto. ElevenLabs' inventions on trailing
+# silence are one- and two-word stock phrases — "Yes.", "Yeah.", "Okay." — while the
+# short barge-ins worth protecting run longer ("Wait, hold on.", "Actually, cancel
+# that.") and carry mic energy regardless. Two words leaves margin on both sides.
+# Single tokens that cannot be a whole turn, whatever the mic heard.
+#
+# Deliberately excludes every one-word utterance that *is* a turn — "No.", "Yes.",
+# "Stop.", "Wait.", "And?", "So?" all carry intent and `banking_short_reject` is
+# literally "No." What remains is a closed class of function words that cannot stand
+# alone: either the first word of an utterance the STT cut off, or the likeliest token
+# for a breath. Observed as `'I'` committing its own turn after a finished one on
+# `deepgram-flux/heuristic` (`banking_digits_pause`, `banking_short_reject`), which
+# neither :func:`_is_garbage_commit` (alphanumeric) nor
+# :func:`_is_unvoiced_hallucination` (the user really had just spoken) can reach.
+_CONTENTLESS_SINGLE_TOKENS = frozenset({"i", "a", "an", "the", "of", "to", "my"})
+
+
+def _is_contentless_single_token(text: str) -> bool:
+    """One function word, alone: a fragment or a mis-transcribed breath, never a turn."""
+    words = _WORD_RE.findall(text)
+    return len(words) == 1 and words[0].lower() in _CONTENTLESS_SINGLE_TOKENS
+
+
+MAX_UNVOICED_COMMIT_WORDS = 2
+
+
+def _is_unvoiced_hallucination(text: str, state: TurnState) -> bool:
+    """A short commit the local VAD can prove the user never spoke.
+
+    ElevenLabs invents stock phrases on trailing silence and *commits* them, not
+    merely emits them as partials, so they arrive as turns of their own: measured
+    across `coding_barge_in_echo`, `food_simple`, `medical_barge_in`,
+    `medical_barge_in_twice`, `support_barge_in` and `support_pause_short`, this one
+    behaviour accounts for six of the nine residual failures on the two ElevenLabs
+    cells and every ghost turn among them.
+
+    Unlike the neighbouring VAD gates this does not require
+    :attr:`~timbal.voice.VoiceSession._vad_evidence`, and the exception is deliberate.
+    That flag exists to stop inference behaviours switching on for detectors that
+    never had them, above all ones that could render the assistant uninterruptible —
+    but a real interruption carries mic energy by definition, so the only thing this
+    can suppress is a two-word commit for which Silero heard nothing at all in the
+    gap since the previous one. Half the failures it addresses are on ``lexical``,
+    which has no audio EOU and would therefore never see the fix.
+
+    Silero's own failure mode is missing *quiet* speech, which is why the caller
+    abandons the judgement when the gap since the last commit outruns the speech
+    history rather than guessing from an empty buffer.
+    """
+    if state.mic_speech_since_last_commit is not False:
+        return False
+    return len(text.split()) <= MAX_UNVOICED_COMMIT_WORDS
+
+
+# How long after the assistant stops speaking its echo may still arrive.
+#
+# STT commits lag the audio that produced them — ~0.3s of endpointing on Deepgram
+# Flux, ~1.6s on ElevenLabs — so the tail of a reply routinely commits after playback
+# has already drained. 2s covers both with margin.
+_ECHO_GRACE_SECS = 2.0
+
+
+def _echo_window_open(state: TurnState) -> bool:
+    """The assistant is speaking, or stopped recently enough that echo is still landing.
+
+    Gating the echo check on :attr:`TurnState.assistant_active` alone misses precisely
+    the leak that arrives last, because the flag drops when playback drains while the
+    transcript for that audio is still in flight. Measured under ``--aec-leak``:
+    `coding_followup_after_reply` commits ``"memory access."`` — an exact substring of
+    its own reply, which the first branch of :func:`_likely_stt_echo` would catch — and
+    nothing looks, so it becomes a ghost turn.
+
+    Bounded rather than left open until the next turn, because ``assistant_text``
+    outlives the turn that produced it. Without a deadline a user whose genuine
+    utterance resembled the last reply would have it dropped — and dropping it means no
+    new turn starts to clear that text, so the suppression would never lift.
+    """
+    if state.assistant_active:
+        return True
+    since = state.seconds_since_assistant_active
+    return since is not None and since <= _ECHO_GRACE_SECS
+
+
 def _likely_stt_echo(committed: str, assistant_so_far: str) -> bool:
-    """True if STT text is probably the assistant's own speech leaking into the mic."""
+    """The assistant's own words came back, verbatim.
+
+    Kept exact on purpose. A verbatim substring of what is playing right now is the
+    only echo evidence that cannot also be produced by a user saying the same thing,
+    which makes this the branch safe to run unconditionally — and the branch worth
+    latching the fuzzy one behind.
+    """
     c = _normalize_echo(committed)
     a = _normalize_echo(assistant_so_far)
     if not a:
         return False
     # Short leaks (punctuation / tail of TTS) often transcribe as 1–9 chars.
     if len(c) < 10:
-        if len(c) >= 2 and c in a:
-            return True
+        return len(c) >= 2 and c in a
+    return c in a
+
+
+def _resembles_stt_echo(committed: str, assistant_so_far: str) -> bool:
+    """The assistant's words came back *garbled* — a judgement, not an observation.
+
+    Only meaningful once something else has established that this microphone leaks;
+    see :meth:`TurnDetector.echo_verdict`. On its own it cannot be trusted, because
+    text similarity cannot separate echo from a user repeating the assistant, and
+    that is not a corner case — confirmations, disambiguation and digit readback all
+    put the user's next words into the reply by design. Measured against real
+    transcripts the two populations interleave: genuine speech scores 0.67 for
+    "Pepperoni pizza, please." against "Got it — a large pepperoni pizza." and 0.78
+    for "Yes, the blue one.", while true echo scores 0.76 and 0.79 for
+    "advertised retailers." and "Our retailers.". No threshold splits that.
+    """
+    c = _normalize_echo(committed)
+    a = _normalize_echo(assistant_so_far)
+    if not a or len(c) < 10:
         return False
-    if c in a:
-        return True
     tail_len = min(len(a), max(len(c) * 3, 100))
     tail = a[-tail_len:]
-    return SequenceMatcher(None, c, tail).ratio() >= 0.68
+    if len(tail) <= len(c):
+        return SequenceMatcher(None, c, tail).ratio() >= _ECHO_WINDOW_RATIO
+    # Compare against a *same-length* window of the tail, aligned on the longest run
+    # the two share. Scoring against the whole tail cannot work: ratio() is
+    # 2M/(len(c)+len(tail)) with M <= len(c), and the tail is deliberately sized at
+    # 3x the commit, which caps the score at 0.50 — so a perfect echo scored below
+    # the old 0.68 threshold and this branch was unreachable. Only exact substrings
+    # were ever suppressed, which is precisely why echo the STT garbles slightly
+    # walked through the filter built to catch it. Anchoring also beats sliding every
+    # window: a weak anchor yields a badly-matched window, so coincidental
+    # resemblance elsewhere in the reply cannot inflate the score.
+    block = SequenceMatcher(None, c, tail).find_longest_match(0, len(c), 0, len(tail))
+    if not block.size:
+        return False
+    start = max(0, min(len(tail) - len(c), block.b - block.a))
+    return SequenceMatcher(None, c, tail[start : start + len(c)]).ratio() >= _ECHO_WINDOW_RATIO
 
 
 def _is_same_user_utterance_refinement(active: str, new: str) -> bool:
@@ -282,6 +508,38 @@ def _looks_like_fresh_hold_utterance(text: str) -> bool:
     return True
 
 
+_CORRECTION_MARKERS = frozenset(
+    {"sorry", "no wait", "oh wait", "wait", "actually", "i mean", "scratch that", "my bad", "hold on"}
+)
+_TRAILING_MARKER_RE = re.compile(r"^(?P<head>.*[.!?])\s*(?P<tail>[^.!?]+[.!?]?)$", re.S)
+
+
+def _ends_with_correction_marker(text: str) -> bool:
+    """A finished sentence with a self-correction marker stuck on the end.
+
+    The one case no end-of-utterance model can resolve, because there is nothing to
+    resolve: "Send it to account 447. Sorry." and "I take the blue pill. No, wait."
+    are complete sentences, both EOU signals correctly score them finished, and the
+    speaker is nonetheless mid-thought. What gives it away is discourse, not prosody
+    or syntax — "Sorry." announces a correction the way a hedge announces a pause,
+    which is the same kind of lexical cue :func:`_is_hesitation_only` already reads.
+
+    Deliberately requires the sentence-then-marker *shape* rather than just a marker
+    at the end. A bare "Sorry." is a whole turn and holding it only adds dead air,
+    and "I'm sorry." is an apology rather than a retraction — both fail the head test.
+
+    Found because ElevenLabs hides it: at `vad_silence_threshold_secs=1.2` the provider
+    merges the correction into one commit before any detector sees it, so the defect is
+    invisible there and shows up on Flux and Nova instead. That masking is also what the
+    1.2s default is buying, at ~630ms of dead air on every turn.
+    """
+    m = _TRAILING_MARKER_RE.match(text.strip())
+    if m is None:
+        return False
+    tail = " ".join(_WORD_RE.findall(m.group("tail"))).lower()
+    return tail in _CORRECTION_MARKERS
+
+
 _TERMINAL_END_CHARS = frozenset(".?!。？！")
 
 
@@ -334,11 +592,8 @@ class HeuristicTurnDetector(TurnDetector):
             return PartialDecision.IGNORE
         is_noise = _is_noise(text)
         is_hesitation = _is_hesitation_only(text)
-        is_echo = _likely_stt_echo(text, state.assistant_text) if not is_noise else False
-        too_short = (
-            len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS
-            or len(text.split()) < self.MIN_BARGE_IN_PARTIAL_WORDS
-        )
+        is_echo = self.echo_verdict(text, state) if not is_noise else False
+        too_short = len(text) < self.MIN_BARGE_IN_PARTIAL_CHARS or len(text.split()) < self.MIN_BARGE_IN_PARTIAL_WORDS
         if not is_noise and not is_hesitation and not is_echo and not too_short:
             return PartialDecision.BARGE_IN
         logger.debug(
@@ -359,6 +614,8 @@ class HeuristicTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
         if _is_hesitation_only(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
+        if _is_contentless_single_token(text):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="contentless")
         # A long commit with zero preceding partials while nothing is playing is
         # almost always an STT hallucination on silence. Uses assistant_active
         # only — pending HOLD must not flip that flag (see TurnState.holding).
@@ -372,8 +629,10 @@ class HeuristicTurnDetector(TurnDetector):
             and not state.holding
         ):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination")
-        if state.assistant_active and _likely_stt_echo(text, state.assistant_text):
+        if self.echo_verdict(text, state, arm=True):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
+        if _is_unvoiced_hallucination(text, state):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
         # Pending HOLD: STT often re-commits a longer form of the same fragment.
         # Mid-turn "refinement" IGNORE would freeze the held text until timeout —
         # re-HOLD with the updated utterance instead (session trusts decision.text).
@@ -426,9 +685,7 @@ class HeuristicTurnDetector(TurnDetector):
                 # utterance → not a VAD mid-phrase split. Ultra-early crumbs
                 # are STT ghosts (live: "…killer." then "No." at +55ms);
                 # anything later is a real short barge-in → NEW_TURN below.
-                if _looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(
-                    text
-                ):
+                if _looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(text):
                     words = _WORD_RE.findall(text)
                     if (
                         state.seconds_since_last_commit < self.TRAILING_CRUMB_WINDOW_SECS
@@ -500,7 +757,7 @@ class ProviderTurnDetector(TurnDetector):
             return PartialDecision.IGNORE
         if _is_noise(text) or _is_garbage_commit(text) or _is_hesitation_only(text):
             return PartialDecision.IGNORE
-        if _likely_stt_echo(text, state.assistant_text):
+        if self.echo_verdict(text, state):
             return PartialDecision.IGNORE
         # Same min-words gate as HeuristicTurnDetector: one short partial while
         # the assistant is speaking is more often a mic blip than a barge-in.
@@ -515,8 +772,12 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="garbage")
         if _is_hesitation_only(text):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hesitation")
-        if state.assistant_active and _likely_stt_echo(text, state.assistant_text):
+        if _is_contentless_single_token(text):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="contentless")
+        if self.echo_verdict(text, state, arm=True):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
+        if _is_unvoiced_hallucination(text, state):
+            return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="provider")
 
 
@@ -653,12 +914,37 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
     # with the transcript as the confidence signal): when the audio model says
     # "incomplete" but the text looks finished (terminal punctuation — Smart
     # Turn systematically under-scores short closers like "Thank you." /
-    # "I am David." / "Quite good."), the hold shrinks to this. Keep it short:
-    # the VAD endpointer has usually already paid ~0.5–3s of silence delay
-    # before the commit, so a second 1.2s tax felt like dead air on every
-    # finished utterance Smart Turn under-scored. Both-signals-incomplete
-    # keeps the full timeout.
-    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 0.35
+    # "I am David." / "Quite good."), the hold shrinks to this. Both-signals-
+    # incomplete keeps the full timeout.
+    #
+    # Was 0.35 on the reasoning that a second tax on top of the endpointer's
+    # ~0.5-3s felt like dead air. Swept properly once dead air became
+    # measurable (benchmarks/voice/sweep.py), across 0.35/0.8/1.2/2.0/3.0 and
+    # then 0.35 vs 1.2 over 684 runs of the full suite on all three STT
+    # backends under `local`: correctness 84% -> 92%, with every scenario this
+    # tier exists to protect — closers, all four barge-ins, short answers —
+    # unchanged at 100%. The intuition was half right: holding longer does cost
+    # dead air, but only in the tail (p95 1969 -> 2683ms) because the tier fires
+    # on a minority of turns. The median does not move (831 -> 842ms), which is
+    # why 0.35 read as free and was never re-examined.
+    #
+    # 3.0 scores higher still on pause merges (90% vs 81%) and is not worth it:
+    # p95 dead air goes to 3617ms and `support_pause_short` starts failing.
+    #
+    # Re-measured once the replay harness was found to tear down mid-hold — its
+    # quiescence window was shorter than this timeout, so any hold that outlived it
+    # scored as the product losing a turn, which biased every number above toward
+    # shorter holds. The conclusion survives the correction, but 2.0 deserved the
+    # look: at 52 runs a value it read as a free win (88% against 83% for 16ms at
+    # the median) and did not replicate at 156 — 85% against 82%, four runs inside
+    # one standard deviation, while p95 dead air went 1791 -> 3204ms.
+    #
+    # What the per-scenario split suggests is that no single value is right, since
+    # five scenarios improve and five regress: `banking_digits_pause` wants 2.0
+    # (67% -> 100%), `support_pause_short` wants 1.2 (100% -> 83%). A tier keyed on
+    # something other than text completeness is the interesting direction, not
+    # another sweep of this constant.
+    TEXT_COMPLETE_HOLD_TIMEOUT_SECS = 1.2
     # The tier needs *confidently* finished text (terminal punctuation scores
     # P_TERMINAL=0.95), not the predictor's complete-leaning neutral (0.60) —
     # unpunctuated text must not shorten the hold.
@@ -688,9 +974,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         self.audio_eou = audio_eou
         if completion_threshold is not None:
             self.completion_threshold = completion_threshold
-        self.hold_timeout_secs = (
-            hold_timeout_secs if hold_timeout_secs is not None else self.DEFAULT_HOLD_TIMEOUT_SECS
-        )
+        self.hold_timeout_secs = hold_timeout_secs if hold_timeout_secs is not None else self.DEFAULT_HOLD_TIMEOUT_SECS
         self.text_complete_hold_timeout_secs = (
             text_complete_hold_timeout_secs
             if text_complete_hold_timeout_secs is not None
@@ -911,9 +1195,19 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
                     action=CommitAction.HOLD,
                     text=candidate,
                     reason="audio_complete_text_incomplete",
-                    hold_timeout_secs=min(
-                        self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs
-                    ),
+                    hold_timeout_secs=min(self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs),
+                )
+            if _ends_with_correction_marker(candidate):
+                # Both signals say finished and both are right about the sentence; the
+                # marker says the speaker is not. Held on the short tier because a
+                # correction follows within a few hundred ms by nature — measured at
+                # ~300ms — so the long hold buys nothing and would cost 3s whenever
+                # the marker misleads.
+                return CommitDecision(
+                    action=CommitAction.HOLD,
+                    text=candidate,
+                    reason="trailing_correction_marker",
+                    hold_timeout_secs=min(self.text_incomplete_hold_timeout_secs, self.hold_timeout_secs),
                 )
             return CommitDecision(
                 action=CommitAction.NEW_TURN,
@@ -926,10 +1220,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         if (
             state.active_user_text
             and state.assistant_active
-            and not (
-                _looks_like_finished_utterance(state.active_user_text)
-                and _looks_like_fresh_hold_utterance(text)
-            )
+            and not (_looks_like_finished_utterance(state.active_user_text) and _looks_like_fresh_hold_utterance(text))
         ):
             combined = state.active_user_text.rstrip(", ") + " " + text
             return CommitDecision(
@@ -949,6 +1240,14 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
         if p_text is not None and p_text >= self.TEXT_COMPLETE_TIER_THRESHOLD:
             timeout = min(self.text_complete_hold_timeout_secs, self.hold_timeout_secs)
             reason = "audio_hold_text_complete"
+        logger.debug(
+            "audio_hold_tier",
+            p_audio=round(p, 3),
+            p_text=None if p_text is None else round(p_text, 3),
+            timeout_secs=timeout,
+            reason=reason,
+            text_preview=candidate[:60],
+        )
         return CommitDecision(
             action=CommitAction.HOLD,
             text=candidate,
@@ -1047,8 +1346,6 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
     if callable(spec):
         built = spec()
         if not isinstance(built, TurnDetector):
-            raise TypeError(
-                f"turn_detector factory must return a TurnDetector, got {type(built)!r}"
-            )
+            raise TypeError(f"turn_detector factory must return a TurnDetector, got {type(built)!r}")
         return built
     raise TypeError(f"turn_detector must be str | TurnDetector | callable | None, got {type(spec)!r}")

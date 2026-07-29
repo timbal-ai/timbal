@@ -86,7 +86,7 @@ All downlink messages are **text JSON** with a **`type`** field.
 
 | `type`                  | Fields        | Meaning |
 |-------------------------|---------------|--------|
-| `session_started`       | `playback_acks`, `stt_provider`, `stt_model`, `model`, `turn_detector`, `vad_endpointing` | Voice session is live; safe to show “listening”. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `stt_provider` is the config id actually in effect (`elevenlabs` / `deepgram-flux` / `deepgram-nova`), not the Python class name. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`). `vad_endpointing` is a bool: whether the local [VAD endpointing](#config-overrides) fast path actually armed for this session (not merely what was requested). |
+| `session_started`       | `session_id`, `playback_acks`, `stt_provider`, `stt_model`, `model`, `turn_detector`, `vad_endpointing` | Voice session is live; safe to show “listening”. `session_id` keys the session's [call recording](#call-recording) files and any platform-side conversation record. `playback_acks: "recommended"` advertises the [playback ack](#playback-acks-client--server) protocol. `stt_provider` is the config id actually in effect (`elevenlabs` / `deepgram-flux` / `deepgram-nova`), not the Python class name. `turn_detector` is the class name of the detector actually in effect (e.g. `LocalAudioTurnDetector`). `vad_endpointing` is a bool: whether the local [VAD endpointing](#config-overrides) fast path actually armed for this session (not merely what was requested). |
 | `transcript_partial`    | `text`        | Live STT (may change). |
 | `transcript_committed`  | `text`        | Final user transcript for the utterance. |
 | `agent_text_delta`      | `text`        | Streaming assistant text (captions / UI). |
@@ -109,26 +109,28 @@ Right before the server sends `session_ended`, it sends a `session_transcript` m
 ```json
 {
   "type": "session_transcript",
+  "started_at": 1713099998.500,
   "entries": [
-    { "role": "user", "text": "Hola, ¿qué tal?", "timestamp": 1713100000.123 },
-    { "role": "assistant", "text": "¡Hola! Todo bien, ¿en qué puedo ayudarte?", "timestamp": 1713100002.456 },
-    { "role": "user", "text": "Cuéntame una historia", "timestamp": 1713100010.789 },
-    { "role": "assistant", "text": "Había una vez…", "timestamp": 1713100012.012 }
+    { "role": "user", "text": "Hola, ¿qué tal?", "timestamp": 1713100000.123, "offset_ms": 1623 },
+    { "role": "assistant", "text": "¡Hola! Todo bien, ¿en qué puedo ayudarte?", "timestamp": 1713100002.456, "offset_ms": 3956 },
+    { "role": "user", "text": "Cuéntame una historia", "timestamp": 1713100010.789, "offset_ms": 12289 },
+    { "role": "assistant", "text": "Había una vez…", "timestamp": 1713100012.012, "offset_ms": 13512 }
   ]
 }
 ```
 
-Each entry has:
+`started_at` is the session's wall-clock start (Unix seconds). Each entry has:
 
 | Field       | Type   | Description |
 |-------------|--------|-------------|
 | `role`      | string | `"user"` or `"assistant"`. |
 | `text`      | string | Final committed text for that turn. |
 | `timestamp` | float  | Unix timestamp (seconds) when the text was committed. |
+| `offset_ms` | int    | Milliseconds since `started_at` — lines up with the call recording's playback position. |
 
 This lets the frontend persist the conversation without having to accumulate `transcript_committed` / `agent_text_done` messages itself.
 
-**Audio recording** is available server-side via the `VoiceSession` Python API (`record_audio=True`) but is not sent over the WebSocket (PCM dumps are too large for a single JSON frame). Use the `session.input_audio` / `session.output_audio` properties to access raw PCM bytes after the session closes for server-side storage, conversion, or upload.
+**Audio recording** is available server-side via the `VoiceSession` Python API (`record_audio=True`) but is not sent over the WebSocket (PCM dumps are too large for a single JSON frame). Use the `session.input_audio` / `session.output_audio` properties to access raw PCM bytes after the session closes for server-side storage, conversion, or upload. For a persistent, playable per-call file see [Call recording](#call-recording) below.
 
 ### Turn metrics
 
@@ -168,5 +170,80 @@ Once per turn — after `agent_text_done`, and also when the turn is interrupted
 ### What this is not
 
 - Not the bundled **`GET /voice/`** HTML demo — only the **`/voice/ws`** contract.
-- Not REST/SSE for the live voice loop; real-time voice uses this WebSocket.
+- Not REST/SSE for the live voice loop; real-time voice uses this WebSocket (or WebRTC, below).
 - The LLM/agent runs on the server; the client only captures audio, plays TTS, and renders text events.
+
+## Voice over WebRTC: `POST /voice/rtc`
+
+The same voice session over WebRTC instead of a WebSocket. Requires the **`timbal[voice]`** extra (which ships aiortc) on the server — without it the route answers **501** with an install hint. The bundled playground has a transport dropdown that exercises this path.
+
+**Why choose it over `/voice/ws`:** Opus instead of raw PCM (~10x less bandwidth), jitter buffering and packet-loss concealment on lossy/mobile networks, and **server-paced playback** — the server sends TTS at real time from its own clock, so it always knows exactly what the caller has heard. Barge-in truncation (`interrupted.heard_text`, memory truncation) is exact with **no playback acks**, and the unspoken tail of an interrupted reply is dropped server-side instead of asking the client to clear buffers.
+
+### Signaling
+
+One HTTP round trip, WHIP-style — no trickle ICE (wait for ICE gathering to complete before posting the offer):
+
+```
+POST /voice/rtc
+{ "sdp": "<offer sdp>", "type": "offer", "config": { ...same keys as the WS config frame... } }
+
+200 → { "sdp": "<answer sdp>", "type": "answer" }
+400 → bad offer / no audio track / runnable is not an Agent
+501 → timbal[voice] extra (aiortc) not installed
+```
+
+The offer **must** contain:
+
+- **One audio track** — the mic. Sent Opus-encoded; the server decodes and resamples to the session rate, so the client-side `sample_rate` config key is irrelevant on this transport. Keep `echoCancellation: true` in `getUserMedia` constraints.
+- **A data channel** (any label) — created by the client so its SCTP m-line rides the offer. All non-audio session events arrive here as JSON: the exact payloads of the WS protocol, except there are **no `audio` messages** (TTS is a real audio track the browser plays natively) and **no `playback` acks** (`session_started.playback_acks` is `"native"`, and `transport` is `"webrtc"`).
+
+The server answers with the TTS audio track on the same m-line. Client teardown = close the peer connection; server teardown (session end/error) closes the connection and fires `session_ended` on the data channel first.
+
+### ICE configuration
+
+| Env var | Meaning |
+|---|---|
+| `TIMBAL_STUN_URL` | STUN server; defaults to `stun:stun.l.google.com:19302`. Set to empty to disable (loopback/LAN). |
+| `TIMBAL_TURN_URL` | Optional TURN server for clients behind symmetric NATs. |
+| `TIMBAL_TURN_USERNAME` / `TIMBAL_TURN_PASSWORD` | TURN credentials. |
+
+## Call recording
+
+Server-side, transport-agnostic (WS and WebRTC share the wiring): every session writes **one playable MP3** — the call as heard, on the call timeline — plus a **JSON manifest** with the timestamped transcript and per-turn latency metrics. This is the data an ElevenLabs-style conversation review UI needs: audio player, transcript entries at `offset_ms`, latency chips per turn.
+
+**Enable** (server-side only — client config frames cannot switch recording on or off):
+
+```python
+# via the runnable, full control:
+agent.voice_config = {
+    "recording": {
+        "dir": "recordings",           # required — files land here
+        "layout": "mixed",             # "mixed" (default): mono, both voices summed
+                                       # "split": stereo, caller left / agent right
+        "bitrate_kbps": 32,            # MP3 bitrate (32 kbps mono ≈ 0.25 MB/min)
+        "on_saved": my_async_hook,     # optional: async (RecordingResult) -> None
+    },
+}
+```
+
+or via env (the platform's config surface — all read **per session**, never cached at boot, so late-injected env e.g. after a CRIU restore still applies):
+
+| Env var | Meaning |
+|---|---|
+| `TIMBAL_VOICE_RECORDING_DIR` | Enables recording; files land here. |
+| `TIMBAL_VOICE_RECORDING_LAYOUT` | `mixed` (default) or `split`. |
+| `TIMBAL_VOICE_RECORDING_BITRATE_KBPS` | MP3 bitrate, default `32`. |
+| `TIMBAL_VOICE_RECORDING_UPLOAD` | `platform` → push files to the platform API after each call (see below). |
+
+Keys in `voice_config["recording"]` win over env, per key. Requires the `timbal[voice]` extra (av + numpy); without it the server logs a warning and runs the call unrecorded.
+
+When `TIMBAL_ORG_ID` / `TIMBAL_PROJECT_ID` / `TIMBAL_PROJECT_ENV_ID` / `TIMBAL_APP_ID` / `TIMBAL_PROJECT_REV` are present in env, they are stamped into the manifest `meta` (as `org_id`, `project_id`, ...) so the files are self-describing for ingest.
+
+Per session, keyed by the `session_id` from `session_started`:
+
+- **`{session_id}.mp3`** — mic and TTS mixed on the real call timeline. TTS synthesizes faster than real time, so the agent side is paced by the mic clock; on barge-in the **unheard tail is dropped** exactly like `interrupted.heard_text` truncates the text (exact on WebRTC, ack/estimate-based on WS). Encoded progressively — a crashed process still leaves a playable file.
+- **`{session_id}.json`** — manifest: `session_id`, `started_at`/`ended_at`, resolved config (`transport`, `model`, `stt_provider`, ...), `transcript` entries with `offset_ms`, `turns` (the full `TurnMetrics` per turn), and the audio descriptor (`layout`, `sample_rate`, `bitrate_kbps`, `duration_secs`). Written **atomically** (tmp + rename) and always *after* the MP3 is finalized — "manifest exists" reliably means "recording complete"; an MP3 without a manifest is a crashed call, playable up to the crash.
+
+`on_saved` fires after both files are written (e.g. upload to platform storage and delete the local copy); its failures are logged, never crash the session.
+
+**Platform push** (`TIMBAL_VOICE_RECORDING_UPLOAD=platform`): after each call, a background task PUTs both files as multipart to `{host}/orgs/{org}/projects/{project}/sessions/{session_id}` — host, Bearer credential and org/project resolved by the standard `resolve_platform_config` (env / ~/.timbal), fresh per session. 2xx → local files deleted; 4xx → keep files, log, no retry; 5xx/429/network → exponential backoff (1s base, ×5, cap 5 min, ~1h budget). Uploads never block session teardown, and files are only deleted after a confirmed 2xx — a crash mid-upload leaves them intact for re-ingest. A user-provided `on_saved` in `voice_config` takes precedence over the platform push.

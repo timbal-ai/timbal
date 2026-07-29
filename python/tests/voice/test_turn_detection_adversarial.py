@@ -12,8 +12,8 @@ from contextlib import aclosing
 
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.voice import TranscriptEvent, VoiceSession, VoiceSessionEvent
 from timbal.voice.eou import AudioEouModel
-from timbal.voice.session import TranscriptEvent, VoiceSession, VoiceSessionEvent
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,

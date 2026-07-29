@@ -31,7 +31,7 @@ from pydantic import SecretStr
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from .session import (
+from .providers import (
     AudioInputConfig,
     SpeechToText,
     TranscriptEvent,
@@ -183,13 +183,15 @@ class _DeepgramSTTBase(SpeechToText):
                     continue
                 await self._handle_message(msg)
         except ConnectionClosed as e:
-            logger.debug("dg_stt_ws_closed", error=str(e))
-            # Deepgram closes normally after CloseStream; only surface abnormal
-            # closures as errors so the session tears down loudly.
-            if not self._stop.is_set() and e.rcvd is not None and e.rcvd.code not in (1000, 1001):
-                await self._queue.put(
-                    TranscriptEvent(type="error", text=f"STT connection closed: {e}")
-                )
+            if self._stop.is_set():
+                # Requested teardown (close() sent CloseStream); silence is correct.
+                logger.debug("dg_stt_ws_closed", error=str(e))
+            else:
+                # Provider-initiated, any code — 1000/1001 included. The provider
+                # hanging up mid-call is not the user hanging up; ending the
+                # session silently made the two indistinguishable.
+                logger.warning("dg_stt_ws_closed_unrequested", error=str(e))
+                await self._queue.put(TranscriptEvent(type="error", text=f"STT connection closed: {e}"))
         except Exception as e:
             logger.error("dg_stt_receive_error", error=str(e), exc_info=True)
             await self._queue.put(TranscriptEvent(type="error", text=f"STT receive error: {e}"))
@@ -269,6 +271,15 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         # EndOfTurn; keep this under the session stale window (2.5s).
         if "eot_timeout_ms" not in extra:
             params.append(("eot_timeout_ms", "2000"))
+        # Deepgram's 0.7 ends a turn on a mid-sentence pause: swept over the
+        # pause-merge family, it merges 68% against 82% at 0.8 and 91% at 0.9,
+        # monotonically, for 635ms / 859ms / 1944ms of dead air. 0.8 buys fourteen
+        # points for 214ms and takes the cell to 100% with no ghost turns; 0.9 buys
+        # nine more for a further second, which is worse dead air than ElevenLabs.
+        # `provider` has no hold of its own, so on Flux this value *is* the turn
+        # policy — it is the only setting that can merge a pause there.
+        if "eot_threshold" not in extra:
+            params.append(("eot_threshold", "0.8"))
         for k, v in extra.items():
             if v is None or k.startswith("_") or k not in _FLUX_QUERY_KEYS:
                 continue
