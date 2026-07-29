@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
 from functools import lru_cache, partial
 
 import numpy as np
@@ -183,14 +184,21 @@ class NamoTextEouPredictor(TextEouPredictor):
         self.max_length = _MAX_LENGTH_BY_REPO.get(self.repo_id, _DEFAULT_MAX_LENGTH)
         self._session: ort.InferenceSession | None = None
         self._tokenizer: object | None = None
-        self._load_lock = asyncio.Lock()
+        # threading.Lock — same rationale as SmartTurnEouModel: process-wide
+        # singleton reused across TestClient lifespan vs request event loops.
+        self._load_lock = threading.Lock()
 
     async def start(self) -> None:
-        async with self._load_lock:
+        if self._session is not None:
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._ensure_loaded)
+
+    def _ensure_loaded(self) -> None:
+        with self._load_lock:
             if self._session is not None:
                 return
-            loop = asyncio.get_running_loop()
-            self._session, self._tokenizer = await loop.run_in_executor(None, self._load)
+            self._session, self._tokenizer = self._load()
 
     async def close(self) -> None:
         # Shared process-wide; keep alive.

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from functools import lru_cache, partial
 
 import numpy as np
@@ -161,15 +162,27 @@ class SmartTurnEouModel(AudioEouModel):
         self.cpu_count = cpu_count
         self._session: ort.InferenceSession | None = None
         self._sample_rate = _MODEL_SAMPLE_RATE
-        self._load_lock = asyncio.Lock()
+        # threading.Lock — not asyncio.Lock: this model is a process-wide
+        # singleton shared across sessions, and Starlette's TestClient runs
+        # lifespan warmup on a different event loop than request handlers
+        # (Windows + py3.13 surfaces it). An asyncio.Lock bound during a
+        # HF-download warmup then crashes the first WS session with
+        # "bound to a different event loop". The load itself is sync work
+        # offloaded to the executor, so a thread lock is the right primitive.
+        self._load_lock = threading.Lock()
 
     async def start(self, *, sample_rate: int) -> None:
         self._sample_rate = int(sample_rate) or _MODEL_SAMPLE_RATE
-        async with self._load_lock:
+        if self._session is not None:
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._ensure_loaded)
+
+    def _ensure_loaded(self) -> None:
+        with self._load_lock:
             if self._session is not None:
                 return
-            loop = asyncio.get_running_loop()
-            self._session = await loop.run_in_executor(None, self._load_session)
+            self._session = self._load_session()
 
     async def close(self) -> None:
         # Shared across sessions; the ort session holds no per-run state and
