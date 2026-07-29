@@ -98,6 +98,47 @@ class TestSingleSessionGuard:
         await asyncio.sleep(0.2)
         assert exits == []
 
+    async def test_idle_exit_aborts_if_connected_at_deadline(self, exits: list[int]) -> None:
+        """Media establishing in the same turn as the timer must not kill the call.
+
+        After sleep wakes, _idle_exit yields once so a queued mark_connected()
+        can run before exit; clearing _idle_task must not strand a late
+        connect with an inevitable exit.
+        """
+        guard = SingleSessionGuard(idle_exit_secs=0.05)
+        guard.start()
+        assert guard.claim()
+
+        async def _connect_at_deadline() -> None:
+            await asyncio.sleep(0.05)
+            guard.mark_connected()
+
+        asyncio.create_task(_connect_at_deadline())
+        await asyncio.sleep(0.3)
+        assert exits == []
+        assert guard._connected
+        assert not guard._finished
+
+    async def test_idle_exit_aborts_if_connected_during_drain(
+        self, exits: list[int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """mark_connected during the idle upload drain must not exit the box."""
+        guard = SingleSessionGuard(idle_exit_secs=0.05)
+
+        async def _drain_and_connect() -> None:
+            guard.mark_connected()
+
+        monkeypatch.setattr(
+            "timbal.server.recording_upload.drain_upload_tasks",
+            _drain_and_connect,
+        )
+        guard.start()
+        assert guard.claim()
+        await asyncio.sleep(0.3)
+        assert exits == []
+        assert guard._connected
+        assert not guard._finished
+
     async def test_finish_waits_for_recording_uploads(self, exits: list[int]) -> None:
         """The exit must not race the platform PUT — the process holds the data."""
         from timbal.server import recording_upload

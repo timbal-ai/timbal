@@ -80,6 +80,14 @@ class SingleSessionGuard:
 
     async def _idle_exit(self) -> None:
         await asyncio.sleep(self.idle_exit_secs)
+        # ICE can complete in the same event-loop turn as the timer firing.
+        # Yield once so a queued connectionstatechange → mark_connected()
+        # runs before we decide the box is unused; without this, clearing
+        # _idle_task below would make a late mark_connected() a no-op and
+        # finish() would kill a call that should count as media established.
+        await asyncio.sleep(0)
+        if self._connected or self._finished:
+            return
         # A claimed-but-never-connected session exits too: the window runs
         # boot → media established, so an offer whose ICE never completes
         # doesn't keep the box (and its concurrency slot) alive.
@@ -88,14 +96,26 @@ class SingleSessionGuard:
             idle_exit_secs=self.idle_exit_secs,
             session_claimed=self._claimed,
         )
-        # Detach before finish(): its shutdown() cancels self._idle_task,
-        # which is this very task — cancelling ourselves would abort the
-        # upload drain mid-flight.
+        # Detach before awaiting so shutdown()/finish() cannot cancel this
+        # very task mid-drain. Commit _finished only after the final
+        # _connected check — media may still land while we drain uploads.
         self._idle_task = None
-        # Exit through finish(), not a bare _exit_process: the exit must
-        # never race an in-flight recording upload, even in states that
-        # shouldn't leave one behind while the timer is still armed.
-        await self.finish()
+        if self._connected or self._finished:
+            return
+        from .recording_upload import drain_upload_tasks
+
+        try:
+            await drain_upload_tasks()
+        except Exception as e:
+            logger.error("voice_single_session_drain_failed", error=str(e))
+        if self._connected or self._finished:
+            # Connected (or the session already finished) while draining —
+            # session teardown owns the process lifetime from here.
+            return
+        self._finished = True
+        self._claimed = True
+        logger.info("voice_single_session_exit")
+        _exit_process(0)
 
     def claim(self) -> bool:
         """Reserve the one session slot; False while live or after it was served."""
