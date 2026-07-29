@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from timbal import __version__ as timbal_version
 from timbal.server import voice as voice_routes
 from timbal.server.http import create_app, lifespan
 from timbal.utils import ImportSpec
+from timbal.voice.config import DEFAULT_VOICE_ID, RecordingConfig, VoiceConfig
 
 from .voice_env import VOICE_ENV_KEYS
 
@@ -24,14 +26,14 @@ from .voice_env import VOICE_ENV_KEYS
 class TestDefaultVoiceConfigFromEnv:
     def test_defaults_when_unset(self) -> None:
         cfg = voice_routes.default_voice_config_from_env()
-        assert cfg["stt_provider"] == "elevenlabs"
-        assert cfg["stt_model"] == "scribe_v2_realtime"
-        assert cfg["tts_model"] == "eleven_flash_v2_5"
-        assert cfg["voice"] == voice_routes._DEFAULT_VOICE_ID
-        assert cfg["language"] == "es"
-        assert cfg["sample_rate"] == 16_000
-        assert cfg["stt_extra"]["commit_strategy"] == "vad"
-        assert cfg["tts_extra"]["auto_mode"] is True
+        assert cfg.stt_provider == "elevenlabs"
+        assert cfg.stt_model == "scribe_v2_realtime"
+        assert cfg.tts_model == "eleven_flash_v2_5"
+        assert cfg.voice == DEFAULT_VOICE_ID
+        assert cfg.language is None  # provider auto-detect
+        assert cfg.sample_rate == 16_000
+        assert cfg.stt_extra["commit_strategy"] == "vad"
+        assert cfg.tts_extra["auto_mode"] is True
 
     def test_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TIMBAL_STT_PROVIDER", "deepgram")
@@ -39,18 +41,18 @@ class TestDefaultVoiceConfigFromEnv:
         monkeypatch.setenv("TIMBAL_TTS_MODEL", "custom_tts")
         monkeypatch.setenv("TIMBAL_VOICE_LANGUAGE", "en")
         cfg = voice_routes.default_voice_config_from_env()
-        assert cfg["stt_provider"] == "deepgram"
-        assert cfg["stt_model"] == "custom_stt"
-        assert cfg["tts_model"] == "custom_tts"
-        assert cfg["language"] == "en"
+        assert cfg.stt_provider == "deepgram"
+        assert cfg.stt_model == "custom_stt"
+        assert cfg.tts_model == "custom_tts"
+        assert cfg.language == "en"
 
     def test_elevenlabs_voice_id_precedence(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ELEVENLABS_VOICE_ID", raising=False)
         monkeypatch.delenv("TIMBAL_VOICE_ID", raising=False)
         monkeypatch.setenv("TIMBAL_VOICE_ID", "from_timbal")
-        assert voice_routes.default_voice_config_from_env()["voice"] == "from_timbal"
+        assert voice_routes.default_voice_config_from_env().voice == "from_timbal"
         monkeypatch.setenv("ELEVENLABS_VOICE_ID", "from_el")
-        assert voice_routes.default_voice_config_from_env()["voice"] == "from_el"
+        assert voice_routes.default_voice_config_from_env().voice == "from_el"
 
 
 @pytest.mark.usefixtures("clear_voice_env")
@@ -60,17 +62,17 @@ class TestMergeVoiceConfig:
             pass
 
         merged = voice_routes.merge_voice_config(R())
-        assert merged["language"] == "es"
-        assert merged["voice"] == voice_routes._DEFAULT_VOICE_ID
+        assert merged.language is None
+        assert merged.voice == DEFAULT_VOICE_ID
 
     def test_dict_overrides_top_level(self) -> None:
         class R:
             voice_config = {"voice": "v1", "language": "pt"}
 
         merged = voice_routes.merge_voice_config(R())
-        assert merged["voice"] == "v1"
-        assert merged["language"] == "pt"
-        assert merged["stt_model"] == "scribe_v2_realtime"
+        assert merged.voice == "v1"
+        assert merged.language == "pt"
+        assert merged.stt_model == "scribe_v2_realtime"
 
     def test_callable_voice_config(self) -> None:
         class R:
@@ -79,44 +81,90 @@ class TestMergeVoiceConfig:
                 return {"voice": "callable_v"}
 
         merged = voice_routes.merge_voice_config(R())
-        assert merged["voice"] == "callable_v"
+        assert merged.voice == "callable_v"
+
+    def test_voice_config_instance(self) -> None:
+        class R:
+            voice_config = VoiceConfig(voice="typed_v", language="de")
+
+        merged = voice_routes.merge_voice_config(R())
+        assert merged.voice == "typed_v"
+        assert merged.language == "de"
+        assert merged.stt_model == "scribe_v2_realtime"
 
     def test_stt_extra_deep_merge(self) -> None:
         class R:
             voice_config = {"stt_extra": {"vad_threshold": 0.99}}
 
         merged = voice_routes.merge_voice_config(R())
-        assert merged["stt_extra"]["commit_strategy"] == "vad"
-        assert merged["stt_extra"]["vad_threshold"] == 0.99
+        assert merged.stt_extra["commit_strategy"] == "vad"
+        assert merged.stt_extra["vad_threshold"] == 0.99
 
     def test_tts_extra_deep_merge(self) -> None:
         class R:
             voice_config = {"tts_extra": {"auto_mode": False}}
 
         merged = voice_routes.merge_voice_config(R())
-        assert merged["tts_extra"]["auto_mode"] is False
+        assert merged.tts_extra["auto_mode"] is False
 
     def test_none_values_in_runnable_dict_skipped(self) -> None:
         class R:
             voice_config = {"voice": None, "language": "it"}
 
         merged = voice_routes.merge_voice_config(R())
-        assert merged["voice"] == voice_routes._DEFAULT_VOICE_ID
-        assert merged["language"] == "it"
+        assert merged.voice == DEFAULT_VOICE_ID
+        assert merged.language == "it"
+
+    def test_unknown_key_fails_fast(self) -> None:
+        """A typo'd voice_config key must raise (at server boot), not silently no-op."""
+
+        class R:
+            voice_config = {"languag": "en"}
+
+        with pytest.raises(ValidationError, match="languag"):
+            voice_routes.merge_voice_config(R())
+
+    def test_recording_dict_is_validated(self) -> None:
+        class R:
+            voice_config = {"recording": {"dir": "/tmp/rec", "layout": "sideways"}}
+
+        with pytest.raises(ValidationError, match="layout"):
+            voice_routes.merge_voice_config(R())
+
+    def test_turn_detector_instance_passes_through(self) -> None:
+        sentinel = object()
+
+        class R:
+            voice_config = {"turn_detector": sentinel}
+
+        assert voice_routes.merge_voice_config(R()).turn_detector is sentinel
 
 
 class TestMergeClientVoiceOverrides:
     def test_overlay(self) -> None:
-        base = {"voice": "a", "language": "es", "sample_rate": 16_000}
+        base = VoiceConfig(voice="a", language="es")
         out = voice_routes.merge_client_voice_overrides(base, {"language": "en", "voice": "b"})
-        assert out["language"] == "en"
-        assert out["voice"] == "b"
-        assert out["sample_rate"] == 16_000
+        assert out.language == "en"
+        assert out.voice == "b"
+        assert out.sample_rate == 16_000
 
     def test_none_skipped(self) -> None:
-        base = {"voice": "a", "language": "es"}
+        base = VoiceConfig(voice="a", language="es")
         out = voice_routes.merge_client_voice_overrides(base, {"language": None})
-        assert out["language"] == "es"
+        assert out.language == "es"
+
+    def test_non_allowlisted_keys_ignored(self) -> None:
+        base = VoiceConfig(recording=RecordingConfig(dir="/srv/rec"))
+        out = voice_routes.merge_client_voice_overrides(
+            base,
+            {"recording": {"dir": "/tmp/evil"}, "turn_detector": "heuristic", "bogus": 1, "voice": "b"},
+        )
+        assert out.recording is not None and out.recording.dir == "/srv/rec"
+        assert out.voice == "b"
+
+    def test_allowlist_is_subset_of_model_fields(self) -> None:
+        assert voice_routes.CLIENT_SETTABLE_VOICE_FIELDS <= set(VoiceConfig.model_fields)
+        assert "recording" not in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
 
 
 class TestLifespanVoiceState:
@@ -139,9 +187,9 @@ class TestLifespanVoiceState:
         app = FastAPI()
         spec = ImportSpec.from_fqn(os.environ["TIMBAL_RUNNABLE"])
         async with lifespan(app, spec):
-            assert app.state.voice_config["language"] == "nl"
-            assert app.state.voice_config["voice"] == "nl_voice"
-            assert "stt_extra" in app.state.voice_config
+            assert app.state.voice_config.language == "nl"
+            assert app.state.voice_config.voice == "nl_voice"
+            assert app.state.voice_config.stt_extra["commit_strategy"] == "vad"
 
     @pytest.mark.asyncio
     async def test_lifespan_merge_with_env(
@@ -159,7 +207,7 @@ class TestLifespanVoiceState:
         app = FastAPI()
         spec = ImportSpec.from_fqn(os.environ["TIMBAL_RUNNABLE"])
         async with lifespan(app, spec):
-            assert app.state.voice_config["voice"] == "env_only_voice"
+            assert app.state.voice_config.voice == "env_only_voice"
 
 
 class TestCreateAppVoiceIntegration:
@@ -182,7 +230,7 @@ class TestCreateAppVoiceIntegration:
         with TestClient(app) as client:
             r = client.get("/healthcheck")
             assert r.status_code == 204
-            assert app.state.voice_config["language"] == "sv"
+            assert app.state.voice_config.language == "sv"
 
     def test_voice_page_injects_runnable_meta(
         self,

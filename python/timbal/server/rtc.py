@@ -32,6 +32,7 @@ import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ..voice.config import VoiceConfig
 from .voice import build_voice_session, event_to_payloads, merge_client_voice_overrides
 
 logger = structlog.get_logger("timbal.server.rtc")
@@ -92,8 +93,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
         logger.error("voice_rtc_rejected", reason="runnable is not an Agent", type=type(runnable).__name__)
         return JSONResponse(status_code=400, content={"error": "Voice requires an Agent runnable."})
 
-    defaults: dict = getattr(request.app.state, "voice_config", None) or {}
-    sample_rate = int(merge_client_voice_overrides(defaults, config).get("sample_rate", 16_000))
+    defaults = getattr(request.app.state, "voice_config", None) or VoiceConfig()
+    sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
 
     downlink = PcmQueueTrack(sample_rate=sample_rate)
     session, meta = build_voice_session(

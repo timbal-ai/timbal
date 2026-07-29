@@ -1,5 +1,9 @@
 """timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, turn detection, metrics, and provider implementations."""
 
+from .config import (
+    RecordingConfig,
+    VoiceConfig,
+)
 from .endpointing import (
     VadEndpointer,
     endpointing_delay,
@@ -116,6 +120,7 @@ __all__ = [
     "RealtimeEvent",
     "RealtimeModel",
     "RealtimeSession",
+    "RecordingConfig",
     "SemanticTurnDetector",
     "SessionEnded",
     "SileroVad",
@@ -136,6 +141,7 @@ __all__ = [
     "TurnMetricsEvent",
     "TurnState",
     "VadEndpointer",
+    "VoiceConfig",
     "VoiceSession",
     "VoiceSessionEvent",
     "endpointing_delay",
