@@ -1,6 +1,7 @@
 """timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, turn detection, metrics, and provider implementations."""
 
 from .config import (
+    AmbientAudioConfig,
     RecordingConfig,
     VoiceConfig,
 )
@@ -97,6 +98,7 @@ __all__ = [
     "AgentStatus",
     "AgentTextDelta",
     "AgentTextDone",
+    "AmbientAudioConfig",
     "AudioEouModel",
     "AudioInputConfig",
     "AudioOutput",

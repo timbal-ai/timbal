@@ -911,3 +911,31 @@ class TestVoiceWsRecording:
         )
         assert not list(rec_dir.glob("*.tmp"))
         assert len(list(rec_dir.glob("*.json"))) == 1
+
+
+class TestVoiceWsAmbient:
+    """`session_started` advertises the server's ambient config; clients mix it locally."""
+
+    def _session_started(self, monkeypatch, tmp_path: Path, *, extra: str = "") -> dict:
+        spec = _write_agent_module(tmp_path, extra=extra)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_stt_class([]))
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"turn_detector": "heuristic"})
+                messages = _collect_ws_messages(ws)
+        return next(m for m in messages if m["type"] == "session_started")
+
+    def test_ambient_config_in_session_started(self, monkeypatch, tmp_path: Path) -> None:
+        started = self._session_started(
+            monkeypatch, tmp_path,
+            extra="agent.voice_config = {'ambient': {'source': 'office', 'volume': 0.2}}\n",
+        )
+        assert started["ambient"] == {"source": "office", "volume": 0.2}
+
+    def test_ambient_null_when_unconfigured(self, monkeypatch, tmp_path: Path) -> None:
+        assert self._session_started(monkeypatch, tmp_path)["ambient"] is None

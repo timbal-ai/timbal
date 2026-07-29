@@ -207,6 +207,25 @@ The server answers with the TTS audio track on the same m-line. Client teardown 
 | `TIMBAL_TURN_URL` | Optional TURN server for clients behind symmetric NATs. |
 | `TIMBAL_TURN_USERNAME` / `TIMBAL_TURN_PASSWORD` | TURN credentials. |
 
+## Ambient background audio
+
+Looped background sound so calls don't happen in sterile silence (server-side only — clients cannot switch it on, off, or point it at a file):
+
+```python
+agent.voice_config = {
+    "ambient": {
+        "source": "office",   # preset name or path to an audio file
+        "volume": 0.2,        # 0.0–1.0
+    }
+}
+```
+
+Or via env: `TIMBAL_VOICE_AMBIENT_SOURCE` / `TIMBAL_VOICE_AMBIENT_VOLUME`. Default is off.
+
+Presets (`GET /voice/ambience` lists them): `office` (quiet room tone with typing), `call-center` (typing, printers, ringing phones), `cafe` (low-passed restaurant murmur), `city` (night traffic), `typing` (close keyboard typing). Preset tracks are not bundled — the server downloads them from the Timbal CDN on first use, verifies a pinned sha256, and caches them in `~/.cache/timbal/ambience/` (override the CDN with `TIMBAL_AMBIENCE_BASE_URL`). Custom tracks should be voiceless or unintelligible murmur — intelligible chatter that leaks back through the caller's mic gets transcribed — and loop-clean (the presets bake a crossfade into the seam; see `timbal/voice/ambience/ATTRIBUTIONS.md`).
+
+**How it plays:** `session_started` carries the resolved config as `ambient: {source, volume} | null`; the client fetches the track from `GET /voice/ambience/current` and loops it locally (the playground page does this through WebAudio, with a local volume slider, and a picker for any preset or local override). Nothing is mixed server-side yet, which also means recordings don't contain ambience. Keep volume low (~0.2–0.3): browser echo cancellation handles page-played audio, but a phone speaker can still leak it into the mic.
+
 ## Call recording
 
 Server-side, transport-agnostic (WS and WebRTC share the wiring): every session writes **one playable MP3** — the call as heard, on the call timeline — plus a **JSON manifest** with the timestamped transcript and per-turn latency metrics. This is the data an ElevenLabs-style conversation review UI needs: audio player, transcript entries at `offset_ms`, latency chips per turn.

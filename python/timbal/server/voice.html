@@ -109,6 +109,11 @@
     cursor: not-allowed;
     opacity: 0.65;
   }
+  .panel input[type="range"] {
+    width: 100%;
+    accent-color: var(--primary);
+    cursor: pointer;
+  }
   .model-picker {
     display: flex;
     flex-direction: column;
@@ -615,6 +620,18 @@
           <option value="webrtc">WebRTC (Opus)</option>
         </select>
       </label>
+      <label class="field">
+        <span class="field-label">Ambience</span>
+        <select id="ambient-select" aria-label="Ambience track" title="Background sound looped locally in your browser. 'Server default' plays whatever the agent's voice_config sets (possibly nothing); presets override it. Applies immediately.">
+          <option value="">Server default</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+      <label class="field">
+        <span class="field-label">Ambience volume</span>
+        <input type="range" id="ambient-volume" min="0" max="100" step="1" aria-label="Ambience volume"
+               title="Local to your browser; overrides the server's configured volume.">
+      </label>
       <p class="panel-note">Echo cancellation stays on in every mode. Settings apply on the next Start.</p>
     </aside>
   </div>
@@ -798,6 +815,80 @@ nsSelect.onchange = () => {
   // Applied on the next Start — AudioContext rate / worklet are rebuilt then.
   localStorage.setItem(NS_STORAGE_KEY, nsSelect.value);
 };
+
+// --- Ambient background audio ------------------------------------------
+// Announced by the server in session_started (`voice_config.ambient`), but
+// mixed locally: the track loops through WebAudio on this page, so nothing
+// crosses the wire and echoCancellation treats it as reference audio. The
+// picker lets you override the server's track (or turn it off) — local-only.
+// An <audio loop> element would insert an audible gap at the seam; a looping
+// AudioBufferSourceNode is gapless (the crossfade is baked into the asset).
+const ambientSelect = document.getElementById('ambient-select');
+const ambientSlider = document.getElementById('ambient-volume');
+const AMBIENT_STORAGE_KEY = 'timbal-voice-ambient-volume';
+const AMBIENT_SRC_STORAGE_KEY = 'timbal-voice-ambient-source';
+let ambientSource = null, ambientGain = null, ambientToken = 0;
+/** `ambient` config from the last session_started, or null. */
+let serverAmbient = null;
+
+(async () => {
+  try {
+    const resp = await fetch('/voice/ambience');
+    if (!resp.ok) return;
+    for (const name of (await resp.json()).presets || []) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      ambientSelect.appendChild(opt);
+    }
+    ambientSelect.value = localStorage.getItem(AMBIENT_SRC_STORAGE_KEY) || '';
+    if (ambientSelect.selectedIndex < 0) ambientSelect.value = ''; // stale stored preset
+  } catch (_) {}
+})();
+
+function stopAmbience() {
+  ambientToken += 1; // invalidates in-flight fetch/decode
+  if (ambientSource) { try { ambientSource.stop(); ambientSource.disconnect(); } catch (_) {} ambientSource = null; }
+  if (ambientGain) { try { ambientGain.disconnect(); } catch (_) {} ambientGain = null; }
+}
+
+async function applyAmbience() {
+  stopAmbience();
+  if (!audioCtx) return;
+  const sel = ambientSelect.value;
+  if (sel === 'off' || (!sel && !serverAmbient)) return;
+  const url = sel ? `/voice/ambience/${encodeURIComponent(sel)}` : '/voice/ambience/current';
+  const stored = localStorage.getItem(AMBIENT_STORAGE_KEY);
+  const volume = stored !== null ? Number(stored) / 100 : (serverAmbient?.volume ?? 0.25);
+  ambientSlider.value = String(Math.round(volume * 100));
+  const token = ambientToken;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return;
+    const buf = await audioCtx.decodeAudioData(await resp.arrayBuffer());
+    if (token !== ambientToken || !audioCtx) return;
+    ambientGain = audioCtx.createGain();
+    ambientGain.gain.value = volume;
+    ambientGain.connect(audioCtx.destination);
+    ambientSource = audioCtx.createBufferSource();
+    ambientSource.buffer = buf;
+    ambientSource.loop = true;
+    ambientSource.connect(ambientGain);
+    ambientSource.start();
+  } catch (err) {
+    console.warn('ambience unavailable', err);
+  }
+}
+
+ambientSelect.addEventListener('change', () => {
+  localStorage.setItem(AMBIENT_SRC_STORAGE_KEY, ambientSelect.value);
+  void applyAmbience(); // live switch — no session restart needed
+});
+
+ambientSlider.addEventListener('input', () => {
+  if (ambientGain) ambientGain.gain.value = Number(ambientSlider.value) / 100;
+  localStorage.setItem(AMBIENT_STORAGE_KEY, ambientSlider.value);
+});
 
 function setSessionButton(mode) {
   const start = mode === 'start';
@@ -1285,6 +1376,7 @@ async function endSession({ userInitiated = false, silent = false } = {}) {
   startGen += 1;
   userEndedSession = userInitiated;
   stopAssistantAudio();
+  stopAmbience();
   if (playbackAckTimer) { clearInterval(playbackAckTimer); playbackAckTimer = null; }
   micAudioToWs = false;
   sessionReady = false;
@@ -1500,6 +1592,8 @@ function handleServerMessage(msg) {
   switch (msg.type) {
       case 'session_started':
         sessionReady = true;
+        serverAmbient = msg.ambient || null;
+        void applyAmbience();
         {
           const bits = [];
           if (msg.model) bits.push(msg.model);
