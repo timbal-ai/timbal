@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 
 from .. import __version__ as timbal_version
+from ..voice.ambience import PRESETS as AMBIENT_PRESETS
+from ..voice.ambience import ensure_ambient_source
 from ..voice.config import RecordingConfig, VoiceConfig
 
 logger = structlog.get_logger("timbal.server.voice")
@@ -47,6 +49,10 @@ def default_voice_config_from_env() -> VoiceConfig:
         kwargs["voice"] = v
     if v := os.environ.get("TIMBAL_VOICE_LANGUAGE"):
         kwargs["language"] = v
+    if v := os.environ.get("TIMBAL_VOICE_AMBIENT_SOURCE"):
+        kwargs["ambient"] = {"source": v}
+        if vol := os.environ.get("TIMBAL_VOICE_AMBIENT_VOLUME"):
+            kwargs["ambient"]["volume"] = vol
     return VoiceConfig(**kwargs)
 
 
@@ -256,6 +262,44 @@ async def voice_page(request: Request) -> HTMLResponse:
     body = json.dumps(meta)
     html = html.replace(_VOICE_HTML_META_TOKEN, body)
     return HTMLResponse(html)
+
+
+@router.get("/ambience")
+async def ambience_index() -> dict[str, Any]:
+    """Preset catalog for the playground picker."""
+    return {"presets": sorted(AMBIENT_PRESETS)}
+
+
+@router.get("/ambience/current")
+async def ambience_current(request: Request) -> FileResponse:
+    """The track configured on this server (preset or custom file).
+
+    This is the only way a custom server-side file reaches the browser —
+    clients never send paths.
+    """
+    cfg = getattr(request.app.state, "voice_config", None)
+    ambient = cfg.ambient if cfg is not None else None
+    if ambient is None:
+        raise HTTPException(status_code=404, detail="No ambient audio configured")
+    return FileResponse(await _ambient_path(ambient.source))
+
+
+@router.get("/ambience/{name}")
+async def ambience_preset(name: str) -> FileResponse:
+    """Known presets only — never an arbitrary path."""
+    name = name.strip().lower()
+    if name not in AMBIENT_PRESETS:
+        raise HTTPException(status_code=404, detail=f"Unknown ambience preset {name!r}")
+    return FileResponse(await _ambient_path(name))
+
+
+async def _ambient_path(source: str) -> Path:
+    """Presets download lazily from the CDN into ``~/.cache/timbal/ambience``."""
+    try:
+        return await asyncio.to_thread(ensure_ambient_source, source)
+    except Exception as e:
+        logger.warning("ambience_fetch_failed", source=source, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Ambience source unavailable: {e}") from e
 
 
 def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux: bool) -> Any:
@@ -510,6 +554,10 @@ def build_voice_session(
         "stt_model": stt_model,
         "model": llm_model,
         "turn_detector": turn_detector_label,
+        # Server config, not client-settable. Phase 1: the browser mixes this
+        # locally (fetch /voice/ambience/current); nothing is mixed server-side.
+        "ambient": ({"source": defaults.ambient.source, "volume": defaults.ambient.volume}
+                    if defaults.ambient else None),
     }
     return session, meta
 

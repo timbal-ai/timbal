@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .ambience import validate_ambient_source
 
 # Override with ELEVENLABS_VOICE_ID / TIMBAL_VOICE_ID (cloned/custom voices
 # are account-specific).
@@ -30,6 +32,27 @@ def _default_stt_extra() -> dict[str, Any]:
         "vad_silence_threshold_secs": 1.2,
         "vad_threshold": 0.4,
     }
+
+
+class AmbientAudioConfig(BaseModel):
+    """Looped background sound mixed into the agent's output.
+
+    Server-side only — never client-settable (``source`` may be a file path,
+    and a browser must not point the server at arbitrary files).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    """Preset name (see ``timbal.voice.ambience.PRESETS``) or audio file path.
+    Presets are fetched from the CDN on first use, not at boot."""
+    volume: float = Field(default=0.3, ge=0.0, le=1.0)
+
+    @field_validator("source")
+    @classmethod
+    def _source_is_valid(cls, v: str) -> str:
+        validate_ambient_source(v)
+        return v
 
 
 class RecordingConfig(BaseModel):
@@ -71,3 +94,5 @@ class VoiceConfig(BaseModel):
     turn_timeout_fallback: str | None = None
     """None → ``VoiceSession`` default; "" → no spoken apology on timeout."""
     recording: RecordingConfig | None = None
+    ambient: AmbientAudioConfig | None = None
+    """None → no background audio."""
