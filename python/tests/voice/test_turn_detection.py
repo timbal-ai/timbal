@@ -1510,7 +1510,7 @@ class TestHoldInSession:
         import asyncio
 
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
-        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
 
         await session._arm_hold("I was wondering about", 0.01)
         stale = session._hold_task

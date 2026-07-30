@@ -1581,7 +1581,7 @@ class TestInterruptionTruncation:
 
         agent = Agent(name="t", model=TestModel(responses=["should not speak", "ok"]), tools=[])
         stt = DelayedMockSTT()
-        session = _GatedSession(agent=agent, stt=stt, tts=MockTTS())
+        session = _GatedSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector="heuristic")
         events: list[VoiceSessionEvent] = []
 
         async def _empty_audio() -> AsyncIterator[bytes]:
