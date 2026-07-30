@@ -119,10 +119,12 @@ class VoiceConfig(BaseModel):
     encoding: str = "pcm_s16le"
     stt_extra: dict[str, Any] = Field(default_factory=_default_stt_extra)
     tts_extra: dict[str, Any] = Field(default_factory=lambda: {"auto_mode": True})
-    turn_detector: Any = "local"
+    turn_detector: Any = None
     """Mode name, ``TurnDetector`` instance, or zero-arg factory.
-    Default ``"local"`` (Smart Turn + Namo + Silero VAD endpointing when
-    ``timbal[voice]`` is installed). Clients may only send mode names
+    ``None`` (unset) resolves to ``"local"`` — Smart Turn + Namo + Silero VAD
+    endpointing — when ``timbal[voice]`` is installed, and degrades to
+    ``"lexical"`` without it (an explicit ``"local"`` pin would skip that
+    degradation and behave holdless). Clients may only send mode names
     (see ``select_turn_detector_spec``)."""
     vad_endpointing: bool | None = None
     """None → auto: on when the turn detector exposes an audio EOU model."""
