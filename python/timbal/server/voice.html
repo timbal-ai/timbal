@@ -875,11 +875,11 @@ const nsSelect = document.getElementById('ns-select');
 const micViz = document.getElementById('mic-viz');
 
 const TD_STORAGE_KEY = 'timbal-voice-turn-detector';
-// Default: Smart Turn + Namo (+ Silero VAD endpointing). Unknown stored values
-// fall back to that too (empty string used to mean "server default", which is
-// the same mode on a voice install).
-tdSelect.value = localStorage.getItem(TD_STORAGE_KEY) || 'local';
-if (![...tdSelect.options].some((o) => o.value === tdSelect.value)) tdSelect.value = 'local';
+// Default '' = server default: Smart Turn + Namo (+ Silero VAD endpointing) on
+// a voice install, lexical without the extra. Pinning 'local' here would skip
+// that server-side degradation (an explicit degraded 'local' is holdless).
+tdSelect.value = localStorage.getItem(TD_STORAGE_KEY) || '';
+if (![...tdSelect.options].some((o) => o.value === tdSelect.value)) tdSelect.value = '';
 tdSelect.onchange = () => {
   // Applied on the next Start (no reload) — modes are fixed per WebSocket hello.
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
