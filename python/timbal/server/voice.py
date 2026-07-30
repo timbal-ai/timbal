@@ -684,7 +684,6 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
 @router.websocket("/ws")
 async def voice_ws(ws: WebSocket) -> None:
     from ..core.agent import Agent
-    from ..voice import SessionInterrupted, VoiceSessionEvent
 
     await ws.accept()
     logger.info("voice_ws_connected")
@@ -694,6 +693,31 @@ async def voice_ws(ws: WebSocket) -> None:
         logger.error("voice_ws_rejected", reason="runnable is not an Agent", type=type(runnable).__name__)
         await ws.close(code=1008, reason="Voice requires an Agent runnable")
         return
+
+    guard = getattr(ws.app.state, "single_session_guard", None)
+    if guard is None:
+        await _serve_voice_ws(ws, runnable)
+        return
+
+    if not guard.claim():
+        logger.info("voice_ws_rejected", reason="single-session server already served its session")
+        await ws.close(code=1008, reason="Single-session server: a voice session was already served")
+        return
+    # On this transport the socket *is* the media connection.
+    guard.mark_connected()
+    try:
+        await _serve_voice_ws(ws, runnable)
+    finally:
+        # However the session ended — including an exception in the handshake
+        # or session build — this socket was the one session. Without this,
+        # a failure between claim() (idle timer disarmed) and the session's
+        # own teardown would leave the process alive forever.
+        await guard.finish()
+
+
+async def _serve_voice_ws(ws: WebSocket, runnable: Any) -> None:
+    """One WebSocket voice session: hello → session → events, until close."""
+    from ..voice import SessionInterrupted, VoiceSessionEvent
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
 

@@ -51,6 +51,18 @@ logger = structlog.get_logger("timbal.server.recording_upload")
 _upload_tasks: set[asyncio.Task[Any]] = set()
 
 
+async def drain_upload_tasks() -> None:
+    """Block until every in-flight recording upload has finished.
+
+    Single-session boxes call this before exiting: the process is the only
+    thing holding the recording, so the exit must wait for the platform PUT.
+    Bounded by the upload's own retry budget (~1h), which sits under the
+    platform's hard session cap.
+    """
+    while _upload_tasks:
+        await asyncio.gather(*list(_upload_tasks), return_exceptions=True)
+
+
 def _recording_backoff(attempt: int) -> float:
     """1, 5, 25, 125, then 300s flat — the agreed recording retry curve."""
     return min(1.0 * 5.0**attempt, 300.0)
