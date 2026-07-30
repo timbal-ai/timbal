@@ -10,7 +10,7 @@ Usage (from repo root)::
 Then open http://127.0.0.1:4444/voice
 
 Modes:
-  heuristic  — default; today's regex/similarity behavior
+  heuristic  — holdless regex/similarity (opt-in; default is local)
   provider   — trust ElevenLabs VAD commits (minimal filtering)
   lexical    — punctuation/dangling HOLD (noticeable mid-thought pauses)
   local      — audio EOU (Smart Turn v3 ONNX with `timbal[voice]`; else == heuristic)
@@ -27,7 +27,7 @@ from timbal import Agent
 from timbal.core.tool import Tool
 from timbal.voice import resolve_turn_detector
 
-_MODE = os.environ.get("TIMBAL_VOICE_TURN_DETECTOR", "heuristic").strip().lower()
+_MODE = os.environ.get("TIMBAL_VOICE_TURN_DETECTOR", "local").strip().lower()
 
 
 async def get_datetime() -> str:

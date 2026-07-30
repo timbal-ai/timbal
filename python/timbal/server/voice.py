@@ -306,6 +306,26 @@ async def voice_page(request: Request) -> HTMLResponse:
     return HTMLResponse(html)
 
 
+@router.get("/meta")
+async def voice_meta(request: Request) -> dict[str, Any]:
+    """Runnable identity + model catalog as JSON.
+
+    Same payload as the blob injected into the served HTML — this endpoint
+    exists for the *standalone* playground (opened from the launcher or the
+    filesystem), which can't get the injection and fetches it cross-origin
+    from whatever local server it's pointed at.
+    """
+    runnable = getattr(request.app.state, "runnable", None)
+    import_spec = os.environ.get("TIMBAL_RUNNABLE", "")
+    meta = (
+        runnable_meta_for_voice_page(runnable, import_spec)
+        if runnable is not None
+        else {"name": "", "kind": "", "import_spec": import_spec}
+    )
+    meta["version"] = timbal_version
+    return meta
+
+
 @router.get("/ambience")
 async def ambience_index() -> dict[str, Any]:
     """Preset catalog for the playground picker."""
@@ -378,22 +398,12 @@ def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux
     if spec is not None:
         return spec
 
-    # Nothing chosen. The holdless heuristic is the worst of the four on every
-    # backend that endpoints on silence — 65-69% against 96-100% for detectors
-    # that can hold — because Nova and ElevenLabs commit each fragment of a
-    # paused utterance separately, and only a hold puts them back together.
-    #
-    # The warmup path already resolved "local" for this case, so a server with no
-    # `turn_detector` configured was loading Smart Turn, Namo and Silero at
-    # startup and then handing the session a detector that used none of them.
-    #
-    # Without `timbal[voice]`, `local` returns the heuristic decision verbatim
-    # (its punctuation fallback sits behind the audio-EOU branch), so it would buy
-    # nothing; `lexical` holds an unfinished transcript with no extra deps. Asking
-    # the resolver beats probing imports: the degradation rule stays in one place.
+    # Nothing chosen — same rule as ``resolve_turn_detector(None)``: local when
+    # the voice extra is present, lexical otherwise. Never the holdless heuristic.
     from ..voice.turn_detection import resolve_turn_detector
 
-    mode = "local" if getattr(resolve_turn_detector("local"), "audio_eou", None) is not None else "lexical"
+    resolved = resolve_turn_detector(None)
+    mode = "local" if getattr(resolved, "audio_eou", None) is not None else "lexical"
     logger.info("voice_ws_default_turn_detector", using=mode)
     return mode
 
@@ -478,22 +488,22 @@ def build_voice_session(
     # may additionally select a *mode name* (string only — useful for A/B
     # testing detectors from the playground); instances and factories can never
     # come over the wire. When neither picks one, the server chooses by STT
-    # rather than taking ``resolve_turn_detector``'s zero-dep default, because
-    # only here is the STT's endpointing behaviour known.
+    # (Flux → provider; else the resolver default — local / lexical).
     turn_detector = None
     raw_td = select_turn_detector_spec(
         defaults.turn_detector,
         client_config.get("turn_detector"),
         stt_is_flux=stt_is_flux,
     )
-    if raw_td is not None:
-        try:
-            # voice_config is process-wide; VoiceSession clones the resolved
-            # detector so concurrent connections never share buffers/lifecycle.
-            turn_detector = resolve_turn_detector(raw_td)
-        except (TypeError, ValueError) as e:
-            logger.warning("voice_ws_bad_turn_detector", error=str(e))
-    turn_detector_label = type(turn_detector).__name__ if turn_detector is not None else "HeuristicTurnDetector"
+    try:
+        # voice_config is process-wide; VoiceSession clones the resolved
+        # detector so concurrent connections never share buffers/lifecycle.
+        # ``None`` / bad specs fall through to the resolver default (local).
+        turn_detector = resolve_turn_detector(raw_td)
+    except (TypeError, ValueError) as e:
+        logger.warning("voice_ws_bad_turn_detector", error=str(e))
+        turn_detector = resolve_turn_detector(None)
+    turn_detector_label = type(turn_detector).__name__
 
     # Optional bool: force the local VAD endpointing fast path on/off. Default
     # (absent / non-bool) is auto — on when the detector has an audio EOU model
