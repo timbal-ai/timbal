@@ -7,7 +7,7 @@ This README documents how a **custom frontend** integrates with the **voice agen
 ### Bundled voice playground
 
 - **Embedded** (served by a running agent): `GET /voice` on a `timbal.server` — auto-dials that agent; the page injects the runnable meta at serve time.
-- **Standalone** (no agent required): `python -m timbal.server.playground` — serves the same HTML raw, opens a Target panel, and can spawn a local `uv run python -m timbal.server --import_spec …` child on demand, or point at a platform workforce (`api.dev.timbal.ai` / `api.timbal.ai`) via ticket-authenticated WS / bearer-authenticated RTC. Fields persist in `localStorage`.
+- **Standalone** (no agent required): `python -m timbal.server.playground` — serves the same HTML raw and opens a Target panel. Local target: enter an agent path (`path/to/agent.py::object`, optional fixed port) and press Start — the launcher spawns `uv run python -m timbal.server --import_spec …` from the agent file's directory, waits for the healthcheck, and the page dials it (changing agent/port respawns on the next Start). Platform target: a deployed workforce (`api.dev.timbal.ai` / `api.timbal.ai`) via ticket-authenticated WS / bearer-authenticated RTC. Fields persist in `localStorage`.
 
 ---
 

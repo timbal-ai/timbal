@@ -4,11 +4,12 @@ Serves ``voice.html`` *without* a running agent underneath. The page detects it
 was served raw (no injected runnable meta) and switches to standalone mode,
 where you pick a target:
 
-* **Local server** — a ``timbal.server`` process. The page can dial one that is
-  already running (by URL), or ask *this* launcher to spawn one: the launcher
-  runs ``uv run python -m timbal.server --import_spec … --port …`` from the
-  agent file's directory (so ``uv`` resolves that project's environment and
-  ``.env``) and reports its state/logs back to the page.
+* **Local server** — pick an agent file (``path/to/agent.py::object``) and
+  press Start: the page asks *this* launcher to spawn ``uv run python -m
+  timbal.server --import_spec … --port …`` from the agent file's directory (so
+  ``uv`` resolves that project's environment and ``.env``), waits for the
+  healthcheck, and dials it. The port is picked automatically unless fixed in
+  the form. Changing the agent or port respawns on the next Start.
 * **Platform** — a deployed workforce through ``api.timbal.ai`` /
   ``api.dev.timbal.ai``. The page talks to the platform directly (ticket mint
   for WS, bearer-authenticated POST for RTC); the launcher is not involved.

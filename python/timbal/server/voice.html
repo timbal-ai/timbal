@@ -111,6 +111,7 @@
     flex-direction: column;
     gap: 0.3rem;
   }
+  .field[hidden] { display: none !important; }
   .field-label {
     font-size: 0.6875rem;
     font-weight: 600;
@@ -628,20 +629,24 @@
           </select>
         </label>
         <div id="target-local" class="target-fields">
-          <label class="field">
-            <span class="field-label">Server URL</span>
-            <input type="text" id="local-url" placeholder="http://localhost:4444" title="A running timbal.server — spawn one below or point at one you started yourself.">
-          </label>
           <div id="launcher-box" class="target-fields" hidden>
             <label class="field">
-              <span class="field-label">Import spec</span>
-              <input type="text" id="launcher-spec" placeholder="path/to/agent.py::agent" title="Runs `uv run python -m timbal.server --import_spec …` from the file's directory (relative paths resolve against the launcher's cwd).">
+              <span class="field-label">Agent</span>
+              <input type="text" id="launcher-spec" placeholder="path/to/agent.py::agent" title="Spawned automatically on Start: runs `uv run python -m timbal.server --import_spec …` from the file's directory (relative paths resolve against the launcher's cwd).">
+            </label>
+            <label class="field">
+              <span class="field-label">Port</span>
+              <input type="text" id="launcher-port" placeholder="auto" inputmode="numeric" title="Port for the spawned server. Leave empty to pick a free one automatically.">
             </label>
             <div class="launcher-row">
-              <button type="button" id="btn-launcher" data-action="spawn">Spawn server</button>
+              <button type="button" id="btn-launcher" hidden>Stop server</button>
               <span id="launcher-state" class="launcher-state"></span>
             </div>
           </div>
+          <label class="field" id="local-url-field">
+            <span class="field-label">Server URL</span>
+            <input type="text" id="local-url" placeholder="http://localhost:4444" title="A timbal.server you started yourself.">
+          </label>
         </div>
         <div id="target-platform" class="target-fields" hidden>
           <label class="field">
@@ -1065,8 +1070,10 @@ function renderModelOptions(preferred, agentDefault) {
 // --- Agent target (standalone mode) ---------------------------------------
 // Embedded pages keep dialing their own origin exactly as before. Standalone
 // pages route everything through one of two targets:
-//   local    — a timbal.server at an arbitrary URL, optionally spawned via
-//              the launcher endpoints on this page's own origin.
+//   local    — a timbal.server on this machine. Served by the playground
+//              launcher, pressing Start spawns it from the agent file path
+//              (optional fixed port); without the launcher (file://), you
+//              point at a server you started yourself by URL.
 //   platform — a deployed workforce through the Timbal platform API. Same
 //              wire protocol; the platform tunnels WS (ticket-authenticated)
 //              and relays RTC signaling (bearer-authenticated).
@@ -1075,10 +1082,16 @@ const targetModeSelect = document.getElementById('target-mode');
 const targetLocalBox = document.getElementById('target-local');
 const targetPlatformBox = document.getElementById('target-platform');
 const localUrlInput = document.getElementById('local-url');
+const localUrlField = document.getElementById('local-url-field');
 const launcherBox = document.getElementById('launcher-box');
 const launcherSpecInput = document.getElementById('launcher-spec');
+const launcherPortInput = document.getElementById('launcher-port');
 const btnLauncher = document.getElementById('btn-launcher');
 const launcherStateEl = document.getElementById('launcher-state');
+/** True when this page is served by the playground launcher (spawn-on-Start). */
+let launcherAvailable = false;
+/** Spec string the current child was spawned from — a mismatch respawns on Start. */
+let lastSpawnedSpec = null;
 const pf = {
   api: document.getElementById('pf-api'),
   org: document.getElementById('pf-org'),
@@ -1935,6 +1948,12 @@ async function start() {
   const gen = startGen;
   // Fail on incomplete platform config before prompting for the microphone.
   if (targetMode() === 'platform') validatePlatform(platformValues());
+  // Local target behind the launcher: spawn (or reuse) the agent server first,
+  // so the WS/RTC dial below lands on a healthy process.
+  if (targetMode() === 'local' && launcherAvailable) {
+    await ensureLocalServer();
+    if (gen !== startGen) return;
+  }
   setConn('connecting', 'Getting ready', 'Microphone and server connection…');
   userEndedSession = false;
   sessionReady = false;
@@ -2316,6 +2335,14 @@ let probeSeq = 0;
 /** Healthcheck + meta fetch against the local target; drives the strip and idle status. */
 async function probeLocal() {
   if (targetMode() !== 'local') return;
+  // Launcher mode with no child yet: nothing to probe — Start spawns it.
+  if (launcherAvailable && lastChildState !== 'running') {
+    applyMeta(null);
+    if (connVisual !== 'live' && connVisual !== 'connecting') {
+      setConn('ended', 'Ready', 'Pick an agent file, then press Start — the server is spawned for you.');
+    }
+    return;
+  }
   const seq = ++probeSeq;
   const base = localBase();
   const idle = () => connVisual !== 'live' && connVisual !== 'connecting';
@@ -2335,14 +2362,18 @@ async function probeLocal() {
   } catch (_) {
     if (seq !== probeSeq) return;
     applyMeta(null);
-    if (idle()) setConn('ended', 'No server', `Nothing answering at ${base}. Spawn one below or start it yourself, then press Start.`);
+    if (idle()) setConn('ended', 'No server', launcherAvailable
+      ? 'The spawned server is not answering — press Start to spawn it again.'
+      : `Nothing answering at ${base}. Start a timbal.server there, then press Start.`);
   }
 }
 
 // --- Launcher client (spawns `uv run python -m timbal.server` children) ----
 // Only reachable when this page is served by `python -m timbal.server.playground`
-// — the launcher endpoints live on the page's own origin. Opened from the
-// filesystem or elsewhere, the status probe fails and the spawn UI stays hidden.
+// — the launcher endpoints live on the page's own origin. Spawning is implicit:
+// pressing Start ensures a child for the agent path in the form (see
+// ensureLocalServer). Opened from the filesystem or elsewhere, the status probe
+// fails and the manual Server URL field is shown instead.
 let lastChildState = null;
 
 async function fetchLauncherStatus() {
@@ -2358,8 +2389,7 @@ async function fetchLauncherStatus() {
 function renderLauncherChild(child) {
   const state = child?.state || 'stopped';
   const stoppable = state === 'running' || state === 'starting';
-  btnLauncher.dataset.action = stoppable ? 'stop' : 'spawn';
-  btnLauncher.textContent = stoppable ? 'Stop server' : 'Spawn server';
+  btnLauncher.hidden = !stoppable; // spawning happens on Start, so the button only stops
   if (state === 'starting') {
     launcherStateEl.textContent = `Starting on port ${child.port}… (first run may pay a uv sync)`;
   } else if (state === 'running') {
@@ -2395,37 +2425,73 @@ function startLauncherPolling() {
 btnLauncher.onclick = async () => {
   btnLauncher.disabled = true;
   try {
-    if (btnLauncher.dataset.action === 'stop') {
-      const r = await fetch('/launcher/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      renderLauncherChild((await r.json()).child);
-      void probeLocal();
-      return;
-    }
-    const spec = launcherSpecInput.value.trim();
-    if (!spec) {
-      launcherStateEl.textContent = 'Enter an import spec first (path/to/agent.py::object).';
-      return;
-    }
-    localStorage.setItem(TGT_KEY('spec'), spec);
-    const r = await fetch('/launcher/spawn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ import_spec: spec }),
-    });
-    const data = await r.json();
-    if (!r.ok) {
-      launcherStateEl.textContent = data.error || `Spawn failed (${r.status}).`;
-      return;
-    }
-    renderLauncherChild(data.child);
-    adoptSpawnedChild(data.child);
-    lastChildState = data.child?.state || null;
+    const r = await fetch('/launcher/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    renderLauncherChild((await r.json()).child);
+    lastSpawnedSpec = null;
+    void probeLocal();
   } catch (err) {
     launcherStateEl.textContent = String(err?.message || err);
   } finally {
     btnLauncher.disabled = false;
   }
 };
+
+/** Optional fixed port for the spawned child, or null for a launcher-picked free one. */
+function launcherPort() {
+  const raw = launcherPortInput.value.trim();
+  if (!raw) return null;
+  const p = parseInt(raw, 10);
+  if (!Number.isFinite(p) || p < 1 || p > 65535) throw new Error(`Invalid port: ${raw}`);
+  return p;
+}
+
+/**
+ * Spawn-on-Start: make sure the launcher child is running the agent currently
+ * in the form (respawning on spec/port changes) and healthy before dialing.
+ * Blocks through the child's `starting` phase — the first run of a project can
+ * pay a `uv sync`, so the deadline is generous.
+ */
+async function ensureLocalServer() {
+  const spec = launcherSpecInput.value.trim();
+  if (!spec) throw new Error('Enter an agent first (path/to/agent.py::object).');
+  const port = launcherPort();
+  localStorage.setItem(TGT_KEY('spec'), spec);
+
+  const st = await fetchLauncherStatus();
+  if (!st) throw new Error('Playground launcher is not reachable — restart `python -m timbal.server.playground`.');
+  let child = st.child;
+  const alive = child && (child.state === 'running' || child.state === 'starting');
+  if (!alive || spec !== lastSpawnedSpec || (port !== null && child.port !== port)) {
+    setConn('connecting', 'Spawning server', `uv run timbal.server — ${spec}`);
+    const r = await fetch('/launcher/spawn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ import_spec: spec, ...(port !== null ? { port } : {}) }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `Spawn failed (${r.status}).`);
+    child = data.child;
+    lastSpawnedSpec = spec;
+  }
+  renderLauncherChild(child);
+
+  const deadline = Date.now() + 180_000;
+  while (child.state !== 'running') {
+    if (child.state === 'exited') {
+      const lastLog = (child.logs || []).filter(Boolean).slice(-1)[0] || '';
+      throw new Error(`Server exited (code ${child.exit_code}).${lastLog ? ` Last log: ${lastLog}` : ''}`);
+    }
+    if (child.state === 'stopped') throw new Error('Server was stopped before it became ready.');
+    if (Date.now() > deadline) throw new Error('Server did not become healthy in time — check its logs in the launcher terminal.');
+    setConn('connecting', 'Starting server', `Waiting for the agent on port ${child.port}… (first run may pay a uv sync)`);
+    await new Promise((res) => setTimeout(res, 500));
+    child = (await fetchLauncherStatus())?.child || { state: 'stopped' };
+    renderLauncherChild(child);
+  }
+  lastChildState = 'running';
+  adoptSpawnedChild(child);
+  void probeLocal();
+}
 
 function onTargetChanged() {
   probeSeq += 1; // cancel in-flight probes for the previous target
@@ -2478,11 +2544,21 @@ async function initStandalone() {
 
   const st = await fetchLauncherStatus();
   if (st) {
+    launcherAvailable = true;
     launcherBox.hidden = false;
+    localUrlField.hidden = true; // launcher mode: the URL is derived from the spawned child
     launcherSpecInput.value = localStorage.getItem(TGT_KEY('spec')) || st.launcher?.default_import_spec || '';
+    launcherPortInput.value = localStorage.getItem(TGT_KEY('port')) || '';
+    launcherSpecInput.onchange = () => localStorage.setItem(TGT_KEY('spec'), launcherSpecInput.value.trim());
+    launcherPortInput.onchange = () => localStorage.setItem(TGT_KEY('port'), launcherPortInput.value.trim());
     renderLauncherChild(st.child);
     lastChildState = st.child?.state || null;
-    if (st.child?.state === 'running') adoptSpawnedChild(st.child);
+    if (st.child?.state === 'running' || st.child?.state === 'starting') {
+      // Adopt a survivor from a previous page load; assume it matches the form
+      // (the spec is persisted) so Start reuses it instead of respawning.
+      lastSpawnedSpec = launcherSpecInput.value.trim() || null;
+      if (st.child.state === 'running') adoptSpawnedChild(st.child);
+    }
     startLauncherPolling();
   }
   onTargetChanged();
