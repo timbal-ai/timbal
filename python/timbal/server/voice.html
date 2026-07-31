@@ -2217,13 +2217,24 @@ function handleServerMessage(msg) {
 
 async function startRtc(gen) {
   const isPlatform = targetMode() === 'platform';
-  const isPreview = isPlatform && platformValues().endpoint === 'preview';
+  // One snapshot for the whole dial: the ICE-gathering wait below yields for
+  // seconds, and form edits during it must not mix endpoint/rev/token between
+  // reads — changes apply on the next Start.
+  const pv = isPlatform ? platformValues() : null;
+  if (pv) validatePlatform(pv);
+  const isPreview = !!pv && pv.endpoint === 'preview';
   setConn('connecting', 'Connecting', isPreview
     ? 'Negotiating WebRTC against the branch worktree (first call after a source edit pays a uv sync — up to ~2 min)…'
     : isPlatform
       ? 'Negotiating WebRTC through the platform (box spawn can take up to ~30 s)…'
       : 'Negotiating WebRTC with the server…');
-  pc = new RTCPeerConnection();
+  // Platform answers are relay-only — the relay only accepts traffic from
+  // addresses it saw in the offer. Without STUN the browser offers private
+  // LAN addresses, connectivity checks die ~15 s after a "successful" answer,
+  // and nothing surfaces an error. STUN only; no TURN credentials on our side.
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:turn.timbal.ai:3478' }],
+  });
   const conn = pc;
 
   // Raw mic track (browser AEC/NS applied via getUserMedia constraints). The
@@ -2291,13 +2302,11 @@ async function startRtc(gen) {
   if (targetMode() === 'local') {
     rtcUrl = localBase() + '/voice/rtc';
   } else if (isPlatform) {
-    const v = platformValues();
-    validatePlatform(v);
     // Same signaling contract on both endpoints — preview just sources the
     // branch worktree instead of a deployment (POST + offer selects RTC there).
     const path = isPreview ? 'voice/preview' : 'voice/rtc';
-    rtcUrl = `${platformBase(v)}/${path}?rev=${encodeURIComponent(v.rev)}`;
-    rtcHeaders.Authorization = `Bearer ${v.token}`;
+    rtcUrl = `${platformBase(pv)}/${path}?rev=${encodeURIComponent(pv.rev)}`;
+    rtcHeaders.Authorization = `Bearer ${pv.token}`;
   }
   const resp = await fetch(rtcUrl, {
     method: 'POST',
