@@ -675,7 +675,7 @@
           </label>
           <label class="field">
             <span class="field-label">Endpoint</span>
-            <select id="pf-endpoint" title="Deployed dials the running deployment for the branch. Preview runs the branch worktree instead (WS only; first connect after a source change pays uv sync).">
+            <select id="pf-endpoint" title="Deployed dials the running deployment for the branch. Preview runs the branch worktree instead — edit the agent, call it immediately (first connect after a source change pays a uv sync; needs timbal >= 2.3.2 on the branch for WebRTC).">
               <option value="deployed">Deployed</option>
               <option value="preview">Preview (branch worktree)</option>
             </select>
@@ -2217,12 +2217,12 @@ function handleServerMessage(msg) {
 
 async function startRtc(gen) {
   const isPlatform = targetMode() === 'platform';
-  if (isPlatform && platformValues().endpoint === 'preview') {
-    throw new Error('WebRTC is not available on voice/preview — switch the transport to WebSocket.');
-  }
-  setConn('connecting', 'Connecting', isPlatform
-    ? 'Negotiating WebRTC through the platform (box spawn can take up to ~30 s)…'
-    : 'Negotiating WebRTC with the server…');
+  const isPreview = isPlatform && platformValues().endpoint === 'preview';
+  setConn('connecting', 'Connecting', isPreview
+    ? 'Negotiating WebRTC against the branch worktree (first call after a source edit pays a uv sync — up to ~2 min)…'
+    : isPlatform
+      ? 'Negotiating WebRTC through the platform (box spawn can take up to ~30 s)…'
+      : 'Negotiating WebRTC with the server…');
   pc = new RTCPeerConnection();
   const conn = pc;
 
@@ -2293,7 +2293,10 @@ async function startRtc(gen) {
   } else if (isPlatform) {
     const v = platformValues();
     validatePlatform(v);
-    rtcUrl = `${platformBase(v)}/voice/rtc?rev=${encodeURIComponent(v.rev)}`;
+    // Same signaling contract on both endpoints — preview just sources the
+    // branch worktree instead of a deployment (POST + offer selects RTC there).
+    const path = isPreview ? 'voice/preview' : 'voice/rtc';
+    rtcUrl = `${platformBase(v)}/${path}?rev=${encodeURIComponent(v.rev)}`;
     rtcHeaders.Authorization = `Bearer ${v.token}`;
   }
   const resp = await fetch(rtcUrl, {
@@ -2309,11 +2312,15 @@ async function startRtc(gen) {
     let detail = `Server answered ${resp.status}.`;
     try { detail = (await resp.json()).error || detail; } catch (_) {}
     if (resp.status === 501) {
-      detail += isPlatform
-        ? ' The deployed timbal lacks the voice extra (needs timbal[voice] >= 2.3.2).'
-        : ' Install it: uv pip install "timbal[voice]".';
+      detail += isPreview
+        ? ' The branch pins a timbal without RTC preview support — bump it to timbal >= 2.3.2.'
+        : isPlatform
+          ? ' The deployed timbal lacks the voice extra (needs timbal[voice] >= 2.3.2).'
+          : ' Install it: uv pip install "timbal[voice]".';
     }
-    if (isPlatform && resp.status === 404) detail += ' No running deployment for that branch?';
+    if (isPlatform && resp.status === 404) {
+      detail += isPreview ? ' Check org/project/workforce and the branch (rev).' : ' No running deployment for that branch?';
+    }
     const err = new Error(detail);
     err.rtcUnsupported = resp.status === 501;
     throw err;
@@ -2330,11 +2337,10 @@ async function startRtc(gen) {
 // --- Standalone bootstrap --------------------------------------------------
 
 function syncTransportForTarget() {
-  // Preview tunnels WebSocket only — there is no RTC preview today.
-  const preview = !EMBEDDED && targetModeSelect.value === 'platform' && pf.endpoint.value === 'preview';
+  // Both transports work on every target now (preview gained RTC signaling:
+  // POST + SDP offer on the same voice/preview URL) — nothing to disable.
   const rtcOpt = [...transportSelect.options].find((o) => o.value === 'webrtc');
-  if (rtcOpt) rtcOpt.disabled = preview;
-  if (preview && transportSelect.value === 'webrtc') transportSelect.value = 'ws';
+  if (rtcOpt) rtcOpt.disabled = false;
   syncNsForTransport();
 }
 
