@@ -142,27 +142,37 @@ class Tool(Runnable):
         ``ToolProxyUnavailable`` so the user fixes platform setup rather than
         local provider credentials.
         """
+        cred_error: CredentialNotAvailable | None = None
         try:
             async for event, final_output, collector in super()._execute_handler(
                 validated_input, run_context, span, event_queue
             ):
                 yield (event, final_output, collector)
-        except CredentialNotAvailable as cred_error:
-            try:
-                output = await execute_tool_proxy(self.name, validated_input)
-            except ToolProxyUnavailable:
-                if run_context.platform_config is None:
-                    # Local run without platform config — fall back to credential error.
-                    raise cred_error from None
-                raise
-            except PlatformError as proxy_error:
-                # 403 is what the platform returns when no proxy is available for this
-                # tool (no service-account credentials configured). 404/501 are kept as
-                # fallbacks. In all these cases, surface the actionable credential error.
-                if proxy_error.status_code in (403, 404, 501):
-                    raise cred_error from None
-                raise
-            yield (None, output, None)
+        except CredentialNotAvailable as e:
+            # Capture and fall through instead of calling the proxy here: anything
+            # raised inside this except block would implicitly chain the credential
+            # error as __context__, making unrelated proxy failures read as auth
+            # problems in tracebacks.
+            cred_error = e
+
+        if cred_error is None:
+            return
+
+        try:
+            output = await execute_tool_proxy(self.name, validated_input)
+        except ToolProxyUnavailable:
+            if run_context.platform_config is None:
+                # Local run without platform config — fall back to credential error.
+                raise cred_error from None
+            raise
+        except PlatformError as proxy_error:
+            # 403 is what the platform returns when no proxy is available for this
+            # tool (no service-account credentials configured). 404/501 are kept as
+            # fallbacks. In all these cases, surface the actionable credential error.
+            if proxy_error.status_code in (403, 404, 501):
+                raise cred_error from None
+            raise
+        yield (None, output, None)
 
     @override
     def nest(self, parent_path: str) -> None:

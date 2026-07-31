@@ -380,6 +380,73 @@ async def test_tool_proxy_other_4xx_surfaces_platform_error():
 
 
 @pytest.mark.asyncio
+async def test_tool_proxy_failure_traceback_not_chained_to_credential_error():
+    """A proxy failure unrelated to credentials must not carry the earlier
+    CredentialNotAvailable as implicit exception context — it makes the trace
+    traceback read as an auth problem when the real error is downstream."""
+    run_context = RunContext(platform_config=_platform_config(), tracing_provider=None)
+    set_run_context(run_context)
+
+    async def _handler(url: str) -> dict:
+        from timbal.tools._creds import resolve_api_key
+
+        await resolve_api_key(
+            provider_name="Firecrawl",
+            env_var="FIRECRAWL_API_KEY",
+            integration=None,
+            api_key=None,
+        )
+        return {"url": url}
+
+    tool = Tool(name="firecrawl_scrape", handler=_handler, tracing_provider=None)
+
+    with patch(
+        "timbal.core.tool.execute_tool_proxy",
+        new_callable=AsyncMock,
+        side_effect=PlatformError("bad request", status_code=400),
+    ):
+        result = await tool(url="https://example.com").collect()
+
+    assert result.status.code == "error"
+    assert result.error is not None
+    assert result.error["type"] == "PlatformError"
+    assert "CredentialNotAvailable" not in result.error["traceback"]
+    assert "credentials not found" not in result.error["traceback"]
+
+
+@pytest.mark.asyncio
+async def test_tool_proxy_failure_exception_context_is_clean():
+    """Direct check on the raised exception: __context__ must not be the
+    credential error that triggered the proxy fallback."""
+    run_context = RunContext(platform_config=_platform_config(), tracing_provider=None)
+    set_run_context(run_context)
+
+    from timbal.errors import CredentialNotAvailable
+
+    async def _handler(url: str) -> dict:  # noqa: ARG001
+        raise CredentialNotAvailable("Firecrawl", env_vars=["FIRECRAWL_API_KEY"])
+
+    tool = Tool(name="firecrawl_scrape", handler=_handler, tracing_provider=None)
+    validated_input = {"url": "https://example.com"}
+
+    with patch(
+        "timbal.core.tool.execute_tool_proxy",
+        new_callable=AsyncMock,
+        side_effect=PlatformError("bad request", status_code=400),
+    ):
+        with pytest.raises(PlatformError) as exc_info:
+            async for _ in tool._execute_handler(validated_input, run_context, None):
+                pass
+
+    chain = []
+    exc = exc_info.value
+    while exc is not None:
+        chain.append(type(exc).__name__)
+        exc = exc.__context__
+    assert "CredentialNotAvailable" not in chain
+
+
+@pytest.mark.asyncio
 async def test_tool_collect_passes_run_call_id_in_proxy_headers():
     run_context = RunContext(platform_config=_platform_config(), tracing_provider=None)
     set_run_context(run_context)
