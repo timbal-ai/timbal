@@ -62,6 +62,10 @@ class ChildServer:
         self._proc: subprocess.Popen | None = None
         self._port: int | None = None
         self._import_spec: str | None = None
+        self._requested_spec: str | None = None
+        """The spec exactly as the client sent it — echoed in status so the page
+        can tell whether the running child matches its form without having to
+        replicate the launcher's path resolution."""
         self._logs: deque[str] = deque(maxlen=_LOG_LINES)
 
     def _reader(self, proc: subprocess.Popen) -> None:
@@ -115,6 +119,7 @@ class ChildServer:
             self._proc = proc
             self._port = child_port
             self._import_spec = resolved_spec
+            self._requested_spec = spec
             threading.Thread(target=self._reader, args=(proc,), daemon=True).start()
             return self.status_locked()
 
@@ -137,6 +142,7 @@ class ChildServer:
         self._proc = None
         self._port = None
         self._import_spec = None
+        self._requested_spec = None
 
     def status(self) -> dict:
         with self._lock:
@@ -154,6 +160,7 @@ class ChildServer:
                 "exit_code": exit_code,
                 "port": self._port,
                 "import_spec": self._import_spec,
+                "requested_import_spec": self._requested_spec,
                 "logs": list(self._logs),
             }
         state = "running" if _healthy(self._port) else "starting"
@@ -162,6 +169,7 @@ class ChildServer:
             "pid": proc.pid,
             "port": self._port,
             "import_spec": self._import_spec,
+            "requested_import_spec": self._requested_spec,
             "logs": list(self._logs),
         }
 

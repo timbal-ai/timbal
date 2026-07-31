@@ -923,11 +923,14 @@ fillerMax.onchange = () => localStorage.setItem(FILLER_MAX_STORAGE_KEY, fillerMa
 
 const transportSelect = document.getElementById('transport-select');
 const TRANSPORT_STORAGE_KEY = 'timbal-voice-transport';
-transportSelect.value = new URLSearchParams(location.search).get('transport')
-  || localStorage.getItem(TRANSPORT_STORAGE_KEY) || 'webrtc';
+const transportFromUrl = new URLSearchParams(location.search).get('transport');
+transportSelect.value = transportFromUrl || localStorage.getItem(TRANSPORT_STORAGE_KEY) || 'webrtc';
 if (![...transportSelect.options].some((o) => o.value === transportSelect.value && !o.disabled)) {
   transportSelect.value = 'webrtc';
 }
+// Only the *default* WebRTC silently falls back to WS when the server lacks
+// the voice extra (501) — an explicit user/URL choice surfaces the error.
+let transportExplicit = !!(transportFromUrl || localStorage.getItem(TRANSPORT_STORAGE_KEY));
 function syncNsForTransport() {
   // WebRTC sends the raw mic track, so the worklet's RNNoise output never
   // reaches the wire — the transport forces browser noise suppression
@@ -940,6 +943,7 @@ function syncNsForTransport() {
 }
 transportSelect.onchange = () => {
   // Applied on the next Start — a live session keeps its transport.
+  transportExplicit = true;
   localStorage.setItem(TRANSPORT_STORAGE_KEY, transportSelect.value);
   syncNsForTransport();
 };
@@ -1090,8 +1094,6 @@ const btnLauncher = document.getElementById('btn-launcher');
 const launcherStateEl = document.getElementById('launcher-state');
 /** True when this page is served by the playground launcher (spawn-on-Start). */
 let launcherAvailable = false;
-/** Spec string the current child was spawned from — a mismatch respawns on Start. */
-let lastSpawnedSpec = null;
 const pf = {
   api: document.getElementById('pf-api'),
   org: document.getElementById('pf-org'),
@@ -1970,8 +1972,20 @@ async function start() {
   }
 
   if (transportSelect.value === 'webrtc') {
-    await startRtc(gen);
-    return;
+    try {
+      await startRtc(gen);
+      return;
+    } catch (err) {
+      if (gen !== startGen) return;
+      if (!err?.rtcUnsupported || transportExplicit) throw err;
+      // Default transport against a server without the voice extra (501):
+      // behave like the old default and connect over WebSocket instead.
+      // Not persisted — RTC is retried first on the next page load.
+      try { pc?.close(); } catch (_) {}
+      pc = null;
+      transportSelect.value = 'ws';
+      syncNsForTransport();
+    }
   }
 
   const isPlatform = targetMode() === 'platform';
@@ -2300,7 +2314,9 @@ async function startRtc(gen) {
         : ' Install it: uv pip install "timbal[voice]".';
     }
     if (isPlatform && resp.status === 404) detail += ' No running deployment for that branch?';
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.rtcUnsupported = resp.status === 501;
+    throw err;
   }
   const answer = await resp.json();
   if (gen !== startGen) return;
@@ -2427,7 +2443,6 @@ btnLauncher.onclick = async () => {
   try {
     const r = await fetch('/launcher/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     renderLauncherChild((await r.json()).child);
-    lastSpawnedSpec = null;
     void probeLocal();
   } catch (err) {
     launcherStateEl.textContent = String(err?.message || err);
@@ -2461,7 +2476,10 @@ async function ensureLocalServer() {
   if (!st) throw new Error('Playground launcher is not reachable — restart `python -m timbal.server.playground`.');
   let child = st.child;
   const alive = child && (child.state === 'running' || child.state === 'starting');
-  if (!alive || spec !== lastSpawnedSpec || (port !== null && child.port !== port)) {
+  // The launcher echoes the raw spec the child was spawned from — compare
+  // against that, not client-side state: a survivor from a previous page load
+  // may be running a different agent than the (persisted) form says.
+  if (!alive || child.requested_import_spec !== spec || (port !== null && child.port !== port)) {
     setConn('connecting', 'Spawning server', `uv run timbal.server — ${spec}`);
     const r = await fetch('/launcher/spawn', {
       method: 'POST',
@@ -2471,7 +2489,6 @@ async function ensureLocalServer() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `Spawn failed (${r.status}).`);
     child = data.child;
-    lastSpawnedSpec = spec;
   }
   renderLauncherChild(child);
 
@@ -2553,12 +2570,9 @@ async function initStandalone() {
     launcherPortInput.onchange = () => localStorage.setItem(TGT_KEY('port'), launcherPortInput.value.trim());
     renderLauncherChild(st.child);
     lastChildState = st.child?.state || null;
-    if (st.child?.state === 'running' || st.child?.state === 'starting') {
-      // Adopt a survivor from a previous page load; assume it matches the form
-      // (the spec is persisted) so Start reuses it instead of respawning.
-      lastSpawnedSpec = launcherSpecInput.value.trim() || null;
-      if (st.child.state === 'running') adoptSpawnedChild(st.child);
-    }
+    // Adopt a running survivor's URL for probing/meta; whether Start reuses it
+    // is decided in ensureLocalServer against the child's own spawned spec.
+    if (st.child?.state === 'running') adoptSpawnedChild(st.child);
     startLauncherPolling();
   }
   onTargetChanged();
