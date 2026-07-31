@@ -193,6 +193,7 @@ class TestSessionIntegration:
             tts=MockTTS(chunk=b"\x01\x02" * 800, num_chunks=2),
             recorder=recorder,
             session_id="fixed-session-id",
+            turn_detector="heuristic",
         )
         session.recording_meta = {"transport": "test", "model": "test/model"}
 
@@ -259,6 +260,7 @@ class TestSessionBargeIn:
             stt=stt,
             tts=MockTTS(chunk=b"\x01\x02" * (SR // 2), num_chunks=int(emitted_secs)),
             recorder=recorder,
+            turn_detector="heuristic",
         )
 
         started = asyncio.Event()

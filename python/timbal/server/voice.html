@@ -84,6 +84,14 @@
     padding-top: 0.7rem;
     border-top: 1px solid var(--border);
   }
+  /* Standalone: Target is the panel header — no Agent title, no leading rule. */
+  .panel-section.panel-section--top {
+    padding-top: 0;
+    border-top: none;
+  }
+  .panel-title[hidden] {
+    display: none !important;
+  }
   .panel-section-title {
     font-size: 0.625rem;
     font-weight: 700;
@@ -103,10 +111,30 @@
     flex-direction: column;
     gap: 0.3rem;
   }
+  .field[hidden] { display: none !important; }
   .field-label {
     font-size: 0.6875rem;
     font-weight: 600;
     color: var(--text-muted);
+  }
+  .panel-section[hidden] { display: none !important; }
+  .target-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+  .target-fields[hidden] { display: none !important; }
+  .launcher-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .launcher-state {
+    font-size: 0.65625rem;
+    color: var(--text-muted);
+    line-height: 1.35;
+    min-width: 0;
+    word-break: break-word;
   }
   .panel select {
     width: 100%;
@@ -138,6 +166,7 @@
     cursor: pointer;
   }
   .panel input[type="text"],
+  .panel input[type="password"],
   .panel input[type="number"] {
     width: 100%;
     min-width: 0;
@@ -151,11 +180,13 @@
     outline: none;
   }
   .panel input[type="text"]:focus,
+  .panel input[type="password"]:focus,
   .panel input[type="number"]:focus {
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(0,0,0,.07);
   }
   .panel input[type="text"]:disabled,
+  .panel input[type="password"]:disabled,
   .panel input[type="number"]:disabled {
     color: var(--text-muted);
     background: var(--bg);
@@ -240,14 +271,18 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.35rem;
-    padding-bottom: 0.75rem;
-    border-bottom: 1px solid var(--border);
+  }
+  .conn-strip[hidden] {
+    display: none !important;
   }
   .conn-version {
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--text-muted);
     letter-spacing: -0.02em;
+  }
+  .conn-version[hidden] {
+    display: none !important;
   }
   .conn-agent {
     text-align: left;
@@ -576,36 +611,102 @@
     <div class="brand">
       <img class="brand-mark" src="https://content.timbal.ai/assets/timbal_favicon.png" alt="" width="28" height="28" decoding="async" />
       <div>
-        <span class="logo">Timbal AI</span><span class="sep">/</span><span class="title">Voice playground</span>
+        <span class="logo">Voice playground</span>
       </div>
     </div>
   </header>
 
   <div class="layout">
     <aside class="panel" aria-label="Agent configuration">
-      <h2 class="panel-title">Agent</h2>
-      <div id="conn-strip" class="conn-strip">
-        <span id="conn-version" class="conn-version"></span>
-        <div id="conn-agent" class="conn-agent" hidden>
-          <div id="conn-runnable-title" class="conn-runnable-title"></div>
-          <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
+      <h2 id="agent-panel-title" class="panel-title">Agent</h2>
+      <section id="target-section" class="panel-section" aria-label="Agent target" hidden>
+        <h3 id="target-heading" class="panel-section-title">Target</h3>
+        <label class="field">
+          <span class="field-label">Run against</span>
+          <select id="target-mode" aria-label="Agent target" title="Where the agent runs. Local = a timbal.server process on this machine; Platform = a workforce deployed on the Timbal platform.">
+            <option value="local">Local server</option>
+            <option value="platform">Platform</option>
+          </select>
+        </label>
+        <div id="target-local" class="target-fields">
+          <div id="launcher-box" class="target-fields" hidden>
+            <label class="field">
+              <span class="field-label">Agent</span>
+              <input type="text" id="launcher-spec" placeholder="path/to/agent.py::agent" title="Spawned automatically on Start: runs `uv run python -m timbal.server --import_spec …` from the file's directory (relative paths resolve against the launcher's cwd).">
+            </label>
+            <label class="field">
+              <span class="field-label">Port</span>
+              <input type="text" id="launcher-port" placeholder="auto" inputmode="numeric" title="Port for the spawned server. Leave empty to pick a free one automatically.">
+            </label>
+            <div class="launcher-row">
+              <button type="button" id="btn-launcher" hidden>Stop server</button>
+              <span id="launcher-state" class="launcher-state"></span>
+            </div>
+          </div>
+          <label class="field" id="local-url-field">
+            <span class="field-label">Server URL</span>
+            <input type="text" id="local-url" placeholder="http://localhost:4444" title="A timbal.server you started yourself.">
+          </label>
         </div>
-      </div>
-      <div class="model-picker" title="Agent LLM — applied on the next Start. Needs the matching provider API key on the server.">
-        <label class="field">
-          <span class="field-label">Provider</span>
-          <select id="model-provider-select" aria-label="LLM provider">
-            <option value="">All providers</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Model</span>
-          <select id="model-select" aria-label="LLM model">
-            <option value="">Agent default</option>
-          </select>
-        </label>
-        <span id="model-count" class="model-count"></span>
-      </div>
+        <div id="target-platform" class="target-fields" hidden>
+          <label class="field">
+            <span class="field-label">API base</span>
+            <input type="text" id="pf-api" placeholder="https://api.dev.timbal.ai">
+          </label>
+          <label class="field">
+            <span class="field-label">Org ID</span>
+            <input type="text" id="pf-org">
+          </label>
+          <label class="field">
+            <span class="field-label">Project ID</span>
+            <input type="text" id="pf-project">
+          </label>
+          <label class="field">
+            <span class="field-label">Workforce</span>
+            <input type="text" id="pf-workforce" placeholder="app id · uid · slug">
+          </label>
+          <label class="field">
+            <span class="field-label">Branch (rev)</span>
+            <input type="text" id="pf-rev" placeholder="main">
+          </label>
+          <label class="field">
+            <span class="field-label">Token</span>
+            <input type="password" id="pf-token" placeholder="API key or OAuth token" autocomplete="off" title="Stored in this browser's localStorage — use a revocable dev key.">
+          </label>
+          <label class="field">
+            <span class="field-label">Endpoint</span>
+            <select id="pf-endpoint" title="Deployed dials the running deployment for the branch. Preview runs the branch worktree instead (WS only; first connect after a source change pays uv sync).">
+              <option value="deployed">Deployed</option>
+              <option value="preview">Preview (branch worktree)</option>
+            </select>
+          </label>
+        </div>
+      </section>
+      <section id="agent-section" class="panel-section panel-section--top" aria-label="Agent">
+        <h3 id="agent-section-title" class="panel-section-title" hidden>Agent</h3>
+        <div id="conn-strip" class="conn-strip" hidden>
+          <span id="conn-version" class="conn-version" hidden></span>
+          <div id="conn-agent" class="conn-agent" hidden>
+            <div id="conn-runnable-title" class="conn-runnable-title"></div>
+            <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
+          </div>
+        </div>
+        <div class="model-picker" title="Agent LLM — applied on the next Start. Needs the matching provider API key on the server.">
+          <label class="field">
+            <span class="field-label">Provider</span>
+            <select id="model-provider-select" aria-label="LLM provider">
+              <option value="">All providers</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Model</span>
+            <select id="model-select" aria-label="LLM model">
+              <option value="">Agent default</option>
+            </select>
+          </label>
+          <span id="model-count" class="model-count"></span>
+        </div>
+      </section>
       <p class="panel-note">Changes apply on the next session Start. Model overrides need the matching provider API key on the server.</p>
     </aside>
 
@@ -753,6 +854,18 @@ const SAMPLE_RATE = 16000;
 // Flux wants ~80ms frames; Nova/Scribe are fine at the same cadence.
 const CHUNK_MS = 80;
 
+// Embedded vs standalone: timbal.server injects the runnable meta into the
+// script tag below when it serves this page. If the placeholder is intact
+// (served by the playground launcher, or opened from the filesystem), the
+// JSON parse fails and the page runs standalone — a Target section appears
+// and every server URL routes through the selected target instead of this
+// page's own origin.
+let META = null;
+try {
+  META = JSON.parse(document.getElementById('timbal-voice-runnable-meta').textContent);
+} catch (_) {}
+const EMBEDDED = META !== null;
+
 const cardEl = document.getElementById('card');
 const footStatus = document.getElementById('foot-status');
 const footStatusTitle = document.getElementById('foot-status-title');
@@ -767,8 +880,11 @@ const nsSelect = document.getElementById('ns-select');
 const micViz = document.getElementById('mic-viz');
 
 const TD_STORAGE_KEY = 'timbal-voice-turn-detector';
-// Unknown stored values leave the select on '' (server default) automatically.
+// Default '' = server default: Smart Turn + Namo (+ Silero VAD endpointing) on
+// a voice install, lexical without the extra. Pinning 'local' here would skip
+// that server-side degradation (an explicit degraded 'local' is holdless).
 tdSelect.value = localStorage.getItem(TD_STORAGE_KEY) || '';
+if (![...tdSelect.options].some((o) => o.value === tdSelect.value)) tdSelect.value = '';
 tdSelect.onchange = () => {
   // Applied on the next Start (no reload) — modes are fixed per WebSocket hello.
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
@@ -807,9 +923,14 @@ fillerMax.onchange = () => localStorage.setItem(FILLER_MAX_STORAGE_KEY, fillerMa
 
 const transportSelect = document.getElementById('transport-select');
 const TRANSPORT_STORAGE_KEY = 'timbal-voice-transport';
-transportSelect.value = new URLSearchParams(location.search).get('transport')
-  || localStorage.getItem(TRANSPORT_STORAGE_KEY) || 'ws';
-if (!transportSelect.value) transportSelect.value = 'ws';
+const transportFromUrl = new URLSearchParams(location.search).get('transport');
+transportSelect.value = transportFromUrl || localStorage.getItem(TRANSPORT_STORAGE_KEY) || 'webrtc';
+if (![...transportSelect.options].some((o) => o.value === transportSelect.value && !o.disabled)) {
+  transportSelect.value = 'webrtc';
+}
+// Only the *default* WebRTC silently falls back to WS when the server lacks
+// the voice extra (501) — an explicit user/URL choice surfaces the error.
+let transportExplicit = !!(transportFromUrl || localStorage.getItem(TRANSPORT_STORAGE_KEY));
 function syncNsForTransport() {
   // WebRTC sends the raw mic track, so the worklet's RNNoise output never
   // reaches the wire — the transport forces browser noise suppression
@@ -822,6 +943,7 @@ function syncNsForTransport() {
 }
 transportSelect.onchange = () => {
   // Applied on the next Start — a live session keeps its transport.
+  transportExplicit = true;
   localStorage.setItem(TRANSPORT_STORAGE_KEY, transportSelect.value);
   syncNsForTransport();
 };
@@ -949,6 +1071,127 @@ function renderModelOptions(preferred, agentDefault) {
   }
 }
 
+// --- Agent target (standalone mode) ---------------------------------------
+// Embedded pages keep dialing their own origin exactly as before. Standalone
+// pages route everything through one of two targets:
+//   local    — a timbal.server on this machine. Served by the playground
+//              launcher, pressing Start spawns it from the agent file path
+//              (optional fixed port); without the launcher (file://), you
+//              point at a server you started yourself by URL.
+//   platform — a deployed workforce through the Timbal platform API. Same
+//              wire protocol; the platform tunnels WS (ticket-authenticated)
+//              and relays RTC signaling (bearer-authenticated).
+const targetSection = document.getElementById('target-section');
+const targetModeSelect = document.getElementById('target-mode');
+const targetLocalBox = document.getElementById('target-local');
+const targetPlatformBox = document.getElementById('target-platform');
+const localUrlInput = document.getElementById('local-url');
+const localUrlField = document.getElementById('local-url-field');
+const launcherBox = document.getElementById('launcher-box');
+const launcherSpecInput = document.getElementById('launcher-spec');
+const launcherPortInput = document.getElementById('launcher-port');
+const btnLauncher = document.getElementById('btn-launcher');
+const launcherStateEl = document.getElementById('launcher-state');
+/** True when this page is served by the playground launcher (spawn-on-Start). */
+let launcherAvailable = false;
+const pf = {
+  api: document.getElementById('pf-api'),
+  org: document.getElementById('pf-org'),
+  project: document.getElementById('pf-project'),
+  workforce: document.getElementById('pf-workforce'),
+  rev: document.getElementById('pf-rev'),
+  token: document.getElementById('pf-token'),
+  endpoint: document.getElementById('pf-endpoint'),
+};
+const TGT_KEY = (k) => `timbal-voice-target-${k}`;
+
+function targetMode() {
+  return EMBEDDED ? 'embedded' : (targetModeSelect.value || 'local');
+}
+
+function localBase() {
+  let u = (localUrlInput.value || '').trim() || 'http://localhost:4444';
+  if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
+  return u.replace(/\/+$/, '');
+}
+
+function platformValues() {
+  return {
+    api: ((pf.api.value || '').trim() || 'https://api.dev.timbal.ai').replace(/\/+$/, ''),
+    org: (pf.org.value || '').trim(),
+    project: (pf.project.value || '').trim(),
+    workforce: (pf.workforce.value || '').trim(),
+    rev: (pf.rev.value || '').trim() || 'main',
+    token: (pf.token.value || '').trim(),
+    endpoint: pf.endpoint.value === 'preview' ? 'preview' : 'deployed',
+  };
+}
+
+function platformBase(v) {
+  v = v || platformValues();
+  return `${v.api}/orgs/${encodeURIComponent(v.org)}/projects/${encodeURIComponent(v.project)}`
+    + `/workforce/${encodeURIComponent(v.workforce)}`;
+}
+
+function validatePlatform(v) {
+  const missing = [];
+  if (!v.org) missing.push('org ID');
+  if (!v.project) missing.push('project ID');
+  if (!v.workforce) missing.push('workforce');
+  if (!v.token) missing.push('token');
+  if (missing.length) throw new Error(`Platform target needs: ${missing.join(', ')}.`);
+}
+
+/**
+ * Origin prefix for plain /voice/* fetches (meta, ambience), or null when the
+ * target can't serve them — the platform tunnels only ws/preview/rtc/ticket.
+ */
+function voiceHttpBase() {
+  const m = targetMode();
+  if (m === 'embedded') return '';
+  if (m === 'local') return localBase();
+  return null;
+}
+
+/** Tickets are single-use and 60s-lived — mint one immediately before each dial. */
+async function mintPlatformTicket(v) {
+  const resp = await fetch(`${platformBase(v)}/voice/ticket?rev=${encodeURIComponent(v.rev)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${v.token}` },
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try { detail = (await resp.json()).error || ''; } catch (_) {}
+    const hint = resp.status === 401 || resp.status === 403 ? ' Check the token.'
+      : resp.status === 400 ? ' Check the branch (rev).'
+      : resp.status === 404 ? ' Check org/project/workforce, and that the branch is deployed.'
+      : '';
+    throw new Error(`Ticket mint failed (${resp.status})${detail ? `: ${detail}` : '.'}${hint}`);
+  }
+  return (await resp.json()).ticket;
+}
+
+/** URL + subprotocols for the WebSocket dial of the current target. */
+async function buildWsConnect() {
+  const m = targetMode();
+  if (m === 'embedded') {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    return { url: `${proto}://${location.host}/voice/ws`, protocols: undefined };
+  }
+  if (m === 'local') {
+    return { url: localBase().replace(/^http/i, 'ws') + '/voice/ws', protocols: undefined };
+  }
+  const v = platformValues();
+  validatePlatform(v);
+  const ticket = await mintPlatformTicket(v);
+  const path = v.endpoint === 'preview' ? 'voice/preview' : 'voice/ws';
+  const wsBase = platformBase(v).replace(/^http/i, 'ws');
+  return {
+    url: `${wsBase}/${path}?rev=${encodeURIComponent(v.rev)}&ticket=${encodeURIComponent(ticket)}`,
+    protocols: ['timbal.v1'],
+  };
+}
+
 const NS_STORAGE_KEY = 'timbal-voice-noise-suppression';
 nsSelect.value = localStorage.getItem(NS_STORAGE_KEY) || 'browser';
 if (!nsSelect.value) nsSelect.value = 'browser'; // unknown stored value
@@ -972,16 +1215,21 @@ let ambientSource = null, ambientGain = null, ambientToken = 0;
 /** `ambient` config from the last session_started, or null. */
 let serverAmbient = null;
 
-(async () => {
+/** Base URL the current preset options were fetched from (avoid refetch loops). */
+let ambienceCatalogBase;
+
+async function loadAmbienceCatalog() {
+  const base = voiceHttpBase();
+  if (base === null || base === ambienceCatalogBase) return;
   const stored = localStorage.getItem(AMBIENT_SRC_STORAGE_KEY) || '';
-  // 'off' exists before the catalog arrives — restore it now so an
-  // auto-started session can't play the server default over a saved "Off"
-  // (and so it survives the catalog fetch failing).
-  if (stored === 'off') ambientSelect.value = 'off';
   try {
-    const resp = await fetch('/voice/ambience');
+    const resp = await fetch(base + '/voice/ambience');
     if (!resp.ok) return;
-    for (const name of (await resp.json()).presets || []) {
+    const presets = (await resp.json()).presets || [];
+    ambienceCatalogBase = base;
+    // Rebuild presets; the first two options ('' and 'off') are fixed markup.
+    while (ambientSelect.options.length > 2) ambientSelect.remove(2);
+    for (const name of presets) {
       const opt = document.createElement('option');
       opt.value = name;
       opt.textContent = name;
@@ -989,12 +1237,22 @@ let serverAmbient = null;
     }
     ambientSelect.value = stored;
     if (ambientSelect.selectedIndex < 0) ambientSelect.value = ''; // stale stored preset
-    // The session auto-starts on load and may have mixed before the catalog
-    // arrived, with the picker still on "server default". Setting .value
-    // fires no change event, so re-apply if the restore changed anything.
+    // The session may auto-start on load and mix before the catalog arrived,
+    // with the picker still on "server default". Setting .value fires no
+    // change event, so re-apply if the restore changed anything.
     // (No-ops before session_started — applyAmbience bails without audioCtx.)
     if (ambientSelect.value) void applyAmbience();
   } catch (_) {}
+}
+
+(() => {
+  const stored = localStorage.getItem(AMBIENT_SRC_STORAGE_KEY) || '';
+  // 'off' exists before the catalog arrives — restore it now so an
+  // auto-started session can't play the server default over a saved "Off"
+  // (and so it survives the catalog fetch failing).
+  if (stored === 'off') ambientSelect.value = 'off';
+  // Standalone pages load the catalog lazily once a local target answers.
+  if (EMBEDDED) void loadAmbienceCatalog();
 })();
 
 function stopAmbience() {
@@ -1008,7 +1266,9 @@ async function applyAmbience() {
   if (!audioCtx) return;
   const sel = ambientSelect.value;
   if (sel === 'off' || (!sel && !serverAmbient)) return;
-  const url = sel ? `/voice/ambience/${encodeURIComponent(sel)}` : '/voice/ambience/current';
+  const base = voiceHttpBase();
+  if (base === null) return; // platform target — ambience assets aren't tunneled
+  const url = base + (sel ? `/voice/ambience/${encodeURIComponent(sel)}` : '/voice/ambience/current');
   const stored = localStorage.getItem(AMBIENT_STORAGE_KEY);
   const volume = stored !== null ? Number(stored) / 100 : (serverAmbient?.volume ?? 0.25);
   ambientSlider.value = String(Math.round(volume * 100));
@@ -1065,7 +1325,9 @@ async function startThinkingSound() {
   const token = ++thinkingToken;
   try {
     if (!thinkingBuf) {
-      const resp = await fetch('/voice/ambience/typing');
+      const base = voiceHttpBase();
+      if (base === null) return; // platform target — ambience assets aren't tunneled
+      const resp = await fetch(base + '/voice/ambience/typing');
       if (!resp.ok) return;
       thinkingBuf = await audioCtx.decodeAudioData(await resp.arrayBuffer());
     }
@@ -1103,42 +1365,46 @@ function truncateMiddle(s, max) {
   return s.slice(0, front) + '…' + s.slice(s.length - back);
 }
 
-function initRunnableStrip() {
-  const raw = document.getElementById('timbal-voice-runnable-meta');
+/** Render the runnable strip + model picker from a meta blob (injected or fetched); null clears both. */
+function applyMeta(meta) {
+  const strip = document.getElementById('conn-strip');
   const verEl = document.getElementById('conn-version');
   const wrap = document.getElementById('conn-agent');
   const titleEl = document.getElementById('conn-runnable-title');
   const specEl = document.getElementById('conn-runnable-spec');
-  if (!raw || !verEl || !wrap || !titleEl || !specEl) return;
-  let meta;
-  try {
-    meta = JSON.parse(raw.textContent);
-  } catch {
+  if (!strip || !verEl || !wrap || !titleEl || !specEl) return;
+  if (!meta) {
     initModelPicker([], '');
+    verEl.textContent = '';
+    verEl.hidden = true;
+    wrap.hidden = true;
+    strip.hidden = true; // no bare "Timbal" + no stacked border with TARGET
     return;
   }
   initModelPicker(meta.models || [], (meta.model || '').trim());
   const v = (meta.version || '').trim();
-  verEl.textContent = v ? `Timbal ${v}` : 'Timbal';
+  verEl.textContent = v;
+  verEl.hidden = !v;
   const spec = (meta.import_spec || '').trim();
   const nm = (meta.name || '').trim();
   const kind = (meta.kind || '').trim();
   const title = nm ? (kind ? `${nm} · ${kind}` : nm) : kind;
-  if (!title && !spec) {
-    wrap.hidden = true;
-    return;
-  }
-  wrap.hidden = false;
-  titleEl.textContent = title || 'Runnable';
-  if (spec) {
-    specEl.textContent = truncateMiddle(spec, 44);
-    specEl.title = spec;
-    specEl.hidden = false;
+  if (title || spec) {
+    wrap.hidden = false;
+    titleEl.textContent = title || 'Runnable';
+    if (spec) {
+      specEl.textContent = truncateMiddle(spec, 44);
+      specEl.title = spec;
+      specEl.hidden = false;
+    } else {
+      specEl.textContent = '';
+      specEl.removeAttribute('title');
+      specEl.hidden = true;
+    }
   } else {
-    specEl.textContent = '';
-    specEl.removeAttribute('title');
-    specEl.hidden = true;
+    wrap.hidden = true;
   }
+  strip.hidden = verEl.hidden && wrap.hidden;
 }
 
 let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
@@ -1682,6 +1948,14 @@ function resetSessionUi() {
 
 async function start() {
   const gen = startGen;
+  // Fail on incomplete platform config before prompting for the microphone.
+  if (targetMode() === 'platform') validatePlatform(platformValues());
+  // Local target behind the launcher: spawn (or reuse) the agent server first,
+  // so the WS/RTC dial below lands on a healthy process.
+  if (targetMode() === 'local' && launcherAvailable) {
+    await ensureLocalServer();
+    if (gen !== startGen) return;
+  }
   setConn('connecting', 'Getting ready', 'Microphone and server connection…');
   userEndedSession = false;
   sessionReady = false;
@@ -1698,14 +1972,31 @@ async function start() {
   }
 
   if (transportSelect.value === 'webrtc') {
-    await startRtc(gen);
-    return;
+    try {
+      await startRtc(gen);
+      return;
+    } catch (err) {
+      if (gen !== startGen) return;
+      if (!err?.rtcUnsupported || transportExplicit) throw err;
+      // Default transport against a server without the voice extra (501):
+      // behave like the old default and connect over WebSocket instead.
+      // Not persisted — RTC is retried first on the next page load.
+      try { pc?.close(); } catch (_) {}
+      pc = null;
+      transportSelect.value = 'ws';
+      syncNsForTransport();
+    }
   }
 
-  setConn('connecting', 'Connecting', 'Opening WebSocket to this server…');
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const isPlatform = targetMode() === 'platform';
+  setConn('connecting', 'Connecting', isPlatform
+    ? 'Minting ticket and dialing the platform (cold start can take several seconds)…'
+    : 'Opening WebSocket to the server…');
   micAudioToWs = false;
-  ws = new WebSocket(`${proto}://${location.host}/voice/ws`);
+  // Platform: mint-then-dial, fresh single-use ticket per attempt.
+  const dial = await buildWsConnect();
+  if (gen !== startGen) return;
+  ws = new WebSocket(dial.url, dial.protocols);
   ws.binaryType = 'arraybuffer';
   if (gen !== startGen) {
     try { ws.close(); } catch (_) {}
@@ -1780,7 +2071,9 @@ async function start() {
   };
 
   ws.onerror = () => {
-    setConn('error', 'Connection error', 'Could not keep the WebSocket open. Is the server running?');
+    setConn('error', 'Connection error', isPlatform
+      ? 'Could not open the socket. Check the token, IDs and rev, and that the branch is deployed (browsers hide the HTTP status of a failed upgrade).'
+      : 'Could not keep the WebSocket open. Is the server running?');
   };
 
   ws.onmessage = (e) => {
@@ -1923,7 +2216,13 @@ function handleServerMessage(msg) {
 }
 
 async function startRtc(gen) {
-  setConn('connecting', 'Connecting', 'Negotiating WebRTC with this server…');
+  const isPlatform = targetMode() === 'platform';
+  if (isPlatform && platformValues().endpoint === 'preview') {
+    throw new Error('WebRTC is not available on voice/preview — switch the transport to WebSocket.');
+  }
+  setConn('connecting', 'Connecting', isPlatform
+    ? 'Negotiating WebRTC through the platform (box spawn can take up to ~30 s)…'
+    : 'Negotiating WebRTC with the server…');
   pc = new RTCPeerConnection();
   const conn = pc;
 
@@ -1974,11 +2273,12 @@ async function startRtc(gen) {
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  // One-round-trip signaling: wait for ICE gathering so the offer is complete
-  // (bounded — host candidates alone are enough against a local server).
+  // One-round-trip signaling: wait for ICE gathering so the offer is complete.
+  // Local servers accept a bounded wait (host candidates alone are enough);
+  // the platform is no-trickle, so give gathering longer to finish there.
   if (pc.iceGatheringState !== 'complete') {
     await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 2000);
+      const timer = setTimeout(resolve, isPlatform ? 8000 : 2000);
       pc.addEventListener('icegatheringstatechange', () => {
         if (conn.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
       });
@@ -1986,9 +2286,19 @@ async function startRtc(gen) {
   }
   if (gen !== startGen) return;
 
-  const resp = await fetch('/voice/rtc', {
+  let rtcUrl = '/voice/rtc';
+  const rtcHeaders = { 'Content-Type': 'application/json' };
+  if (targetMode() === 'local') {
+    rtcUrl = localBase() + '/voice/rtc';
+  } else if (isPlatform) {
+    const v = platformValues();
+    validatePlatform(v);
+    rtcUrl = `${platformBase(v)}/voice/rtc?rev=${encodeURIComponent(v.rev)}`;
+    rtcHeaders.Authorization = `Bearer ${v.token}`;
+  }
+  const resp = await fetch(rtcUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rtcHeaders,
     body: JSON.stringify({
       sdp: conn.localDescription.sdp,
       type: 'offer',
@@ -1998,8 +2308,15 @@ async function startRtc(gen) {
   if (!resp.ok) {
     let detail = `Server answered ${resp.status}.`;
     try { detail = (await resp.json()).error || detail; } catch (_) {}
-    if (resp.status === 501) detail += ' Install it: uv pip install "timbal[voice]".';
-    throw new Error(detail);
+    if (resp.status === 501) {
+      detail += isPlatform
+        ? ' The deployed timbal lacks the voice extra (needs timbal[voice] >= 2.3.2).'
+        : ' Install it: uv pip install "timbal[voice]".';
+    }
+    if (isPlatform && resp.status === 404) detail += ' No running deployment for that branch?';
+    const err = new Error(detail);
+    err.rtcUnsupported = resp.status === 501;
+    throw err;
   }
   const answer = await resp.json();
   if (gen !== startGen) return;
@@ -2010,12 +2327,268 @@ async function startRtc(gen) {
   updateEmptyState();
 }
 
-initRunnableStrip();
+// --- Standalone bootstrap --------------------------------------------------
+
+function syncTransportForTarget() {
+  // Preview tunnels WebSocket only — there is no RTC preview today.
+  const preview = !EMBEDDED && targetModeSelect.value === 'platform' && pf.endpoint.value === 'preview';
+  const rtcOpt = [...transportSelect.options].find((o) => o.value === 'webrtc');
+  if (rtcOpt) rtcOpt.disabled = preview;
+  if (preview && transportSelect.value === 'webrtc') transportSelect.value = 'ws';
+  syncNsForTransport();
+}
+
+function syncTargetVisibility() {
+  const m = targetModeSelect.value;
+  targetLocalBox.hidden = m !== 'local';
+  targetPlatformBox.hidden = m !== 'platform';
+  syncTransportForTarget();
+}
+
+/** Guards stale async probe results after the target changed under them. */
+let probeSeq = 0;
+
+/** Healthcheck + meta fetch against the local target; drives the strip and idle status. */
+async function probeLocal() {
+  if (targetMode() !== 'local') return;
+  // Launcher mode with no child yet: nothing to probe — Start spawns it.
+  if (launcherAvailable && lastChildState !== 'running') {
+    applyMeta(null);
+    if (connVisual !== 'live' && connVisual !== 'connecting') {
+      setConn('ended', 'Ready', 'Pick an agent file, then press Start — the server is spawned for you.');
+    }
+    return;
+  }
+  const seq = ++probeSeq;
+  const base = localBase();
+  const idle = () => connVisual !== 'live' && connVisual !== 'connecting';
+  try {
+    const r = await fetch(base + '/healthcheck');
+    if (seq !== probeSeq) return;
+    if (!r.ok) throw new Error(`healthcheck ${r.status}`);
+    let meta = null;
+    try {
+      const mr = await fetch(base + '/voice/meta');
+      if (mr.ok) meta = await mr.json(); // older servers lack /voice/meta — fine
+    } catch (_) {}
+    if (seq !== probeSeq) return;
+    applyMeta(meta);
+    void loadAmbienceCatalog();
+    if (idle()) setConn('ended', 'Ready', `Server answering at ${base} — press Start.`);
+  } catch (_) {
+    if (seq !== probeSeq) return;
+    applyMeta(null);
+    if (idle()) setConn('ended', 'No server', launcherAvailable
+      ? 'The spawned server is not answering — press Start to spawn it again.'
+      : `Nothing answering at ${base}. Start a timbal.server there, then press Start.`);
+  }
+}
+
+// --- Launcher client (spawns `uv run python -m timbal.server` children) ----
+// Only reachable when this page is served by `python -m timbal.server.playground`
+// — the launcher endpoints live on the page's own origin. Spawning is implicit:
+// pressing Start ensures a child for the agent path in the form (see
+// ensureLocalServer). Opened from the filesystem or elsewhere, the status probe
+// fails and the manual Server URL field is shown instead.
+let lastChildState = null;
+
+async function fetchLauncherStatus() {
+  try {
+    const r = await fetch('/launcher/status');
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function renderLauncherChild(child) {
+  const state = child?.state || 'stopped';
+  const stoppable = state === 'running' || state === 'starting';
+  btnLauncher.hidden = !stoppable; // spawning happens on Start, so the button only stops
+  if (state === 'starting') {
+    launcherStateEl.textContent = `Starting on port ${child.port}… (first run may pay a uv sync)`;
+  } else if (state === 'running') {
+    launcherStateEl.textContent = `Running on port ${child.port} (pid ${child.pid})`;
+  } else if (state === 'exited') {
+    const lastLog = (child.logs || []).filter(Boolean).slice(-1)[0] || '';
+    launcherStateEl.textContent = `Exited (code ${child.exit_code}).${lastLog ? ` Last log: ${lastLog}` : ''}`;
+  } else {
+    launcherStateEl.textContent = '';
+  }
+}
+
+function adoptSpawnedChild(child) {
+  if (!child?.port) return;
+  localUrlInput.value = `http://${location.hostname || 'localhost'}:${child.port}`;
+  localStorage.setItem(TGT_KEY('local-url'), localUrlInput.value);
+}
+
+function startLauncherPolling() {
+  setInterval(async () => {
+    const st = await fetchLauncherStatus();
+    if (!st) return;
+    renderLauncherChild(st.child);
+    const state = st.child?.state || 'stopped';
+    if (state === 'running' && lastChildState !== 'running') {
+      adoptSpawnedChild(st.child);
+      void probeLocal();
+    }
+    lastChildState = state;
+  }, 3000);
+}
+
+btnLauncher.onclick = async () => {
+  btnLauncher.disabled = true;
+  try {
+    const r = await fetch('/launcher/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    renderLauncherChild((await r.json()).child);
+    void probeLocal();
+  } catch (err) {
+    launcherStateEl.textContent = String(err?.message || err);
+  } finally {
+    btnLauncher.disabled = false;
+  }
+};
+
+/** Optional fixed port for the spawned child, or null for a launcher-picked free one. */
+function launcherPort() {
+  const raw = launcherPortInput.value.trim();
+  if (!raw) return null;
+  const p = parseInt(raw, 10);
+  if (!Number.isFinite(p) || p < 1 || p > 65535) throw new Error(`Invalid port: ${raw}`);
+  return p;
+}
+
+/**
+ * Spawn-on-Start: make sure the launcher child is running the agent currently
+ * in the form (respawning on spec/port changes) and healthy before dialing.
+ * Blocks through the child's `starting` phase — the first run of a project can
+ * pay a `uv sync`, so the deadline is generous.
+ */
+async function ensureLocalServer() {
+  const spec = launcherSpecInput.value.trim();
+  if (!spec) throw new Error('Enter an agent first (path/to/agent.py::object).');
+  const port = launcherPort();
+  localStorage.setItem(TGT_KEY('spec'), spec);
+
+  const st = await fetchLauncherStatus();
+  if (!st) throw new Error('Playground launcher is not reachable — restart `python -m timbal.server.playground`.');
+  let child = st.child;
+  const alive = child && (child.state === 'running' || child.state === 'starting');
+  // The launcher echoes the raw spec the child was spawned from — compare
+  // against that, not client-side state: a survivor from a previous page load
+  // may be running a different agent than the (persisted) form says.
+  if (!alive || child.requested_import_spec !== spec || (port !== null && child.port !== port)) {
+    setConn('connecting', 'Spawning server', `uv run timbal.server — ${spec}`);
+    const r = await fetch('/launcher/spawn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ import_spec: spec, ...(port !== null ? { port } : {}) }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `Spawn failed (${r.status}).`);
+    child = data.child;
+  }
+  renderLauncherChild(child);
+
+  const deadline = Date.now() + 180_000;
+  while (child.state !== 'running') {
+    if (child.state === 'exited') {
+      const lastLog = (child.logs || []).filter(Boolean).slice(-1)[0] || '';
+      throw new Error(`Server exited (code ${child.exit_code}).${lastLog ? ` Last log: ${lastLog}` : ''}`);
+    }
+    if (child.state === 'stopped') throw new Error('Server was stopped before it became ready.');
+    if (Date.now() > deadline) throw new Error('Server did not become healthy in time — check its logs in the launcher terminal.');
+    setConn('connecting', 'Starting server', `Waiting for the agent on port ${child.port}… (first run may pay a uv sync)`);
+    await new Promise((res) => setTimeout(res, 500));
+    child = (await fetchLauncherStatus())?.child || { state: 'stopped' };
+    renderLauncherChild(child);
+  }
+  lastChildState = 'running';
+  adoptSpawnedChild(child);
+  void probeLocal();
+}
+
+function onTargetChanged() {
+  probeSeq += 1; // cancel in-flight probes for the previous target
+  if (targetMode() === 'local') {
+    void probeLocal();
+  } else {
+    applyMeta(null);
+    if (connVisual !== 'live' && connVisual !== 'connecting') {
+      setConn('ended', 'Ready', 'Fill in the workforce details, then press Start.');
+    }
+  }
+}
+
+async function initStandalone() {
+  // Standalone layout mirrors the right panel: TARGET (panel header), then --- AGENT.
+  document.getElementById('agent-panel-title').hidden = true;
+  targetSection.hidden = false;
+  targetSection.classList.add('panel-section--top');
+  document.getElementById('target-heading').className = 'panel-title';
+  const agentSection = document.getElementById('agent-section');
+  agentSection.classList.remove('panel-section--top'); // restore the section rule
+  document.getElementById('agent-section-title').hidden = false;
+  targetModeSelect.value = localStorage.getItem(TGT_KEY('mode')) || 'local';
+  if (!targetModeSelect.value) targetModeSelect.value = 'local';
+  localUrlInput.value = localStorage.getItem(TGT_KEY('local-url')) || '';
+  pf.api.value = localStorage.getItem(TGT_KEY('pf-api')) || '';
+  pf.org.value = localStorage.getItem(TGT_KEY('pf-org')) || '';
+  pf.project.value = localStorage.getItem(TGT_KEY('pf-project')) || '';
+  pf.workforce.value = localStorage.getItem(TGT_KEY('pf-workforce')) || '';
+  pf.rev.value = localStorage.getItem(TGT_KEY('pf-rev')) || '';
+  pf.token.value = localStorage.getItem(TGT_KEY('pf-token')) || '';
+  pf.endpoint.value = localStorage.getItem(TGT_KEY('pf-endpoint')) || 'deployed';
+  syncTargetVisibility();
+
+  targetModeSelect.onchange = () => {
+    localStorage.setItem(TGT_KEY('mode'), targetModeSelect.value);
+    syncTargetVisibility();
+    onTargetChanged();
+  };
+  localUrlInput.onchange = () => {
+    localStorage.setItem(TGT_KEY('local-url'), localUrlInput.value.trim());
+    void probeLocal();
+  };
+  for (const [key, el] of Object.entries(pf)) {
+    el.onchange = () => {
+      localStorage.setItem(TGT_KEY(`pf-${key}`), el.value);
+      if (key === 'endpoint') syncTransportForTarget();
+    };
+  }
+
+  const st = await fetchLauncherStatus();
+  if (st) {
+    launcherAvailable = true;
+    launcherBox.hidden = false;
+    localUrlField.hidden = true; // launcher mode: the URL is derived from the spawned child
+    launcherSpecInput.value = localStorage.getItem(TGT_KEY('spec')) || st.launcher?.default_import_spec || '';
+    launcherPortInput.value = localStorage.getItem(TGT_KEY('port')) || '';
+    launcherSpecInput.onchange = () => localStorage.setItem(TGT_KEY('spec'), launcherSpecInput.value.trim());
+    launcherPortInput.onchange = () => localStorage.setItem(TGT_KEY('port'), launcherPortInput.value.trim());
+    renderLauncherChild(st.child);
+    lastChildState = st.child?.state || null;
+    // Adopt a running survivor's URL for probing/meta; whether Start reuses it
+    // is decided in ensureLocalServer against the child's own spawned spec.
+    if (st.child?.state === 'running') adoptSpawnedChild(st.child);
+    startLauncherPolling();
+  }
+  onTargetChanged();
+}
+
+applyMeta(EMBEDDED ? META : null);
 setSessionButton('start');
-setConn('connecting', 'Getting ready', 'Microphone and server connection…');
 cardEl.classList.add('card--inactive');
-// Auto-start on load — no idle play click. Start remains after Stop for a new session.
-void startSession();
+if (EMBEDDED) {
+  setConn('connecting', 'Getting ready', 'Microphone and server connection…');
+  // Auto-start on load — no idle play click. Start remains after Stop for a new session.
+  void startSession();
+} else {
+  setConn('ended', 'Ready', 'Pick a target, then press Start.');
+  void initStandalone();
+}
 </script>
 </body>
 </html>

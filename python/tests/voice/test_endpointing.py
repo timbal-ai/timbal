@@ -510,6 +510,7 @@ class TestVoiceSessionEndpointing:
             agent=Agent(name="t", model=TestModel(responses=["ok"]), tools=[]),
             stt=stt,
             tts=_SilentTTS(),
+            turn_detector="heuristic",  # no audio EOU — the premise of this test
             vad_endpointing=True,
         )
 

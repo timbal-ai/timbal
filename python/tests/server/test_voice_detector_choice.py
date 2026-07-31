@@ -52,6 +52,14 @@ class TestFluxOwnsEndpointing:
 class TestSilenceEndpointingDefault:
     """Nova / ElevenLabs / anything that commits on a silence timeout."""
 
+    def test_voice_config_leaves_the_detector_unset(self):
+        # Regression: pinning "local" in VoiceConfig would make sessions take
+        # the explicit-spec path, skipping the lexical degradation below when
+        # timbal[voice] is absent (a degraded "local" is holdless).
+        from timbal.voice.config import VoiceConfig
+
+        assert VoiceConfig().turn_detector is None
+
     def test_defaults_to_local_with_the_extra(self, monkeypatch):
         _with_extra(monkeypatch, available=True)
         assert select_turn_detector_spec(None, None, stt_is_flux=False) == "local"

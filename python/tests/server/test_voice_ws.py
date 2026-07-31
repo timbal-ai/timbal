@@ -551,7 +551,7 @@ class TestVoiceWsClientTurnDetector:
 
     def test_unknown_mode_name_falls_back_to_default(self, monkeypatch, tmp_path: Path) -> None:
         started = self._run_session(monkeypatch, tmp_path, {"turn_detector": "quantum"})
-        assert started["turn_detector"] == "HeuristicTurnDetector"
+        assert started["turn_detector"] in self._HOLDS
 
     def test_racing_playback_ack_does_not_eat_config(self, monkeypatch, tmp_path: Path) -> None:
         """A playback ack sent before the hello must not be mistaken for config."""

@@ -271,6 +271,10 @@ def _make_session(
         stt=stt,
         tts=tts,
         record_audio=record_audio,
+        # These tests exercise session mechanics with scripted STT text and no
+        # real mic audio — pin the holdless heuristic so the default ("local",
+        # Smart Turn HOLD + VAD endpointing) doesn't shape their timing.
+        turn_detector="heuristic",
     )
     return session, stt, tts
 
@@ -391,7 +395,7 @@ class TestAudioRecording:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = MockSTT(script=[])
         tts = MockTTS()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts, record_audio=True)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, record_audio=True, turn_detector="heuristic")
 
         audio_chunks = [b"\x00\x01" * 10, b"\x02\x03" * 10]
 
@@ -409,7 +413,7 @@ class TestAudioRecording:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = MockSTT(script=[])
         tts = MockTTS()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts, record_audio=False)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, record_audio=False, turn_detector="heuristic")
 
         async def _audio_source() -> AsyncIterator[bytes]:
             yield b"\x00\x01" * 10
@@ -441,6 +445,7 @@ class TestLlmWarmup:
             stt=MockSTT(),
             tts=MockTTS(),
             model="openai/gpt-4o-mini",
+            turn_detector="heuristic",
         )
         session._start_llm_warmup()
         assert session._llm_warmup_task is not None
@@ -455,7 +460,7 @@ class TestLlmWarmup:
 
         monkeypatch.setattr("timbal.core.llm_router.warmup_llm_connection", _fake_warmup)
         agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
-        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
         session._start_llm_warmup()
         assert session._llm_warmup_task is not None
         await session._llm_warmup_task
@@ -463,7 +468,7 @@ class TestLlmWarmup:
 
     def test_warmup_skips_test_model(self) -> None:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
-        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
         session._start_llm_warmup()
         assert session._llm_warmup_task is None
 
@@ -583,6 +588,7 @@ class TestTurnTimeout:
             agent=_HungAgent(),  # type: ignore[arg-type]
             stt=stt,
             tts=tts,
+            turn_detector="heuristic",
             turn_timeout_secs=0.15,
             turn_timeout_fallback="Sorry, try again.",
         )
@@ -647,6 +653,7 @@ class TestTurnTimeout:
             agent=_HungAgent(),  # type: ignore[arg-type]
             stt=stt,
             tts=tts,
+            turn_detector="heuristic",
             turn_timeout_secs=0.15,
         )
         events: list[VoiceSessionEvent] = []
@@ -747,7 +754,7 @@ class TestMultiTurn:
         agent = Agent(name="t", model=TestModel(responses=["Answer 1", "Answer 2"]), tools=[])
         stt = DelayedMockSTT()
         tts = MockTTS()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic")
 
         events: list[VoiceSessionEvent] = []
 
@@ -796,7 +803,7 @@ class TestMultiTurn:
         # far in the future so _assistant_active stays True after the agent turn finishes.
         big_chunk = b"\x00\x01" * 16_000
         tts = SlowMockTTS(delay=0.05, chunk=big_chunk, num_chunks=3)
-        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic")
 
         events: list[VoiceSessionEvent] = []
 
@@ -884,7 +891,7 @@ class TestTurnMetrics:
             tracing_provider=provider,
         )
         stt = MockSTT(script=[TranscriptEvent(type="committed", text="What time is it?")])
-        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector="heuristic")
         await _collect_events(session)
 
         assert len(session.metrics) == 1
@@ -918,7 +925,7 @@ class TestTurnMetrics:
         stt = DelayedMockSTT()
         big_chunk = b"\x00\x01" * 16_000
         tts = SlowMockTTS(delay=0.05, chunk=big_chunk, num_chunks=3)
-        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic")
 
         events: list[VoiceSessionEvent] = []
 
@@ -1019,7 +1026,7 @@ class TestInterruptionTruncation:
         stt = DelayedMockSTT()
         chunk = b"\x00\x01" * 50  # 100 bytes per chunk
         tts = SlowMockTTS(delay=0.03, chunk=chunk, num_chunks=4) if not interrupt_after_done else MockTTS(chunk=chunk, num_chunks=4)
-        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
 
         events: list[VoiceSessionEvent] = []
 
@@ -1121,7 +1128,7 @@ class TestInterruptionTruncation:
         """TTS can enqueue far more AudioOutput than the WS drains. Barge-in must
         not wait behind that backlog or long replies keep playing after interrupt."""
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
-        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
         await session._emit(AudioOutput(data=b"\x00" * 64))
         await session._emit(AudioOutput(data=b"\x01" * 64))
         await session._emit(AgentTextDone(text="already spoken"))
@@ -1169,7 +1176,7 @@ class TestInterruptionTruncation:
         )
         stt = DelayedMockSTT()
         tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
-        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
 
         events: list[VoiceSessionEvent] = []
         first_run_id: str | None = None
@@ -1323,7 +1330,7 @@ class TestInterruptionTruncation:
         )
         stt = DelayedMockSTT()
         tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
-        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
 
         events: list[VoiceSessionEvent] = []
 
@@ -1470,7 +1477,7 @@ class TestInterruptionTruncation:
         from timbal.types.message import Message
 
         agent = Agent(name="t", model=TestModel(responses=["x"]), tools=[])
-        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
         ctx = RunContext(tracing_provider=None, platform_config=None)
         root = Span(
             path="t",
@@ -1574,7 +1581,7 @@ class TestInterruptionTruncation:
 
         agent = Agent(name="t", model=TestModel(responses=["should not speak", "ok"]), tools=[])
         stt = DelayedMockSTT()
-        session = _GatedSession(agent=agent, stt=stt, tts=MockTTS())
+        session = _GatedSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector="heuristic")
         events: list[VoiceSessionEvent] = []
 
         async def _empty_audio() -> AsyncIterator[bytes]:
@@ -1615,7 +1622,7 @@ class TestInterruptionTruncation:
         agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE]), tools=[])
         stt = MockSTT(script=[TranscriptEvent(type="committed", text="Hello there, how are you doing?")])
         tts = MockTTS(chunk=b"\x00\x01" * 50, num_chunks=4)
-        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
         # Simulate audio still playing (and only partially heard) at close time:
         # close() must NOT rewrite the committed transcript entry.
         tracker.playing = True
@@ -1772,7 +1779,7 @@ class TestVadBargeInVeto:
         stt = DelayedMockSTT()
         tts = SlowMockTTS(delay=0.05, num_chunks=6)
         tracker = FakePlaybackTracker()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts, playback_tracker=tracker)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic", playback_tracker=tracker)
         _arm_vad(session, _FakeEndpointer(speech_secs))
 
         events: list[VoiceSessionEvent] = []
@@ -1839,7 +1846,12 @@ class TestStreamingTTS:
             model=TestModel(responses=responses or [self.RESPONSE]),
             tools=[],
         )
-        return VoiceSession(agent=agent, stt=MockSTT(script=[TranscriptEvent(type="committed", text="hi")]), tts=tts)
+        return VoiceSession(
+            agent=agent,
+            stt=MockSTT(script=[TranscriptEvent(type="committed", text="hi")]),
+            tts=tts,
+            turn_detector="heuristic",
+        )
 
     async def test_single_stream_per_reply(self) -> None:
         """All flushes of one reply feed the SAME stream (no per-segment
@@ -1871,7 +1883,7 @@ class TestStreamingTTS:
         tts = StreamingMockTTS(bytes_per_char=10, chunk_delay=0.2)
         agent = Agent(name="t", model=TestModel(responses=[self.RESPONSE, "second"]), tools=[])
         stt = DelayedMockSTT()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic")
 
         events: list[VoiceSessionEvent] = []
 
@@ -2129,7 +2141,7 @@ class TestStalePartialSweeper:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = _StuckPartialSTT()
         tts = MockTTS()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic")
         session._stale_partial_poll_secs = 0.05
         session._stale_partial_commit_secs = 0.2
 
@@ -2167,7 +2179,7 @@ class TestStalePartialSweeper:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = _StuckPartialSTT()
         tts = MockTTS()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic")
         session._stale_partial_poll_secs = 0.05
         session._stale_partial_commit_secs = 0.15
 
@@ -2205,7 +2217,7 @@ class TestStalePartialSweeper:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = DelayedMockSTT()
         tts = MockTTS()
-        session = VoiceSession(agent=agent, stt=stt, tts=tts)
+        session = VoiceSession(agent=agent, stt=stt, tts=tts, turn_detector="heuristic")
         session._stale_partial_poll_secs = 0.05
         session._stale_partial_commit_secs = 0.15
 
@@ -2241,7 +2253,7 @@ class TestStalePartialSweeper:
         """
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
         stt = _StuckPartialSTT()
-        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector="heuristic")
         session._stale_partial_poll_secs = 0.05
         session._stale_partial_commit_secs = 0.4
         _arm_vad(session, endpointer)

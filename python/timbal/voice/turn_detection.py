@@ -13,20 +13,15 @@ without session changes.
 
 **Modes** (see :func:`resolve_turn_detector`):
 
-* ``heuristic`` (resolver default) — :class:`HeuristicTurnDetector`, no extra deps
+* ``local`` (resolver default) — :class:`LocalAudioTurnDetector` + Smart Turn /
+  Namo when ``timbal[voice]`` is installed; falls back to ``lexical`` without
+  the extra (never the holdless heuristic)
 * ``provider`` — :class:`ProviderTurnDetector`, trust STT/realtime endpointing
-* ``local`` — :class:`LocalAudioTurnDetector` + injectable :class:`AudioEouModel`
 * ``lexical`` — :class:`LexicalTurnDetector`, optional zero-dep text overlay
+* ``heuristic`` — :class:`HeuristicTurnDetector`, no holds (opt-in only)
 
-``heuristic`` is the resolver's default only because it is the one mode that
-needs no extras and makes no assumption about the STT. It is *not* the best
-choice: it cannot hold, so on any STT that endpoints on silence it splits a
-paused utterance into several turns (``benchmarks/voice`` measures 65-69% on
-Nova and ElevenLabs against 96-100% for the holding modes). Pick by STT —
-``provider`` for Deepgram Flux, ``local`` (or ``lexical`` without the
-``timbal[voice]`` extra) for everything else. :mod:`timbal.server.voice` does
-this for you; direct :class:`~timbal.voice.session.VoiceSession` users should
-pass ``turn_detector=`` explicitly.
+Pick by STT when overriding: ``provider`` for Deepgram Flux (the server forces
+this automatically), ``local`` for everything else.
 
 Provider-native paths (OpenAI ``semantic_vad``, ElevenLabs Scribe VAD commits,
 Deepgram Flux, Gemini Live) map to ``provider`` or a future realtime session
@@ -1307,25 +1302,44 @@ _TEXT_EOU_UNSET: Any = object()
 _DEFAULT_TEXT_EOU: TextEouPredictor | Any = _TEXT_EOU_UNSET
 
 
+def _default_turn_detector() -> TurnDetector:
+    """Smart Turn + Namo when ``timbal[voice]`` is present, else lexical.
+
+    ``local`` without an audio EOU model collapses to the holdless heuristic
+    decision path, so without the extra we pick ``lexical`` (can HOLD, no deps)
+    rather than a degraded ``local``.
+    """
+    local = LocalAudioTurnDetector(
+        audio_eou=_default_audio_eou(),
+        fallback_text_eou=_default_text_eou(),
+    )
+    if getattr(local, "audio_eou", None) is not None:
+        return local
+    return LexicalTurnDetector(text_eou=_default_text_eou())
+
+
 def resolve_turn_detector(spec: Any = None) -> TurnDetector:
     """Build a :class:`TurnDetector` from a name, instance, factory, or ``None``.
 
-    Accepted names: ``heuristic`` (default), ``provider``, ``local``, ``lexical``,
+    Accepted names: ``local`` (default), ``provider``, ``lexical``, ``heuristic``,
     ``raw`` (debug: no silence/noise/echo filtering at all).
-    ``local`` auto-loads Smart Turn (audio) + Namo (text) when the
-    ``timbal[voice]`` extra is installed (heuristic / punctuation degradation
-    otherwise). Instances are returned unchanged — callers that reuse one spec
-    across concurrent sessions (server ``voice_config``) must
-    :meth:`~TurnDetector.clone` per session, or pass a zero-arg factory
-    callable instead.
+    ``None`` / ``""`` / ``"default"`` resolve to :func:`_default_turn_detector`
+    (Smart Turn + Namo when ``timbal[voice]`` is installed, else lexical).
+    ``local`` auto-loads Smart Turn (audio) + Namo (text) when the extra is
+    installed (heuristic / punctuation degradation otherwise). Instances are
+    returned unchanged — callers that reuse one spec across concurrent sessions
+    (server ``voice_config``) must :meth:`~TurnDetector.clone` per session, or
+    pass a zero-arg factory callable instead.
     """
     if spec is None:
-        return HeuristicTurnDetector()
+        return _default_turn_detector()
     if isinstance(spec, TurnDetector):
         return spec
     if isinstance(spec, str):
         key = spec.strip().lower()
-        if key in ("", "heuristic", "default"):
+        if key in ("", "default"):
+            return _default_turn_detector()
+        if key == "heuristic":
             return HeuristicTurnDetector()
         if key in ("provider", "stt"):
             return ProviderTurnDetector()
@@ -1340,7 +1354,7 @@ def resolve_turn_detector(spec: Any = None) -> TurnDetector:
             return RawTurnDetector()
         raise ValueError(
             f"Unknown turn_detector {spec!r}; expected one of "
-            "'heuristic', 'provider', 'local', 'lexical', 'raw', a TurnDetector "
+            "'local', 'provider', 'lexical', 'heuristic', 'raw', a TurnDetector "
             "instance, or a zero-arg factory returning one"
         )
     if callable(spec):

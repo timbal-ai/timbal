@@ -892,9 +892,17 @@ class TestRawTurnDetector:
 
 
 class TestResolveTurnDetector:
-    def test_none_and_heuristic(self) -> None:
-        assert isinstance(resolve_turn_detector(None), HeuristicTurnDetector)
-        assert isinstance(resolve_turn_detector("heuristic"), HeuristicTurnDetector)
+    def test_none_defaults_to_local_or_lexical(self) -> None:
+        # With timbal[voice]: LocalAudioTurnDetector (Smart Turn). Without: lexical.
+        # Note: LocalAudioTurnDetector subclasses HeuristicTurnDetector — check
+        # the concrete type, not isinstance(..., HeuristicTurnDetector).
+        for key in (None, "default", ""):
+            got = type(resolve_turn_detector(key))
+            assert got in (LocalAudioTurnDetector, LexicalTurnDetector), got
+            assert got is not HeuristicTurnDetector
+
+    def test_explicit_heuristic(self) -> None:
+        assert type(resolve_turn_detector("heuristic")) is HeuristicTurnDetector
 
     def test_named_modes(self) -> None:
         assert isinstance(resolve_turn_detector("provider"), ProviderTurnDetector)
@@ -1502,7 +1510,7 @@ class TestHoldInSession:
         import asyncio
 
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
-        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS())
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=MockTTS(), turn_detector="heuristic")
 
         await session._arm_hold("I was wondering about", 0.01)
         stale = session._hold_task
