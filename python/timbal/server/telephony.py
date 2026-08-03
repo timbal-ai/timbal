@@ -327,7 +327,7 @@ async def _safe_close(ws: WebSocket, code: int, reason: str) -> None:
 async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
     """One phone call: start frame → session → μ-law media both ways, until stop."""
     try:
-        from ..voice import AudioOutput
+        from ..voice import AgentTextDone, AudioOutput, FillerSpoken, SessionEnded, TurnMetricsEvent
         from ..voice.telephony import (
             TELEPHONY_SAMPLE_RATE,
             ULAW_SILENCE,
@@ -521,15 +521,20 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
                 break
             yield chunk
 
+    # Events that follow *completed* speech (turn reply spoken, filler spoken,
+    # turn wrapped up, session over) — the only safe points to flush the
+    # sub-minimum downlink tail. Flushing on every non-audio event would pad
+    # mid-utterance (AgentTextDelta interleaves with AudioOutput while TTS
+    # streams), stitching audible silence gaps into continuous speech.
+    flush_events = (AgentTextDone, FillerSpoken, TurnMetricsEvent, SessionEnded)
+
     recv_task = asyncio.create_task(_recv_loop())
     try:
         async with aclosing(session.run(_phone_stream())) as event_iter:
             async for event in event_iter:
                 if isinstance(event, AudioOutput):
                     await _push_downlink(event.data)
-                else:
-                    # Any non-audio event marks a pause in synthesis: flush the
-                    # sub-minimum tail so turn endings aren't clipped.
+                elif isinstance(event, flush_events):
                     await _flush_downlink()
     finally:
         if not recv_task.done():
