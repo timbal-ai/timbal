@@ -406,6 +406,10 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
         ignored_marks.update(pending_marks)
         pending_marks.clear()
         out_ulaw.clear()
+        if down_resampler is not None:
+            # The FIR delay line still holds a tail of the interrupted reply;
+            # without a reset it would leak into the next turn's audio.
+            down_resampler.reset()
         task = asyncio.get_running_loop().create_task(_send_frame(dialect.clear_frame(stream_id)))
         clear_tasks.add(task)
         task.add_done_callback(clear_tasks.discard)

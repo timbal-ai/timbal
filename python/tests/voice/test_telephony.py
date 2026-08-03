@@ -79,6 +79,26 @@ class TestPcmResampler:
         resampler = PcmResampler(TELEPHONY_SAMPLE_RATE, 16_000)
         assert resampler.process(b"") == b""
 
+    def test_reset_drops_filter_tail(self) -> None:
+        """After a barge-in reset, no residue of the old audio may leak out."""
+        pytest.importorskip("av")
+        resampler = PcmResampler(16_000, TELEPHONY_SAMPLE_RATE)
+        loud = (16_000).to_bytes(2, "little", signed=True) * 1600
+        silence = b"\x00\x00" * 1600
+
+        resampler.process(loud)
+        resampler.reset()
+        out = _samples(resampler.process(silence))
+        assert out
+        assert max(abs(v) for v in out) == 0
+
+        # Control: without a reset the FIR delay line does leak the tail —
+        # if this stops failing, the reset (and its call site) is dead code.
+        leaky = PcmResampler(16_000, TELEPHONY_SAMPLE_RATE)
+        leaky.process(loud)
+        leaked = _samples(leaky.process(silence))
+        assert max(abs(v) for v in leaked) > 1_000
+
 
 class TestTelephonyPlaybackTracker:
     def test_interruption_fires_clear_and_freezes_axis(self) -> None:

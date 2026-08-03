@@ -112,8 +112,19 @@ class PcmResampler:
         if src_rate <= 0 or dst_rate <= 0:
             raise ValueError("sample rates must be positive")
         self._src_rate = src_rate
+        self._dst_rate = dst_rate
         self._audio_frame_cls = AudioFrame
+        self._resampler_cls = AudioResampler
         self._resampler = AudioResampler(format="s16", layout="mono", rate=dst_rate)
+        self._pts = 0
+
+    def reset(self) -> None:
+        """Drop filter state — audio still in the delay line is discarded.
+
+        Call after a barge-in throws away queued output: without this, the
+        FIR tail of the interrupted reply leaks into the next turn's audio.
+        """
+        self._resampler = self._resampler_cls(format="s16", layout="mono", rate=self._dst_rate)
         self._pts = 0
 
     def process(self, pcm: bytes) -> bytes:
