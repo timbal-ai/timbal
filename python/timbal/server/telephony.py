@@ -216,8 +216,15 @@ def _telnyx_signature_ok(body: bytes, timestamp: str, signature_b64: str, public
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError:
-        logger.warning("telnyx_signature_skipped", hint="Ed25519 verification requires the cryptography package")
-        return True
+        # Fail closed: the operator explicitly asked for verification by
+        # setting TELNYX_PUBLIC_KEY — accepting unverified webhooks here
+        # would turn a missing dependency into an auth bypass. (cryptography
+        # ships with timbal[voice] via aiortc, so this is a broken install.)
+        logger.error(
+            "telnyx_signature_unverifiable",
+            hint="TELNYX_PUBLIC_KEY is set but the cryptography package is missing; rejecting webhook",
+        )
+        return False
     try:
         key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_b64))
         key.verify(base64.b64decode(signature_b64), f"{timestamp}|".encode() + body)

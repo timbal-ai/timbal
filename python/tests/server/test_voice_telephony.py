@@ -427,6 +427,15 @@ class TestTelnyxWebhook:
         assert ok.status_code == 200
         assert bad.status_code == 403
 
+    def test_missing_cryptography_fails_closed(self, monkeypatch) -> None:
+        """Key set + cryptography unimportable must reject, not bypass auth."""
+        import sys
+
+        from timbal.server.telephony import _telnyx_signature_ok
+
+        monkeypatch.setitem(sys.modules, "cryptography.exceptions", None)
+        assert _telnyx_signature_ok(b"body", "123", base64.b64encode(b"\x00" * 64).decode(), "notakey") is False
+
 
 class TestUlawWire:
     def test_media_payload_is_valid_ulaw(self, monkeypatch, tmp_path) -> None:
