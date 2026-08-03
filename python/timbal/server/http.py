@@ -88,10 +88,12 @@ def create_app() -> FastAPI:
     )
 
     from .rtc import router as rtc_router
+    from .telephony import router as telephony_router
     from .voice import router as voice_router
 
     app.include_router(voice_router)
     app.include_router(rtc_router)
+    app.include_router(telephony_router)
 
     @app.get("/healthcheck")
     async def healthcheck() -> Response:

@@ -214,6 +214,30 @@ The server answers with the TTS audio track on the same m-line. Client teardown 
 | `TIMBAL_TURN_USERNAME` / `TIMBAL_TURN_PASSWORD` | TURN credentials. |
 | `TIMBAL_VOICE_RTC_FORCE_RELAY` | `1` → relay-only ICE: allocate on the TURN server above, skip STUN, and strip host/srflx candidates from the answer SDP. For servers on private subnets (serverless boxes) where every non-relay candidate is unreachable dead weight that slows the browser's ICE convergence. Requires `TIMBAL_TURN_URL` — without it (or if the TURN allocation yields no relay candidate) the server logs an error and answers with all candidates instead of an unconnectable SDP. |
 
+## Telephony: `/voice/twilio` and `/voice/telnyx`
+
+Answer real phone calls with the same voice session. Twilio and Telnyx stream call audio (G.711 μ-law, 8kHz mono) over a WebSocket they open toward the server; a shared bridge decodes/resamples into the session and sends TTS back the same way. Requires **`timbal[voice]`** (av for resampling).
+
+Routes per provider:
+
+- `POST /voice/twilio/incoming` / `POST /voice/telnyx/incoming` — the phone number's voice webhook. Answers with TwiML/TeXML that connects the call to the media WebSocket below (URL derived from `X-Forwarded-Proto`/`Host`, so it works behind a TLS proxy or an ngrok tunnel).
+- `WS /voice/twilio/stream` / `WS /voice/telnyx/stream` — the bidirectional media stream.
+
+**Provider setup:**
+
+- **Twilio:** point the number's *A call comes in* webhook (HTTP POST) at `https://<host>/voice/twilio/incoming`. Set `TWILIO_AUTH_TOKEN` so webhook signatures (`X-Twilio-Signature`, HMAC-SHA1) are enforced — without it requests are accepted with a warning.
+- **Telnyx:** create a TeXML application whose voice webhook is `https://<host>/voice/telnyx/incoming` and assign the number to it. Set `TELNYX_PUBLIC_KEY` (portal → API keys → public key) to enforce Ed25519 webhook signatures. The returned TeXML pins `bidirectionalMode="rtp"` and PCMU both ways.
+
+**Bridge semantics:**
+
+- Caller audio: μ-law 8kHz → PCM16 → resampled to the session rate (default 16kHz). No client `sample_rate` config applies; the line format is fixed by the carrier.
+- TTS audio: resampled to 8kHz, μ-law encoded, sent as `media` frames batched to ≥20ms (Telnyx's RTP minimum). A `mark` frame carrying the cumulative byte count follows each media frame; its echo is the playback ack, so barge-in truncation (`heard_text`, memory) works exactly like the browser transports.
+- Barge-in sends the provider's `clear` message, dropping their buffered audio immediately. Marks echoed *by* the clear (audio that never played) are ignored.
+- Custom `<Parameter>` values on the stream may override allowlisted session config (`turn_detector`, `stt_provider`, `stt_model`, `tts_model`, `model`, `language`, `voice`) — the webhook's TwiML already forwards `from`/`to`/`call_sid` so recordings are call-addressable.
+- DTMF frames are logged and otherwise ignored (no keypad actions yet). Outbound calls are not implemented yet either — these routes cover inbound.
+
+Single-session mode applies: a phone call counts as the process's one session.
+
 ## Single-session lifetime (serverless voice boxes)
 
 `TIMBAL_VOICE_SINGLE_SESSION=1` makes the server process serve **exactly one voice session and then exit 0** — for deployments that spawn one process per call and reap the box on process exit (the platform cannot see a WebRTC call: media flows browser ↔ TURN ↔ box, so the process must own its lifetime). Applies to both transports; whichever session arrives first (WS or RTC) owns the process.
