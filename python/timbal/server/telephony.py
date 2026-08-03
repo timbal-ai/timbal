@@ -457,7 +457,7 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
         if not out_ulaw:
             return
         # Pad short tails to the provider minimum with μ-law silence.
-        payload = bytes(out_ulaw).ljust(_MIN_MEDIA_BYTES, ULAW_SILENCE)
+        payload = bytes(out_ulaw) + ULAW_SILENCE * max(0, _MIN_MEDIA_BYTES - len(out_ulaw))
         out_ulaw.clear()
         await _send_media(payload)
 
