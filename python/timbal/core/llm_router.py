@@ -17,23 +17,18 @@ from types import SimpleNamespace
 from typing import Any, Literal
 
 import structlog
-from anthropic import APIConnectionError as AnthropicAPIConnectionError
-from anthropic import APIStatusError as AnthropicAPIStatusError
-from anthropic import APITimeoutError as AnthropicAPITimeoutError
-from anthropic import AsyncAnthropic
-from anthropic import RateLimitError as AnthropicRateLimitError  # APIError as AnthropicAPIError,
-from openai import APIConnectionError as OpenAIAPIConnectionError
-from openai import APIStatusError as OpenAIAPIStatusError
-from openai import APITimeoutError as OpenAIAPITimeoutError
-from openai import AsyncOpenAI
-from openai import RateLimitError as OpenAIRateLimitError  # APIError as OpenAIAPIError,
 from pydantic import BaseModel, SecretStr
 
 from ..errors import APIKeyNotFoundError
 from ..state import get_call_id, get_or_create_run_context, set_billing_id
 from ..types.message import Message
 from ..utils import transform_schema
+from .provider_errors import provider_error_classes
 from .runnable import Runnable
+
+# NOTE: provider SDKs (openai, anthropic) are imported lazily — at client
+# resolution and error classification, never at module import. They account
+# for ~460ms (a third) of `from timbal import Agent` otherwise.
 
 logger = structlog.get_logger("timbal.core.llm_router")
 MAX_RETRY_DELAY = 30.0
@@ -45,7 +40,8 @@ MAX_RETRY_DELAY = 30.0
 # on each individual .create() call instead.
 # Concurrency-safe: all coroutines run on one thread in asyncio; the GIL
 # ensures check-and-assign is atomic (no await between the if and the write).
-_CLIENT_CACHE: dict[tuple, AsyncOpenAI | AsyncAnthropic] = {}
+# Values are AsyncOpenAI | AsyncAnthropic instances (SDKs imported lazily).
+_CLIENT_CACHE: dict[tuple, Any] = {}
 
 # Shared httpx client for async file loading. Reused across LLM calls to
 # preserve connection pools to file origins (CDNs, S3, etc.). Lazy-initialized
@@ -71,7 +67,7 @@ def _get_file_client() -> Any:
     return _FILE_CLIENT
 
 
-def _get_client(cls: type, api_key: str, base_url: str | None, provider: str) -> AsyncOpenAI | AsyncAnthropic:
+def _get_client(cls: type, api_key: str, base_url: str | None, provider: str) -> Any:
     cache_key = (cls, api_key, base_url, provider)
     if cache_key not in _CLIENT_CACHE:
         kwargs: dict[str, Any] = {"api_key": api_key, "default_headers": {"x-provider": provider}}
@@ -198,7 +194,7 @@ def _resolve_client(
     api_key: str | None,
     base_url: str | None,
     run_context: Any,
-) -> tuple[AsyncOpenAI | AsyncAnthropic, str | None]:
+) -> tuple[Any, str | None]:
     """Resolve API key, base URL, and return the appropriate SDK client.
 
     Returns:
@@ -221,8 +217,13 @@ def _resolve_client(
     if not api_key:
         raise APIKeyNotFoundError(f"{config.env_key} not found.")
 
+    # Lazy SDK import: after the first call this is a sys.modules lookup (~1µs).
     if config.client_type == "anthropic":
+        from anthropic import AsyncAnthropic
+
         return _get_client(AsyncAnthropic, api_key, base_url, "anthropic"), base_url
+    from openai import AsyncOpenAI
+
     return _get_client(AsyncOpenAI, api_key, base_url or config.default_base_url, provider), base_url
 
 
@@ -316,22 +317,24 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
             error_msg = str(e)
 
             # Determine if error is retryable based on SDK exception types
+            # (classes resolved lazily — we're on an LLM error path, the SDK
+            # that raised is already imported).
             is_retryable = False
+            err_cls = provider_error_classes()
 
-            # OpenAI SDK exceptions
-            if isinstance(e, (OpenAIRateLimitError, AnthropicRateLimitError)):
+            if isinstance(e, err_cls["rate_limit"]):
                 is_retryable = True
                 error_type = "rate_limit"
 
-            elif isinstance(e, (OpenAIAPITimeoutError, AnthropicAPITimeoutError)):
+            elif isinstance(e, err_cls["timeout"]):
                 is_retryable = True
                 error_type = "timeout"
 
-            elif isinstance(e, (OpenAIAPIConnectionError, AnthropicAPIConnectionError)):
+            elif isinstance(e, err_cls["connection"]):
                 is_retryable = True
                 error_type = "connection_error"
 
-            elif isinstance(e, (OpenAIAPIStatusError, AnthropicAPIStatusError)):
+            elif isinstance(e, err_cls["status"]):
                 # Check status code for retryable HTTP errors
                 status_code = getattr(e, "status_code", None)
                 if status_code in [429, 500, 502, 503, 504]:
