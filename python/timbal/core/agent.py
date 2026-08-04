@@ -912,16 +912,26 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if tool is None:
                 yield tool_call, self._build_unknown_tool_event(tool_call, tools)
                 return
+            # A cancelled tool records 'interrupted' on its own span and swallows
+            # the CancelledError. In the queue/task path the agent still sees the
+            # cancellation at queue.get(); here we share the task with the tool,
+            # so detect the still-pending cancel request and re-raise before
+            # forwarding post-cancel events (keeps LLM-output salvage semantics).
+            current_task = asyncio.current_task()
             try:
                 # Raw stream: the collector wrapper is only needed at the public
                 # API boundary; internal consumers forward events themselves.
                 async for event in tool._stream(**tool_call.input):
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError
                     self._link_tool_call_span(event, tool_call)
                     yield tool_call, event
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
             except Exception as e:
                 yield tool_call, self._build_dispatch_failed_event(tool_call, e)
+            if current_task is not None and current_task.cancelling():
+                raise asyncio.CancelledError
             return
 
         queue = asyncio.Queue()
@@ -1123,8 +1133,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         ],
                                     }
                                 )
-                                # Run the tool (raw stream — see _multiplex_tools)
+                                # Run the tool (raw stream — see _multiplex_tools;
+                                # same pending-cancel detection as the fast path)
+                                _cmd_task = asyncio.current_task()
                                 async for event in tool._stream(**tool_input):
+                                    if _cmd_task is not None and _cmd_task.cancelling():
+                                        raise asyncio.CancelledError
                                     await _process_tool_event(event, tool_use_id, append_to_messages=False)
                                     if isinstance(event, OutputEvent) and event.output is not None:
                                         if (
