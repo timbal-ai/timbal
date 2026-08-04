@@ -1106,6 +1106,299 @@ class Runnable(ABC, BaseModel):
         # Yield a final marker with the output and collector
         yield (None, output, collector)
 
+    async def _apply_approval_gate(
+        self,
+        approval_decision: ApprovalPolicyDecision,
+        validated_input: dict[str, Any],
+        span: Any,
+        run_context: Any,
+    ) -> tuple[bool, "ApprovalEvent | None", dict[str, Any]]:
+        """Run the human-approval gate for one invocation.
+
+        All span status/output/metadata mutations for the gate happen here.
+
+        Returns ``(proceed, approval_event, validated_input)``:
+
+        - ``proceed=False, event=None`` — the gate ended the run (claimed by
+          another worker, cancelled, or denied); the caller just returns.
+        - ``proceed=False, event=ApprovalEvent`` — the gate is pending; the
+          caller yields the event and returns.
+        - ``proceed=True`` — approved; ``validated_input`` may carry the
+          human's edit-on-approve overrides.
+        """
+        # ``approval_id`` MUST be derived from the unredacted input
+        # so the resume call (which carries the full input) lands
+        # on the same id as the original gate.
+        input_dump = await dump(validated_input)
+        approval_id = _approval_id_for(span.path, input_dump)
+
+        # Compute the redacted view once and use it for every
+        # public surface. The unredacted ``validated_input`` is
+        # still what the handler sees on resume.
+        redacted_input = self._redact_validated_input(validated_input)
+        redaction_active = self.approval_redactor is not None or bool(self.approval_redact_keys)
+        if redaction_active:
+            span.input = redacted_input
+            span._input_dump = await dump(redacted_input)
+
+        try:
+            input_schema = self.format_params_model_schema()
+        except Exception:
+            input_schema = None
+        # Set by the agent on the START event when this gate fires inside a
+        # tool call (see Agent._safe_tool_dispatch). None for direct calls.
+        tool_call_id = span.metadata.get("tool_call_id")
+        span.metadata["approval"] = {
+            "id": approval_id,
+            "required": True,
+            "prompt": approval_decision.prompt,
+            "description": approval_decision.description,
+            "kind": approval_decision.kind,
+            "ui": approval_decision.ui,
+            "input_schema": input_schema,
+            "tool_call_id": tool_call_id,
+            "metadata": approval_decision.metadata,
+            "input": redacted_input,
+        }
+        approval_resolution = None
+        approval_cancel: Cancel | None = None
+        if approval_id in run_context._resume_values:
+            run_context._used_resume_ids.add(approval_id)
+            raw_resume = run_context._resume_values[approval_id]
+            # A Cancel value aborts the whole run rather than approving or
+            # denying. It is not a valid ApprovalResolution input, so it
+            # routes around coercion — but still flows through the durable
+            # claim below so a cancel and an approve racing on two workers
+            # can't both win.
+            if isinstance(raw_resume, Cancel):
+                approval_cancel = raw_resume
+            else:
+                approval_resolution = _coerce_approval_resolution(raw_resume)
+        if approval_resolution is not None and approval_resolution.is_expired():
+            span.metadata["approval"]["expired"] = True
+            span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
+            # Counter fires for the *expired* resolution. The gate
+            # then re-emits below, which adds a fresh :required tick.
+            run_context.update_usage("approvals:expired", 1)
+            approval_resolution = None
+
+        # A decision OR a cancel claims the gate; the first claimer wins and
+        # any later duplicate (resolve or cancel) stops here.
+        if (approval_resolution is not None or approval_cancel is not None) and (
+            run_context._tracing_provider is not None
+        ):
+            claimed = await run_context._tracing_provider.claim_approval(
+                str(run_context.parent_id) if run_context.parent_id else None,
+                approval_id,
+                str(run_context.id),
+            )
+            if not claimed:
+                span.metadata["approval"]["claim"] = {
+                    "claimed": False,
+                    "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
+                }
+                span.status = RunStatus(
+                    code="cancelled",
+                    reason="approval_already_claimed",
+                    message="Approval was already claimed by another resume run.",
+                )
+                span.output = {
+                    "approval_id": approval_id,
+                    "status": "approval_already_claimed",
+                }
+                span._output_dump = await dump(span.output)
+                return False, None, validated_input
+
+        if approval_cancel is not None:
+            run_context.update_usage("approvals:cancelled", 1)
+            message = approval_cancel.reason or "Run cancelled by user."
+            span.metadata["approval"]["cancelled"] = True
+            span.status = RunStatus(code="cancelled", reason="cancelled", message=message)
+            span.output = {"approval_id": approval_id, "status": "cancelled", "reason": message}
+            span._output_dump = await dump(span.output)
+            return False, None, validated_input
+
+        if approval_resolution is None:
+            # Status/output MUST be set BEFORE the caller yields the event.
+            # If the consumer breaks the stream right after seeing the
+            # ApprovalEvent, GeneratorExit fires at the yield and we'd
+            # otherwise persist this span as 'interrupted'.
+            span.status = RunStatus(
+                code="cancelled",
+                reason="approval_required",
+                message="Approval required before runnable execution.",
+            )
+            span.output = {
+                "approval_id": approval_id,
+                "status": "approval_required",
+                "prompt": approval_decision.prompt,
+            }
+            span._output_dump = await dump(span.output)
+
+            approval_event = ApprovalEvent(
+                run_id=run_context.id,
+                parent_run_id=run_context.parent_id,
+                path=span.path,
+                call_id=span.call_id,
+                parent_call_id=span.parent_call_id,
+                t0=int(time.time() * 1000),
+                approval_id=approval_id,
+                runnable_path=span.path,
+                runnable_name=self.name,
+                runnable_type=self.metadata.get("type", self.__class__.__name__),
+                tool_call_id=tool_call_id,
+                input=redacted_input,
+                input_schema=input_schema,
+                prompt=approval_decision.prompt,
+                description=approval_decision.description,
+                kind=approval_decision.kind,
+                ui=approval_decision.ui,
+                metadata=approval_decision.metadata,
+            )
+            run_context.update_usage("approvals:required", 1)
+            return False, approval_event, validated_input
+
+        # Resolution found and not expired — capture the audit
+        # snapshot before deciding the gate's outcome. Typed fields
+        # are surfaced under ``resolution`` so trace consumers can
+        # query e.g. ``approval.resolution.approver_id`` directly.
+        span.metadata["approval"]["resolution"] = {
+            "approved": approval_resolution.approved,
+            "reason": approval_resolution.reason,
+            "approver_id": approval_resolution.approver_id,
+            "comment": approval_resolution.comment,
+            "decided_at": approval_resolution.decided_at,
+            "expires_at": approval_resolution.expires_at,
+            "override_input": approval_resolution.override_input,
+            "metadata": approval_resolution.metadata,
+        }
+        if not approval_resolution.approved:
+            run_context.update_usage("approvals:denied", 1)
+            span.status = RunStatus(
+                code="cancelled",
+                reason="approval_denied",
+                message=approval_resolution.reason or "Approval denied.",
+            )
+            span.output = {
+                "approval_id": approval_id,
+                "status": "approval_denied",
+                "reason": approval_resolution.reason,
+            }
+            span._output_dump = await dump(span.output)
+            return False, None, validated_input
+
+        run_context.update_usage("approvals:approved", 1)
+
+        # Edit-on-approve: merge the human's overrides over the proposed
+        # input (override wins) and re-validate so the handler runs with
+        # the corrected, type-checked values. The audit snapshot above
+        # already recorded what was overridden.
+        if approval_resolution.override_input:
+            merged_input = {**validated_input, **approval_resolution.override_input}
+            validated_input = dict(self.params_model.model_validate(merged_input))
+            # Reflect what actually runs on the public input surface (redacted).
+            span.input = self._redact_validated_input(validated_input)
+            span._input_dump = await dump(span.input)
+            span.metadata["approval"]["effective_input"] = span.input
+
+        return True, None, validated_input
+
+    async def _finalize_suspend(self, suspend_signal: Suspend, span: Any, run_context: Any) -> InteractionEvent:
+        """Record a ``suspend()`` pause on the span and build its InteractionEvent.
+
+        The same durable resume rails as approvals (parent_id + tracing
+        provider) re-fire the handler with the supplied value on resume.
+        """
+        span.status = RunStatus(
+            code="cancelled",
+            reason="input_required",
+            message="Input required to resume.",
+        )
+        span.output = {
+            "suspension_id": suspend_signal.suspension_id,
+            "status": "input_required",
+            "kind": suspend_signal.kind,
+            "payload": suspend_signal.payload,
+        }
+        span._output_dump = await dump(span.output)
+        # Set by the agent on the START event when this suspension fires
+        # inside a tool call. None for direct (non-agent) calls.
+        tool_call_id = span.metadata.get("tool_call_id")
+        span.metadata["suspension"] = {
+            "id": suspend_signal.suspension_id,
+            "kind": suspend_signal.kind,
+            "payload": suspend_signal.payload,
+            "response_schema": suspend_signal.response_schema,
+            "tool_call_id": tool_call_id,
+        }
+        run_context.update_usage("suspends:required", 1)
+        return InteractionEvent(
+            run_id=run_context.id,
+            parent_run_id=run_context.parent_id,
+            path=span.path,
+            call_id=span.call_id,
+            parent_call_id=span.parent_call_id,
+            t0=int(time.time() * 1000),
+            interaction_id=suspend_signal.suspension_id,
+            kind=suspend_signal.kind,
+            runnable_path=span.path,
+            runnable_name=self.name,
+            runnable_type=self.metadata.get("type", self.__class__.__name__),
+            tool_call_id=tool_call_id,
+            payload=suspend_signal.payload,
+            response_schema=suspend_signal.response_schema,
+        )
+
+    def _spawn_background_task(
+        self, validated_input: dict[str, Any], input: dict[str, Any], run_context: Any, span: Any
+    ) -> dict[str, Any]:
+        """Spawn the handler as a background task registered on the parent runnable.
+
+        Returns the ``{"task_id", "status"}`` placeholder output for the
+        launching span. The task streams its events into a queue polled via
+        :meth:`get_background_task` and records its real output on the span
+        when it completes.
+        """
+        parent_span = run_context.parent_span()
+        if not parent_span:
+            raise ValueError("Parent span not found. Cannot run in background.")
+        task_id = "".join(secrets.choice(ALPHABET) for _ in range(6))
+        event_queue = asyncio.Queue()
+
+        async def _bg_handler_execution():
+            output = None
+            try:
+                async for _, final_output, _handler_collector in self._execute_handler(
+                    validated_input, run_context, span, event_queue
+                ):
+                    if final_output is not None:
+                        output = final_output
+
+                # Post hook might modify the output, so we dump afterwards
+                span._output_dump = await dump(output)
+                span.output = output
+                _emit_default_tool_usage(self)
+
+                set_parent_call_id(span.parent_call_id)
+                set_call_id(span.call_id)
+                if self.post_hook is not None:
+                    await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+
+            except asyncio.CancelledError:
+                # Re-raise so asyncio marks the task as cancelled
+                raise
+
+        task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
+
+        # Store task with event queue in parent runnable if available
+        parent_span.runnable._bg_tasks[task_id] = {
+            "task": task,
+            "event_queue": event_queue,
+            "name": self.name,
+            "input": input,
+        }
+        return {"task_id": task_id, "status": "running"}
+
     def __call__(self, **kwargs: Any) -> Any:
         """Execute the runnable, returning a TimbalCollector over its event stream.
 
@@ -1258,191 +1551,19 @@ class Runnable(ABC, BaseModel):
 
             # Fast path: requires_approval=False (the default) skips the whole
             # gate — no policy resolution, no ApprovalPolicyDecision construction.
-            if self.requires_approval is False:
-                approval_decision = None
-            else:
+            if self.requires_approval is not False:
                 approval_decision = await self._resolve_approval_decision(validated_input)
-            if approval_decision is not None and approval_decision.required:
-                # ``approval_id`` MUST be derived from the unredacted input
-                # so the resume call (which carries the full input) lands
-                # on the same id as the original gate.
-                input_dump = await dump(validated_input)
-                approval_id = _approval_id_for(span.path, input_dump)
-
-                # Compute the redacted view once and use it for every
-                # public surface. The unredacted ``validated_input`` is
-                # still what the handler sees on resume.
-                redacted_input = self._redact_validated_input(validated_input)
-                redaction_active = (
-                    self.approval_redactor is not None or bool(self.approval_redact_keys)
-                )
-                if redaction_active:
-                    span.input = redacted_input
-                    span._input_dump = await dump(redacted_input)
-
-                try:
-                    input_schema = self.format_params_model_schema()
-                except Exception:
-                    input_schema = None
-                # Set by the agent on the START event when this gate fires inside a
-                # tool call (see Agent._safe_tool_dispatch). None for direct calls.
-                tool_call_id = span.metadata.get("tool_call_id")
-                span.metadata["approval"] = {
-                    "id": approval_id,
-                    "required": True,
-                    "prompt": approval_decision.prompt,
-                    "description": approval_decision.description,
-                    "kind": approval_decision.kind,
-                    "ui": approval_decision.ui,
-                    "input_schema": input_schema,
-                    "tool_call_id": tool_call_id,
-                    "metadata": approval_decision.metadata,
-                    "input": redacted_input,
-                }
-                approval_resolution = None
-                approval_cancel: Cancel | None = None
-                if approval_id in run_context._resume_values:
-                    run_context._used_resume_ids.add(approval_id)
-                    raw_resume = run_context._resume_values[approval_id]
-                    # A Cancel value aborts the whole run rather than approving or
-                    # denying. It is not a valid ApprovalResolution input, so it
-                    # routes around coercion — but still flows through the durable
-                    # claim below so a cancel and an approve racing on two workers
-                    # can't both win.
-                    if isinstance(raw_resume, Cancel):
-                        approval_cancel = raw_resume
-                    else:
-                        approval_resolution = _coerce_approval_resolution(raw_resume)
-                if approval_resolution is not None and approval_resolution.is_expired():
-                    span.metadata["approval"]["expired"] = True
-                    span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
-                    # Counter fires for the *expired* resolution. The gate
-                    # then re-emits below, which adds a fresh :required tick.
-                    run_context.update_usage("approvals:expired", 1)
-                    approval_resolution = None
-
-                # A decision OR a cancel claims the gate; the first claimer wins and
-                # any later duplicate (resolve or cancel) stops here.
-                if (approval_resolution is not None or approval_cancel is not None) and (
-                    run_context._tracing_provider is not None
-                ):
-                    claimed = await run_context._tracing_provider.claim_approval(
-                        str(run_context.parent_id) if run_context.parent_id else None,
-                        approval_id,
-                        str(run_context.id),
+                if approval_decision.required:
+                    proceed, approval_event, validated_input = await self._apply_approval_gate(
+                        approval_decision, validated_input, span, run_context
                     )
-                    if not claimed:
-                        span.metadata["approval"]["claim"] = {
-                            "claimed": False,
-                            "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
-                        }
-                        span.status = RunStatus(
-                            code="cancelled",
-                            reason="approval_already_claimed",
-                            message="Approval was already claimed by another resume run.",
-                        )
-                        span.output = {
-                            "approval_id": approval_id,
-                            "status": "approval_already_claimed",
-                        }
-                        span._output_dump = await dump(span.output)
+                    if approval_event is not None:
+                        if approval_event.type in self._log_events and _events_logging_enabled():
+                            _get_logger().info(approval_event.type, **approval_event.model_dump())
+                        yield approval_event
+                        _restore_context()
+                    if not proceed:
                         return
-
-                if approval_cancel is not None:
-                    run_context.update_usage("approvals:cancelled", 1)
-                    message = approval_cancel.reason or "Run cancelled by user."
-                    span.metadata["approval"]["cancelled"] = True
-                    span.status = RunStatus(code="cancelled", reason="cancelled", message=message)
-                    span.output = {"approval_id": approval_id, "status": "cancelled", "reason": message}
-                    span._output_dump = await dump(span.output)
-                    return
-
-                if approval_resolution is None:
-                    # Status/output MUST be set BEFORE the yield. If the
-                    # consumer breaks the stream right after seeing the
-                    # ApprovalEvent, GeneratorExit fires at the yield and
-                    # we'd otherwise persist this span as 'interrupted'.
-                    span.status = RunStatus(
-                        code="cancelled",
-                        reason="approval_required",
-                        message="Approval required before runnable execution.",
-                    )
-                    span.output = {
-                        "approval_id": approval_id,
-                        "status": "approval_required",
-                        "prompt": approval_decision.prompt,
-                    }
-                    span._output_dump = await dump(span.output)
-
-                    approval_event = ApprovalEvent(
-                        run_id=run_context.id,
-                        parent_run_id=run_context.parent_id,
-                        path=span.path,
-                        call_id=span.call_id,
-                        parent_call_id=span.parent_call_id,
-                        t0=int(time.time() * 1000),
-                        approval_id=approval_id,
-                        runnable_path=span.path,
-                        runnable_name=self.name,
-                        runnable_type=self.metadata.get("type", self.__class__.__name__),
-                        tool_call_id=tool_call_id,
-                        input=redacted_input,
-                        input_schema=input_schema,
-                        prompt=approval_decision.prompt,
-                        description=approval_decision.description,
-                        kind=approval_decision.kind,
-                        ui=approval_decision.ui,
-                        metadata=approval_decision.metadata,
-                    )
-                    run_context.update_usage("approvals:required", 1)
-                    if approval_event.type in self._log_events and _events_logging_enabled():
-                        _get_logger().info(approval_event.type, **approval_event.model_dump())
-                    yield approval_event
-                    _restore_context()
-                    return
-
-                # Resolution found and not expired — capture the audit
-                # snapshot before deciding the gate's outcome. Typed fields
-                # are surfaced under ``resolution`` so trace consumers can
-                # query e.g. ``approval.resolution.approver_id`` directly.
-                span.metadata["approval"]["resolution"] = {
-                    "approved": approval_resolution.approved,
-                    "reason": approval_resolution.reason,
-                    "approver_id": approval_resolution.approver_id,
-                    "comment": approval_resolution.comment,
-                    "decided_at": approval_resolution.decided_at,
-                    "expires_at": approval_resolution.expires_at,
-                    "override_input": approval_resolution.override_input,
-                    "metadata": approval_resolution.metadata,
-                }
-                if not approval_resolution.approved:
-                    run_context.update_usage("approvals:denied", 1)
-                    span.status = RunStatus(
-                        code="cancelled",
-                        reason="approval_denied",
-                        message=approval_resolution.reason or "Approval denied.",
-                    )
-                    span.output = {
-                        "approval_id": approval_id,
-                        "status": "approval_denied",
-                        "reason": approval_resolution.reason,
-                    }
-                    span._output_dump = await dump(span.output)
-                    return
-
-                run_context.update_usage("approvals:approved", 1)
-
-                # Edit-on-approve: merge the human's overrides over the proposed
-                # input (override wins) and re-validate so the handler runs with
-                # the corrected, type-checked values. The audit snapshot above
-                # already recorded what was overridden.
-                if approval_resolution.override_input:
-                    merged_input = {**validated_input, **approval_resolution.override_input}
-                    validated_input = dict(self.params_model.model_validate(merged_input))
-                    # Reflect what actually runs on the public input surface (redacted).
-                    span.input = self._redact_validated_input(validated_input)
-                    span._input_dump = await dump(span.input)
-                    span.metadata["approval"]["effective_input"] = span.input
 
             # pre_hook runs only when we're actually going to execute the
             # handler. We deliberately defer it past the approval gate so
@@ -1454,48 +1575,7 @@ class Runnable(ABC, BaseModel):
 
             # Background task
             if run_in_background:
-                parent_span = run_context.parent_span()
-                if not parent_span:
-                    raise ValueError("Parent span not found. Cannot run in background.")
-                # task_id = uuid7(as_type="str").replace("-", "")
-                task_id = "".join(secrets.choice(ALPHABET) for _ in range(6))
-                event_queue = asyncio.Queue()
-
-                async def _bg_handler_execution():
-                    nonlocal output, collector
-                    try:
-                        async for _, final_output, handler_collector in self._execute_handler(
-                            validated_input, run_context, span, event_queue
-                        ):
-                            if handler_collector is not None:
-                                collector = handler_collector
-                            if final_output is not None:
-                                output = final_output
-
-                        # Post hook might modify the output, so we dump afterwards
-                        span._output_dump = await dump(output)
-                        span.output = output
-                        _emit_default_tool_usage(self)
-
-                        set_parent_call_id(_new_parent_call_id)
-                        set_call_id(_new_call_id)
-                        if self.post_hook is not None:
-                            await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
-
-                    except asyncio.CancelledError:
-                        # Re-raise so asyncio marks the task as cancelled
-                        raise
-
-                task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
-
-                # Store task with event queue in parent runnable if available
-                parent_span.runnable._bg_tasks[task_id] = {
-                    "task": task,
-                    "event_queue": event_queue,
-                    "name": self.name,
-                    "input": input,
-                }
-                output = {"task_id": task_id, "status": "running"}
+                output = self._spawn_background_task(validated_input, input, run_context, span)
             elif not self._is_async_gen and not self._is_gen:
                 # Fast path: plain sync/coroutine handlers cannot yield events,
                 # so skip the async-generator/tuple protocol entirely.
@@ -1537,45 +1617,7 @@ class Runnable(ABC, BaseModel):
                     suspend_signal = susp
 
             if suspend_signal is not None:
-                span.status = RunStatus(
-                    code="cancelled",
-                    reason="input_required",
-                    message="Input required to resume.",
-                )
-                span.output = {
-                    "suspension_id": suspend_signal.suspension_id,
-                    "status": "input_required",
-                    "kind": suspend_signal.kind,
-                    "payload": suspend_signal.payload,
-                }
-                span._output_dump = await dump(span.output)
-                # Set by the agent on the START event when this suspension fires
-                # inside a tool call. None for direct (non-agent) calls.
-                tool_call_id = span.metadata.get("tool_call_id")
-                span.metadata["suspension"] = {
-                    "id": suspend_signal.suspension_id,
-                    "kind": suspend_signal.kind,
-                    "payload": suspend_signal.payload,
-                    "response_schema": suspend_signal.response_schema,
-                    "tool_call_id": tool_call_id,
-                }
-                run_context.update_usage("suspends:required", 1)
-                interaction_event = InteractionEvent(
-                    run_id=run_context.id,
-                    parent_run_id=run_context.parent_id,
-                    path=span.path,
-                    call_id=span.call_id,
-                    parent_call_id=span.parent_call_id,
-                    t0=int(time.time() * 1000),
-                    interaction_id=suspend_signal.suspension_id,
-                    kind=suspend_signal.kind,
-                    runnable_path=span.path,
-                    runnable_name=self.name,
-                    runnable_type=self.metadata.get("type", self.__class__.__name__),
-                    tool_call_id=tool_call_id,
-                    payload=suspend_signal.payload,
-                    response_schema=suspend_signal.response_schema,
-                )
+                interaction_event = await self._finalize_suspend(suspend_signal, span, run_context)
                 if interaction_event.type in self._log_events and _events_logging_enabled():
                     _get_logger().info(interaction_event.type, **interaction_event.model_dump())
                 yield interaction_event
