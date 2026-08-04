@@ -227,6 +227,39 @@ def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, A
 _VOICE_HTML_META_TOKEN = "__TIMBAL_VOICE_RUNNABLE_META_JSON__"
 
 
+_TRUTHY = frozenset({"1", "true", "t", "yes", "y", "on"})
+_FALSY = frozenset({"0", "false", "f", "no", "n", "off"})
+
+
+def voice_warmup_intended(runnable: Any) -> bool:
+    """Whether server boot should pre-import the voice stack and pre-load ONNX models.
+
+    Historically this ran for every Agent app whenever the ``timbal[voice]``
+    extra was installed, which meant non-voice deployments (e.g. platform
+    images built from ``timbal[all]``) downloaded and loaded Smart Turn +
+    Namo + Silero at boot for nothing.
+
+    Policy, in order:
+
+    1. ``TIMBAL_VOICE_WARMUP`` env: truthy forces warmup (the playground
+       launcher sets this for its child servers), falsy disables it.
+    2. The runnable declares ``voice_config`` — clearly a voice app.
+    3. Any ``TIMBAL_VOICE_*`` / ``ELEVENLABS_VOICE_ID`` env is set — the
+       deployment is voice-configured even if the runnable isn't.
+    4. Otherwise: no warmup.
+    """
+    override = os.environ.get("TIMBAL_VOICE_WARMUP", "").strip().lower()
+    if override in _TRUTHY:
+        return True
+    if override in _FALSY:
+        return False
+    if getattr(runnable, "voice_config", None) is not None:
+        return True
+    if os.environ.get("ELEVENLABS_VOICE_ID"):
+        return True
+    return any(k.startswith("TIMBAL_VOICE_") for k in os.environ)
+
+
 async def warmup_voice_stack(voice_config: VoiceConfig) -> None:
     """Background warmup at server boot so the first voice session starts fast.
 

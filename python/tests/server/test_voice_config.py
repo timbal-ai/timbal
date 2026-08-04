@@ -23,6 +23,58 @@ from .voice_env import VOICE_ENV_KEYS
 
 
 @pytest.mark.usefixtures("clear_voice_env")
+class TestVoiceWarmupIntended:
+    """Non-voice deployments must not pre-load ONNX models at server boot.
+
+    Regression: warmup used to run for every Agent app whenever the
+    timbal[voice] extra was installed (e.g. platform images from timbal[all]),
+    downloading and loading Smart Turn + Namo + Silero for nothing.
+    """
+
+    class _Runnable:
+        voice_config = None
+
+    def _clear_warmup_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TIMBAL_VOICE_WARMUP", raising=False)
+        for k in list(os.environ):
+            if k.startswith("TIMBAL_VOICE_"):
+                monkeypatch.delenv(k, raising=False)
+
+    def test_no_voice_signals_means_no_warmup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_warmup_env(monkeypatch)
+        assert voice_routes.voice_warmup_intended(self._Runnable()) is False
+
+    def test_runnable_voice_config_enables_warmup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_warmup_env(monkeypatch)
+        r = self._Runnable()
+        r.voice_config = {"stt_provider": "elevenlabs"}
+        assert voice_routes.voice_warmup_intended(r) is True
+
+    def test_voice_env_enables_warmup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_warmup_env(monkeypatch)
+        monkeypatch.setenv("TIMBAL_VOICE_LANGUAGE", "en")
+        assert voice_routes.voice_warmup_intended(self._Runnable()) is True
+
+    def test_elevenlabs_voice_id_enables_warmup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_warmup_env(monkeypatch)
+        monkeypatch.setenv("ELEVENLABS_VOICE_ID", "abc")
+        assert voice_routes.voice_warmup_intended(self._Runnable()) is True
+
+    def test_env_override_forces_warmup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The playground launcher sets TIMBAL_VOICE_WARMUP=1 for its children."""
+        self._clear_warmup_env(monkeypatch)
+        monkeypatch.setenv("TIMBAL_VOICE_WARMUP", "1")
+        assert voice_routes.voice_warmup_intended(self._Runnable()) is True
+
+    def test_env_override_forces_no_warmup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_warmup_env(monkeypatch)
+        monkeypatch.setenv("TIMBAL_VOICE_WARMUP", "0")
+        r = self._Runnable()
+        r.voice_config = {"stt_provider": "elevenlabs"}  # even a voice app
+        assert voice_routes.voice_warmup_intended(r) is False
+
+
+@pytest.mark.usefixtures("clear_voice_env")
 class TestDefaultVoiceConfigFromEnv:
     def test_defaults_when_unset(self) -> None:
         cfg = voice_routes.default_voice_config_from_env()
