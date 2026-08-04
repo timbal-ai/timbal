@@ -20,17 +20,17 @@
   [1mLatency p50 by history length[0m
     N messages    Timbal p50        LG p50     ratio
   ────────────  ────────────  ────────────  ────────
-            10      121.7 µs       1.17 ms     9.61x
-            50      181.0 µs       1.59 ms     8.79x
-           200      419.1 µs       3.37 ms     8.05x
+            10      121.8 µs       1.10 ms     9.06x
+            50      180.5 µs       1.44 ms     8.01x
+           200      409.3 µs       2.93 ms     7.15x
 
   [1mMarginal cost per message  (slope 10 → 200)[0m
-  Timbal          +1.57 µs / message
-  LG (bare)       +11.61 µs / message
+  Timbal          +1.51 µs / message
+  LG (bare)       +9.60 µs / message
 
   [1mMemory per run  (N=200, ×50 runs)[0m
-  Timbal               1.0 KB
-  LG (bare)            2.8 KB
+  Timbal               1.1 KB
+  LG (bare)            2.9 KB
 
 [1m[36m────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario 2: Long messages, single turn  (20-message history, size scales, ×50)[0m
@@ -39,16 +39,16 @@
   [1mLatency p50 by message size[0m
      msg bytes    Timbal p50        LG p50     ratio
   ────────────  ────────────  ────────────  ────────
-           200      138.7 µs       1.46 ms    10.55x
-          5000      138.3 µs       1.68 ms    12.17x
-         20000      137.4 µs       2.24 ms    16.31x
+           200      138.5 µs       1.20 ms     8.67x
+          5000      135.0 µs       1.35 ms    10.00x
+         20000      144.0 µs       2.42 ms    16.82x
 
   [1mMarginal cost per KB of message  (slope 200 → 20000)[0m
-  Timbal          +-0.07 µs / KB of message
-  LG (bare)       +39.24 µs / KB of message
+  Timbal          +0.28 µs / KB of message
+  LG (bare)       +61.75 µs / KB of message
 
   [1mMemory per run  (msg=20000 B, ×50 runs)[0m
-  Timbal               0.7 KB
+  Timbal               0.8 KB
   LG (bare)           18.9 KB
 
 [1m[36m────────────────────────────────────────────────────────────────────────────[0m
@@ -60,18 +60,18 @@
   [1mPer-turn latency p50 (history grows with turn index)[0m
           turn        Timbal     LG (bare)     ratio
   ────────────  ────────────  ────────────  ────────
-             1      142.1 µs       1.51 ms    10.64x
-             5      125.3 µs       1.51 ms    12.04x
-            10      135.3 µs       1.73 ms    12.80x
-            20      158.8 µs       2.32 ms    14.60x
+             1      125.1 µs       1.36 ms    10.91x
+             5      117.1 µs       1.36 ms    11.60x
+            10      129.0 µs       1.50 ms    11.63x
+            20      152.5 µs       1.84 ms    12.08x
 
   [1mFull-session wall time  (20 turns)[0m
-  Timbal               3.0 ms
-  LG (bare)           36.4 ms
+  Timbal               2.7 ms
+  LG (bare)           31.1 ms
 
   [1mMemory per session  (20 turns, peak / 3 sessions)[0m
-  Timbal              44.8 KB
-  LG (bare)          158.6 KB
+  Timbal              45.2 KB
+  LG (bare)          158.7 KB
 
 [2m────────────────────────────────────────────────────────────────────────────
   Agent/graph creation excluded (except fresh per-session checkpointers,

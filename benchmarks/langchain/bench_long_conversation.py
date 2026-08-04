@@ -182,7 +182,9 @@ async def _latency(run_fn, n: int, warmup: int) -> list[float]:
         t0 = time.perf_counter()
         await run_fn()
         samples.append((time.perf_counter() - t0) * 1e6)
-    _clear_traces()
+        # Clear per iteration (outside the timed window) so accumulated
+        # in-memory traces don't skew later samples — mirrors _memory.
+        _clear_traces()
     return samples
 
 
