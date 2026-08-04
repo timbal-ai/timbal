@@ -191,6 +191,10 @@ class TestAgentNode:
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         assert config["voice_config"]["value"] == "<make_voice_config>"
+        # Schema must advertise the callable variant (mirrors system_prompt).
+        any_of_types = [v.get("type") for v in config["voice_config"]["anyOf"]]
+        assert "callable" in any_of_types
+        assert "object" in any_of_types
 
     def test_voice_config_instance(self, workspace):
         """A VoiceConfig instance is dumped to a JSON-safe dict."""

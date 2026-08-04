@@ -402,8 +402,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 vc = str(vc)
         if isinstance(vc, dict):
             vc = self._coerce_to_json_safe(vc)
+        # "callable" mirrors how system_prompt advertises non-serialisable
+        # variants (see _partial_schema) — the value is then a "<fn_name>"
+        # placeholder string rather than an object.
         config["voice_config"] = {
-            "anyOf": [{"type": "object"}, {"type": "null"}],
+            "anyOf": [{"type": "object"}, {"type": "callable"}, {"type": "null"}],
             "default": None,
             "value": vc,
         }

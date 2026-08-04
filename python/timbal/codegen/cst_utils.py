@@ -16,14 +16,47 @@ def _root_constructor_name(value: cst.BaseExpression) -> str | None:
     """Return the root constructor's class name for an assignment value.
 
     Walks down chained method calls (e.g. ``Workflow(...).step(...).step(...)``)
-    to find the root constructor.
+    to find the root constructor. Module-qualified constructors
+    (e.g. ``timbal.Agent(...)``) resolve to the attribute name.
     """
     call = value
-    while isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute):
+    # Chained method calls have a Call as the attribute base; module access
+    # (``timbal.Agent``) has a Name/Attribute base and must not be walked.
+    while (
+        isinstance(call, cst.Call)
+        and isinstance(call.func, cst.Attribute)
+        and isinstance(call.func.value, cst.Call)
+    ):
         call = call.func.value
-    if isinstance(call, cst.Call) and isinstance(call.func, cst.Name):
-        return call.func.value
+    if isinstance(call, cst.Call):
+        if isinstance(call.func, cst.Name):
+            return call.func.value
+        if isinstance(call.func, cst.Attribute):
+            return call.func.attr.value
     return None
+
+
+def _collect_entry_point_aliases(tree: cst.Module) -> dict[str, str]:
+    """Map local import aliases to canonical entry point class names.
+
+    Covers ``from timbal import Agent as A`` so aliased constructors are
+    recognized like the canonical names.
+    """
+    aliases: dict[str, str] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if isinstance(item, cst.ImportFrom) and not isinstance(item.names, cst.ImportStar):
+                    for alias in item.names:
+                        if (
+                            isinstance(alias, cst.ImportAlias)
+                            and isinstance(alias.name, cst.Name)
+                            and alias.name.value in ENTRY_POINT_TYPES
+                            and alias.asname is not None
+                            and isinstance(alias.asname.name, cst.Name)
+                        ):
+                            aliases[alias.asname.name.value] = alias.name.value
+    return aliases
 
 
 def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
@@ -31,17 +64,25 @@ def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
 
     Inspects top-level assignments (plain and annotated, e.g.
     ``agent: Agent = Agent(...)``) to find `entry_point = ClassName(...)` and
-    returns the class name if it's a known entry point type. Returns None if
-    not found.
+    returns the class name if it's a known entry point type. Import aliases
+    (``Agent as A``) and module-qualified constructors (``timbal.Agent(...)``)
+    are canonicalized. Returns None if not found.
     """
+    aliases = _collect_entry_point_aliases(tree)
+
+    def _canonical(value: cst.BaseExpression) -> str | None:
+        cls_name = _root_constructor_name(value)
+        cls_name = aliases.get(cls_name, cls_name)
+        return cls_name if cls_name in ENTRY_POINT_TYPES else None
+
     for stmt in tree.body:
         if isinstance(stmt, cst.SimpleStatementLine):
             for item in stmt.body:
                 if isinstance(item, cst.Assign):
                     for target in item.targets:
                         if isinstance(target.target, cst.Name) and target.target.value == entry_point:
-                            cls_name = _root_constructor_name(item.value)
-                            if cls_name in ENTRY_POINT_TYPES:
+                            cls_name = _canonical(item.value)
+                            if cls_name is not None:
                                 return cls_name
                 elif isinstance(item, cst.AnnAssign):
                     if (
@@ -49,8 +90,8 @@ def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
                         and item.target.value == entry_point
                         and item.value is not None
                     ):
-                        cls_name = _root_constructor_name(item.value)
-                        if cls_name in ENTRY_POINT_TYPES:
+                        cls_name = _canonical(item.value)
+                        if cls_name is not None:
                             return cls_name
     return None
 

@@ -90,7 +90,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     if args.name and args.name != entry_point:
         assignments = collect_assignments(tree) if tree else {}
-        tool_class = _resolve_tool_class(tree, entry_point, args.name, assignments)
+        tool_class = _resolve_tool_class(entry_point, args.name, assignments)
         if tool_class is None:
             raise ValueError(f"Tool '{args.name}' not found in agent tools list.")
         validate_tool_config(tool_class, config)
@@ -107,37 +107,49 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
         )
 
-    # ``agent = build()`` — a factory call, not a constructor. Appending config
-    # kwargs to ``build()`` would corrupt the module, so fail loudly instead.
+    # ``ep_type is None`` with a call on the RHS: the entry point may be a
+    # factory call like ``agent = build()`` (local or imported) — appending
+    # config kwargs to that call would corrupt the module, so fail loudly.
+    # Constructors can't be told apart from factories statically for imports,
+    # so use PEP 8 naming: CapWords callees (``Tool``, ``WebSearch``, custom
+    # runnables) are treated as constructors, everything else as a factory.
+    # (Aliased imports like ``Agent as A`` and module-qualified ``timbal.Agent``
+    # are canonicalized by resolve_entry_point_type and never land here.)
     if tree is not None and ep_type is None:
         ep_call = collect_assignments(tree).get(entry_point)
-        if ep_call is not None and isinstance(ep_call.func, cst.Name):
-            func_name = ep_call.func.value
-            is_local_func = any(
+        if ep_call is not None:
+            if isinstance(ep_call.func, cst.Name):
+                func_name = ep_call.func.value
+            elif isinstance(ep_call.func, cst.Attribute):
+                func_name = ep_call.func.attr.value
+            else:
+                func_name = None
+            is_local_func = func_name is not None and any(
                 isinstance(stmt, cst.FunctionDef) and stmt.name.value == func_name for stmt in tree.body
             )
-            if is_local_func:
+            looks_like_function = func_name is None or not func_name[:1].isupper()
+            if is_local_func or looks_like_function:
                 raise ValueError(
-                    f"Entry point '{entry_point}' is built by calling the local function '{func_name}()'. "
-                    f"set-config cannot modify a factory-built agent; construct the Agent directly "
-                    f"in the '{entry_point}' assignment."
+                    f"Entry point '{entry_point}' is built by calling '{func_name or '<expression>'}()', "
+                    f"which looks like a factory function, not an Agent(...) constructor. set-config "
+                    f"cannot modify a factory-built agent; construct the Agent directly in the "
+                    f"'{entry_point}' assignment."
                 )
 
     return AgentConfigSetter(entry_point, config)
 
 
 def _resolve_tool_class(
-    tree: cst.Module, entry_point: str, tool_name: str, assignments: dict[str, cst.Call]
+    entry_point: str, tool_name: str, assignments: dict[str, cst.Call]
 ) -> str | None:
-    """Find the framework class name for a tool in the agent's tools list."""
-    for stmt in tree.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for item in stmt.body:
-                if isinstance(item, cst.Assign):
-                    for target in item.targets:
-                        if isinstance(target.target, cst.Name) and target.target.value == entry_point:
-                            if isinstance(item.value, cst.Call):
-                                return _find_tool_class(item.value, tool_name, assignments)
+    """Find the framework class name for a tool in the agent's tools list.
+
+    ``assignments`` covers both plain and annotated entry point assignments
+    (see ``collect_assignments``).
+    """
+    call = assignments.get(entry_point)
+    if call is not None:
+        return _find_tool_class(call, tool_name, assignments)
     return None
 
 
@@ -283,6 +295,30 @@ class ToolConfigSetter(cst.CSTTransformer):
                     )
         return updated_node
 
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(..., tools=[...])``."""
+        if not isinstance(updated_node.target, cst.Name) or not isinstance(updated_node.value, cst.Call):
+            return updated_node
+        target_name = updated_node.target.value
+
+        # Entry point — check for inline tools to migrate.
+        if target_name == self.entry_point:
+            new_call = self._migrate_inline(updated_node.value)
+            if new_call is not updated_node.value:
+                self.matched = True
+                return updated_node.with_changes(value=new_call)
+            return updated_node
+
+        # Variable assignment — update config kwargs.
+        resolved = resolve_runnable_name(updated_node.value)
+        if resolved == self.tool_name:
+            self.matched = True
+            self._var_updated = True
+            return updated_node.with_changes(
+                value=self._build_configured_call(updated_node.value),
+            )
+        return updated_node
+
     def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
         if not self._needs_migration:
             return updated_node
@@ -299,7 +335,7 @@ class ToolConfigSetter(cst.CSTTransformer):
 
         body = list(updated_node.body)
 
-        # Insert before the entry point assignment.
+        # Insert before the entry point assignment (plain or annotated).
         insert_idx = len(body)
         for i, stmt in enumerate(body):
             if isinstance(stmt, cst.SimpleStatementLine):
@@ -308,6 +344,9 @@ class ToolConfigSetter(cst.CSTTransformer):
                         for t in item.targets:
                             if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
                                 insert_idx = min(insert_idx, i)
+                    elif isinstance(item, cst.AnnAssign):
+                        if isinstance(item.target, cst.Name) and item.target.value == self.entry_point:
+                            insert_idx = min(insert_idx, i)
 
         for stmt in reversed(stmts_to_add):
             body.insert(insert_idx, stmt)
