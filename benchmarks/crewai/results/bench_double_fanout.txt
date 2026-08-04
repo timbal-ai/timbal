@@ -1,3 +1,4 @@
+Installed 61 packages in 123ms
 
 [1m════════════════════════════════════════════════════════════════════════════════════════[0m
 [1m  Timbal vs CrewAI Flow — Double Fan-out[0m
@@ -21,55 +22,55 @@
   [1mLatency p50  (×200 sequential runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35         3.92 ms         6.09 ms
-      32       67         7.53 ms         11.8 ms
-      64      131         14.4 ms         21.8 ms
-     128      259         33.2 ms         52.9 ms
+      16       35         1.85 ms         6.77 ms
+      32       67         3.78 ms         11.3 ms
+      64      131         8.27 ms         23.7 ms
+     128      259         20.8 ms         58.7 ms
 
   [1mLatency p95  (×200 sequential runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35         4.67 ms         7.14 ms
-      32       67         8.65 ms         19.9 ms
-      64      131         16.6 ms         23.4 ms
-     128      259        124.0 ms         56.2 ms
+      16       35         2.13 ms         7.81 ms
+      32       67         4.60 ms         12.8 ms
+      64      131         8.89 ms         25.1 ms
+     128      259         31.4 ms         61.7 ms
 
   [1mLatency p99  (×200 sequential runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35         5.17 ms         8.43 ms
-      32       67         9.62 ms         59.5 ms
-      64      131        103.1 ms         71.0 ms
-     128      259        161.7 ms        134.3 ms
+      16       35         2.31 ms         8.36 ms
+      32       67         4.87 ms         13.4 ms
+      64      131         74.9 ms         35.1 ms
+     128      259        103.6 ms        133.6 ms
 
   [1mOverhead per extra branch-pair  (slope of p50 vs N, 2 branches per unit)[0m
   [2mEach N increment adds 2 async branches (one per phase)[0m
-  Timbal          +262.0 µs / branch-pair  (+131.0 µs per branch)
-  Flow steps      +419.3 µs / branch-pair  (+209.7 µs per branch)
+  Timbal          +171.6 µs / branch-pair  (+85.8 µs per branch)
+  Flow steps      +471.6 µs / branch-pair  (+235.8 µs per branch)
 
   [1mBurst p50  (100 concurrent runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35        504.2 ms        704.3 ms
-      32       67       1014.1 ms       1021.4 ms
-      64      131       2214.4 ms       2198.1 ms
-     128      259       4838.4 ms       5329.4 ms
+      16       35        377.4 ms        483.3 ms
+      32       67        487.1 ms       1015.3 ms
+      64      131       1156.9 ms       2270.6 ms
+     128      259       2539.8 ms       5836.5 ms
 
   [1mBurst p95  (100 concurrent runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35        506.6 ms        788.9 ms
-      32       67       1018.3 ms       1125.1 ms
-      64      131       2221.5 ms       2324.7 ms
-     128      259       4944.3 ms       5593.3 ms
+      16       35        379.9 ms        567.3 ms
+      32       67        491.1 ms       1114.4 ms
+      64      131       1165.3 ms       2402.6 ms
+     128      259       2632.3 ms       6103.8 ms
 
   [1mBurst p99  (100 concurrent runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35        506.8 ms        798.2 ms
-      32       67       1019.0 ms       1134.8 ms
-      64      131       2222.2 ms       2335.8 ms
-     128      259       4945.7 ms       5607.1 ms
+      16       35        380.2 ms        575.1 ms
+      32       67        491.5 ms       1124.4 ms
+      64      131       1165.9 ms       2414.1 ms
+     128      259       2633.7 ms       6120.7 ms
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario B — 1 ms async sleep per branch  ← parallelism verification[0m
@@ -82,55 +83,55 @@
   [1mLatency p50  (×200 sequential runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35         5.09 ms         6.50 ms
-      32       67         7.41 ms         10.2 ms
-      64      131         14.5 ms         21.2 ms
-     128      259         33.1 ms         53.8 ms
+      16       35         4.00 ms         8.53 ms
+      32       67         5.54 ms         10.9 ms
+      64      131         8.58 ms         22.6 ms
+     128      259         20.3 ms         59.4 ms
 
   [1mLatency p95  (×200 sequential runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35         5.76 ms         7.17 ms
-      32       67         7.91 ms         11.9 ms
-      64      131         19.0 ms         24.3 ms
-     128      259        134.8 ms        130.6 ms
+      16       35         4.40 ms         9.73 ms
+      32       67         9.33 ms         13.2 ms
+      64      131         9.75 ms         26.0 ms
+     128      259         86.8 ms        128.3 ms
 
   [1mLatency p99  (×200 sequential runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35         21.9 ms         13.9 ms
-      32       67         79.1 ms         13.8 ms
-      64      131        107.7 ms         98.0 ms
-     128      259        169.2 ms        134.5 ms
+      16       35         4.61 ms         11.3 ms
+      32       67         43.7 ms         13.9 ms
+      64      131         79.0 ms         90.2 ms
+     128      259        103.8 ms        131.6 ms
 
   [1mOverhead per extra branch-pair  (slope of p50 vs N, 2 branches per unit)[0m
   [2mEach N increment adds 2 async branches (one per phase)[0m
-  Timbal          +255.1 µs / branch-pair  (+127.5 µs per branch)
-  Flow steps      +430.9 µs / branch-pair  (+215.4 µs per branch)
+  Timbal          +147.4 µs / branch-pair  (+73.7 µs per branch)
+  Flow steps      +468.6 µs / branch-pair  (+234.3 µs per branch)
 
   [1mBurst p50  (100 concurrent runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35        728.6 ms        612.8 ms
-      32       67       1255.1 ms       1163.3 ms
-      64      131       2498.7 ms       2548.8 ms
-     128      259       5531.2 ms       6346.3 ms
+      16       35        335.6 ms        777.1 ms
+      32       67        622.3 ms       1196.1 ms
+      64      131       1479.6 ms       2749.1 ms
+     128      259       3339.8 ms       6925.6 ms
 
   [1mBurst p95  (100 concurrent runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35        730.7 ms        680.1 ms
-      32       67       1259.0 ms       1246.6 ms
-      64      131       2506.6 ms       2656.2 ms
-     128      259       5629.3 ms       6595.8 ms
+      16       35        338.3 ms        885.5 ms
+      32       67        626.4 ms       1285.3 ms
+      64      131       1486.6 ms       2861.0 ms
+     128      259       3423.5 ms       7188.2 ms
 
   [1mBurst p99  (100 concurrent runs)[0m
        N    steps          Timbal      Flow steps
   ──────  ───────  ──────────────  ──────────────
-      16       35        731.0 ms        686.8 ms
-      32       67       1259.5 ms       1254.3 ms
-      64      131       2507.2 ms       2666.7 ms
-     128      259       5631.0 ms       6621.9 ms
+      16       35        338.6 ms        895.7 ms
+      32       67        626.8 ms       1293.8 ms
+      64      131       1487.2 ms       2871.4 ms
+     128      259       3424.8 ms       7205.3 ms
 
   [2mEach phase: theoretical serial = N×1000 µs, parallel ≈ 1000 µs flat[0m
   [2mTwo phases: expect ~2000 µs floor + scheduling overhead[0m
@@ -143,18 +144,18 @@
   [1mSequential peak  (per-run, cleared between)[0m
        N    steps    T (InMemory)    T (no trace)      Flow steps
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        294.8 KB        283.4 KB        345.3 KB
-      32       67        504.1 KB        499.3 KB        352.2 KB
-      64      131        936.7 KB        936.2 KB        403.5 KB
-     128      259          1.7 MB          1.7 MB        694.2 KB
+      16       35        229.6 KB        210.2 KB        346.7 KB
+      32       67        385.0 KB        383.0 KB        345.6 KB
+      64      131        725.9 KB        724.5 KB        391.9 KB
+     128      259          1.4 MB          1.4 MB        678.2 KB
 
   [1mBurst peak  (100 concurrent, no GC between)[0m
        N    steps    T (InMemory)    T (no trace)      Flow steps
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35         23.2 MB         23.2 MB         11.2 MB
-      32       67         43.6 MB         43.6 MB         17.9 MB
-      64      131         84.4 MB         84.4 MB         31.7 MB
-     128      259        165.7 MB        165.7 MB         58.8 MB
+      16       35         14.7 MB         14.7 MB         11.0 MB
+      32       67         27.2 MB         27.2 MB         17.7 MB
+      64      131         52.3 MB         52.3 MB         31.4 MB
+     128      259        102.8 MB        102.8 MB         58.3 MB
 
 [2m────────────────────────────────────────────────────────────────────────────────────────
   Topology: root → [N×p1] → aggregator → [N×p2] → sink

@@ -1,3 +1,4 @@
+Installed 61 packages in 123ms
 
 [1m════════════════════════════════════════════════════════════════════════════════════════[0m
 [1m  Timbal Workflow vs CrewAI Flow — DAG benchmark[0m
@@ -22,36 +23,36 @@
   [1mLatency  (×200)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-          mean         1.30 ms         1.53 ms         1.93 ms
-           p50         1.26 ms         1.47 ms         1.91 ms
-           p95         1.56 ms         1.99 ms         2.19 ms
-           p99         1.80 ms         2.49 ms         2.36 ms
+          mean        381.3 µs         1.66 ms         2.61 ms
+           p50        351.0 µs         1.59 ms         2.44 ms
+           p95        573.9 µs         2.28 ms         3.42 ms
+           p99        667.3 µs         2.78 ms         4.72 ms
 
   [1mMemory  (×200 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                          63.3 KB         324  B
-  Flow bare                      333.8 KB        1709  B
-  Flow+OI                        359.5 KB        1840  B
+  Timbal                          41.6 KB         213  B
+  Flow bare                      328.1 KB        1680  B
+  Flow+OI                        357.4 KB        1830  B
 
   [1mBurst  (200 concurrent)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-           p50       114.11 ms       142.41 ms       270.87 ms
-           p75       115.60 ms       183.87 ms       314.92 ms
-           p95       200.29 ms       218.72 ms       351.31 ms
-           p99       200.68 ms       226.83 ms       358.26 ms
-           max       201.21 ms       229.83 ms       359.42 ms
+           p50        31.54 ms       181.79 ms       283.99 ms
+           p75        34.54 ms       235.03 ms       338.80 ms
+           p95        36.62 ms       291.64 ms       382.56 ms
+           p99        37.16 ms       301.49 ms       390.00 ms
+           max        37.31 ms       304.64 ms       391.55 ms
 
-  [2mwall: Timbal: 201.2 ms | Flow bare: 229.8 ms | Flow+OI: 359.4 ms[0m
+  [2mwall: Timbal: 37.3 ms | Flow bare: 304.6 ms | Flow+OI: 391.6 ms[0m
 
   [1mThroughput  (500 runs)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-             1           699/s           627/s           532/s
-            10          1203/s           776/s           665/s
-            50           961/s           992/s           563/s
-           200           947/s           827/s           532/s
+             1          2094/s           492/s           468/s
+            10          4037/s           602/s           617/s
+            50          2897/s           656/s           615/s
+           200          4491/s           754/s           540/s
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario 2: Fan-out/in  (A → [B, C, D] → E)[0m
@@ -63,36 +64,36 @@
   [1mLatency  (×200)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-          mean         1.42 ms         1.35 ms         1.89 ms
-           p50         1.42 ms         1.33 ms         1.87 ms
-           p95         1.66 ms         1.59 ms         2.17 ms
-           p99         1.98 ms         1.72 ms         2.35 ms
+          mean        497.6 µs         1.40 ms         1.98 ms
+           p50        455.0 µs         1.33 ms         1.94 ms
+           p95        763.5 µs         1.83 ms         2.59 ms
+           p99        891.1 µs         2.21 ms         2.99 ms
 
   [1mMemory  (×200 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                          84.3 KB         431  B
-  Flow bare                      368.2 KB        1885  B
-  Flow+OI                        396.7 KB        2031  B
+  Timbal                          57.2 KB         293  B
+  Flow bare                      363.2 KB        1860  B
+  Flow+OI                        389.4 KB        1994  B
 
   [1mBurst  (200 concurrent)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-           p50       243.94 ms       128.24 ms       378.68 ms
-           p75       244.42 ms       168.77 ms       413.68 ms
-           p95       244.78 ms       201.08 ms       442.66 ms
-           p99       245.22 ms       207.77 ms       450.87 ms
-           max       245.24 ms       208.98 ms       452.08 ms
+           p50        48.26 ms       132.92 ms       281.92 ms
+           p75        49.70 ms       181.32 ms       321.95 ms
+           p95        50.58 ms       215.94 ms       355.23 ms
+           p99        50.78 ms       222.68 ms       362.40 ms
+           max        50.92 ms       224.10 ms       364.49 ms
 
-  [2mwall: Timbal: 245.2 ms | Flow bare: 209.0 ms | Flow+OI: 452.1 ms[0m
+  [2mwall: Timbal: 50.9 ms | Flow bare: 224.1 ms | Flow+OI: 364.5 ms[0m
 
   [1mThroughput  (500 runs)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-             1           696/s           693/s           458/s
-            10           911/s           557/s           494/s
-            50           727/s           737/s           468/s
-           200           718/s           826/s           545/s
+             1          2111/s           667/s           502/s
+            10          3190/s           877/s           586/s
+            50          2395/s           820/s           437/s
+           200          1819/s           750/s           501/s
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario 3: Diamond  (A → [B, C] → D)[0m
@@ -104,36 +105,36 @@
   [1mLatency  (×200)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-          mean         1.23 ms         1.40 ms         1.80 ms
-           p50         1.23 ms         1.33 ms         1.79 ms
-           p95         1.41 ms         1.84 ms         2.16 ms
-           p99         1.64 ms         2.44 ms         2.43 ms
+          mean        403.2 µs         1.31 ms         1.59 ms
+           p50        372.8 µs         1.24 ms         1.55 ms
+           p95        636.1 µs         1.73 ms         1.88 ms
+           p99        814.6 µs         2.03 ms         2.38 ms
 
   [1mMemory  (×200 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                          71.5 KB         366  B
-  Flow bare                      336.8 KB        1724  B
-  Flow+OI                        367.2 KB        1880  B
+  Timbal                          50.3 KB         258  B
+  Flow bare                      332.3 KB        1701  B
+  Flow+OI                        358.8 KB        1837  B
 
   [1mBurst  (200 concurrent)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-           p50       208.54 ms       114.87 ms       277.43 ms
-           p75       209.22 ms       151.22 ms       316.32 ms
-           p95       210.20 ms       180.84 ms       348.27 ms
-           p99       210.38 ms       188.42 ms       357.04 ms
-           max       210.39 ms       189.75 ms       358.76 ms
+           p50        40.61 ms       101.79 ms       301.83 ms
+           p75        42.09 ms       133.50 ms       369.16 ms
+           p95        43.25 ms       155.99 ms       491.04 ms
+           p99        43.52 ms       160.99 ms       497.21 ms
+           max        43.66 ms       162.72 ms       498.53 ms
 
-  [2mwall: Timbal: 210.4 ms | Flow bare: 189.7 ms | Flow+OI: 358.8 ms[0m
+  [2mwall: Timbal: 43.7 ms | Flow bare: 162.7 ms | Flow+OI: 498.5 ms[0m
 
   [1mThroughput  (500 runs)[0m
                         Timbal       Flow bare         Flow+OI
   ────────────  ──────────────  ──────────────  ──────────────
-             1           795/s           757/s           577/s
-            10          1235/s           848/s           721/s
-            50           959/s          1031/s           606/s
-           200           802/s           746/s           633/s
+             1          2231/s           824/s           469/s
+            10          3985/s           818/s           553/s
+            50          2791/s           970/s           431/s
+           200          2689/s           964/s           548/s
 
 [2m────────────────────────────────────────────────────────────────────────────────────────
   Timbal: built-in InMemory tracing on every run — spans recorded per step.

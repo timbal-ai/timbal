@@ -4,18 +4,18 @@
   100 iters | 40 burst | 100 mem | 200 throughput ops
 [1m================================================================================================[0m
   Timbal: OK  |  ADK: OK
-    Timbal delegation latency... p50=696.3 us
-    Timbal delegation memory... 76 KB peak
-    Timbal delegation burst (40 concurrent)... p50=20.05 ms
-    Timbal delegation throughput conc=1... 1360/s
-    Timbal delegation throughput conc=10... 1378/s
-    Timbal delegation throughput conc=50... 1405/s
-    ADK transfer latency... p50=977.1 us
-    ADK transfer memory... 1800 KB peak
-    ADK transfer burst (40 concurrent)... p50=21.49 ms
-    ADK transfer throughput conc=1... 968/s
-    ADK transfer throughput conc=10... 1028/s
-    ADK transfer throughput conc=50... 1037/s
+    Timbal delegation latency... p50=343.0 us
+    Timbal delegation memory... 62 KB peak
+    Timbal delegation burst (40 concurrent)... p50=331.9 us
+    Timbal delegation throughput conc=1... 2028/s
+    Timbal delegation throughput conc=10... 2113/s
+    Timbal delegation throughput conc=50... 2147/s
+    ADK transfer latency... p50=2.52 ms
+    ADK transfer memory... 5582 KB peak
+    ADK transfer burst (40 concurrent)... p50=84.51 ms
+    ADK transfer throughput conc=1... 331/s
+    ADK transfer throughput conc=10... 437/s
+    ADK transfer throughput conc=50... 220/s
 
 [1m[36m------------------------------------------------------------------------------------------------[0m
 [1m[36m  Delegation / transfer[0m
@@ -24,32 +24,32 @@
   [1mLatency  (x100 sequential runs)[0m
                  Timbal delegation        ADK transfer
   ------------  ------------------  ------------------
-          mean            722.4 us             1.01 ms
-           p50            696.3 us            977.1 us
-           p95            872.6 us             1.21 ms
-           p99             1.09 ms             1.64 ms
+          mean            367.5 us             2.94 ms
+           p50            343.0 us             2.52 ms
+           p95            562.5 us             3.47 ms
+           p99            692.1 us            24.05 ms
 
   [1mMemory  (x100 runs)[0m
   framework                         peak       per run
   ------------------------  ------------  ------------
-  Timbal delegation               76.3 KB         781  B
-  ADK transfer                  1800.1 KB       18433  B
+  Timbal delegation               62.0 KB         635  B
+  ADK transfer                  5581.6 KB       57156  B
 
   [1mBurst  (40 concurrent)[0m
                  Timbal delegation        ADK transfer
   ------------  ------------------  ------------------
-           p50            20.05 ms            21.49 ms
-           p75            20.24 ms            21.95 ms
-           p95            20.43 ms            22.40 ms
-           p99            20.67 ms            22.41 ms
-           max            20.67 ms            22.41 ms
+           p50            331.9 us            84.51 ms
+           p75            391.3 us           108.71 ms
+           p95            711.8 us           109.38 ms
+           p99            21.54 ms           109.68 ms
+           max            21.54 ms           109.68 ms
 
   [1mThroughput  (200 loops)[0m
                  Timbal delegation        ADK transfer
   ------------  ------------------  ------------------
-             1              1360/s               968/s
-            10              1378/s              1028/s
-            50              1405/s              1037/s
+             1              2028/s               331/s
+            10              2113/s               437/s
+            50              2147/s               220/s
 
 [2m------------------------------------------------------------------------------------------------
   Google ADK has a true sub-agent transfer primitive via transfer_to_agent.
