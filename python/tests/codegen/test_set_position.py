@@ -91,6 +91,21 @@ class TestAgentPosition:
         ns = _exec_agent(output)
         assert ns["agent"].metadata["position"] == {"x": 300.0, "y": 400.0}
 
+    def test_same_position_is_idempotent_success(self, workspace):
+        """Setting the current coordinates again succeeds without changes."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(
+            name="a",
+            model="openai/gpt-4o-mini",
+            metadata={"position": {"x": 10.0, "y": 20.0}},
+        )
+        """)
+        output = _run_dry(ws, "--x", "10", "--y", "20")
+        ns = _exec_agent(output)
+        assert ns["agent"].metadata["position"] == {"x": 10.0, "y": 20.0}
+
     def test_preserves_other_kwargs(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent

@@ -294,6 +294,9 @@ class StepAdder(cst.CSTTransformer):
     # A re-added step's .step() call is appended last; if existing steps depend
     # on it, topologically re-sort so dependencies precede their dependents.
     needs_reorder = True
+    # Re-adding an identical step is an idempotent success (existing assignment
+    # and .step() call updated in place), not a silent failure.
+    allow_noop = True
 
     def __init__(
         self,

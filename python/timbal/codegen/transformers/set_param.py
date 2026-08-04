@@ -197,6 +197,9 @@ class ParamSetter(cst.CSTTransformer):
         self.assignments = assignments or {}
         self.step_names = step_names or {}
         self.needs_reorder = param_type == "map"
+        # True once the target .step() call was found — an unchanged file is
+        # then an idempotent save (param already set to this value).
+        self.matched = False
 
     def _is_step_call(self, call: cst.Call) -> bool:
         return (
@@ -242,6 +245,7 @@ class ParamSetter(cst.CSTTransformer):
         if not self._is_step_call(call) or not self._matches_target(call):
             return updated_node
 
+        self.matched = True
         step_call_code = self._build_step_call_code(call)
         parsed = cst.parse_module(step_call_code + "\n")
         for stmt in parsed.body:
