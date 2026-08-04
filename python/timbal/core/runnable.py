@@ -114,16 +114,28 @@ def _collector_output_on_interrupt(collector: Any) -> Any:
     return raw
 
 
+_Tool = None
+_record_tool_requests = None
+
+
 def _emit_default_tool_usage(runnable: Any) -> None:
-    """On successful Tool completion, record ``{tool.name}:requests`` for billing defaults."""
-    from .tool import Tool
+    """On successful Tool completion, record ``{tool.name}:requests`` for billing defaults.
 
-    if not isinstance(runnable, Tool):
-        return
-    if not getattr(runnable, "record_default_request_usage", True):
-        return
-    from ..state import _record_tool_requests
+    Runs on every successful call — the imports are cached in module globals
+    after the first invocation.
+    """
+    global _Tool, _record_tool_requests
+    if _Tool is None:
+        from ..state import _record_tool_requests as _record_fn
+        from .tool import Tool
 
+        _Tool = Tool
+        _record_tool_requests = _record_fn
+
+    if not isinstance(runnable, _Tool):
+        return
+    if not runnable.record_default_request_usage:
+        return
     _record_tool_requests(runnable.name)
 
 
@@ -215,8 +227,6 @@ class Runnable(ABC, BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
-
-    _is_timbal_runnable: bool = True  # Marker for fast isinstance check in dump() without circular imports
 
     name: str
     """The unique identifier for this runnable component."""
