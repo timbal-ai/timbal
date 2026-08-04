@@ -128,26 +128,7 @@ def _emit_default_tool_usage(runnable: Any) -> None:
 
 
 _TimbalCollector = None
-
-
-def _timbal_collector_wrap(fn):
-    """Lazy wrapper for @TimbalCollector.wrap — avoids importing the collector at module load.
-
-    The class is cached in a module global after the first call so the import
-    machinery isn't consulted on every runnable invocation.
-    """
-    from functools import wraps
-
-    @wraps(fn)
-    def wrapper(self, **kwargs):
-        global _TimbalCollector
-        if _TimbalCollector is None:
-            from ..collectors.impl.timbal import TimbalCollector
-
-            _TimbalCollector = TimbalCollector
-        return _TimbalCollector(async_gen=fn(self, **kwargs))
-
-    return wrapper
+"""Lazily imported TimbalCollector class — avoids importing collectors at module load."""
 
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -1125,29 +1106,40 @@ class Runnable(ABC, BaseModel):
         # Yield a final marker with the output and collector
         yield (None, output, collector)
 
-    @_timbal_collector_wrap
-    async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
-        """Execute the runnable with the given parameters.
+    def __call__(self, **kwargs: Any) -> Any:
+        """Execute the runnable, returning a TimbalCollector over its event stream.
 
-        This is the main entry point for executing a runnable. It handles:
-        - Parameter validation and merging with default_params
-        - Run context management and tracing setup
-        - Event streaming (StartEvent, DeltaEvents, OutputEvent)
-        - Error handling and cleanup
-        - Integration with the collectors system
-
-        The @collectable decorator wraps the returned async generator to add
-        a .collect() method for easy result collection.
+        This is the public entry point. The collector is the API boundary: it
+        supports ``async for`` iteration and ``.collect()``, and enriches the
+        final OutputEvent with pending approvals/interactions. Framework
+        internals (workflow steps, agent tools) iterate :meth:`_stream`
+        directly, skipping the per-event collector layer.
 
         Args:
             **kwargs: Runtime parameters for the runnable execution.
 
         Returns:
-            A BaseCollector that yields Events and provides collect() method
+            A TimbalCollector that yields Events and provides collect().
 
         Raises:
             ValidationError: If input parameters don't match the params_model
             Exception: Any exception raised during handler execution (captured in OutputEvent)
+        """
+        global _TimbalCollector
+        if _TimbalCollector is None:
+            from ..collectors.impl.timbal import TimbalCollector
+
+            _TimbalCollector = TimbalCollector
+        return _TimbalCollector(async_gen=self._stream(**kwargs))
+
+    async def _stream(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
+        """Raw event stream for one runnable execution (internal entry point).
+
+        Handles:
+        - Parameter validation and merging with default_params
+        - Run context management and tracing setup
+        - Event streaming (StartEvent, DeltaEvents, OutputEvent)
+        - Error handling and cleanup
         """
         t0 = int(time.time() * 1000)
 

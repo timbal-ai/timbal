@@ -913,7 +913,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 yield tool_call, self._build_unknown_tool_event(tool_call, tools)
                 return
             try:
-                async for event in tool(**tool_call.input):
+                # Raw stream: the collector wrapper is only needed at the public
+                # API boundary; internal consumers forward events themselves.
+                async for event in tool._stream(**tool_call.input):
                     self._link_tool_call_span(event, tool_call)
                     yield tool_call, event
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
@@ -931,7 +933,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if tool is None:
                     queue.put_nowait((tool_call, self._build_unknown_tool_event(tool_call, tools)))
                     return
-                async for event in tool(**tool_call.input):
+                async for event in tool._stream(**tool_call.input):
                     self._link_tool_call_span(event, tool_call)
                     queue.put_nowait((tool_call, event))
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
@@ -1121,8 +1123,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         ],
                                     }
                                 )
-                                # Run the tool
-                                async for event in tool(**tool_input):
+                                # Run the tool (raw stream — see _multiplex_tools)
+                                async for event in tool._stream(**tool_input):
                                     await _process_tool_event(event, tool_use_id, append_to_messages=False)
                                     if isinstance(event, OutputEvent) and event.output is not None:
                                         if (
@@ -1196,7 +1198,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Compaction rewrote memory out of lockstep with the dump; rebuild it.
                         current_span._memory_dump = await dump(current_span.memory)
 
-                async for event in self._llm(
+                async for event in self._llm._stream(
                     model=model,
                     messages=current_span.memory,
                     system_prompt=system_prompt,

@@ -275,7 +275,10 @@ class Workflow(Runnable):
 
             status.state = StepState.RUNNING
             try:
-                async for event in step(**resolved_input):
+                # Iterate the raw stream: the TimbalCollector wrapper is only
+                # needed at the public API boundary (.collect(), pending-gate
+                # enrichment); a per-event collector layer here is pure overhead.
+                async for event in step._stream(**resolved_input):
                     # put_nowait: the queue is unbounded, so put() never suspends —
                     # awaiting it is pure coroutine overhead per event.
                     queue.put_nowait(event)

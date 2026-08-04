@@ -23,56 +23,56 @@
   [1mLatency p50  (×200 sequential runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35         1.84 ms         3.73 ms         7.50 ms
-      32       67         3.50 ms         6.55 ms         13.1 ms
-      64      131         7.38 ms         13.3 ms         27.6 ms
-     128      259         17.5 ms         30.2 ms         54.3 ms
+      16       35         2.67 ms         5.43 ms         11.6 ms
+      32       67         3.84 ms         7.72 ms         16.0 ms
+      64      131         7.41 ms         13.7 ms         26.5 ms
+     128      259         17.6 ms         32.1 ms         57.8 ms
 
   [1mLatency p95  (×200 sequential runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35         2.34 ms         4.65 ms         14.6 ms
-      32       67         4.31 ms         7.72 ms         20.9 ms
-      64      131         8.97 ms         15.2 ms         65.8 ms
-     128      259         18.7 ms         34.4 ms         65.8 ms
+      16       35         3.56 ms         6.43 ms         30.2 ms
+      32       67         4.55 ms         8.89 ms         24.5 ms
+      64      131         8.64 ms         15.8 ms         32.9 ms
+     128      259         19.9 ms         39.7 ms        175.8 ms
 
   [1mLatency p99  (×200 sequential runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35         2.49 ms         4.91 ms         31.3 ms
-      32       67         6.60 ms         43.2 ms         77.8 ms
-      64      131         9.49 ms        105.8 ms        187.7 ms
-     128      259         22.3 ms        232.8 ms        368.3 ms
+      16       35         6.35 ms         7.27 ms         54.4 ms
+      32       67         7.41 ms         45.9 ms         90.8 ms
+      64      131         9.12 ms        108.1 ms        168.6 ms
+     128      259         58.1 ms        323.1 ms        408.4 ms
 
   [1mOverhead per extra branch-pair  (slope of p50 vs N, 2 branches per unit)[0m
   [2mEach N increment adds 2 async branches (one per phase)[0m
-  Timbal          +141.5 µs / branch-pair  (+70.7 µs per branch)
-  LG (bare)       +239.4 µs / branch-pair  (+119.7 µs per branch)
-  LG+Smith        +422.3 µs / branch-pair  (+211.1 µs per branch)
+  Timbal          +136.3 µs / branch-pair  (+68.2 µs per branch)
+  LG (bare)       +242.5 µs / branch-pair  (+121.2 µs per branch)
+  LG+Smith        +418.5 µs / branch-pair  (+209.3 µs per branch)
 
   [1mBurst p50  (100 concurrent runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        154.1 ms        328.3 ms        701.5 ms
-      32       67        298.5 ms        613.2 ms       1324.6 ms
-      64      131        648.6 ms       1282.8 ms       2653.0 ms
-     128      259       1595.4 ms       3336.9 ms       6026.9 ms
+      16       35        138.6 ms        329.7 ms        707.9 ms
+      32       67        323.0 ms        632.5 ms       1356.1 ms
+      64      131        624.4 ms       1314.7 ms       2686.1 ms
+     128      259       1752.5 ms       3009.6 ms       5844.7 ms
 
   [1mBurst p95  (100 concurrent runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        183.6 ms        366.9 ms        743.7 ms
-      32       67        301.1 ms        695.9 ms       1414.1 ms
-      64      131        652.8 ms       1449.7 ms       2673.3 ms
-     128      259       1603.9 ms       3355.9 ms       6054.7 ms
+      16       35        168.1 ms        370.3 ms        754.0 ms
+      32       67        325.1 ms        724.1 ms       1443.7 ms
+      64      131        630.0 ms       1485.7 ms       2706.5 ms
+     128      259       1761.5 ms       3029.6 ms       5871.3 ms
 
   [1mBurst p99  (100 concurrent runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        183.9 ms        368.3 ms        746.1 ms
-      32       67        369.6 ms        697.4 ms       1416.1 ms
-      64      131        807.2 ms       1451.4 ms       2829.1 ms
-     128      259       1931.9 ms       3668.1 ms       6461.3 ms
+      16       35        168.5 ms        371.9 ms        756.0 ms
+      32       67        404.5 ms        726.3 ms       1446.0 ms
+      64      131        786.0 ms       1487.3 ms       2865.5 ms
+     128      259       2115.7 ms       3494.9 ms       6212.7 ms
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario B — 1 ms async sleep per branch  ← parallelism verification[0m
@@ -85,56 +85,56 @@
   [1mLatency p50  (×200 sequential runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35         3.90 ms         5.96 ms         9.40 ms
-      32       67         4.79 ms         8.31 ms         14.3 ms
-      64      131         7.56 ms         14.2 ms         27.5 ms
-     128      259         17.3 ms         32.8 ms         58.9 ms
+      16       35         4.07 ms         6.81 ms         13.2 ms
+      32       67         5.52 ms         10.0 ms         17.6 ms
+      64      131         9.10 ms         17.2 ms         30.8 ms
+     128      259         19.9 ms         35.2 ms         61.1 ms
 
   [1mLatency p95  (×200 sequential runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35         4.31 ms         6.57 ms         11.8 ms
-      32       67         5.50 ms         9.81 ms         21.3 ms
-      64      131         8.76 ms         16.9 ms         52.3 ms
-     128      259         20.6 ms         36.8 ms         68.4 ms
+      16       35         4.64 ms         7.77 ms         18.3 ms
+      32       67         6.32 ms         11.0 ms         20.9 ms
+      64      131         11.2 ms         18.9 ms         38.9 ms
+     128      259         22.9 ms         36.7 ms         72.8 ms
 
   [1mLatency p99  (×200 sequential runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35         4.63 ms         6.99 ms         32.0 ms
-      32       67         45.3 ms         45.7 ms         76.9 ms
-      64      131         97.6 ms        104.2 ms        183.9 ms
-     128      259        211.0 ms        241.3 ms        320.2 ms
+      16       35         6.62 ms         8.11 ms         41.1 ms
+      32       67         47.5 ms         52.2 ms         83.8 ms
+      64      131        115.0 ms        114.9 ms        176.9 ms
+     128      259        226.8 ms        240.4 ms        334.1 ms
 
   [1mOverhead per extra branch-pair  (slope of p50 vs N, 2 branches per unit)[0m
   [2mEach N increment adds 2 async branches (one per phase)[0m
-  Timbal          +122.5 µs / branch-pair  (+61.3 µs per branch)
-  LG (bare)       +243.5 µs / branch-pair  (+121.8 µs per branch)
-  LG+Smith        +448.5 µs / branch-pair  (+224.3 µs per branch)
+  Timbal          +143.5 µs / branch-pair  (+71.7 µs per branch)
+  LG (bare)       +255.8 µs / branch-pair  (+127.9 µs per branch)
+  LG+Smith        +435.5 µs / branch-pair  (+217.7 µs per branch)
 
   [1mBurst p50  (100 concurrent runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        160.3 ms        330.6 ms        682.5 ms
-      32       67        323.3 ms        634.5 ms       1311.9 ms
-      64      131        724.3 ms       1351.4 ms       2918.7 ms
-     128      259       2049.5 ms       3126.1 ms       6123.8 ms
+      16       35        173.7 ms        352.9 ms        749.1 ms
+      32       67        315.8 ms        676.8 ms       1770.8 ms
+      64      131        680.5 ms       1400.9 ms       2786.9 ms
+     128      259       1740.2 ms       3122.0 ms       5660.7 ms
 
   [1mBurst p95  (100 concurrent runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        189.6 ms        368.6 ms        726.2 ms
-      32       67        326.3 ms        713.6 ms       1400.9 ms
-      64      131        729.7 ms       1524.8 ms       2941.0 ms
-     128      259       2113.2 ms       3145.4 ms       6151.2 ms
+      16       35        210.8 ms        394.6 ms        795.8 ms
+      32       67        320.4 ms        768.0 ms       1873.2 ms
+      64      131        685.6 ms       1582.0 ms       2809.9 ms
+     128      259       1755.9 ms       3141.9 ms       5686.5 ms
 
   [1mBurst p99  (100 concurrent runs)[0m
        N    steps          Timbal       LG (bare)        LG+Smith
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        189.9 ms        369.9 ms        728.1 ms
-      32       67        397.5 ms        715.2 ms       1402.8 ms
-      64      131        885.8 ms       1526.4 ms       3098.6 ms
-     128      259       2464.7 ms       3467.1 ms       6527.5 ms
+      16       35        211.4 ms        396.1 ms        797.9 ms
+      32       67        397.4 ms        769.7 ms       1875.8 ms
+      64      131        847.6 ms       1583.8 ms       2996.1 ms
+     128      259       2101.1 ms       3472.1 ms       6019.9 ms
 
   [2mEach phase: theoretical serial = N×1000 µs, parallel ≈ 1000 µs flat[0m
   [2mTwo phases: expect ~2000 µs floor + scheduling overhead[0m
@@ -147,10 +147,10 @@
   [1mSequential peak  (per-run, cleared between)[0m
        N    steps    T (InMemory)    T (no trace)       LG (bare)
   ──────  ───────  ──────────────  ──────────────  ──────────────
-      16       35        170.7 KB        160.1 KB        283.8 KB
-      32       67        278.4 KB        279.2 KB        512.0 KB
-      64      131        528.4 KB        510.4 KB        960.6 KB
-     128      259       1009.2 KB       1009.7 KB          1.8 MB
+      16       35        169.1 KB        157.7 KB        284.6 KB
+      32       67        272.3 KB        282.9 KB        511.7 KB
+      64      131        511.1 KB        520.9 KB        960.0 KB
+     128      259       1006.8 KB        995.6 KB          1.8 MB
 
   [1mBurst peak  (100 concurrent, no GC between)[0m
        N    steps    T (InMemory)    T (no trace)       LG (bare)
