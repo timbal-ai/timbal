@@ -156,6 +156,51 @@ class TestHookIntrospectionIsolation:
         assert calls == ["sync", "async"]
 
 
+class TestBlockingHandlerWarning:
+    """Sync handlers run inline on the event loop; ones that block past the
+    threshold must be flagged once with an actionable warning."""
+
+    @pytest.mark.asyncio
+    async def test_slow_sync_handler_sets_warned_flag(self):
+        import time as _time
+
+        def slow_handler() -> str:
+            _time.sleep(0.15)  # > default 100ms threshold
+            return "done"
+
+        tool = Tool(name="slow_sync", handler=slow_handler)
+        result = await tool().collect()
+        assert result.error is None
+        assert tool._blocking_warned is True
+
+        # Warned once — the flag stays set on subsequent runs (no re-warning).
+        await tool().collect()
+        assert tool._blocking_warned is True
+
+    @pytest.mark.asyncio
+    async def test_fast_sync_handler_does_not_warn(self):
+        def fast_handler() -> str:
+            return "done"
+
+        tool = Tool(name="fast_sync", handler=fast_handler)
+        result = await tool().collect()
+        assert result.error is None
+        assert tool._blocking_warned is False
+
+    @pytest.mark.asyncio
+    async def test_offloaded_handler_does_not_warn(self):
+        import time as _time
+
+        def slow_handler() -> str:
+            _time.sleep(0.15)
+            return "done"
+
+        tool = Tool(name="slow_offloaded", handler=slow_handler, offload_blocking=True)
+        result = await tool().collect()
+        assert result.error is None
+        assert tool._blocking_warned is False
+
+
 class TestErrorHandling:
     """Test error handling in Runnable execution."""
     

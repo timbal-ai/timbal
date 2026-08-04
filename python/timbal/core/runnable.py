@@ -145,6 +145,11 @@ _TimbalCollector = None
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
+_BLOCKING_HANDLER_WARN_MS = float(os.getenv("TIMBAL_BLOCKING_WARN_MS", "100"))
+"""Sync handlers running inline for longer than this (ms) get a one-time
+warning suggesting offload_blocking=True / an async handler. Set to 0 to warn
+on any sync handler; raise it (or set very high) to silence."""
+
 
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
@@ -482,6 +487,7 @@ class Runnable(ABC, BaseModel):
         self._default_fixed_params: dict[str, Any] = {}
         self._default_runtime_params: dict[str, dict[str, Any]] = {}
         self._bg_tasks: dict[str, Any] = {}
+        self._blocking_warned: bool = False
         if self.pre_hook is not None:
             pre_hook_inspect = self._inspect_callable(self.pre_hook)
             self._pre_hook_is_coroutine: bool | None = pre_hook_inspect["is_coroutine"]
@@ -1022,7 +1028,24 @@ class Runnable(ABC, BaseModel):
                 return ctx.run(self.handler, **validated_input)
 
             return await loop.run_in_executor(None, handler_func)
-        return self.handler(**validated_input)
+        # Sync handlers run inline on the event loop: while one runs, every
+        # other coroutine on this worker waits. Cheap handlers benefit (no
+        # threadpool hop); blocking ones degrade concurrent request latency,
+        # so flag them once with an actionable warning.
+        t0 = time.perf_counter()
+        try:
+            return self.handler(**validated_input)
+        finally:
+            elapsed_ms = (time.perf_counter() - t0) * 1e3
+            if elapsed_ms >= _BLOCKING_HANDLER_WARN_MS and not self._blocking_warned:
+                self._blocking_warned = True
+                _get_logger().warning(
+                    "Sync handler blocked the event loop; concurrent runs stall while it executes. "
+                    "Make the handler async, or set offload_blocking=True to run it in a thread.",
+                    runnable_path=self._path,
+                    handler_elapsed_ms=round(elapsed_ms, 1),
+                    threshold_ms=_BLOCKING_HANDLER_WARN_MS,
+                )
 
     async def _execute_handler(
         self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None
