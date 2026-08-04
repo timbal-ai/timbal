@@ -78,6 +78,9 @@ class _Remover(cst.CSTTransformer):
                 for target in item.targets:
                     if isinstance(target.target, cst.Name) and target.target.value in self._unused_vars:
                         return cst.RemovalSentinel.REMOVE
+            elif isinstance(item, cst.AnnAssign):
+                if isinstance(item.target, cst.Name) and item.target.value in self._unused_vars:
+                    return cst.RemovalSentinel.REMOVE
         return updated_node
 
 
@@ -102,6 +105,9 @@ def remove_unused_code(code: str, protected: set[str]) -> str:
                         for target in item.targets:
                             if isinstance(target.target, cst.Name):
                                 var_defs.add(target.target.value)
+                    elif isinstance(item, cst.AnnAssign):
+                        if isinstance(item.target, cst.Name):
+                            var_defs.add(item.target.value)
 
         candidates = (var_defs | func_defs) - protected
         if not candidates:
@@ -116,19 +122,26 @@ def remove_unused_code(code: str, protected: set[str]) -> str:
         for stmt in tree.body:
             if isinstance(stmt, cst.SimpleStatementLine):
                 for item in stmt.body:
+                    assigned_names: list[str] = []
                     if isinstance(item, cst.Assign):
-                        for target in item.targets:
-                            if isinstance(target.target, cst.Name) and target.target.value in candidates:
-                                name = target.target.value
-                                # Count Name nodes in the assignment value + target itself.
-                                count = 0
-                                stack = list(stmt.children)
-                                while stack:
-                                    child = stack.pop()
-                                    if isinstance(child, cst.Name) and child.value == name:
-                                        count += 1
-                                    stack.extend(child.children)
-                                var_self_counts[name] = var_self_counts.get(name, 0) + count
+                        assigned_names = [
+                            t.target.value
+                            for t in item.targets
+                            if isinstance(t.target, cst.Name) and t.target.value in candidates
+                        ]
+                    elif isinstance(item, cst.AnnAssign):
+                        if isinstance(item.target, cst.Name) and item.target.value in candidates:
+                            assigned_names = [item.target.value]
+                    for name in assigned_names:
+                        # Count Name nodes in the assignment value + target itself.
+                        count = 0
+                        stack = list(stmt.children)
+                        while stack:
+                            child = stack.pop()
+                            if isinstance(child, cst.Name) and child.value == name:
+                                count += 1
+                            stack.extend(child.children)
+                        var_self_counts[name] = var_self_counts.get(name, 0) + count
 
         def_weight: dict[str, int] = {}
         for name in candidates:

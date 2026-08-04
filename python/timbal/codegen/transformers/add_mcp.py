@@ -360,6 +360,26 @@ class MCPAdder(cst.CSTTransformer):
                         raise _name_collision_error(runtime_name)
         return updated_node
 
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if not isinstance(updated_node.target, cst.Name) or not isinstance(updated_node.value, cst.Call):
+            return updated_node
+        target_name = updated_node.target.value
+
+        if target_name == self.target:
+            return updated_node.with_changes(value=self._add_to_tools(updated_node.value))
+
+        for var_name, runtime_name, kwargs in self.servers:
+            mcp_id = _mcp_server_id(updated_node.value, target_name)
+            if mcp_id == runtime_name or (_is_mcp_call(updated_node.value) and target_name == var_name):
+                self._updated.add(runtime_name)
+                call_code, _ = _server_call_code(kwargs)
+                return updated_node.with_changes(value=cst.parse_expression(call_code))
+            resolved = resolve_runnable_name(updated_node.value)
+            if resolved == runtime_name and not _is_mcp_call(updated_node.value):
+                raise _name_collision_error(runtime_name)
+        return updated_node
+
     def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
         imports_to_add: list[cst.BaseStatement] = []
         stmts_to_add: list[cst.BaseStatement] = []
@@ -402,6 +422,16 @@ class MCPAdder(cst.CSTTransformer):
                             for t in item.targets:
                                 if isinstance(t.target, cst.Name) and t.target.value == self.target:
                                     insert_idx = min(insert_idx, i)
+                        elif (
+                            isinstance(item, cst.AnnAssign)
+                            and isinstance(item.target, cst.Name)
+                            and isinstance(item.value, cst.Call)
+                        ):
+                            if (
+                                resolve_runnable_name(item.value) in runtime_names
+                                or item.target.value == self.target
+                            ):
+                                insert_idx = min(insert_idx, i)
             for stmt in reversed(stmts_to_add):
                 body.insert(insert_idx, stmt)
 

@@ -2,7 +2,13 @@ import argparse
 
 import libcst as cst
 
-from ..cst_utils import collect_assignments, resolve_entry_point_type, resolve_runnable_name
+from ..cst_utils import (
+    collect_assignments,
+    collect_step_names,
+    is_bare_function_step,
+    resolve_entry_point_type,
+    resolve_runnable_name,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -31,6 +37,29 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     target = step if step else entry_point
     assignments = collect_assignments(tree) if tree else {}
+
+    # Validate the target resolves to a constructor assignment (mirrors
+    # add-tool). Without this, an aliased entry point like ``agent = _agent``
+    # would ride ``allow_noop`` to a phantom success: the transformer never
+    # matches anything, the file is unchanged, and the tool stays in place.
+    if tree is not None:
+        if step:
+            step_names = collect_step_names(tree, entry_point, assignments)
+            if (
+                step not in step_names
+                and step not in assignments
+                and not is_bare_function_step(tree, entry_point, step, assignments)
+            ):
+                raise ValueError(
+                    f"Workflow step '{step}' not found. "
+                    "Use the step variable name from .step(...), not the runtime name."
+                )
+        elif entry_point not in assignments:
+            raise ValueError(
+                f"Entry point variable '{entry_point}' not found in source. "
+                "Ensure timbal.yaml fqn matches the Agent/Workflow variable name."
+            )
+
     return ToolRemover(target, args.name, assignments)
 
 

@@ -260,6 +260,29 @@ def collect_step_names(
     return var_to_name
 
 
+def has_step_expr(tree: cst.Module, entry_point: str) -> bool:
+    """True when a standalone ``<entry_point>.step(...)`` statement exists.
+
+    Used to validate workflow entry points that ``collect_assignments`` cannot
+    see (e.g. an alias like ``workflow = _wf`` whose steps are registered via
+    ``workflow.step(...)`` statements).
+    """
+    for stmt in tree.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for item in stmt.body:
+            if (
+                isinstance(item, cst.Expr)
+                and isinstance(item.value, cst.Call)
+                and isinstance(item.value.func, cst.Attribute)
+                and isinstance(item.value.func.value, cst.Name)
+                and item.value.func.value.value == entry_point
+                and item.value.func.attr.value == "step"
+            ):
+                return True
+    return False
+
+
 def collect_chained_step_names(
     tree: cst.Module,
     entry_point: str,
@@ -277,14 +300,19 @@ def collect_chained_step_names(
         if not isinstance(stmt, cst.SimpleStatementLine):
             continue
         for item in stmt.body:
-            if not isinstance(item, cst.Assign):
+            if isinstance(item, cst.Assign):
+                if not any(
+                    isinstance(t.target, cst.Name) and t.target.value == entry_point
+                    for t in item.targets
+                ):
+                    continue
+                node = item.value
+            elif isinstance(item, cst.AnnAssign):
+                if not (isinstance(item.target, cst.Name) and item.target.value == entry_point):
+                    continue
+                node = item.value
+            else:
                 continue
-            if not any(
-                isinstance(t.target, cst.Name) and t.target.value == entry_point
-                for t in item.targets
-            ):
-                continue
-            node = item.value
             while isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute):
                 if node.func.attr.value == "step" and node.args:
                     first_arg = node.args[0].value
@@ -421,7 +449,10 @@ class _BareFunctionWrapper(cst.CSTTransformer):
             f'{self.step_name} = Tool(name="{self.step_name}", handler={self.step_name}_fn)\n'
         )
 
-        # Insert before the entry-point assignment.
+        # Insert before the entry-point assignment (plain or annotated). Also
+        # stop at the first standalone ``.step()`` statement so aliased entry
+        # points (not visible as assignments) still get the Tool defined
+        # before its first reference.
         insert_idx = len(body)
         for i, stmt in enumerate(body):
             if isinstance(stmt, cst.SimpleStatementLine):
@@ -430,6 +461,17 @@ class _BareFunctionWrapper(cst.CSTTransformer):
                         for t in item_node.targets:
                             if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
                                 insert_idx = min(insert_idx, i)
+                    elif isinstance(item_node, cst.AnnAssign):
+                        if isinstance(item_node.target, cst.Name) and item_node.target.value == self.entry_point:
+                            insert_idx = min(insert_idx, i)
+                    elif (
+                        isinstance(item_node, cst.Expr)
+                        and isinstance(item_node.value, cst.Call)
+                        and isinstance(item_node.value.func, cst.Attribute)
+                        and isinstance(item_node.value.func.value, cst.Name)
+                        and item_node.value.func.value.value == self.entry_point
+                    ):
+                        insert_idx = min(insert_idx, i)
         body.insert(insert_idx, cst.parse_statement(assignment_code))
 
         return updated_node.with_changes(body=body)

@@ -63,6 +63,45 @@ class TestAgentStep:
         assert 'name="agent_a"' in norm
         assert "workflow.step(agent_a)" in output
 
+    def test_annotated_workflow_entry_point(self, workspace):
+        """The new step variable must precede the .step() call on an annotated workflow."""
+        ws = workspace("""\
+        from timbal import Workflow
+
+        workflow: Workflow = Workflow(name="my_workflow")
+        """)
+        output = _run_dry(ws, "--type", "Agent", "--config", '{"name": "agent_a", "model": "openai/gpt-4o-mini"}')
+        assert "workflow.step(agent_a)" in output
+        assert output.index("agent_a = Agent") < output.index("workflow.step(agent_a)")
+        exec(output, {})  # no NameError → definition order is valid
+
+    def test_annotated_step_variable_idempotent_readd(self, workspace):
+        """Re-adding a step whose variable is annotated updates it in place."""
+        ws = workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a: Agent = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry(ws, "--type", "Agent", "--config", '{"name": "agent_a", "model": "openai/gpt-4o"}')
+        assert output.count("workflow.step(agent_a)") == 1
+        assert output.count("Agent(") <= 2  # annotation + constructor, no duplicate assignment
+        assert 'model="openai/gpt-4o"' in output
+
+    def test_missing_entry_point_fails_loudly(self, workspace):
+        """A wrong fqn must not emit a dangling workflow.step(...) call."""
+        ws = workspace("""\
+        from timbal import Workflow
+
+        wf = Workflow(name="my_workflow")
+        """)
+        stderr = _run_dry_expect_error(
+            ws, "--type", "Agent", "--config", '{"name": "agent_a", "model": "openai/gpt-4o-mini"}'
+        )
+        assert "Entry point variable 'workflow' not found" in stderr
+
     def test_rejects_agent_without_name(self, workspace):
         """Agent steps must have a name."""
         ws = workspace("""\
