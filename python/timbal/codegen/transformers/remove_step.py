@@ -2,7 +2,12 @@ import argparse
 
 import libcst as cst
 
-from ..cst_utils import collect_assignments, resolve_entry_point_type, resolve_runnable_name
+from ..cst_utils import (
+    collect_assignments,
+    has_step_expr,
+    resolve_entry_point_type,
+    resolve_runnable_name,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -20,10 +25,24 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             raise ValueError(f"remove-step requires a Workflow entry point, but '{entry_point}' is a {ep_type}.")
 
     assignments = collect_assignments(tree) if tree else {}
+
+    # The entry point must resolve to a constructor assignment (plain or
+    # annotated) or have standalone .step() statements (covers aliases like
+    # ``workflow = _wf``). Otherwise ``allow_noop`` would turn a wrong fqn
+    # into a phantom success while the step stays in place.
+    if tree is not None and entry_point not in assignments and not has_step_expr(tree, entry_point):
+        raise ValueError(
+            f"Entry point variable '{entry_point}' not found in source. "
+            "Ensure timbal.yaml fqn matches the Agent/Workflow variable name."
+        )
+
     return StepRemover(entry_point, args.name, assignments)
 
 
 class StepRemover(cst.CSTTransformer):
+    # Removing a step that is already absent is an idempotent success.
+    allow_noop = True
+
     def __init__(self, entry_point: str, step_name: str, assignments: dict[str, cst.Call]):
         self.entry_point = entry_point
         self.step_name = step_name

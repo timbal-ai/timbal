@@ -59,6 +59,33 @@ class TestRemoveAgentStep:
         # Variable and import should be cleaned up by remove_unused_code
         assert "agent_a = Agent" not in output
 
+    def test_missing_entry_point_fails_loudly(self, workspace):
+        """A wrong fqn must not phantom-succeed via allow_noop."""
+        ws = workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        wf = Workflow(name="my_workflow")
+        wf.step(agent_a)
+        """)
+        stderr = _run_dry_expect_error(ws, "agent_a")
+        assert "Entry point variable 'workflow' not found" in stderr
+
+    def test_aliased_workflow_with_step_calls_works(self, workspace):
+        """An alias entry point whose .step() calls use the fqn name still works."""
+        ws = workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        _wf = Workflow(name="my_workflow")
+        workflow = _wf
+        workflow.step(agent_a)
+        """)
+        output = _run_dry(ws, "agent_a")
+        assert "workflow.step(agent_a)" not in output
+
     def test_removes_one_keeps_other(self, workspace):
         """Remove one step but keep the other intact."""
         ws = workspace("""\

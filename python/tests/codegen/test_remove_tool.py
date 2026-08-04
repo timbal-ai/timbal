@@ -32,6 +32,15 @@ def _run_dry(workspace_path: Path, tool_name: str) -> str:
     return result.stdout
 
 
+def _run_dry_fail(workspace_path: Path, tool_name: str) -> subprocess.CompletedProcess:
+    """Run codegen remove-tool with --dry-run and return the raw result."""
+    return subprocess.run(
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "remove-tool", "--name", tool_name),
+        capture_output=True,
+        text=True,
+    )
+
+
 def _exec_agent(code: str) -> dict:
     """Exec the generated code and return its globals."""
     ns = {}
@@ -47,6 +56,18 @@ class TestRemoveFrameworkTool:
         from timbal.tools import WebSearch
 
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[WebSearch()])
+        """)
+        output = _run_dry(ws, "web_search")
+        ns = _exec_agent(output)
+        assert len(ns["agent"].tools) == 0
+
+    def test_annotated_entry_point(self, workspace):
+        """remove-tool prunes the tools list of an annotated agent assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[WebSearch()])
         """)
         output = _run_dry(ws, "web_search")
         ns = _exec_agent(output)
@@ -348,3 +369,39 @@ class TestRemoveToolStep:
         )
         assert result.returncode != 0
         assert "--step requires a Workflow" in result.stderr
+
+
+class TestEntryPointValidation:
+    def test_aliased_entry_point_fails_loudly(self, workspace):
+        """An alias entry point (agent = _agent) must not phantom-succeed via allow_noop."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        _agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[WebSearch()])
+        agent = _agent
+        """)
+        result = _run_dry_fail(ws, "web_search")
+        assert result.returncode != 0
+        assert "Entry point variable 'agent' not found" in result.stderr
+
+    def test_unknown_step_fails_loudly(self, wf_workspace):
+        """Removing from a nonexistent step is an error, not an idempotent no-op."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.tools import WebSearch
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", tools=[WebSearch()])
+
+        workflow = Workflow(name="workflow")
+        workflow.step(agent_a)
+        """)
+        result = subprocess.run(
+            codegen_cmd("--path", str(ws), "--dry-run",
+                "remove-tool", "--name", "web_search", "--step", "nope",
+            ),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "Workflow step 'nope' not found" in result.stderr

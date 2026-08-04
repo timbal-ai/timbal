@@ -2,7 +2,13 @@ import argparse
 
 import libcst as cst
 
-from ..cst_utils import collect_assignments, resolve_entry_point_type, resolve_runnable_name
+from ..cst_utils import (
+    collect_assignments,
+    collect_step_names,
+    is_bare_function_step,
+    resolve_entry_point_type,
+    resolve_runnable_name,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -31,10 +37,36 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     target = step if step else entry_point
     assignments = collect_assignments(tree) if tree else {}
+
+    # Validate the target resolves to a constructor assignment (mirrors
+    # add-tool). Without this, an aliased entry point like ``agent = _agent``
+    # would ride ``allow_noop`` to a phantom success: the transformer never
+    # matches anything, the file is unchanged, and the tool stays in place.
+    if tree is not None:
+        if step:
+            step_names = collect_step_names(tree, entry_point, assignments)
+            if (
+                step not in step_names
+                and step not in assignments
+                and not is_bare_function_step(tree, entry_point, step, assignments)
+            ):
+                raise ValueError(
+                    f"Workflow step '{step}' not found. "
+                    "Use the step variable name from .step(...), not the runtime name."
+                )
+        elif entry_point not in assignments:
+            raise ValueError(
+                f"Entry point variable '{entry_point}' not found in source. "
+                "Ensure timbal.yaml fqn matches the Agent/Workflow variable name."
+            )
+
     return ToolRemover(target, args.name, assignments)
 
 
 class ToolRemover(cst.CSTTransformer):
+    # Removing a tool that is already absent is an idempotent success.
+    allow_noop = True
+
     def __init__(self, entry_point: str, tool_name: str, assignments: dict[str, cst.Call]):
         self.entry_point = entry_point
         self.tool_name = tool_name
@@ -47,6 +79,18 @@ class ToolRemover(cst.CSTTransformer):
                     return updated_node.with_changes(
                         value=self._remove_from_tools(updated_node.value),
                     )
+        return updated_node
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if (
+            isinstance(updated_node.target, cst.Name)
+            and updated_node.target.value == self.entry_point
+            and isinstance(updated_node.value, cst.Call)
+        ):
+            return updated_node.with_changes(
+                value=self._remove_from_tools(updated_node.value),
+            )
         return updated_node
 
     def _remove_from_tools(self, call: cst.Call) -> cst.Call:

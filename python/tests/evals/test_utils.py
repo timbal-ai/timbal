@@ -79,6 +79,12 @@ class TestDiscoverEvalFiles:
         b = touch(tmp_path / "more_evals" / "deep" / "b_eval.yaml")
         assert discover_eval_files(tmp_path) == sorted([a, b])
 
+    def test_skips_evalconf(self, tmp_path):
+        """evalconf.yaml matches the eval* glob but is the shared config, not a suite."""
+        touch(tmp_path / "evalconf.yaml", "runnable: ../agent.py::agent\n")
+        eval_file = touch(tmp_path / "eval_smoke.yaml")
+        assert discover_eval_files(tmp_path) == [eval_file]
+
 
 class TestParseEvalFileRunnableResolution:
     def test_runnable_relative_to_eval_file_dir(self, tmp_path):

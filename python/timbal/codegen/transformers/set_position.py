@@ -121,13 +121,29 @@ class ConstructorPositionSetter(cst.CSTTransformer):
     def __init__(self, entry_point: str, position: dict):
         self.entry_point = entry_point
         self.position = position
+        # True once the constructor was found — an unchanged file is then an
+        # idempotent save (position already set to these coordinates).
+        self.matched = False
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         for target in updated_node.targets:
             if isinstance(target.target, cst.Name) and target.target.value == self.entry_point:
                 if isinstance(updated_node.value, cst.Call):
+                    self.matched = True
                     new_args = _merge_position_into_metadata(list(updated_node.value.args), self.position)
                     return updated_node.with_changes(value=updated_node.value.with_changes(args=new_args))
+        return updated_node
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if (
+            isinstance(updated_node.target, cst.Name)
+            and updated_node.target.value == self.entry_point
+            and isinstance(updated_node.value, cst.Call)
+        ):
+            self.matched = True
+            new_args = _merge_position_into_metadata(list(updated_node.value.args), self.position)
+            return updated_node.with_changes(value=updated_node.value.with_changes(args=new_args))
         return updated_node
 
 
@@ -139,6 +155,7 @@ class StepPositionSetter(cst.CSTTransformer):
         self.step_name = step_name
         self.position = position
         self.assignments = assignments
+        self.matched = False  # target step found — unchanged file means idempotent save
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         for target in updated_node.targets:
@@ -150,8 +167,25 @@ class StepPositionSetter(cst.CSTTransformer):
             if isinstance(updated_node.value, cst.Call):
                 resolved = resolve_runnable_name(updated_node.value)
                 if resolved == self.step_name:
+                    self.matched = True
                     new_args = _merge_position_into_metadata(list(updated_node.value.args), self.position)
                     return updated_node.with_changes(
                         value=updated_node.value.with_changes(args=new_args),
                     )
+        return updated_node
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated step variables, e.g. ``agent_a: Agent = Agent(...)``."""
+        if (
+            not isinstance(updated_node.target, cst.Name)
+            or updated_node.target.value == self.entry_point
+            or not isinstance(updated_node.value, cst.Call)
+        ):
+            return updated_node
+        if resolve_runnable_name(updated_node.value) == self.step_name:
+            self.matched = True
+            new_args = _merge_position_into_metadata(list(updated_node.value.args), self.position)
+            return updated_node.with_changes(
+                value=updated_node.value.with_changes(args=new_args),
+            )
         return updated_node

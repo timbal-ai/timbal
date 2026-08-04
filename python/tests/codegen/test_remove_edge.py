@@ -55,6 +55,23 @@ class TestRemoveOrderingEdge:
         assert '"agent_a"' not in normalized.split("depends_on")[1] if "depends_on" in normalized else True
 
 
+class TestIdempotency:
+    def test_remove_absent_edge_is_noop_success(self, wf_workspace):
+        """Removing an edge that is already gone succeeds without changes."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        workflow.step(agent_b)
+        """)
+        output = _run(ws, source="agent_a", target="agent_b")
+        assert "workflow.step(agent_b)" in output
+
+
 class TestRemoveDataFlowEdge:
     def test_remove_param_lambda(self, wf_workspace):
         ws = wf_workspace("""\

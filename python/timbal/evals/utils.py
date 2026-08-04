@@ -278,7 +278,8 @@ def discover_eval_files(path: Path) -> list[Path]:
         current = Path(dirpath)
         dirnames[:] = [d for d in dirnames if not _is_ignored_dir(current / d)]
         for filename in filenames:
-            if not filename.endswith(".yaml"):
+            # evalconf.yaml is the shared config file, not an eval suite.
+            if not filename.endswith(".yaml") or filename == CONFIG_FILENAME:
                 continue
             stem = filename[: -len(".yaml")]
             if filename.startswith("eval") or stem.endswith("eval"):

@@ -388,6 +388,29 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             "value": _extract_fallbacks(self.model),
         }
 
+        # ``voice_config`` is not a declared field — it rides ``extra="allow"``
+        # and the voice server reads it via ``getattr`` (merge_voice_config).
+        # Surface it here so get-flow round-trips what set-config writes. It
+        # may be a dict, a zero-arg callable, or a VoiceConfig instance.
+        vc = getattr(self, "voice_config", None)
+        if vc is not None and not isinstance(vc, dict):
+            if callable(vc):
+                vc = f"<{getattr(vc, '__name__', 'callable')}>"
+            elif isinstance(vc, BaseModel):
+                vc = vc.model_dump(exclude_none=True)
+            else:
+                vc = str(vc)
+        if isinstance(vc, dict):
+            vc = self._coerce_to_json_safe(vc)
+        # "callable" mirrors how system_prompt advertises non-serialisable
+        # variants (see _partial_schema) — the value is then a "<fn_name>"
+        # placeholder string rather than an object.
+        config["voice_config"] = {
+            "anyOf": [{"type": "object"}, {"type": "callable"}, {"type": "null"}],
+            "default": None,
+            "value": vc,
+        }
+
         return {**super().get_config(), **config}
 
     @override

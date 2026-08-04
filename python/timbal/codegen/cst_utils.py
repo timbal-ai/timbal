@@ -12,27 +12,87 @@ if TYPE_CHECKING:
 ENTRY_POINT_TYPES = {"Agent", "Workflow"}
 
 
+def _root_constructor_name(value: cst.BaseExpression) -> str | None:
+    """Return the root constructor's class name for an assignment value.
+
+    Walks down chained method calls (e.g. ``Workflow(...).step(...).step(...)``)
+    to find the root constructor. Module-qualified constructors
+    (e.g. ``timbal.Agent(...)``) resolve to the attribute name.
+    """
+    call = value
+    # Chained method calls have a Call as the attribute base; module access
+    # (``timbal.Agent``) has a Name/Attribute base and must not be walked.
+    while (
+        isinstance(call, cst.Call)
+        and isinstance(call.func, cst.Attribute)
+        and isinstance(call.func.value, cst.Call)
+    ):
+        call = call.func.value
+    if isinstance(call, cst.Call):
+        if isinstance(call.func, cst.Name):
+            return call.func.value
+        if isinstance(call.func, cst.Attribute):
+            return call.func.attr.value
+    return None
+
+
+def _collect_entry_point_aliases(tree: cst.Module) -> dict[str, str]:
+    """Map local import aliases to canonical entry point class names.
+
+    Covers ``from timbal import Agent as A`` so aliased constructors are
+    recognized like the canonical names.
+    """
+    aliases: dict[str, str] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if isinstance(item, cst.ImportFrom) and not isinstance(item.names, cst.ImportStar):
+                    for alias in item.names:
+                        if (
+                            isinstance(alias, cst.ImportAlias)
+                            and isinstance(alias.name, cst.Name)
+                            and alias.name.value in ENTRY_POINT_TYPES
+                            and alias.asname is not None
+                            and isinstance(alias.asname.name, cst.Name)
+                        ):
+                            aliases[alias.asname.name.value] = alias.name.value
+    return aliases
+
+
 def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
     """Return the constructor class name ('Agent' or 'Workflow') for the entry point variable.
 
-    Inspects top-level assignments to find `entry_point = ClassName(...)` and returns
-    the class name if it's a known entry point type. Returns None if not found.
+    Inspects top-level assignments (plain and annotated, e.g.
+    ``agent: Agent = Agent(...)``) to find `entry_point = ClassName(...)` and
+    returns the class name if it's a known entry point type. Import aliases
+    (``Agent as A``) and module-qualified constructors (``timbal.Agent(...)``)
+    are canonicalized. Returns None if not found.
     """
+    aliases = _collect_entry_point_aliases(tree)
+
+    def _canonical(value: cst.BaseExpression) -> str | None:
+        cls_name = _root_constructor_name(value)
+        cls_name = aliases.get(cls_name, cls_name)
+        return cls_name if cls_name in ENTRY_POINT_TYPES else None
+
     for stmt in tree.body:
         if isinstance(stmt, cst.SimpleStatementLine):
             for item in stmt.body:
                 if isinstance(item, cst.Assign):
                     for target in item.targets:
                         if isinstance(target.target, cst.Name) and target.target.value == entry_point:
-                            # Walk down chained method calls (e.g. Workflow(...).step(...).step(...))
-                            # to find the root constructor.
-                            call = item.value
-                            while isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute):
-                                call = call.func.value
-                            if isinstance(call, cst.Call) and isinstance(call.func, cst.Name):
-                                cls_name = call.func.value
-                                if cls_name in ENTRY_POINT_TYPES:
-                                    return cls_name
+                            cls_name = _canonical(item.value)
+                            if cls_name is not None:
+                                return cls_name
+                elif isinstance(item, cst.AnnAssign):
+                    if (
+                        isinstance(item.target, cst.Name)
+                        and item.target.value == entry_point
+                        and item.value is not None
+                    ):
+                        cls_name = _canonical(item.value)
+                        if cls_name is not None:
+                            return cls_name
     return None
 
 
@@ -141,7 +201,11 @@ def build_cst_value(value: object) -> cst.BaseExpression:
 
 
 def collect_assignments(tree: cst.Module) -> dict[str, cst.Call]:
-    """Build a map of variable_name -> Call node for all top-level assignments."""
+    """Build a map of variable_name -> Call node for all top-level assignments.
+
+    Covers plain assignments (``x = Call(...)``) and annotated assignments
+    (``x: T = Call(...)``).
+    """
     result = {}
     for stmt in tree.body:
         if isinstance(stmt, cst.SimpleStatementLine):
@@ -150,6 +214,12 @@ def collect_assignments(tree: cst.Module) -> dict[str, cst.Call]:
                     for target in item.targets:
                         if isinstance(target.target, cst.Name):
                             result[target.target.value] = item.value
+                elif (
+                    isinstance(item, cst.AnnAssign)
+                    and isinstance(item.target, cst.Name)
+                    and isinstance(item.value, cst.Call)
+                ):
+                    result[item.target.value] = item.value
     return result
 
 
@@ -190,6 +260,29 @@ def collect_step_names(
     return var_to_name
 
 
+def has_step_expr(tree: cst.Module, entry_point: str) -> bool:
+    """True when a standalone ``<entry_point>.step(...)`` statement exists.
+
+    Used to validate workflow entry points that ``collect_assignments`` cannot
+    see (e.g. an alias like ``workflow = _wf`` whose steps are registered via
+    ``workflow.step(...)`` statements).
+    """
+    for stmt in tree.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for item in stmt.body:
+            if (
+                isinstance(item, cst.Expr)
+                and isinstance(item.value, cst.Call)
+                and isinstance(item.value.func, cst.Attribute)
+                and isinstance(item.value.func.value, cst.Name)
+                and item.value.func.value.value == entry_point
+                and item.value.func.attr.value == "step"
+            ):
+                return True
+    return False
+
+
 def collect_chained_step_names(
     tree: cst.Module,
     entry_point: str,
@@ -207,14 +300,19 @@ def collect_chained_step_names(
         if not isinstance(stmt, cst.SimpleStatementLine):
             continue
         for item in stmt.body:
-            if not isinstance(item, cst.Assign):
+            if isinstance(item, cst.Assign):
+                if not any(
+                    isinstance(t.target, cst.Name) and t.target.value == entry_point
+                    for t in item.targets
+                ):
+                    continue
+                node = item.value
+            elif isinstance(item, cst.AnnAssign):
+                if not (isinstance(item.target, cst.Name) and item.target.value == entry_point):
+                    continue
+                node = item.value
+            else:
                 continue
-            if not any(
-                isinstance(t.target, cst.Name) and t.target.value == entry_point
-                for t in item.targets
-            ):
-                continue
-            node = item.value
             while isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute):
                 if node.func.attr.value == "step" and node.args:
                     first_arg = node.args[0].value
@@ -351,7 +449,10 @@ class _BareFunctionWrapper(cst.CSTTransformer):
             f'{self.step_name} = Tool(name="{self.step_name}", handler={self.step_name}_fn)\n'
         )
 
-        # Insert before the entry-point assignment.
+        # Insert before the entry-point assignment (plain or annotated). Also
+        # stop at the first standalone ``.step()`` statement so aliased entry
+        # points (not visible as assignments) still get the Tool defined
+        # before its first reference.
         insert_idx = len(body)
         for i, stmt in enumerate(body):
             if isinstance(stmt, cst.SimpleStatementLine):
@@ -360,6 +461,17 @@ class _BareFunctionWrapper(cst.CSTTransformer):
                         for t in item_node.targets:
                             if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
                                 insert_idx = min(insert_idx, i)
+                    elif isinstance(item_node, cst.AnnAssign):
+                        if isinstance(item_node.target, cst.Name) and item_node.target.value == self.entry_point:
+                            insert_idx = min(insert_idx, i)
+                    elif (
+                        isinstance(item_node, cst.Expr)
+                        and isinstance(item_node.value, cst.Call)
+                        and isinstance(item_node.value.func, cst.Attribute)
+                        and isinstance(item_node.value.func.value, cst.Name)
+                        and item_node.value.func.value.value == self.entry_point
+                    ):
+                        insert_idx = min(insert_idx, i)
         body.insert(insert_idx, cst.parse_statement(assignment_code))
 
         return updated_node.with_changes(body=body)
