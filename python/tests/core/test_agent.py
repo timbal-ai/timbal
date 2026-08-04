@@ -430,6 +430,44 @@ class TestAgentErrorHandling:
         assert isinstance(output, OutputEvent)
 
     @pytest.mark.asyncio
+    async def test_top_level_agent_inside_tool_handler_does_not_leak_context(self):
+        """Regression: a TOP-LEVEL agent awaited inside a plain tool handler swaps
+        in a fresh RunContext (concurrent-sibling logic). With tools iterated
+        directly on the caller's task, that swap must be restored on exit —
+        otherwise the caller's next LLM call runs against the wrong trace and
+        the whole run errors (caught by the delegation benchmarks, not unit
+        tests: subagents-as-tools have nested paths and inherit the context).
+        """
+        worker = Agent(
+            name="ctx_worker",
+            model=TestModel(responses=["worker-done"]),
+            tools=[],
+        )
+
+        async def worker_tool(input: str) -> str:
+            """Delegate work to the worker agent."""
+            result = await worker(prompt=input).collect()
+            return result.output.collect_text()
+
+        supervisor = Agent(
+            name="ctx_supervisor",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="worker_tool", input={"input": "go"})],
+                    stop_reason="tool_use",
+                ),
+                "supervisor-done",
+            ]),
+            tools=[worker_tool],
+        )
+
+        result = await supervisor(prompt="go").collect()
+        assert result.error is None, result.error
+        assert result.status.code == "success"
+        assert result.output.collect_text() == "supervisor-done"
+
+    @pytest.mark.asyncio
     async def test_hallucinated_tool_does_not_hang(self):
         """LLM emits a tool_use for a tool that doesn't exist (e.g. a skill name
         called as if it were a tool). Agent must not hang on queue.get(); it must

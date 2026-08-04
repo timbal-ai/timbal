@@ -1485,6 +1485,13 @@ class Runnable(ABC, BaseModel):
         _parent_call_id = get_parent_call_id()
         _call_id = get_call_id()
         run_context = get_run_context()
+        # Entry snapshot for the finally block. A non-None entry call id means
+        # we're executing inside another runnable's call on this task; if we
+        # swap in a fresh RunContext below (top-level runnable invoked from a
+        # handler, e.g. an agent called inside a tool), the caller's context
+        # must be restored on exit or the swap leaks into the caller's run.
+        _entry_run_context = run_context
+        _entry_call_id = _call_id
         if run_context is None:
             run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
@@ -1545,9 +1552,11 @@ class Runnable(ABC, BaseModel):
             Between yields, another coroutine sharing the same asyncio Task
             may overwrite the context vars. Call this after every yield to
             reclaim ownership. Skips the writes if context is already correct
-            (the common single-consumer case).
+            (the common single-consumer case). The run-context check matters
+            independently of the call-id one: a nested top-level runnable may
+            have swapped in (and restored the ids around) a fresh RunContext.
             """
-            if get_call_id() != _new_call_id:
+            if get_call_id() != _new_call_id or get_run_context() is not run_context:
                 set_run_context(run_context)
                 set_parent_call_id(_new_parent_call_id)
                 set_call_id(_new_call_id)
@@ -1851,6 +1860,15 @@ class Runnable(ABC, BaseModel):
             run_context._resume_values = previous_resume_values
             set_parent_call_id(_parent_call_id)
             set_call_id(_call_id)
+            if _entry_call_id is not None:
+                # Nested invocation: restore the caller's run context. A
+                # top-level runnable invoked from a handler may have swapped in
+                # a fresh RunContext above; with direct in-task iteration
+                # (agent tool fast path, linear workflow steps) that swap would
+                # otherwise leak into the caller's run. Top-level invocations
+                # (entry call id None) deliberately leave their context set so
+                # sequential same-task runs chain sessions implicitly.
+                set_run_context(_entry_run_context)
             if output_event.type in self._log_events and _events_logging_enabled():
                 _get_logger().info(output_event.type, **output_event.model_dump())
             if not _generator_closed:
