@@ -74,8 +74,13 @@ def parallel_task_3(duration: float = 1) -> str:
 
 @pytest.fixture
 def long_running_sync_tool():
-    """Create a long-running synchronous tool."""
-    return Tool(name="long_sync", handler=long_running_sync_handler)
+    """Create a long-running synchronous tool.
+
+    offload_blocking=True runs the blocking sync handler in the thread pool so
+    the event loop stays responsive and cancellation can land mid-execution.
+    Without it, sync handlers run inline and cannot be interrupted mid-flight.
+    """
+    return Tool(name="long_sync", handler=long_running_sync_handler, offload_blocking=True)
 
 
 @pytest.fixture
@@ -439,11 +444,13 @@ class TestWorkflowInterruption:
     @pytest.mark.asyncio
     async def test_workflow_interruption_during_parallel_steps(self):
         """Test workflow interruption when parallel steps are executing."""
+        # offload_blocking=True: blocking sync handlers must run in the thread
+        # pool for the loop to stay responsive and cancellation to land mid-run.
         workflow = (
             Workflow(name="parallel_workflow")
-            .step(parallel_task_1, duration=1)
-            .step(parallel_task_2, duration=1)
-            .step(parallel_task_3, duration=1)
+            .step(Tool(handler=parallel_task_1, offload_blocking=True), duration=1)
+            .step(Tool(handler=parallel_task_2, offload_blocking=True), duration=1)
+            .step(Tool(handler=parallel_task_3, offload_blocking=True), duration=1)
         )
 
         # Start workflow (all steps run in parallel)

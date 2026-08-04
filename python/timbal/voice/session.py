@@ -371,7 +371,7 @@ class VoiceSession:
         self._output_audio_chunks: list[bytes] = []
         # Persistent call recording (MP3 + manifest; see voice/recording.py).
         # Distinct from the in-memory record_audio seam above.
-        self.session_id = session_id or uuid7(as_type="str").replace("-", "")
+        self.session_id = session_id or uuid7(as_type="hex")
         self._recorder = recorder
         #: Wall-clock session start (set when run() begins); transcript offsets
         #: in the recording manifest and session_transcript are relative to it.

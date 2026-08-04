@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from pydantic import BaseModel, SecretStr, model_validator
+from pydantic import BaseModel, PrivateAttr, SecretStr, model_validator
 
 
 class PlatformAuthType(StrEnum):
@@ -80,6 +80,11 @@ class PlatformConfig(BaseModel):
     ``sync_traces`` in ~/.timbal/config when unset here.
     Defaults to True when not explicitly configured.
     """
+
+    _fully_resolved: bool = PrivateAttr(default=False)
+    """Set by resolve_platform_config() once env/file merging has completed, so
+    a config inherited across chained runs is not re-resolved (which would
+    re-read ~/.timbal files on every run)."""
 
     @model_validator(mode="before")
     @classmethod

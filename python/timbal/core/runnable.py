@@ -4,6 +4,7 @@ import contextvars
 import hashlib
 import inspect
 import json
+import logging
 import os
 import secrets
 import time
@@ -17,9 +18,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
     TypeAdapter,
-    ValidationInfo,
     computed_field,
     field_validator,
     model_serializer,
@@ -67,6 +66,21 @@ def _get_logger():
     import structlog
 
     return structlog.get_logger("timbal.core.runnable")
+
+
+_stdlib_events_logger = logging.getLogger("timbal.core.runnable")
+
+
+def _events_logging_enabled() -> bool:
+    """Cheap gate for per-event INFO logging.
+
+    ``event.model_dump()`` is expensive and is evaluated eagerly as a call
+    argument, so callers must check this BEFORE building the log kwargs.
+    Timbal's structlog setup is stdlib-backed (see logs.setup_logging), so the
+    stdlib effective level (which also respects ``logging.disable``) is
+    authoritative.
+    """
+    return _stdlib_events_logger.isEnabledFor(logging.INFO)
 
 
 def _collector_output_on_interrupt(collector: Any) -> Any:
@@ -284,6 +298,15 @@ class Runnable(ABC, BaseModel):
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
 
+    offload_blocking: bool = False
+    """If True, plain sync handlers run in the default thread pool so blocking
+    code doesn't stall the event loop. Default False: sync handlers run inline
+    on the event loop, which avoids a threadpool round-trip per call. Set this
+    on tools whose sync handler blocks (network/disk I/O, heavy CPU) and that
+    must not serialize concurrent runs — or better, make the handler async.
+    Sync generator handlers always stream via the thread pool regardless of
+    this flag."""
+
     tracing_provider: Any = Field(
         default=TRACING_UNSET,
         description=(
@@ -311,20 +334,30 @@ class Runnable(ABC, BaseModel):
     applicable to all Runnable types.
     """
 
-    _path: str = PrivateAttr()
-    _is_orchestrator: bool = PrivateAttr()
-    _is_coroutine: bool = PrivateAttr()
-    _is_gen: bool = PrivateAttr()
-    _is_async_gen: bool = PrivateAttr()
-    _dependencies: list[str] = PrivateAttr(default_factory=list)
-    _default_fixed_params: dict[str, Any] = PrivateAttr(default_factory=dict)
-    _default_runtime_params: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
-    _pre_hook_is_coroutine: bool | None = PrivateAttr()
-    _pre_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
-    _post_hook_is_coroutine: bool | None = PrivateAttr()
-    _post_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
-    _log_events: set[str] = PrivateAttr()
-    _bg_tasks: dict[str, Any] = PrivateAttr(default_factory=dict)
+    # Workflow wiring. Declared as real (excluded-from-schema) fields rather than
+    # relying on extra="allow" attributes: declared fields live in the instance
+    # __dict__ and read ~8x faster than __pydantic_extra__ lookups, and these are
+    # read on every step execution. Set by Workflow.step(); None outside workflows.
+    previous_steps: Any = Field(default=None, exclude=True)
+    """Names of steps this step waits for (set by Workflow.step)."""
+    next_steps: Any = Field(default=None, exclude=True)
+    """Names of steps that depend on this step (set by Workflow.step)."""
+    previous_steps_kinds: Any = Field(default=None, exclude=True)
+    """Per-source edge kinds ('ordering' | 'when' | 'param') for introspection."""
+    when: Any = Field(default=None, exclude=True)
+    """Optional {'callable', 'is_coroutine', ...} guard evaluated before the step runs."""
+
+    # NOTE — hot runtime attributes are plain instance attributes assigned in
+    # model_post_init, NOT pydantic PrivateAttr declarations. PrivateAttr reads
+    # route through BaseModel.__getattr__ (~20x slower than __dict__ lookup) and
+    # these are read multiple times on every call:
+    #   _path, _is_orchestrator, _is_coroutine, _is_gen, _is_async_gen,
+    #   _dependencies, _default_fixed_params, _default_runtime_params,
+    #   _pre_hook_is_coroutine, _pre_hook_dependencies,
+    #   _post_hook_is_coroutine, _post_hook_dependencies,
+    #   _log_events, _bg_tasks
+    # Do not add class-level annotations for them — pydantic would turn any
+    # annotated underscore name back into a (slow) private attribute.
 
     @classmethod
     def _inspect_callable(
@@ -414,17 +447,17 @@ class Runnable(ABC, BaseModel):
 
     @field_validator("pre_hook", "post_hook")
     @classmethod
-    def _validate_hooks(cls, v: Any, info: ValidationInfo) -> Callable[[], Any] | None:
-        """Validate a hook, raise ValueError if invalid."""
+    def _validate_hooks(cls, v: Any) -> Callable[[], Any] | None:
+        """Validate a hook, raise ValueError if invalid.
+
+        Inspection *results* (is_coroutine, dependencies) are stored per instance
+        in model_post_init. They used to be written to ``cls`` here, which let two
+        instances of the same class with different sync/async hooks clobber each
+        other's flags.
+        """
         if v is None:
             return v
-        inspect_result = cls._inspect_callable(v)
-        if info.field_name == "pre_hook":
-            cls._pre_hook_is_coroutine = inspect_result["is_coroutine"]
-            cls._pre_hook_dependencies = inspect_result["dependencies"]
-        elif info.field_name == "post_hook":
-            cls._post_hook_is_coroutine = inspect_result["is_coroutine"]
-            cls._post_hook_dependencies = inspect_result["dependencies"]
+        cls._inspect_callable(v)
         return v
 
     def _prepare_default_params(self, default_params: dict[str, Any]) -> None:
@@ -443,6 +476,26 @@ class Runnable(ABC, BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the Runnable after Pydantic model creation."""
+        # Plain instance attributes (see NOTE above the field declarations).
+        self._dependencies: list[str] = []
+        self._default_fixed_params: dict[str, Any] = {}
+        self._default_runtime_params: dict[str, dict[str, Any]] = {}
+        self._bg_tasks: dict[str, Any] = {}
+        if self.pre_hook is not None:
+            pre_hook_inspect = self._inspect_callable(self.pre_hook)
+            self._pre_hook_is_coroutine: bool | None = pre_hook_inspect["is_coroutine"]
+            self._pre_hook_dependencies: list[str] = pre_hook_inspect["dependencies"]
+        else:
+            self._pre_hook_is_coroutine = None
+            self._pre_hook_dependencies = []
+        if self.post_hook is not None:
+            post_hook_inspect = self._inspect_callable(self.post_hook)
+            self._post_hook_is_coroutine: bool | None = post_hook_inspect["is_coroutine"]
+            self._post_hook_dependencies: list[str] = post_hook_inspect["dependencies"]
+        else:
+            self._post_hook_is_coroutine = None
+            self._post_hook_dependencies = []
+
         log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
         self._log_events = set(event.strip() for event in log_events)
         self._prepare_default_params(self.default_params)
@@ -796,17 +849,18 @@ class Runnable(ABC, BaseModel):
             return {"status": "running", "events": events, "name": task_info["name"], "input": task_info["input"]}
 
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
-        """Execute a runtime callable handling async context automatically."""
+        """Execute a runtime callable handling async context automatically.
+
+        Sync callables run inline on the event loop. These are param/`when`
+        lambdas and hooks — documented as cheap accessors over the run context
+        (e.g. ``step_span()``) — so a threadpool round-trip per evaluation is
+        pure overhead. Running inline also lets them see the live context vars
+        (the workflow sets ``parent_call_id`` right before evaluating them)
+        without a context copy.
+        """
         if is_coroutine:
             return await fn()
-        else:
-            loop = asyncio.get_running_loop()
-            ctx = contextvars.copy_context()
-
-            def fn_with_ctx():
-                return ctx.run(fn)
-
-            return await loop.run_in_executor(None, fn_with_ctx)
+        return fn()
 
     async def _execute_approval_callable(self, fn: Callable[..., Any], validated_input: dict[str, Any]) -> Any:
         """Execute an approval policy callable with matching validated input parameters."""
@@ -964,17 +1018,21 @@ class Runnable(ABC, BaseModel):
         collector = None
 
         if not self._is_async_gen and not self._is_coroutine:
-            loop = asyncio.get_running_loop()
-            ctx = contextvars.copy_context()
             if self._is_gen:
+                loop = asyncio.get_running_loop()
+                ctx = contextvars.copy_context()
                 gen = self.handler(**validated_input)
                 async_gen = sync_to_async_gen(gen, loop, ctx)
-            else:
+            elif self.offload_blocking:
+                loop = asyncio.get_running_loop()
+                ctx = contextvars.copy_context()
 
                 def handler_func():
                     return ctx.run(self.handler, **validated_input)
 
                 output = await loop.run_in_executor(None, handler_func)
+            else:
+                output = self.handler(**validated_input)
         elif self._is_coroutine:
             output = await self.handler(**validated_input)
         else:
@@ -1016,7 +1074,7 @@ class Runnable(ABC, BaseModel):
                         parent_call_id=span.parent_call_id,
                         item=event,
                     )
-                    if event.type in self._log_events:
+                    if event.type in self._log_events and _events_logging_enabled():
                         _get_logger().info(event.type, **event.model_dump())
                     if event_queue:
                         event_queue.put_nowait(event)
@@ -1128,7 +1186,7 @@ class Runnable(ABC, BaseModel):
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
-        _new_call_id: str = uuid7(as_type="str").replace("-", "")  # type: ignore
+        _new_call_id: str = uuid7(as_type="hex")  # type: ignore
         set_parent_call_id(_new_parent_call_id)
         set_call_id(_new_call_id)
 
@@ -1172,7 +1230,7 @@ class Runnable(ABC, BaseModel):
                 call_id=span.call_id,
                 parent_call_id=span.parent_call_id,
             )
-            if start_event.type in self._log_events:
+            if start_event.type in self._log_events and _events_logging_enabled():
                 _get_logger().info(start_event.type, **start_event.model_dump())
             yield start_event
             _restore_context()
@@ -1320,7 +1378,7 @@ class Runnable(ABC, BaseModel):
                         metadata=approval_decision.metadata,
                     )
                     run_context.update_usage("approvals:required", 1)
-                    if approval_event.type in self._log_events:
+                    if approval_event.type in self._log_events and _events_logging_enabled():
                         _get_logger().info(approval_event.type, **approval_event.model_dump())
                     yield approval_event
                     _restore_context()
@@ -1494,7 +1552,7 @@ class Runnable(ABC, BaseModel):
                     payload=suspend_signal.payload,
                     response_schema=suspend_signal.response_schema,
                 )
-                if interaction_event.type in self._log_events:
+                if interaction_event.type in self._log_events and _events_logging_enabled():
                     _get_logger().info(interaction_event.type, **interaction_event.model_dump())
                 yield interaction_event
                 _restore_context()
@@ -1691,7 +1749,7 @@ class Runnable(ABC, BaseModel):
             run_context._resume_values = previous_resume_values
             set_parent_call_id(_parent_call_id)
             set_call_id(_call_id)
-            if output_event.type in self._log_events:
+            if output_event.type in self._log_events and _events_logging_enabled():
                 _get_logger().info(output_event.type, **output_event.model_dump())
             if not _generator_closed:
                 yield output_event

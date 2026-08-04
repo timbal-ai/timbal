@@ -413,7 +413,7 @@ class ChatCompletionCollector(BaseCollector):
             # Openai allows the use of custom IDs for tool calls.
             # We choose to generate our own random IDs for consistency and to make sure they don't collide
             # (they are not transparent with the algs being used)
-            tool_calls = [{**tc, "id": uuid7(as_type="str").replace("-", "")} for tc in self._tool_calls]
+            tool_calls = [{**tc, "id": uuid7(as_type="hex")} for tc in self._tool_calls]
             content.extend(tool_calls)
 
         return Message.validate({"role": "assistant", "content": content, "stop_reason": self._stop_reason})

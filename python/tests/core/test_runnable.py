@@ -121,6 +121,41 @@ class TestRunnableBase:
         assert serialized['name'] == 'simple'
 
 
+class TestHookIntrospectionIsolation:
+    """Regression: hook is_coroutine flags must be per instance, not per class.
+
+    They used to be written to ``cls`` by a field validator, so two instances
+    of the same class with different sync/async hooks clobbered each other —
+    the last-constructed instance's flag won for both.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_and_async_hooks_do_not_clobber_each_other(self):
+        calls: list[str] = []
+
+        def sync_hook():
+            calls.append("sync")
+
+        async def async_hook():
+            calls.append("async")
+
+        def handler(x: str) -> str:
+            return x
+
+        sync_tool = Tool(name="sync_hooked", handler=handler, pre_hook=sync_hook)
+        # Constructing the async-hooked tool AFTER must not flip the sync tool's flag.
+        async_tool = Tool(name="async_hooked", handler=handler, pre_hook=async_hook)
+
+        assert sync_tool._pre_hook_is_coroutine is False
+        assert async_tool._pre_hook_is_coroutine is True
+
+        result = await sync_tool(x="a").collect()
+        assert result.error is None
+        result = await async_tool(x="b").collect()
+        assert result.error is None
+        assert calls == ["sync", "async"]
+
+
 class TestErrorHandling:
     """Test error handling in Runnable execution."""
     

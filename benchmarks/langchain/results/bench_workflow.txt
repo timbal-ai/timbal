@@ -18,36 +18,36 @@
   [1mLatency  (×200)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-          mean      1.17 ms      1.97 ms      2.58 ms
-           p50      1.13 ms      1.54 ms      2.23 ms
-           p95      1.48 ms      3.08 ms      3.75 ms
-           p99      1.88 ms     15.87 ms     15.30 ms
+          mean     802.7 µs      2.19 ms      2.85 ms
+           p50     671.0 µs      1.79 ms      2.66 ms
+           p95      1.16 ms      4.85 ms      3.75 ms
+           p99      1.43 ms     12.18 ms      7.44 ms
 
   [1mMemory  (×200 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                         160.6 KB         822  B
-  LG (bare)                       73.7 KB         377  B
-  LG + LangSmith                7161.0 KB       36664  B
+  Timbal                         220.3 KB        1128  B
+  LG (bare)                       75.5 KB         386  B
+  LG + LangSmith               29083.9 KB      148910  B
 
   [1mBurst  (500 concurrent)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-           p50    415.24 ms    330.57 ms    644.38 ms
-           p75    417.63 ms    347.03 ms    660.97 ms
-           p95    418.62 ms    364.51 ms    673.93 ms
-           p99    419.34 ms    367.65 ms    677.88 ms
-           max    419.42 ms    368.66 ms    678.49 ms
+           p50    115.85 ms    332.20 ms    817.93 ms
+           p75    119.42 ms    352.77 ms    830.73 ms
+           p95    122.05 ms    369.00 ms    849.33 ms
+           p99    122.90 ms    373.77 ms    874.42 ms
+           max    123.35 ms    377.13 ms    910.91 ms
 
-  [2mwall: Timbal 419.4 ms  |  LG bare 368.7 ms  |  LG+Smith 678.5 ms[0m
+  [2mwall: Timbal 123.3 ms  |  LG bare 377.1 ms  |  LG+Smith 910.9 ms[0m
 
   [1mThroughput  (1000 runs)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-             1         814/s         883/s         407/s
-            10        1171/s        1308/s         621/s
-            50        1010/s        1068/s         568/s
-           200         841/s         960/s         492/s
+             1        1350/s         749/s         321/s
+            10        2033/s        1003/s         422/s
+            50        2533/s         961/s         583/s
+           200        3513/s        1075/s         681/s
 
 [1m[36m────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario 2: Fan-out/in  (A → [B, C, D] → E)[0m
@@ -56,36 +56,36 @@
   [1mLatency  (×200)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-          mean      1.28 ms      1.33 ms      2.49 ms
-           p50      1.20 ms      1.30 ms      2.43 ms
-           p95      1.69 ms      1.67 ms      3.39 ms
-           p99      2.79 ms      1.84 ms      3.97 ms
+          mean     985.5 µs      1.59 ms      2.36 ms
+           p50     768.1 µs      1.49 ms      2.20 ms
+           p95      1.66 ms      2.09 ms      3.19 ms
+           p99      8.19 ms      2.99 ms      3.70 ms
 
   [1mMemory  (×200 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                         444.6 KB        2277  B
-  LG (bare)                      107.1 KB         548  B
-  LG + LangSmith                8486.3 KB       43450  B
+  Timbal                         611.9 KB        3133  B
+  LG (bare)                      127.3 KB         652  B
+  LG + LangSmith               30710.5 KB      157238  B
 
   [1mBurst  (500 concurrent)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-           p50    705.05 ms    549.38 ms    991.77 ms
-           p75    707.53 ms    567.97 ms   1016.86 ms
-           p95    709.55 ms    584.97 ms   1042.57 ms
-           p99    709.99 ms    588.58 ms   1047.41 ms
-           max    710.07 ms    589.63 ms   1048.35 ms
+           p50    139.65 ms    399.45 ms    721.61 ms
+           p75    143.82 ms    422.12 ms    741.05 ms
+           p95    146.89 ms    438.14 ms    760.19 ms
+           p99    147.41 ms    445.77 ms    771.41 ms
+           max    147.71 ms    456.53 ms    772.27 ms
 
-  [2mwall: Timbal 710.1 ms  |  LG bare 589.6 ms  |  LG+Smith 1048.4 ms[0m
+  [2mwall: Timbal 147.7 ms  |  LG bare 456.5 ms  |  LG+Smith 772.3 ms[0m
 
   [1mThroughput  (1000 runs)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-             1         635/s         674/s         432/s
-            10         862/s        1005/s         479/s
-            50         691/s         660/s         394/s
-           200         515/s         565/s         331/s
+             1        1599/s         702/s         407/s
+            10        2592/s         915/s         452/s
+            50        2845/s         964/s         573/s
+           200        2188/s        1086/s         570/s
 
 [1m[36m────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario 3: Diamond  (A → [B, C] → D)[0m
@@ -94,36 +94,36 @@
   [1mLatency  (×200)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-          mean      1.20 ms      1.31 ms      2.24 ms
-           p50      1.12 ms      1.26 ms      2.16 ms
-           p95      1.62 ms      1.72 ms      3.31 ms
-           p99      2.91 ms      1.83 ms      3.88 ms
+          mean      1.00 ms      1.26 ms      2.14 ms
+           p50     539.0 µs      1.20 ms      1.95 ms
+           p95      2.54 ms      1.64 ms      2.81 ms
+           p99      5.69 ms      2.11 ms      3.81 ms
 
   [1mMemory  (×200 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                         197.1 KB        1009  B
-  LG (bare)                       95.2 KB         487  B
-  LG + LangSmith                7251.3 KB       37127  B
+  Timbal                         268.3 KB        1374  B
+  LG (bare)                       94.1 KB         482  B
+  LG + LangSmith               29064.8 KB      148812  B
 
   [1mBurst  (500 concurrent)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-           p50    449.95 ms    413.70 ms    753.63 ms
-           p75    450.90 ms    428.79 ms    787.28 ms
-           p95    452.30 ms    443.95 ms    859.53 ms
-           p99    452.79 ms    447.69 ms    883.94 ms
-           max    453.40 ms    448.73 ms    884.90 ms
+           p50    110.94 ms    321.49 ms    581.45 ms
+           p75    113.28 ms    335.43 ms    614.67 ms
+           p95    115.01 ms    355.45 ms    645.15 ms
+           p99    115.37 ms    360.46 ms    658.78 ms
+           max    115.61 ms    361.62 ms    659.95 ms
 
-  [2mwall: Timbal 453.4 ms  |  LG bare 448.7 ms  |  LG+Smith 884.9 ms[0m
+  [2mwall: Timbal 115.6 ms  |  LG bare 361.6 ms  |  LG+Smith 659.9 ms[0m
 
   [1mThroughput  (1000 runs)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-             1         654/s         820/s         481/s
-            10        1177/s        1110/s         535/s
-            50         890/s         924/s         501/s
-           200         661/s         526/s         221/s
+             1        1881/s         851/s         500/s
+            10        3094/s        1121/s         598/s
+            50        2811/s        1239/s         596/s
+           200        2577/s        1182/s         631/s
 
 [2m────────────────────────────────────────────────────────────────────────────
   Both frameworks execute identical DAGs with trivial handlers.

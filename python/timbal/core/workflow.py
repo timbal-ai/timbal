@@ -12,7 +12,7 @@ except ImportError:
     from typing_extensions import override
 
 import structlog
-from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
+from pydantic import BaseModel, ConfigDict, computed_field, create_model
 
 from ..errors import InterruptError, PauseRequired, RunCancelled, SpanNotFound, WorkflowStepError
 from ..state import get_call_id, get_parent_call_id, set_parent_call_id
@@ -44,10 +44,10 @@ logger = structlog.get_logger("timbal.core.workflow")
 class Workflow(Runnable):
     """Orchestrates execution of multiple steps in a DAG with automatic dependency linking."""
 
-    _steps: dict[str, Runnable] = PrivateAttr(default_factory=dict)
-
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
+        # Plain instance attribute (not PrivateAttr) — hot read on every run.
+        self._steps: dict[str, Runnable] = {}
         self._path = self.name
         self._is_orchestrator = True
         self._is_coroutine = False

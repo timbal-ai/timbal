@@ -1,36 +1,107 @@
-from typing import Any
+from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field
+from ..._slots import SlotModel, dump_value
 
 
-class Span(BaseModel):
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="allow",
+class Span(SlotModel):
+    """A single runnable invocation inside a run's trace.
+
+    Plain ``__slots__`` class (constructed once per runnable call — hot path).
+    Preserves the old pydantic surface:
+
+    - ``model_dump()`` with ``elapsed`` included and ``input``/``output``/
+      ``memory``/``session`` replaced by their dumped versions when available.
+    - ``runnable``/``memory``/``session`` excluded from dumps (``memory`` and
+      ``session`` only appear via their ``_*_dump`` counterparts).
+    - Tolerant construction from serialized records: unknown keys are kept and
+      re-emitted on dump (old ``extra="allow"``), ``elapsed`` is recomputed.
+    - ``status`` is stored as-is: a live span holds a ``RunStatus``; a span
+      reloaded from a provider keeps the plain dict (intentional).
+    """
+
+    __slots__ = (
+        "path",
+        "call_id",
+        "parent_call_id",
+        "t0",
+        "t1",
+        "input",
+        "status",
+        "output",
+        "error",
+        "usage",
+        "metadata",
+        "runnable",
+        "memory",
+        "session",
+        "_input_dump",
+        "_output_dump",
+        "_memory_dump",
+        "_prev_memory_dump",
+        "_session_dump",
+        "_extra",
     )
 
-    path: str = Field(
-        ...,
-        description="The path of the runnable.",
-    )
-    call_id: str = Field(
-        ...,
-        description="The call id of the runnable.",
-    )
-    parent_call_id: str | None = Field(
-        None,
-        description="The parent call id of the runnable.",
-    )
-    t0: int = Field(
-        ...,
-        description="The start time of the runnable.",
-    )
-    t1: int | None = Field(
-        None,
-        description="The end time of the runnable. Will be None if the runnable has not yet completed.",
-    )
+    _FIELDS = ("path", "call_id", "parent_call_id", "t0", "t1", "input", "status", "output", "error", "usage", "metadata")
 
-    @computed_field
+    # pydantic-compat: evals introspect Span.model_fields.keys() to know which
+    # names address span properties (includes non-serialized fields).
+    model_fields: ClassVar[dict[str, None]] = dict.fromkeys(_FIELDS + ("runnable", "memory", "session"))
+
+    def __init__(
+        self,
+        *,
+        path: str,
+        call_id: str,
+        t0: int,
+        parent_call_id: str | None = None,
+        t1: int | None = None,
+        input: Any = None,
+        status: Any = None,
+        output: Any = None,
+        error: Any = None,
+        usage: dict[str, int] | None = None,
+        metadata: dict[str, Any] | None = None,
+        runnable: Any = None,
+        memory: Any = None,
+        session: Any = None,
+        **extra: Any,
+    ) -> None:
+        # _extra must be set first: __getattr__ reads it for unknown-attribute
+        # lookups and would otherwise recurse while the slot is still unset.
+        extra.pop("elapsed", None)  # Computed field in dumps; always recomputed from t0/t1.
+        object.__setattr__(self, "_extra", extra or None)
+        self.path = path
+        """The path of the runnable."""
+        self.call_id = call_id
+        """The call id of the runnable."""
+        self.parent_call_id = parent_call_id
+        """The parent call id of the runnable."""
+        self.t0 = t0
+        """The start time of the runnable."""
+        self.t1 = t1
+        """The end time of the runnable. Will be None if the runnable has not yet completed."""
+        self.input = input
+        """The input of the runnable."""
+        self.status = status
+        """The status of the runnable."""
+        self.output = output
+        """The output of the runnable."""
+        self.error = error
+        """The error of the runnable."""
+        self.usage = usage if usage is not None else {}
+        """The usage of the runnable."""
+        self.metadata = metadata if metadata is not None else {}
+        """Flexible metadata storage for run-specific metrics and data."""
+        self.runnable = runnable
+        """A reference to the runnable being executed. Excluded from dumps.
+        Will be None when initializing traces from serialized data."""
+        self.memory = memory
+        """Used by Agent to retrieve message histories between runs. Excluded from dumps."""
+        # INTERNAL: accepted on construction for deserialization support.
+        # Do not access directly; use RunContext.get_session() instead.
+        self.session = session
+
     @property
     def elapsed(self) -> int | None:
         """The elapsed time in milliseconds (t1 - t0). None if span is not yet completed."""
@@ -38,64 +109,40 @@ class Span(BaseModel):
             return None
         return self.t1 - self.t0
 
-    input: Any = Field(
-        None,
-        description="The input of the runnable. Will be None if the runnable has not yet started or if there was an error gathering the input.",
-    )
-    status: Any | None = Field(  # Any to prevent circular import
-        None,
-        description="The status of the runnable.",
-    )
-    output: Any = Field(
-        None,
-        description="The output of the runnable. Will be None if the runnable has not yet completed or if there was an error.",
-    )
-    error: Any = Field(
-        None,
-        description="The error of the runnable. Will be None if the runnable has not yet completed or if there was no error.",
-    )
-    usage: dict[str, int] = Field(
-        default_factory=dict,
-        description="The usage of the runnable.",
-    )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Flexible metadata storage for run-specific metrics and data.",
-    )
+    def __getattr__(self, name: str) -> Any:
+        # Only called when normal lookup fails: unset _*_dump slots and
+        # extra keys from deserialized records land here.
+        if not name.startswith("_"):
+            extra = object.__getattribute__(self, "_extra")
+            if extra and name in extra:
+                return extra[name]
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
-    runnable: Any = Field(
-        None,
-        description=(
-            "A reference to the runnable being executed. "
-            "Can be used to access runnable properties, background tasks, and other runtime attributes. "
-            "Will be None when initializing traces from serialized data."
-        ),
-        exclude=True,
-    )
-    memory: Any = Field(
-        None,
-        description=(
-            "This field is used by Agent to retrieve message histories between runs. "
-            "It can also be used to overwrite what an llm can see and whatnot. "
-        ),
-        exclude=True,
-    )
-    # INTERNAL: Exposed as a field instead of PrivateAttr for deserialization support.
-    # Do not access directly; use RunContext.get_session() instead.
-    session: Any = Field(None, exclude=True)
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Old pydantic config was extra="allow": handlers may stash arbitrary
+        # attributes on their span (read by siblings via step_span()). Unknown
+        # public names go to _extra and are included in model_dump().
+        try:
+            object.__setattr__(self, name, value)
+        except AttributeError:
+            if name.startswith("_"):
+                raise
+            extra = object.__getattribute__(self, "_extra")
+            if extra is None:
+                extra = {}
+                object.__setattr__(self, "_extra", extra)
+            extra[name] = value
 
-    _input_dump: Any = PrivateAttr()
-    """The dumped/serialized version of input for internal use."""
-    _output_dump: Any = PrivateAttr()
-    """The dumped/serialized version of output for internal use."""
-    _memory_dump: Any = PrivateAttr()
-    """The dumped/serialized version of memory for internal use."""
-    _session_dump: Any = PrivateAttr()
-    """The dumped/serialized version of session for internal use."""
-
-    def model_dump(self, **kwargs) -> dict[str, Any]:
-        """Override model_dump to use dumped versions of input and output during serialization."""
-        data = super().model_dump(**kwargs)  # Pydantic ignores private attributes by default
+    def model_dump(self, mode: str = "python", **_kwargs: Any) -> dict[str, Any]:
+        """Serialize the span, preferring the dumped versions of input/output/memory/session."""
+        data: dict[str, Any] = {}
+        for field in self._FIELDS:
+            data[field] = dump_value(getattr(self, field), mode)
+            if field == "t1":
+                data["elapsed"] = self.elapsed
+        extra = self._extra
+        if extra:
+            data.update(extra)
         # Use dumped versions if available, otherwise fall back to originals
         if hasattr(self, "_input_dump"):
             data["input"] = self._input_dump

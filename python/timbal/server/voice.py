@@ -572,7 +572,7 @@ def build_voice_session(
                 from .recording_upload import platform_recording_upload_hook
 
                 on_saved = platform_recording_upload_hook()
-            session_id = uuid7(as_type="str").replace("-", "")
+            session_id = uuid7(as_type="hex")
             session_kwargs["session_id"] = session_id
             session_kwargs["recorder"] = CallRecorder(
                 Path(recording_cfg.dir) / f"{session_id}.mp3",

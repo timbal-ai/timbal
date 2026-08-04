@@ -20,7 +20,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
     SecretStr,
     SkipValidation,
     ValidationError,
@@ -209,14 +208,13 @@ class Agent(Runnable):
     api_key: SecretStr | None = None
     """Custom API key for the LLM API."""
 
-    _llm: Tool = PrivateAttr()
-    _system_prompt_fn: Callable | None = PrivateAttr(default=None)
-    _system_prompt_fn_is_async: bool = PrivateAttr(default=False)
-    _system_prompt_skills: str | None = PrivateAttr(default=None)
-
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
         super().model_post_init(__context)
+        # Plain instance attributes (not PrivateAttr) — read on every agent turn.
+        self._system_prompt_fn: Callable | None = None
+        self._system_prompt_fn_is_async: bool = False
+        self._system_prompt_skills: str | None = None
         self._path = self.name
 
         # Handle callable system_prompt
@@ -843,7 +841,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             run_id=run_context.id if run_context is not None else "",
             parent_run_id=None,
             path=f"{self._path}.{tool_call.name}",
-            call_id=uuid7(as_type="str").replace("-", ""),
+            call_id=uuid7(as_type="hex"),
             parent_call_id=None,
             input=tool_call.input,
             status=RunStatus(code="error", reason="tool_not_found", message=message),
@@ -898,7 +896,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         run_id=run_context.id if run_context is not None else "",
                         parent_run_id=None,
                         path=f"{self._path}.{tool_call.name}",
-                        call_id=uuid7(as_type="str").replace("-", ""),
+                        call_id=uuid7(as_type="hex"),
                         parent_call_id=None,
                         input=tool_call.input,
                         status=RunStatus(code="error", reason="dispatch_failed", message=str(e)),
@@ -1080,7 +1078,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         break
                                     tool_input[field_name] = args[i]
                                 # Craft a fake tool_use so we can keep this interaction in the agent memory
-                                tool_use_id = uuid7(as_type="str").replace("-", "")
+                                tool_use_id = uuid7(as_type="hex")
                                 current_span._memory_dump.append(
                                     {
                                         "role": "assistant",

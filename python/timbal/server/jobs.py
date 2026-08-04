@@ -16,7 +16,7 @@ class JobStore:
         self._jobs: dict[str, Job] = {}
 
     def create_job(self, runnable, params, job_id: str | None = None) -> tuple[str, Job]:
-        _job_id: str = job_id if job_id is not None else uuid7(as_type="str").replace("-", "")  # type: ignore
+        _job_id: str = job_id if job_id is not None else uuid7(as_type="hex")  # type: ignore
         queue = asyncio.Queue()
         task = asyncio.create_task(self._run(runnable, params, queue))
         task.add_done_callback(lambda _: self._jobs.pop(_job_id, None))

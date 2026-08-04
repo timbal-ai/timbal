@@ -99,6 +99,10 @@ def _dump_sync(value: Any) -> Any:
     if getattr(value, "_is_timbal_runnable", False):
         return value.model_dump()
 
+    # Slotted timbal models (events, Span, RunStatus) — no __dict__; use model_dump()
+    if getattr(value, "__timbal_serializable__", False):
+        return _dump_sync(value.model_dump())
+
     if isinstance(value, BaseModel):
         return {k: _dump_sync(v) for k, v in value.__dict__.items()}
 
@@ -167,6 +171,10 @@ async def _dump_async(value: Any) -> Any:
 
     if getattr(value, "_is_timbal_runnable", False):
         return value.model_dump()
+
+    # Slotted timbal models (events, Span, RunStatus) — no __dict__; use model_dump()
+    if getattr(value, "__timbal_serializable__", False):
+        return await _dump_async(value.model_dump())
 
     if isinstance(value, BaseModel):
         items = await asyncio.gather(*[_dump_async(v) for v in value.__dict__.values()])

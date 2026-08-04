@@ -40,19 +40,36 @@ def _resolve_section_name(profile: str) -> str:
     return f"profile {profile}"
 
 
+_file_config_cache: dict[str, FileConfig] = {}
+"""Per-profile cache of ~/.timbal file reads. Only used when reading the real
+config dir (config_dir is None) — explicit config_dir calls (tests) always
+re-read. Cleared by force_refresh in resolve_platform_config."""
+
+
 def load_file_config(
     profile: str | None = None,
     config_dir: Path | None = None,
+    force_refresh: bool = False,
 ) -> FileConfig:
     """Load configuration from ~/.timbal/config and ~/.timbal/credentials files.
+
+    Results for the real config dir are cached per profile: these files are read
+    on every RunContext creation (including once per run in chained sessions),
+    and disk I/O + configparser dominate the cost. Pass ``force_refresh=True``
+    to re-read from disk and refresh the cache.
 
     Args:
         profile: Profile name to load. If None, uses TIMBAL_PROFILE env var
                  or falls back to "default".
-        config_dir: Override the config directory (for testing).
+        config_dir: Override the config directory (for testing). Disables caching.
+        force_refresh: Re-read files even when a cached result exists.
     """
     if profile is None:
         profile = os.getenv("TIMBAL_PROFILE", "default")
+
+    cacheable = config_dir is None
+    if cacheable and not force_refresh and profile in _file_config_cache:
+        return _file_config_cache[profile]
 
     base_dir = config_dir or TIMBAL_CONFIG_DIR
     config_path = base_dir / "config"
@@ -110,12 +127,15 @@ def load_file_config(
                 error=str(e),
             )
 
-    return FileConfig(
+    result = FileConfig(
         base_url=base_url,
         api_key=api_key,
         org=org,
         sync_traces_enabled=sync_traces_enabled,
     )
+    if cacheable:
+        _file_config_cache[profile] = result
+    return result
 
 
 def _merge_sync_traces_enabled(platform_config: PlatformConfig, file_config: FileConfig) -> None:
@@ -181,7 +201,16 @@ def resolve_platform_config(
     if is_default_call and _default_config_resolved and not force_refresh:
         return _cached_default_config.model_copy() if _cached_default_config else None
 
-    file_config = load_file_config(profile=profile, config_dir=config_dir)
+    # A config that already went through this function (e.g. inherited from a
+    # previous run's context during session chaining) has every field filled —
+    # skip the file/env re-resolution entirely.
+    if platform_config is not None and platform_config._fully_resolved and not force_refresh:
+        return platform_config
+
+    if force_refresh:
+        _file_config_cache.clear()
+
+    file_config = load_file_config(profile=profile, config_dir=config_dir, force_refresh=force_refresh)
     logger.debug("Loaded file config.", file_config=file_config._asdict())
 
     if not platform_config:
@@ -235,6 +264,7 @@ def resolve_platform_config(
     if not org_id:
         logger.debug("No org_id found, skipping subject resolution.")
         _merge_sync_traces_enabled(platform_config, file_config)
+        platform_config._fully_resolved = True
         if is_default_call:
             _cached_default_config, _default_config_resolved = platform_config, True
         return platform_config
@@ -271,6 +301,7 @@ def resolve_platform_config(
 
     _merge_sync_traces_enabled(platform_config, file_config)
 
+    platform_config._fully_resolved = True
     if is_default_call:
         _cached_default_config, _default_config_resolved = platform_config, True
 
