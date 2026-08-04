@@ -40,7 +40,7 @@ class Message:
             - OpenAI Responses: 'completed', 'max_output_tokens', 'content_filter', etc.
     """
 
-    __slots__ = ("role", "content", "stop_reason")
+    __slots__ = ("role", "content", "stop_reason", "_cached_dump", "_cached_dump_len")
 
     def __init__(self, role: Any, content: Any, stop_reason: str | None = None) -> None:
         """Initialize a Message instance.
@@ -53,6 +53,14 @@ class Message:
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "content", content)
         object.__setattr__(self, "stop_reason", stop_reason)
+        # Serialized-form cache (see timbal.utils.serialization). Long
+        # conversations re-dump the same Message objects on every turn
+        # (span input dump, memory dump, LLM input dump); messages are
+        # immutable after construction except for in-place content appends
+        # (e.g. synthesized server tool results), so the cache is validated
+        # against len(content).
+        object.__setattr__(self, "_cached_dump", None)
+        object.__setattr__(self, "_cached_dump_len", -1)
 
     def __str__(self) -> str:
         if self.stop_reason:

@@ -59,7 +59,7 @@ from ..types.events import (
 from ..types.events.delta import Custom, DeltaEvent, DeltaItem
 from ..types.message import Message
 from ..types.run_status import RunStatus
-from ..utils import dump, sync_to_async_gen
+from ..utils import dump, invalidate_message_dump_caches, sync_to_async_gen
 
 
 def _get_logger():
@@ -1648,6 +1648,9 @@ class Runnable(ABC, BaseModel):
                 set_call_id(_new_call_id)
                 if self.post_hook is not None and not run_in_background:
                     await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+                    # Hooks may mutate message content in place; drop any cached
+                    # dumps on the output so the re-dump below sees the changes.
+                    invalidate_message_dump_caches(span.output)
 
                 # Post hook might modify the output, so we dump afterwards
                 span._output_dump = await dump(span.output)

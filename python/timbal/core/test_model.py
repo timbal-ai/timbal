@@ -112,9 +112,18 @@ class TestModel:
             response = raw
 
         # Approximate token counts (1 token ≈ 4 chars) for UsageLimits compatibility.
+        # Fast path for TextContent (the bulk of long histories): stringifying
+        # whole pydantic content models is O(model repr) per item per call.
+        # Non-text blocks (tool results etc.) keep the str() estimate — memory
+        # compaction tests rely on large tool results driving usage up.
+        def _content_chars(c: Any) -> int:
+            if isinstance(c, TextContent):
+                return len(c.text)
+            return len(str(c))
+
         run_context = get_or_create_run_context()
-        input_tokens = max(1, sum(len(str(c)) for m in messages for c in m.content) // 4)
-        output_tokens = max(1, sum(len(str(c)) for c in response.content) // 4)
+        input_tokens = max(1, sum(_content_chars(c) for m in messages for c in m.content) // 4)
+        output_tokens = max(1, sum(_content_chars(c) for c in response.content) // 4)
         run_context.update_usage("test/model:input_text_tokens", input_tokens)
         run_context.update_usage("test/model:output_text_tokens", output_tokens)
 

@@ -29,11 +29,13 @@ def safe_is_nan(value: Any) -> bool:
 _File = None
 _Message = None
 _FileContent = None
+_Runnable = None
 
 
 def _ensure_types():
-    global _File, _Message, _FileContent
+    global _File, _Message, _FileContent, _Runnable
     if _File is None:
+        from ..core.runnable import Runnable
         from ..types.content.file import FileContent
         from ..types.file import File
         from ..types.message import Message
@@ -41,6 +43,7 @@ def _ensure_types():
         _File = File
         _Message = Message
         _FileContent = FileContent
+        _Runnable = Runnable
 
 
 # Pre-allocated singleton to avoid creating exception objects on every File hit
@@ -87,24 +90,36 @@ def _dump_sync(value: Any) -> Any:
         raise _NEEDS_ASYNC
 
     if isinstance(value, _Message):
+        # Per-message dump cache: long conversations re-dump the same Message
+        # objects several times per turn. Messages are immutable after
+        # construction except for in-place content appends, so validate the
+        # cache against len(content). The returned dict is a shared read-only
+        # snapshot — dump consumers never mutate the inner dicts.
+        content = value.content
+        if value._cached_dump is not None and value._cached_dump_len == len(content):
+            return value._cached_dump
         result = {
             "role": value.role,
-            "content": [_dump_sync(c) for c in value.content],
+            "content": [_dump_sync(c) for c in content],
         }
         if value.stop_reason is not None:
             result["stop_reason"] = value.stop_reason
+        object.__setattr__(value, "_cached_dump", result)
+        object.__setattr__(value, "_cached_dump_len", len(content))
         return result
 
-    # Marker attribute check — O(1) vs O(n) MRO scan
-    if getattr(value, "_is_timbal_runnable", False):
-        return value.model_dump()
+    # BaseModel branch comes before the marker probes: failed getattr on a
+    # pydantic model raises AttributeError inside pydantic's __getattr__, which
+    # is expensive when probing thousands of content items per dump.
+    if isinstance(value, BaseModel):
+        if isinstance(value, _Runnable):
+            return value.model_dump()
+        return {k: _dump_sync(v) for k, v in value.__dict__.items()}
 
-    # Slotted timbal models (events, Span, RunStatus) — no __dict__; use model_dump()
+    # Slotted timbal models (events, Span, RunStatus) — plain classes with a
+    # class-attribute marker (cheap getattr); no __dict__; use model_dump()
     if getattr(value, "__timbal_serializable__", False):
         return _dump_sync(value.model_dump())
-
-    if isinstance(value, BaseModel):
-        return {k: _dump_sync(v) for k, v in value.__dict__.items()}
 
     if isinstance(value, tuple):
         return tuple(_dump_sync(v) for v in value)
@@ -161,24 +176,31 @@ async def _dump_async(value: Any) -> Any:
         return result
 
     if isinstance(value, _Message):
+        # See _dump_sync: cached, len-validated snapshot. Also caches messages
+        # with File content after their (potentially expensive) persist step.
+        content = value.content
+        if value._cached_dump is not None and value._cached_dump_len == len(content):
+            return value._cached_dump
         result = {
             "role": value.role,
-            "content": await asyncio.gather(*[_dump_async(c) for c in value.content]),
+            "content": await asyncio.gather(*[_dump_async(c) for c in content]),
         }
         if value.stop_reason is not None:
             result["stop_reason"] = value.stop_reason
+        object.__setattr__(value, "_cached_dump", result)
+        object.__setattr__(value, "_cached_dump_len", len(content))
         return result
 
-    if getattr(value, "_is_timbal_runnable", False):
-        return value.model_dump()
+    # BaseModel before marker probes — see _dump_sync.
+    if isinstance(value, BaseModel):
+        if isinstance(value, _Runnable):
+            return value.model_dump()
+        items = await asyncio.gather(*[_dump_async(v) for v in value.__dict__.values()])
+        return dict(zip(value.__dict__.keys(), items, strict=False))
 
     # Slotted timbal models (events, Span, RunStatus) — no __dict__; use model_dump()
     if getattr(value, "__timbal_serializable__", False):
         return await _dump_async(value.model_dump())
-
-    if isinstance(value, BaseModel):
-        items = await asyncio.gather(*[_dump_async(v) for v in value.__dict__.values()])
-        return dict(zip(value.__dict__.keys(), items, strict=False))
 
     if isinstance(value, Path):
         return value.as_posix()
@@ -195,6 +217,25 @@ async def _dump_async(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def invalidate_message_dump_caches(value: Any) -> None:
+    """Reset the cached dump on any Message reachable in *value* (shallow containers).
+
+    Hooks are allowed to mutate message content in place (e.g. a post_hook
+    rewriting the output text); the framework re-dumps afterwards and must not
+    serve the pre-mutation cache. Called after post_hook execution.
+    """
+    _ensure_types()
+    if isinstance(value, _Message):
+        object.__setattr__(value, "_cached_dump", None)
+        object.__setattr__(value, "_cached_dump_len", -1)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            invalidate_message_dump_caches(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            invalidate_message_dump_caches(item)
+
 
 async def dump(value: Any) -> Any:
     """Dumps all models that live within a nested structure of arbitrary depth.
