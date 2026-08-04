@@ -127,15 +127,25 @@ def _emit_default_tool_usage(runnable: Any) -> None:
     _record_tool_requests(runnable.name)
 
 
+_TimbalCollector = None
+
+
 def _timbal_collector_wrap(fn):
-    """Lazy wrapper for @TimbalCollector.wrap — avoids importing the collector at module load."""
+    """Lazy wrapper for @TimbalCollector.wrap — avoids importing the collector at module load.
+
+    The class is cached in a module global after the first call so the import
+    machinery isn't consulted on every runnable invocation.
+    """
     from functools import wraps
 
     @wraps(fn)
     def wrapper(self, **kwargs):
-        from ..collectors.impl.timbal import TimbalCollector
+        global _TimbalCollector
+        if _TimbalCollector is None:
+            from ..collectors.impl.timbal import TimbalCollector
 
-        return TimbalCollector(async_gen=fn(self, **kwargs))
+            _TimbalCollector = TimbalCollector
+        return _TimbalCollector(async_gen=fn(self, **kwargs))
 
     return wrapper
 
@@ -1004,6 +1014,25 @@ class Runnable(ABC, BaseModel):
         resolved.update(input)
         return resolved
 
+    async def _execute_simple(self, validated_input: dict[str, Any]) -> Any:
+        """Execute a non-streaming (plain sync or coroutine) handler and return its output.
+
+        Fast path used by __call__ for handlers that cannot yield events — skips
+        the async-generator/tuple protocol of :meth:`_execute_handler` entirely.
+        Subclasses may override to add fallback behavior (see Tool's proxy path).
+        """
+        if self._is_coroutine:
+            return await self.handler(**validated_input)
+        if self.offload_blocking:
+            loop = asyncio.get_running_loop()
+            ctx = contextvars.copy_context()
+
+            def handler_func():
+                return ctx.run(self.handler, **validated_input)
+
+            return await loop.run_in_executor(None, handler_func)
+        return self.handler(**validated_input)
+
     async def _execute_handler(
         self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None
     ) -> AsyncGenerator[tuple[Event | None, Any, Any], None]:
@@ -1017,26 +1046,15 @@ class Runnable(ABC, BaseModel):
         output = None
         collector = None
 
-        if not self._is_async_gen and not self._is_coroutine:
-            if self._is_gen:
-                loop = asyncio.get_running_loop()
-                ctx = contextvars.copy_context()
-                gen = self.handler(**validated_input)
-                async_gen = sync_to_async_gen(gen, loop, ctx)
-            elif self.offload_blocking:
-                loop = asyncio.get_running_loop()
-                ctx = contextvars.copy_context()
-
-                def handler_func():
-                    return ctx.run(self.handler, **validated_input)
-
-                output = await loop.run_in_executor(None, handler_func)
-            else:
-                output = self.handler(**validated_input)
-        elif self._is_coroutine:
-            output = await self.handler(**validated_input)
-        else:
+        if self._is_gen:
+            loop = asyncio.get_running_loop()
+            ctx = contextvars.copy_context()
+            gen = self.handler(**validated_input)
+            async_gen = sync_to_async_gen(gen, loop, ctx)
+        elif self._is_async_gen:
             async_gen = self.handler(**validated_input)
+        else:
+            output = await self._execute_simple(validated_input)
 
         if async_gen:
             output = None
@@ -1180,7 +1198,9 @@ class Runnable(ABC, BaseModel):
                 )
             _parent_call_id = None
             _call_id = None
-        await run_context.get_session()
+        # Session data is loaded once per run; nested calls see it already set.
+        if run_context._session_data is None:
+            await run_context.get_session()
         previous_resume_values = dict(run_context._resume_values)
         run_context._resume_values.update(resume_values)
         set_run_context(run_context)
@@ -1244,8 +1264,13 @@ class Runnable(ABC, BaseModel):
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
 
-            approval_decision = await self._resolve_approval_decision(validated_input)
-            if approval_decision.required:
+            # Fast path: requires_approval=False (the default) skips the whole
+            # gate — no policy resolution, no ApprovalPolicyDecision construction.
+            if self.requires_approval is False:
+                approval_decision = None
+            else:
+                approval_decision = await self._resolve_approval_decision(validated_input)
+            if approval_decision is not None and approval_decision.required:
                 # ``approval_id`` MUST be derived from the unredacted input
                 # so the resume call (which carries the full input) lands
                 # on the same id as the original gate.
@@ -1479,6 +1504,13 @@ class Runnable(ABC, BaseModel):
                     "input": input,
                 }
                 output = {"task_id": task_id, "status": "running"}
+            elif not self._is_async_gen and not self._is_gen:
+                # Fast path: plain sync/coroutine handlers cannot yield events,
+                # so skip the async-generator/tuple protocol entirely.
+                try:
+                    output = await self._execute_simple(validated_input)
+                except Suspend as susp:
+                    suspend_signal = susp
             else:
                 # Iterate over events from handler and yield them
                 try:

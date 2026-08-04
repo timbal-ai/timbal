@@ -15,38 +15,38 @@
   [1mLatency  (×100)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-          mean      1.22 ms      3.04 ms      5.83 ms
-           p50      1.06 ms      2.77 ms      5.45 ms
-           p95      1.87 ms      4.50 ms      7.50 ms
-           p99     16.03 ms      5.10 ms     22.07 ms
+          mean      1.19 ms      2.75 ms      5.75 ms
+           p50      1.06 ms      2.66 ms      5.19 ms
+           p95      1.87 ms      3.35 ms      7.70 ms
+           p99     15.40 ms      3.86 ms     21.95 ms
 
   [1mMemory  (×100 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                         377.3 KB        3864  B
-  LG (bare)                      398.5 KB        4080  B
-  LG + LangSmith               23014.8 KB      235671  B
+  Timbal                         277.7 KB        2844  B
+  LG (bare)                      399.6 KB        4092  B
+  LG + LangSmith               23137.1 KB      236924  B
 
   [1mBurst  (20 concurrent loops)[0m
   [2mBoth use 1 shared instance. LangGraph uses native ainvoke().[0m
-  burst [ 1/20]  last    23.64 ms  burst [ 2/20]  last    23.48 ms  burst [ 3/20]  last    23.48 ms  burst [ 4/20]  last    23.53 ms  burst [ 5/20]  last    23.52 ms  burst [ 6/20]  last    23.33 ms  burst [ 7/20]  last    23.21 ms  burst [ 8/20]  last    23.15 ms  burst [ 9/20]  last    23.11 ms  burst [10/20]  last    23.09 ms  burst [11/20]  last    23.09 ms  burst [12/20]  last    23.21 ms  burst [13/20]  last    23.31 ms  burst [14/20]  last     6.57 ms  burst [15/20]  last     6.43 ms  burst [16/20]  last     6.38 ms  burst [17/20]  last     6.11 ms  burst [18/20]  last     5.28 ms  burst [19/20]  last     4.93 ms  burst [20/20]  last     4.89 ms
+  burst [ 1/20]  last    582.3 µs  burst [ 2/20]  last    421.2 µs  burst [ 3/20]  last    346.5 µs  burst [ 4/20]  last    310.3 µs  burst [ 5/20]  last    307.8 µs  burst [ 6/20]  last    286.5 µs  burst [ 7/20]  last    284.3 µs  burst [ 8/20]  last    295.3 µs  burst [ 9/20]  last    288.6 µs  burst [10/20]  last    278.0 µs  burst [11/20]  last    276.1 µs  burst [12/20]  last    372.5 µs  burst [13/20]  last    309.4 µs  burst [14/20]  last    293.9 µs  burst [15/20]  last    287.6 µs  burst [16/20]  last    16.37 ms  burst [17/20]  last    384.3 µs  burst [18/20]  last    301.6 µs  burst [19/20]  last    295.8 µs  burst [20/20]  last    293.2 µs
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-           p50     23.15 ms     27.70 ms     76.61 ms
-           p75     23.48 ms     44.84 ms     95.69 ms
-           p95     23.64 ms     46.27 ms     97.11 ms
-           p99     23.64 ms     46.27 ms     97.11 ms
-           max     23.64 ms     46.27 ms     97.11 ms
+           p50     301.6 µs     25.68 ms     69.93 ms
+           p75     372.5 µs     42.64 ms     87.05 ms
+           p95     16.37 ms     43.82 ms     88.98 ms
+           p99     16.37 ms     43.82 ms     88.98 ms
+           max     16.37 ms     43.82 ms     88.98 ms
 
-  [2mwall: Timbal 23.6 ms  |  LG bare 46.3 ms  |  LG+Smith 97.1 ms[0m
+  [2mwall: Timbal 16.4 ms  |  LG bare 43.8 ms  |  LG+Smith 89.0 ms[0m
 
   [1mThroughput  (200 loops)[0m
   [2mBoth use 1 shared instance, semaphore-bounded async.[0m
    concurrency        Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-             1        1692/s         284/s         162/s
-            10        2021/s         513/s         173/s
-            50        1907/s         702/s         268/s
+             1        2543/s         363/s         186/s
+            10        2207/s         595/s         241/s
+            50        2025/s         763/s         269/s
 
 [1m[36m────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)[0m
@@ -55,38 +55,38 @@
   [1mLatency  (×100)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-          mean      1.37 ms      6.99 ms     13.42 ms
-           p50      1.22 ms      6.69 ms     12.49 ms
-           p95      2.05 ms      9.08 ms     18.42 ms
-           p99     17.37 ms     12.81 ms     36.79 ms
+          mean      1.30 ms      5.92 ms     11.43 ms
+           p50      1.18 ms      5.60 ms     11.05 ms
+           p95      1.92 ms      7.91 ms     13.68 ms
+           p99     17.01 ms      9.85 ms     29.47 ms
 
   [1mMemory  (×100 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                         650.2 KB        6658  B
-  LG (bare)                      119.3 KB        1221  B
-  LG + LangSmith               36982.6 KB      378702  B
+  Timbal                         394.9 KB        4044  B
+  LG (bare)                      155.9 KB        1597  B
+  LG + LangSmith               36976.8 KB      378643  B
 
   [1mBurst  (10 concurrent loops)[0m
   [2mBoth use 1 shared instance. LangGraph uses native ainvoke().[0m
-  burst [ 1/10]  last    25.86 ms  burst [ 2/10]  last    25.76 ms  burst [ 3/10]  last    25.75 ms  burst [ 4/10]  last    25.58 ms  burst [ 5/10]  last    25.57 ms  burst [ 6/10]  last    25.60 ms  burst [ 7/10]  last    25.68 ms  burst [ 8/10]  last    25.68 ms  burst [ 9/10]  last    25.66 ms  burst [10/10]  last    25.81 ms
+  burst [ 1/10]  last    972.3 µs  burst [ 2/10]  last    689.0 µs  burst [ 3/10]  last    646.1 µs  burst [ 4/10]  last    644.0 µs  burst [ 5/10]  last    654.6 µs  burst [ 6/10]  last    17.30 ms  burst [ 7/10]  last    794.9 µs  burst [ 8/10]  last    654.7 µs  burst [ 9/10]  last    641.6 µs  burst [10/10]  last    651.5 µs
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-           p50     25.68 ms     48.97 ms    102.99 ms
-           p75     25.76 ms     49.61 ms    103.38 ms
-           p95     25.86 ms     50.00 ms    105.67 ms
-           p99     25.86 ms     50.00 ms    105.67 ms
-           max     25.86 ms     50.00 ms    105.67 ms
+           p50     654.7 µs     49.30 ms     99.49 ms
+           p75     794.9 µs     49.56 ms    100.85 ms
+           p95     17.30 ms     50.12 ms    101.10 ms
+           p99     17.30 ms     50.12 ms    101.10 ms
+           max     17.30 ms     50.12 ms    101.10 ms
 
-  [2mwall: Timbal 25.9 ms  |  LG bare 50.0 ms  |  LG+Smith 105.7 ms[0m
+  [2mwall: Timbal 17.3 ms  |  LG bare 50.1 ms  |  LG+Smith 101.1 ms[0m
 
   [1mThroughput  (200 loops)[0m
   [2mBoth use 1 shared instance, semaphore-bounded async.[0m
    concurrency        Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-             1         755/s         147/s          75/s
-            10         956/s         228/s          96/s
-            50         996/s         256/s         121/s
+             1        1305/s         164/s          80/s
+            10        1139/s         253/s          98/s
+            50        1050/s         312/s         122/s
 
 [1m[36m────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Scenario 3: Parallel tools  (LLM → [add, mul, neg] → LLM → answer)[0m
@@ -95,38 +95,38 @@
   [1mLatency  (×100)[0m
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-          mean      1.27 ms      4.91 ms      7.30 ms
-           p50      1.14 ms      5.01 ms      6.81 ms
-           p95      1.85 ms      6.47 ms      9.54 ms
-           p99     16.37 ms     11.04 ms     23.12 ms
+          mean      2.40 ms      3.80 ms      8.55 ms
+           p50      1.44 ms      3.71 ms      7.99 ms
+           p95      4.32 ms      4.84 ms     13.02 ms
+           p99     74.20 ms      6.37 ms     29.91 ms
 
   [1mMemory  (×100 runs)[0m
   framework                         peak       per run
   ────────────────────────  ────────────  ────────────
-  Timbal                         379.8 KB        3889  B
+  Timbal                         337.2 KB        3453  B
   LG (bare)                      434.8 KB        4453  B
-  LG + LangSmith               27041.5 KB      276905  B
+  LG + LangSmith               26846.4 KB      274908  B
 
   [1mBurst  (15 concurrent loops)[0m
   [2mBoth use 1 shared instance. LangGraph uses native ainvoke().[0m
-  burst [ 1/15]  last    21.72 ms  burst [ 2/15]  last    21.85 ms  burst [ 3/15]  last    21.85 ms  burst [ 4/15]  last    21.87 ms  burst [ 5/15]  last    21.88 ms  burst [ 6/15]  last    21.87 ms  burst [ 7/15]  last    21.89 ms  burst [ 8/15]  last    21.91 ms  burst [ 9/15]  last    21.87 ms  burst [10/15]  last    21.83 ms  burst [11/15]  last    21.46 ms  burst [12/15]  last     5.33 ms  burst [13/15]  last     5.30 ms  burst [14/15]  last     5.31 ms  burst [15/15]  last     5.33 ms
+  burst [ 1/15]  last    20.52 ms  burst [ 2/15]  last    21.31 ms  burst [ 3/15]  last    21.34 ms  burst [ 4/15]  last    21.43 ms  burst [ 5/15]  last    21.47 ms  burst [ 6/15]  last    21.72 ms  burst [ 7/15]  last    21.83 ms  burst [ 8/15]  last    21.90 ms  burst [ 9/15]  last    21.96 ms  burst [10/15]  last    22.03 ms  burst [11/15]  last    22.09 ms  burst [12/15]  last     5.99 ms  burst [13/15]  last     5.89 ms  burst [14/15]  last     5.92 ms  burst [15/15]  last     5.97 ms
                       Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-           p50     21.85 ms     45.22 ms     79.55 ms
-           p75     21.87 ms     46.04 ms     80.76 ms
-           p95     21.91 ms     46.61 ms     82.10 ms
-           p99     21.91 ms     46.61 ms     82.10 ms
-           max     21.91 ms     46.61 ms     82.10 ms
+           p50     21.43 ms     44.09 ms     81.33 ms
+           p75     21.90 ms     44.86 ms     83.72 ms
+           p95     22.09 ms     45.73 ms     84.75 ms
+           p99     22.09 ms     45.73 ms     84.75 ms
+           max     22.09 ms     45.73 ms     84.75 ms
 
-  [2mwall: Timbal 21.9 ms  |  LG bare 46.6 ms  |  LG+Smith 82.1 ms[0m
+  [2mwall: Timbal 22.1 ms  |  LG bare 45.7 ms  |  LG+Smith 84.8 ms[0m
 
   [1mThroughput  (200 loops)[0m
   [2mBoth use 1 shared instance, semaphore-bounded async.[0m
    concurrency        Timbal     LG (bare)      LG+Smith
   ────────────  ────────────  ────────────  ────────────
-             1        1541/s         287/s         129/s
-            10        1571/s         432/s         166/s
-            50        1453/s         506/s         186/s
+             1        1598/s         284/s         147/s
+            10        1658/s         421/s         173/s
+            50        1421/s         462/s         178/s
 
 [1m[36m────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  AgentExecutor vs create_react_agent vs Timbal  (Scenario 2: 3-tool chain)[0m

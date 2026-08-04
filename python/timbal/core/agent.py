@@ -853,67 +853,96 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             metadata={"tool_not_found": True, "requested_tool": tool_call.name},
         )
 
+    def _build_dispatch_failed_event(self, tool_call: ToolUseContent, e: Exception) -> OutputEvent:
+        """Build the synthetic OutputEvent fed back to the LLM when tool dispatch itself fails."""
+        logger.exception(
+            "Unexpected error dispatching tool; feeding error back to LLM.",
+            agent_path=self._path,
+            tool=tool_call.name,
+        )
+        run_context = get_run_context()
+        now = int(time.time() * 1000)
+        return OutputEvent(
+            run_id=run_context.id if run_context is not None else "",
+            parent_run_id=None,
+            path=f"{self._path}.{tool_call.name}",
+            call_id=uuid7(as_type="hex"),
+            parent_call_id=None,
+            input=tool_call.input,
+            status=RunStatus(code="error", reason="dispatch_failed", message=str(e)),
+            output=None,
+            error={
+                "type": type(e).__name__,
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+            },
+            t0=now,
+            t1=now,
+            usage={},
+            metadata={"dispatch_failed": True, "requested_tool": tool_call.name},
+        )
+
+    def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
+        """Find the tool for a call, logging when the LLM asked for an unknown one."""
+        tool = next((t for t in tools if t.name == tool_call.name), None)
+        if tool is None:
+            logger.warning(
+                "LLM called unknown tool; feeding error back so it can self-correct.",
+                agent_path=self._path,
+                requested_tool=tool_call.name,
+                available_tools=sorted(t.name for t in tools),
+            )
+        return tool
+
+    @staticmethod
+    def _link_tool_call_span(event: Any, tool_call: ToolUseContent) -> None:
+        """Link the LLM tool_call id to the tool's span for memory resolution."""
+        if event.type == "START":
+            tool_call_span = get_run_context()._trace[event.call_id]
+            tool_call_span.metadata["tool_call_id"] = tool_call.id
+
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
+        # Fast path: a single tool call needs no queue/task fan-in — iterate the
+        # tool directly, exactly like Workflow consumes its steps. This is the
+        # common case for most agent iterations.
+        if len(tool_calls) == 1:
+            tool_call = tool_calls[0]
+            tool = self._resolve_tool_for_call(tools, tool_call)
+            if tool is None:
+                yield tool_call, self._build_unknown_tool_event(tool_call, tools)
+                return
+            try:
+                async for event in tool(**tool_call.input):
+                    self._link_tool_call_span(event, tool_call)
+                    yield tool_call, event
+            except (asyncio.CancelledError, GeneratorExit, InterruptError):
+                raise
+            except Exception as e:
+                yield tool_call, self._build_dispatch_failed_event(tool_call, e)
+            return
+
         queue = asyncio.Queue()
         tasks = []
 
         async def consume_tool(tool_call: ToolUseContent):
             try:
-                tool = next((t for t in tools if t.name == tool_call.name), None)
+                tool = self._resolve_tool_for_call(tools, tool_call)
                 if tool is None:
-                    logger.warning(
-                        "LLM called unknown tool; feeding error back so it can self-correct.",
-                        agent_path=self._path,
-                        requested_tool=tool_call.name,
-                        available_tools=sorted(t.name for t in tools),
-                    )
-                    await queue.put((tool_call, self._build_unknown_tool_event(tool_call, tools)))
+                    queue.put_nowait((tool_call, self._build_unknown_tool_event(tool_call, tools)))
                     return
                 async for event in tool(**tool_call.input):
-                    # Link tool call id to span for memory resolution
-                    if event.type == "START":
-                        tool_call_id = event.call_id
-                        tool_call_span = get_run_context()._trace[tool_call_id]
-                        tool_call_span.metadata["tool_call_id"] = tool_call.id
-                    await queue.put((tool_call, event))
+                    self._link_tool_call_span(event, tool_call)
+                    queue.put_nowait((tool_call, event))
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
             except Exception as e:
                 # Defensive: any unexpected error in dispatch must NOT swallow the
                 # sentinel. Without this, a bug here would hang the agent forever
                 # because the consumer loop waits on `remaining` to hit zero.
-                logger.exception(
-                    "Unexpected error dispatching tool; feeding error back to LLM.",
-                    agent_path=self._path,
-                    tool=tool_call.name,
-                )
-                run_context = get_run_context()
-                now = int(time.time() * 1000)
-                await queue.put((
-                    tool_call,
-                    OutputEvent(
-                        run_id=run_context.id if run_context is not None else "",
-                        parent_run_id=None,
-                        path=f"{self._path}.{tool_call.name}",
-                        call_id=uuid7(as_type="hex"),
-                        parent_call_id=None,
-                        input=tool_call.input,
-                        status=RunStatus(code="error", reason="dispatch_failed", message=str(e)),
-                        output=None,
-                        error={
-                            "type": type(e).__name__,
-                            "message": str(e),
-                            "traceback": traceback.format_exc(),
-                        },
-                        t0=now,
-                        t1=now,
-                        usage={},
-                        metadata={"dispatch_failed": True, "requested_tool": tool_call.name},
-                    ),
-                ))
+                queue.put_nowait((tool_call, self._build_dispatch_failed_event(tool_call, e)))
             finally:
-                await queue.put((tool_call, None))
+                queue.put_nowait((tool_call, None))
 
         try:
             for tc in tool_calls:

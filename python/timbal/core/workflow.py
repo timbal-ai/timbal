@@ -218,8 +218,13 @@ class Workflow(Runnable):
         sentinel: Any = None
 
         try:
-            # Await for the completion of all ancestors
-            await asyncio.gather(*[statuses[step_name].done.wait() for step_name in step.previous_steps])
+            # Await for the completion of all ancestors. Sequential awaits are
+            # equivalent to gather() for waiting on ALL events, without a task
+            # per dependency; the is_set() guard skips already-completed ones.
+            for step_name in step.previous_steps:
+                dep_done = statuses[step_name].done
+                if not dep_done.is_set():
+                    await dep_done.wait()
             # This serves multiple purposes.
             # - It ensures that the step is not executed multiple times.
             # - It allows the step to be skipped from other steps, e.g. if a previous step failed.
@@ -271,7 +276,9 @@ class Workflow(Runnable):
             status.state = StepState.RUNNING
             try:
                 async for event in step(**resolved_input):
-                    await queue.put(event)
+                    # put_nowait: the queue is unbounded, so put() never suspends —
+                    # awaiting it is pure coroutine overhead per event.
+                    queue.put_nowait(event)
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
