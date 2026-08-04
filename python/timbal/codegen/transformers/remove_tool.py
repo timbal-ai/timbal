@@ -35,6 +35,9 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
 
 class ToolRemover(cst.CSTTransformer):
+    # Removing a tool that is already absent is an idempotent success.
+    allow_noop = True
+
     def __init__(self, entry_point: str, tool_name: str, assignments: dict[str, cst.Call]):
         self.entry_point = entry_point
         self.tool_name = tool_name

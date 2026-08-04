@@ -24,6 +24,9 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
 
 class StepRemover(cst.CSTTransformer):
+    # Removing a step that is already absent is an idempotent success.
+    allow_noop = True
+
     def __init__(self, entry_point: str, step_name: str, assignments: dict[str, cst.Call]):
         self.entry_point = entry_point
         self.step_name = step_name

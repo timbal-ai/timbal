@@ -106,6 +106,23 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
             f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
         )
+
+    # ``agent = build()`` — a factory call, not a constructor. Appending config
+    # kwargs to ``build()`` would corrupt the module, so fail loudly instead.
+    if tree is not None and ep_type is None:
+        ep_call = collect_assignments(tree).get(entry_point)
+        if ep_call is not None and isinstance(ep_call.func, cst.Name):
+            func_name = ep_call.func.value
+            is_local_func = any(
+                isinstance(stmt, cst.FunctionDef) and stmt.name.value == func_name for stmt in tree.body
+            )
+            if is_local_func:
+                raise ValueError(
+                    f"Entry point '{entry_point}' is built by calling the local function '{func_name}()'. "
+                    f"set-config cannot modify a factory-built agent; construct the Agent directly "
+                    f"in the '{entry_point}' assignment."
+                )
+
     return AgentConfigSetter(entry_point, config)
 
 
@@ -173,13 +190,30 @@ class AgentConfigSetter(cst.CSTTransformer):
     def __init__(self, entry_point: str, config: dict):
         self.entry_point = entry_point
         self.config = config
+        # True once the entry point constructor was found and updated. An
+        # unchanged file with matched=True is an idempotent save (success);
+        # matched=False means the source shape was never recognized (failure).
+        self.matched = False
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         for target in updated_node.targets:
             if isinstance(target.target, cst.Name) and target.target.value == self.entry_point:
                 if isinstance(updated_node.value, cst.Call):
+                    self.matched = True
                     new_call = self._update_agent_kwargs(updated_node.value)
                     return updated_node.with_changes(value=new_call)
+        return updated_node
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if (
+            isinstance(updated_node.target, cst.Name)
+            and updated_node.target.value == self.entry_point
+            and isinstance(updated_node.value, cst.Call)
+        ):
+            self.matched = True
+            new_call = self._update_agent_kwargs(updated_node.value)
+            return updated_node.with_changes(value=new_call)
         return updated_node
 
     def _update_agent_kwargs(self, call: cst.Call) -> cst.Call:
@@ -220,6 +254,7 @@ class ToolConfigSetter(cst.CSTTransformer):
         self.assignments = assignments
         self.tool_class = tool_class  # e.g. "WebSearch"
         self.var_name = var_name  # e.g. "web_search"
+        self.matched = False  # target tool found — unchanged file means idempotent save
         self._var_updated = False
         self._needs_migration = False
         self._inline_call: cst.Call | None = None  # original inline call args for migration
@@ -234,12 +269,14 @@ class ToolConfigSetter(cst.CSTTransformer):
             if target_name == self.entry_point and isinstance(updated_node.value, cst.Call):
                 new_call = self._migrate_inline(updated_node.value)
                 if new_call is not updated_node.value:
+                    self.matched = True
                     return updated_node.with_changes(value=new_call)
 
             # Variable assignment — update config kwargs.
             if target_name != self.entry_point and isinstance(updated_node.value, cst.Call):
                 resolved = resolve_runnable_name(updated_node.value)
                 if resolved == self.tool_name:
+                    self.matched = True
                     self._var_updated = True
                     return updated_node.with_changes(
                         value=self._build_configured_call(updated_node.value),
@@ -328,6 +365,7 @@ class StepConstructorConfigSetter(cst.CSTTransformer):
         self.step_name = step_name
         self.config = config
         self.assignments = assignments
+        self.matched = False  # target step found — unchanged file means idempotent save
         # When renaming, track the old→new runtime name for reference updates.
         self._new_runtime_name: str | None = config.get("name")
         # Context tracking for string replacement (mirrors Renamer).
@@ -346,6 +384,7 @@ class StepConstructorConfigSetter(cst.CSTTransformer):
             if isinstance(updated_node.value, cst.Call):
                 resolved = resolve_runnable_name(updated_node.value)
                 if resolved == self.step_name:
+                    self.matched = True
                     args = [
                         a for a in updated_node.value.args
                         if not (isinstance(a.keyword, cst.Name) and a.keyword.value in self.config)

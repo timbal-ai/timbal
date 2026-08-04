@@ -307,4 +307,26 @@ def apply_operation(workspace_path: str | Path, operation: str, **kwargs) -> str
     if getattr(transformer, "needs_reorder", False):
         code = reorder_step_calls(code, spec.target)
 
-    return format_code(code, spec.path)
+    formatted = format_code(code, spec.path)
+
+    # Every transformer operation is a mutation, so identical output is
+    # suspicious — it usually means the transformer never matched its target
+    # (e.g. an aliased entry point like ``agent = _agent``). Fail loudly
+    # instead of reporting a phantom success, except when:
+    # - the transformer has intentional no-op semantics (``allow_noop = True``,
+    #   e.g. add-edge deduplication, removing an already-absent tool), or
+    # - the transformer affirmatively found its target (``matched = True``),
+    #   in which case an unchanged file just means the source was already in
+    #   the desired state (idempotent save).
+    if (
+        formatted == source
+        and not getattr(transformer, "allow_noop", False)
+        and getattr(transformer, "matched", None) is not True
+    ):
+        raise ValueError(
+            f"{operation.replace('_', '-')} produced no changes to {spec.path.name}. "
+            f"The source may use a shape the transformer does not recognize "
+            f"(e.g. an aliased entry point assignment)."
+        )
+
+    return formatted

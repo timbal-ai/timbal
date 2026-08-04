@@ -12,11 +12,27 @@ if TYPE_CHECKING:
 ENTRY_POINT_TYPES = {"Agent", "Workflow"}
 
 
+def _root_constructor_name(value: cst.BaseExpression) -> str | None:
+    """Return the root constructor's class name for an assignment value.
+
+    Walks down chained method calls (e.g. ``Workflow(...).step(...).step(...)``)
+    to find the root constructor.
+    """
+    call = value
+    while isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute):
+        call = call.func.value
+    if isinstance(call, cst.Call) and isinstance(call.func, cst.Name):
+        return call.func.value
+    return None
+
+
 def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
     """Return the constructor class name ('Agent' or 'Workflow') for the entry point variable.
 
-    Inspects top-level assignments to find `entry_point = ClassName(...)` and returns
-    the class name if it's a known entry point type. Returns None if not found.
+    Inspects top-level assignments (plain and annotated, e.g.
+    ``agent: Agent = Agent(...)``) to find `entry_point = ClassName(...)` and
+    returns the class name if it's a known entry point type. Returns None if
+    not found.
     """
     for stmt in tree.body:
         if isinstance(stmt, cst.SimpleStatementLine):
@@ -24,15 +40,18 @@ def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
                 if isinstance(item, cst.Assign):
                     for target in item.targets:
                         if isinstance(target.target, cst.Name) and target.target.value == entry_point:
-                            # Walk down chained method calls (e.g. Workflow(...).step(...).step(...))
-                            # to find the root constructor.
-                            call = item.value
-                            while isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute):
-                                call = call.func.value
-                            if isinstance(call, cst.Call) and isinstance(call.func, cst.Name):
-                                cls_name = call.func.value
-                                if cls_name in ENTRY_POINT_TYPES:
-                                    return cls_name
+                            cls_name = _root_constructor_name(item.value)
+                            if cls_name in ENTRY_POINT_TYPES:
+                                return cls_name
+                elif isinstance(item, cst.AnnAssign):
+                    if (
+                        isinstance(item.target, cst.Name)
+                        and item.target.value == entry_point
+                        and item.value is not None
+                    ):
+                        cls_name = _root_constructor_name(item.value)
+                        if cls_name in ENTRY_POINT_TYPES:
+                            return cls_name
     return None
 
 
@@ -141,7 +160,11 @@ def build_cst_value(value: object) -> cst.BaseExpression:
 
 
 def collect_assignments(tree: cst.Module) -> dict[str, cst.Call]:
-    """Build a map of variable_name -> Call node for all top-level assignments."""
+    """Build a map of variable_name -> Call node for all top-level assignments.
+
+    Covers plain assignments (``x = Call(...)``) and annotated assignments
+    (``x: T = Call(...)``).
+    """
     result = {}
     for stmt in tree.body:
         if isinstance(stmt, cst.SimpleStatementLine):
@@ -150,6 +173,12 @@ def collect_assignments(tree: cst.Module) -> dict[str, cst.Call]:
                     for target in item.targets:
                         if isinstance(target.target, cst.Name):
                             result[target.target.value] = item.value
+                elif (
+                    isinstance(item, cst.AnnAssign)
+                    and isinstance(item.target, cst.Name)
+                    and isinstance(item.value, cst.Call)
+                ):
+                    result[item.target.value] = item.value
     return result
 
 

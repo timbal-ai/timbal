@@ -161,6 +161,10 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
 
 class ToolAdder(cst.CSTTransformer):
+    # Re-adding an existing tool is an idempotent success (no duplicate entry,
+    # file unchanged), not a silent failure.
+    allow_noop = True
+
     def __init__(
         self,
         entry_point: str,

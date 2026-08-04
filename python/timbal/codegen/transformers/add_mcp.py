@@ -320,6 +320,10 @@ def _name_collision_error(runtime_name: str) -> ValueError:
 
 
 class MCPAdder(cst.CSTTransformer):
+    # Re-adding an identical server is an idempotent success (same-named
+    # assignment replaced in place, file unchanged), not a silent failure.
+    allow_noop = True
+
     def __init__(self, assignments: dict[str, cst.Call], *, target: str, servers: list[tuple[str, dict]]):
         self.assignments = assignments
         self.target = target

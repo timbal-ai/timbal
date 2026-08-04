@@ -485,6 +485,95 @@ class TestToolNameAndDescription:
 
 
 # ---------------------------------------------------------------------------
+# Entry point shapes (annotated / aliased / factory assignments)
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPointShapes:
+    def test_annotated_assignment(self, workspace):
+        """``agent: Agent = Agent(...)`` is transformed like a plain assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].voice_config == {"voice": "NEW_VOICE"}
+
+    def test_annotated_assignment_set_model(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o"})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o"
+
+    def test_aliased_assignment_fails_loudly(self, workspace):
+        """``agent = _agent`` cannot be transformed — must exit non-zero, not silently no-op."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        _agent = Agent(name="a", model="openai/gpt-4o-mini")
+        agent = _agent
+        """)
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        result = _run_dry_fail(ws, "--config", config)
+        assert result.returncode != 0
+        assert "produced no changes" in result.stderr
+
+    def test_factory_call_fails_loudly(self, workspace):
+        """``agent = build()`` must error instead of appending kwargs to build()."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        def build():
+            return Agent(name="a", model="openai/gpt-4o-mini")
+
+        agent = build()
+        """)
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        result = _run_dry_fail(ws, "--config", config)
+        assert result.returncode != 0
+        assert "factory" in result.stderr
+
+    def test_noop_same_value_is_idempotent_success(self, workspace):
+        """Setting a field to its current value is a success: the transformer
+        matched the entry point, the source was already in the desired state."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o-mini"})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o-mini"
+
+    def test_write_mode_noop_leaves_file_untouched(self, workspace):
+        """A failed no-op without --dry-run must not rewrite the source file."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        _agent = Agent(name="a", model="openai/gpt-4o-mini")
+        agent = _agent
+        """)
+        original = (ws / "agent.py").read_text()
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        result = subprocess.run(
+            codegen_cmd("--path", str(ws), "set-config", "--config", config),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert (ws / "agent.py").read_text() == original
+
+
+# ---------------------------------------------------------------------------
 # Workflow step config
 # ---------------------------------------------------------------------------
 
