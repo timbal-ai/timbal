@@ -169,6 +169,20 @@ class TestWorkflowStepPosition:
         ns = _exec_agent(output)
         assert ns["agent_a"].metadata["position"] == {"x": 150.0, "y": 250.0}
 
+    def test_annotated_step_variable(self, wf_workspace):
+        """Set position on an annotated step variable."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a: Agent = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry(ws, "--name", "agent_a", "--x", "150", "--y", "250")
+        ns = _exec_agent(output)
+        assert ns["agent_a"].metadata["position"] == {"x": 150.0, "y": 250.0}
+
     def test_set_step_position_preserves_metadata(self, wf_workspace):
         ws = wf_workspace("""\
         from timbal import Agent, Workflow

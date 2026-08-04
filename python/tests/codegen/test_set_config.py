@@ -695,6 +695,19 @@ class TestStepConstructorConfig:
         output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
         assert 'model="openai/gpt-4o"' in output
 
+    def test_annotated_step_variable(self, wf_workspace):
+        """Update constructor config on an annotated step variable."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a: Agent = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
+        assert 'model="openai/gpt-4o"' in output
+
     def test_rename_step_updates_depends_on(self, wf_workspace):
         """Renaming a step via set-config updates depends_on references."""
         ws = wf_workspace("""\

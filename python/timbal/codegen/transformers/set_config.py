@@ -424,17 +424,36 @@ class StepConstructorConfigSetter(cst.CSTTransformer):
                 resolved = resolve_runnable_name(updated_node.value)
                 if resolved == self.step_name:
                     self.matched = True
-                    args = [
-                        a for a in updated_node.value.args
-                        if not (isinstance(a.keyword, cst.Name) and a.keyword.value in self.config)
-                    ]
-                    for key, value in self.config.items():
-                        if value is not None:
-                            args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
                     return updated_node.with_changes(
-                        value=updated_node.value.with_changes(args=args),
+                        value=self._merge_config_into_call(updated_node.value),
                     )
         return updated_node
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated step variables, e.g. ``agent_a: Agent = Agent(...)``."""
+        if (
+            not isinstance(updated_node.target, cst.Name)
+            or updated_node.target.value == self.entry_point
+            or not isinstance(updated_node.value, cst.Call)
+        ):
+            return updated_node
+        if resolve_runnable_name(updated_node.value) == self.step_name:
+            self.matched = True
+            return updated_node.with_changes(
+                value=self._merge_config_into_call(updated_node.value),
+            )
+        return updated_node
+
+    def _merge_config_into_call(self, call: cst.Call) -> cst.Call:
+        """Drop overridden kwargs and append the new config values."""
+        args = [
+            a for a in call.args
+            if not (isinstance(a.keyword, cst.Name) and a.keyword.value in self.config)
+        ]
+        for key, value in self.config.items():
+            if value is not None:
+                args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
+        return call.with_changes(args=args)
 
     # -- Context tracking for depends_on / step_span string replacement --------
 
