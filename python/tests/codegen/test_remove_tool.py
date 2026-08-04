@@ -52,6 +52,18 @@ class TestRemoveFrameworkTool:
         ns = _exec_agent(output)
         assert len(ns["agent"].tools) == 0
 
+    def test_annotated_entry_point(self, workspace):
+        """remove-tool prunes the tools list of an annotated agent assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[WebSearch()])
+        """)
+        output = _run_dry(ws, "web_search")
+        ns = _exec_agent(output)
+        assert len(ns["agent"].tools) == 0
+
     def test_removes_one_keeps_others(self, workspace):
         """Remove WebSearch but keep other tools intact."""
         ws = workspace("""\

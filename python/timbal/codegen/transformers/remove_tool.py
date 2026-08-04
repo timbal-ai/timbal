@@ -52,6 +52,18 @@ class ToolRemover(cst.CSTTransformer):
                     )
         return updated_node
 
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if (
+            isinstance(updated_node.target, cst.Name)
+            and updated_node.target.value == self.entry_point
+            and isinstance(updated_node.value, cst.Call)
+        ):
+            return updated_node.with_changes(
+                value=self._remove_from_tools(updated_node.value),
+            )
+        return updated_node
+
     def _remove_from_tools(self, call: cst.Call) -> cst.Call:
         for i, arg in enumerate(call.args):
             if isinstance(arg.keyword, cst.Name) and arg.keyword.value == "tools":

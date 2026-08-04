@@ -134,6 +134,18 @@ class ConstructorPositionSetter(cst.CSTTransformer):
                     return updated_node.with_changes(value=updated_node.value.with_changes(args=new_args))
         return updated_node
 
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if (
+            isinstance(updated_node.target, cst.Name)
+            and updated_node.target.value == self.entry_point
+            and isinstance(updated_node.value, cst.Call)
+        ):
+            self.matched = True
+            new_args = _merge_position_into_metadata(list(updated_node.value.args), self.position)
+            return updated_node.with_changes(value=updated_node.value.with_changes(args=new_args))
+        return updated_node
+
 
 class StepPositionSetter(cst.CSTTransformer):
     """Set position metadata on a workflow step's constructor variable."""

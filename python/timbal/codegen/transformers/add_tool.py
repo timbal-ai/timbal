@@ -231,6 +231,21 @@ class ToolAdder(cst.CSTTransformer):
                     )
         return updated_node
 
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if not isinstance(updated_node.target, cst.Name) or not isinstance(updated_node.value, cst.Call):
+            return updated_node
+        target_name = updated_node.target.value
+
+        if target_name == self.target:
+            return updated_node.with_changes(value=self._add_to_tools(updated_node.value))
+
+        resolved = resolve_runnable_name(updated_node.value)
+        if resolved == self.runtime_name:
+            self._assignment_updated = True
+            return updated_node.with_changes(value=self._merge_config_into_call(updated_node.value))
+        return updated_node
+
     # -- Module: add imports, function defs, and variable assignments -------
 
     def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
@@ -277,8 +292,9 @@ class ToolAdder(cst.CSTTransformer):
             for stmt in reversed(imports_to_add):
                 body.insert(import_insert_idx, stmt)
 
-        # Insert statements before the earliest relevant assignment:
-        # either a tool wrapper assignment or the target (entry point / step).
+        # Insert statements before the earliest relevant assignment (plain or
+        # annotated): either a tool wrapper assignment or the target
+        # (entry point / step).
         if stmts_to_add:
             insert_idx = len(body)
             for i, stmt in enumerate(body):
@@ -291,6 +307,14 @@ class ToolAdder(cst.CSTTransformer):
                             for t in item.targets:
                                 if isinstance(t.target, cst.Name) and t.target.value == self.target:
                                     insert_idx = min(insert_idx, i)
+                        elif (
+                            isinstance(item, cst.AnnAssign)
+                            and isinstance(item.target, cst.Name)
+                            and isinstance(item.value, cst.Call)
+                        ):
+                            resolved = resolve_runnable_name(item.value)
+                            if resolved == self.runtime_name or item.target.value == self.target:
+                                insert_idx = min(insert_idx, i)
             for stmt in reversed(stmts_to_add):
                 body.insert(insert_idx, stmt)
 

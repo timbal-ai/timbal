@@ -91,6 +91,17 @@ class TestAgentPosition:
         ns = _exec_agent(output)
         assert ns["agent"].metadata["position"] == {"x": 300.0, "y": 400.0}
 
+    def test_annotated_entry_point(self, workspace):
+        """set-position works on an annotated agent assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        output = _run_dry(ws, "--x", "100", "--y", "200")
+        ns = _exec_agent(output)
+        assert ns["agent"].metadata["position"] == {"x": 100.0, "y": 200.0}
+
     def test_same_position_is_idempotent_success(self, workspace):
         """Setting the current coordinates again succeeds without changes."""
         ws = workspace("""\
