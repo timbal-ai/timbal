@@ -6,44 +6,44 @@
 [1m════════════════════════════════════════════════════════════════════════════════════════════[0m
 
   [2m[N=4 per phase][0m
-    Timbal trivial... p50=1.82 ms
-    Timbal async work... p50=4.16 ms
-    Timbal memory... 100.9 KB peak
-    Timbal burst (100 concurrent, async work)... p50=121.5 ms
-    Agno trivial... p50=757.0 µs
-    Agno async work... p50=3.29 ms
-    Agno memory... 73.2 KB peak
-    Agno burst (100 concurrent, async work)... p50=53.2 ms
+    Timbal trivial... p50=776.8 µs
+    Timbal async work... p50=3.16 ms
+    Timbal memory... 68.4 KB peak
+    Timbal burst (100 concurrent, async work)... p50=48.6 ms
+    Agno trivial... p50=389.9 µs
+    Agno async work... p50=2.93 ms
+    Agno memory... 96.6 KB peak
+    Agno burst (100 concurrent, async work)... p50=28.0 ms
 
   [2m[N=8 per phase][0m
-    Timbal trivial... p50=2.69 ms
-    Timbal async work... p50=5.26 ms
-    Timbal memory... 162.3 KB peak
-    Timbal burst (100 concurrent, async work)... p50=301.4 ms
-    Agno trivial... p50=1.02 ms
-    Agno async work... p50=3.47 ms
-    Agno memory... 83.0 KB peak
-    Agno burst (100 concurrent, async work)... p50=64.3 ms
+    Timbal trivial... p50=1.59 ms
+    Timbal async work... p50=3.52 ms
+    Timbal memory... 95.7 KB peak
+    Timbal burst (100 concurrent, async work)... p50=85.9 ms
+    Agno trivial... p50=769.5 µs
+    Agno async work... p50=2.88 ms
+    Agno memory... 104.7 KB peak
+    Agno burst (100 concurrent, async work)... p50=43.4 ms
 
   [2m[N=16 per phase][0m
-    Timbal trivial... p50=4.99 ms
-    Timbal async work... p50=5.89 ms
-    Timbal memory... 277.8 KB peak
-    Timbal burst (100 concurrent, async work)... p50=524.4 ms
-    Agno trivial... p50=1.17 ms
-    Agno async work... p50=3.61 ms
-    Agno memory... 108.1 KB peak
-    Agno burst (100 concurrent, async work)... p50=101.5 ms
+    Timbal trivial... p50=1.72 ms
+    Timbal async work... p50=3.86 ms
+    Timbal memory... 159.2 KB peak
+    Timbal burst (100 concurrent, async work)... p50=160.9 ms
+    Agno trivial... p50=795.7 µs
+    Agno async work... p50=3.01 ms
+    Agno memory... 124.9 KB peak
+    Agno burst (100 concurrent, async work)... p50=76.5 ms
 
   [2m[N=32 per phase][0m
-    Timbal trivial... p50=7.49 ms
-    Timbal async work... p50=8.06 ms
-    Timbal memory... 512.1 KB peak
-    Timbal burst (100 concurrent, async work)... p50=1119.0 ms
-    Agno trivial... p50=1.68 ms
-    Agno async work... p50=3.99 ms
-    Agno memory... 150.8 KB peak
-    Agno burst (100 concurrent, async work)... p50=209.1 ms
+    Timbal trivial... p50=3.10 ms
+    Timbal async work... p50=4.72 ms
+    Timbal memory... 287.9 KB peak
+    Timbal burst (100 concurrent, async work)... p50=361.7 ms
+    Agno trivial... p50=1.32 ms
+    Agno async work... p50=3.49 ms
+    Agno memory... 159.2 KB peak
+    Agno burst (100 concurrent, async work)... p50=141.5 ms
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Width N=4 per phase[0m
@@ -52,35 +52,35 @@
   [1mTrivial branches  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         1.87 ms        783.3 µs
-           p50         1.82 ms        757.0 µs
-           p95         2.42 ms        971.2 µs
-           p99         2.52 ms         1.33 ms
+          mean        906.4 µs        403.0 µs
+           p50        776.8 µs        389.9 µs
+           p95        986.3 µs        521.5 µs
+           p99         11.6 ms        750.5 µs
 
   [1mAsync work branches (1 ms sleep per branch)  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         4.20 ms         3.66 ms
-           p50         4.16 ms         3.29 ms
-           p95         4.75 ms         6.78 ms
-           p99         5.03 ms         9.42 ms
+          mean         3.27 ms         2.94 ms
+           p50         3.16 ms         2.93 ms
+           p95         3.46 ms         3.31 ms
+           p99         14.3 ms         3.77 ms
 
   [1mBurst  (100 concurrent, async work)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-           p50        121.5 ms         53.2 ms
-           p75        121.8 ms         63.3 ms
-           p95        122.2 ms         70.9 ms
-           p99        122.3 ms         72.6 ms
-           max        122.3 ms         72.6 ms
+           p50         48.6 ms         28.0 ms
+           p75         49.0 ms         28.3 ms
+           p95         60.6 ms         39.4 ms
+           p99         60.9 ms         39.7 ms
+           max         60.9 ms         39.7 ms
 
-  [2mwall: Timbal: 122.3 ms | Agno: 72.6 ms[0m
+  [2mwall: Timbal: 60.9 ms | Agno: 39.7 ms[0m
 
   [1mMemory  (trivial, ×100)[0m
   framework                     peak       per run
   ────────────────────  ────────────  ────────────
-  Timbal                     100.9 KB        1033  B
-  Agno                        73.2 KB         750  B
+  Timbal                      68.4 KB         701  B
+  Agno                        96.6 KB         989  B
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Width N=8 per phase[0m
@@ -89,35 +89,35 @@
   [1mTrivial branches  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         2.74 ms         1.42 ms
-           p50         2.69 ms         1.02 ms
-           p95         3.35 ms         1.57 ms
-           p99         3.95 ms         35.5 ms
+          mean         1.88 ms         2.91 ms
+           p50         1.59 ms        769.5 µs
+           p95         3.29 ms         17.0 ms
+           p99         12.4 ms         34.8 ms
 
   [1mAsync work branches (1 ms sleep per branch)  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         8.63 ms         3.47 ms
-           p50         5.26 ms         3.47 ms
-           p95         31.0 ms         3.77 ms
-           p99         99.7 ms         3.95 ms
+          mean         3.66 ms         2.97 ms
+           p50         3.52 ms         2.88 ms
+           p95         4.00 ms         3.35 ms
+           p99         14.4 ms         6.75 ms
 
   [1mBurst  (100 concurrent, async work)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-           p50        301.4 ms         64.3 ms
-           p75        302.5 ms         73.5 ms
-           p95        303.2 ms         81.2 ms
-           p99        303.5 ms         83.0 ms
-           max        303.5 ms         83.0 ms
+           p50         85.9 ms         43.4 ms
+           p75         86.5 ms         43.7 ms
+           p95         97.8 ms         54.4 ms
+           p99         98.0 ms         54.7 ms
+           max         98.0 ms         54.7 ms
 
-  [2mwall: Timbal: 303.5 ms | Agno: 83.0 ms[0m
+  [2mwall: Timbal: 98.0 ms | Agno: 54.7 ms[0m
 
   [1mMemory  (trivial, ×100)[0m
   framework                     peak       per run
   ────────────────────  ────────────  ────────────
-  Timbal                     162.3 KB        1661  B
-  Agno                        83.0 KB         850  B
+  Timbal                      95.7 KB         980  B
+  Agno                       104.7 KB        1073  B
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Width N=16 per phase[0m
@@ -126,35 +126,35 @@
   [1mTrivial branches  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         6.00 ms         1.24 ms
-           p50         4.99 ms         1.17 ms
-           p95         10.1 ms         1.56 ms
-           p99         57.4 ms         3.19 ms
+          mean         1.85 ms        812.5 µs
+           p50         1.72 ms        795.7 µs
+           p95         2.01 ms        935.6 µs
+           p99         11.9 ms         1.10 ms
 
   [1mAsync work branches (1 ms sleep per branch)  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         8.91 ms         3.66 ms
-           p50         5.89 ms         3.61 ms
-           p95         19.4 ms         4.18 ms
-           p99         71.8 ms         5.70 ms
+          mean         4.01 ms         3.03 ms
+           p50         3.86 ms         3.01 ms
+           p95         4.34 ms         3.30 ms
+           p99         15.2 ms         3.36 ms
 
   [1mBurst  (100 concurrent, async work)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-           p50        524.4 ms        101.5 ms
-           p75        525.7 ms        110.9 ms
-           p95        526.8 ms        118.3 ms
-           p99        527.1 ms        119.8 ms
-           max        527.1 ms        119.8 ms
+           p50        160.9 ms         76.5 ms
+           p75        161.7 ms         76.7 ms
+           p95        172.6 ms         87.9 ms
+           p99        172.9 ms         88.0 ms
+           max        172.9 ms         88.0 ms
 
-  [2mwall: Timbal: 527.1 ms | Agno: 119.8 ms[0m
+  [2mwall: Timbal: 172.9 ms | Agno: 88.0 ms[0m
 
   [1mMemory  (trivial, ×100)[0m
   framework                     peak       per run
   ────────────────────  ────────────  ────────────
-  Timbal                     277.8 KB        2845  B
-  Agno                       108.1 KB        1107  B
+  Timbal                     159.2 KB        1630  B
+  Agno                       124.9 KB        1278  B
 
 [1m[36m────────────────────────────────────────────────────────────────────────────────────────────[0m
 [1m[36m  Width N=32 per phase[0m
@@ -163,35 +163,35 @@
   [1mTrivial branches  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         7.86 ms         1.73 ms
-           p50         7.49 ms         1.68 ms
-           p95         8.07 ms         2.08 ms
-           p99         43.1 ms         2.50 ms
+          mean         3.40 ms         1.34 ms
+           p50         3.10 ms         1.32 ms
+           p95         4.16 ms         1.42 ms
+           p99         13.6 ms         1.60 ms
 
   [1mAsync work branches (1 ms sleep per branch)  (×100)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-          mean         8.96 ms         4.00 ms
-           p50         8.06 ms         3.99 ms
-           p95         9.86 ms         4.44 ms
-           p99         45.1 ms         5.09 ms
+          mean         4.92 ms         3.53 ms
+           p50         4.72 ms         3.49 ms
+           p95         5.20 ms         3.83 ms
+           p99         16.7 ms         3.99 ms
 
   [1mBurst  (100 concurrent, async work)[0m
                         Timbal            Agno
   ────────────  ──────────────  ──────────────
-           p50       1119.0 ms        209.1 ms
-           p75       1121.4 ms        218.3 ms
-           p95       1123.3 ms        226.0 ms
-           p99       1123.7 ms        227.6 ms
-           max       1123.7 ms        227.6 ms
+           p50        361.7 ms        141.5 ms
+           p75        362.5 ms        141.7 ms
+           p95        363.5 ms        151.6 ms
+           p99        375.1 ms        151.7 ms
+           max        375.1 ms        151.7 ms
 
-  [2mwall: Timbal: 1123.7 ms | Agno: 227.6 ms[0m
+  [2mwall: Timbal: 375.1 ms | Agno: 151.7 ms[0m
 
   [1mMemory  (trivial, ×100)[0m
   framework                     peak       per run
   ────────────────────  ────────────  ────────────
-  Timbal                     512.1 KB        5244  B
-  Agno                       150.8 KB        1544  B
+  Timbal                     287.9 KB        2948  B
+  Agno                       159.2 KB        1631  B
 
 [2m────────────────────────────────────────────────────────────────────────────────────────────
   Timbal: two explicit first-class fan-out phases, one task/span per branch.

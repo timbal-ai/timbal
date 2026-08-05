@@ -6,7 +6,7 @@ from typing import Any, Literal
 import pytest
 from pydantic import BaseModel
 from timbal import Tool
-from timbal.core.llm_router import _llm_router
+from timbal.core.llm import _llm_router
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 

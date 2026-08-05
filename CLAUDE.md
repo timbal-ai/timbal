@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Development and Testing
 - **Install dependencies**: `uv sync --dev` (from repo root — `pyproject.toml` is at root)
 - **Run all tests**: `uv run pytest` (from repo root)
-- **Run single test**: `uv run pytest python/tests/core/test_file.py::TestClass::test_method`
+- **Run single test**: `uv run pytest python/tests/core/test_agent.py::TestClass::test_method`
 - **Linting**: `uv run ruff check`
 - **Format**: `uv run ruff format`
 - **Fix lint**: `uv run ruff check --fix`
@@ -34,7 +34,7 @@ timbal/
 │   │   │   ├── tool.py       # Tool wrapper
 │   │   │   ├── tool_set.py   # ToolSet ABC for runtime tool resolution
 │   │   │   ├── mcp.py        # MCPServer — MCP servers as tool sources
-│   │   │   ├── llm_router.py # Multi-provider LLM dispatch
+│   │   │   ├── llm/          # Multi-provider LLM dispatch (router, registry, clients, retry + one module per API)
 │   │   │   ├── models.py     # Model strings + context window lookup
 │   │   │   └── test_model.py # Offline TestModel for testing
 │   │   ├── state/
@@ -564,7 +564,7 @@ async with OTelExporter(endpoint="http://localhost:4318") as exporter:
 
 ## Testing Strategy
 
-- Tests live in `python/tests/core/` mirroring the package structure
+- Tests live under `python/tests/` mirroring the package (`core/`, `core/llm/`, `state/tracing/`, `collectors/`, …)
 - All async tests use `pytest-asyncio` (mode=AUTO — no `@pytest.mark.asyncio` needed if configured)
 - Use `TestModel` to avoid API calls in unit tests
 - `tmp_path` pytest fixture for file-based provider tests

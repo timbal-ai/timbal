@@ -32,17 +32,14 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from pydantic import TypeAdapter
 from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
 from timbal.state import RunContext, get_run_context, suspend
 from timbal.state.tracing.providers.jsonl import JsonlTracingProvider
 from timbal.state.tracing.trace import Trace
 from timbal.types.content import ToolUseContent
-from timbal.types.events import Event, InteractionEvent, OutputEvent
+from timbal.types.events import InteractionEvent, OutputEvent, validate_event
 from timbal.types.message import Message
-
-_EVENT_ADAPTER = TypeAdapter(Event)
 
 
 def _interaction_events(events) -> list[InteractionEvent]:
@@ -89,7 +86,7 @@ class TestEventSerialization:
 
         # model_dump_json -> json.loads -> discriminated-union validate.
         raw = json.loads(ev.model_dump_json())
-        restored = _EVENT_ADAPTER.validate_python(raw)
+        restored = validate_event(raw)
 
         assert isinstance(restored, InteractionEvent)
         assert restored.type == "INTERACTION"
@@ -120,7 +117,7 @@ class TestEventSerialization:
             metadata={"type": "Agent"},
         )
 
-        restored = _EVENT_ADAPTER.validate_python(json.loads(out.model_dump_json()))
+        restored = validate_event(json.loads(out.model_dump_json()))
         assert isinstance(restored, OutputEvent)
         assert restored.status.code == "cancelled"
         assert restored.status.reason == "input_required"

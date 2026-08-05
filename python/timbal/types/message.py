@@ -40,7 +40,7 @@ class Message:
             - OpenAI Responses: 'completed', 'max_output_tokens', 'content_filter', etc.
     """
 
-    __slots__ = ("role", "content", "stop_reason")
+    __slots__ = ("role", "content", "stop_reason", "_cached_dump", "_cached_dump_len")
 
     def __init__(self, role: Any, content: Any, stop_reason: str | None = None) -> None:
         """Initialize a Message instance.
@@ -53,6 +53,14 @@ class Message:
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "content", content)
         object.__setattr__(self, "stop_reason", stop_reason)
+        # Serialized-form cache (see timbal.utils.serialization). Long
+        # conversations re-dump the same Message objects on every turn
+        # (span input dump, memory dump, LLM input dump); messages are
+        # immutable after construction except for in-place content appends
+        # (e.g. synthesized server tool results), so the cache is validated
+        # against len(content).
+        object.__setattr__(self, "_cached_dump", None)
+        object.__setattr__(self, "_cached_dump_len", -1)
 
     def __str__(self) -> str:
         if self.stop_reason:
@@ -66,12 +74,14 @@ class Message:
         inputs = []
         message_content = []
         for content_item in self.content:
-            if isinstance(content_item, ToolUseContent):
-                inputs.append(content_item.to_openai_responses_input())
-            elif isinstance(content_item, ToolResultContent):
-                inputs.append(content_item.to_openai_responses_input())
+            if isinstance(content_item, ToolUseContent | ToolResultContent):
+                item_input = content_item.to_openai_responses_input()
+                if item_input is not None:
+                    inputs.append(item_input)
             else:
-                message_content.append(content_item.to_openai_responses_input(role=self.role))
+                item_input = content_item.to_openai_responses_input(role=self.role)
+                if item_input is not None:
+                    message_content.append(item_input)
         if message_content:
             # Role here should only be 'user' or 'assistant'
             inputs.append({"role": self.role, "content": message_content})
@@ -81,7 +91,7 @@ class Message:
         self,
         *,
         reasoning_as: Literal["omit", "reasoning_content"] = "omit",
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Convert the message to OpenAI's chat completions api expected input format.
 
         Args:
@@ -98,7 +108,9 @@ class Message:
         reasoning_parts: list[str] = []
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent):
-                tool_calls.append(content_item.to_openai_chat_completions_input())
+                tool_call = content_item.to_openai_chat_completions_input()
+                if tool_call is not None:
+                    tool_calls.append(tool_call)
             elif isinstance(content_item, ToolResultContent):
                 return content_item.to_openai_chat_completions_input()
             elif isinstance(content_item, ThinkingContent):
@@ -122,6 +134,11 @@ class Message:
             openai_input["tool_calls"] = tool_calls
         if reasoning_parts:
             openai_input["reasoning_content"] = "".join(reasoning_parts)
+        if len(openai_input) == 1:
+            # Every content item was skipped (e.g. server-side tool blocks on
+            # cross-provider replay, or thinking-only turns with omit). A bare
+            # role dict is invalid for the API — drop the turn entirely.
+            return None
         return openai_input
 
     def to_anthropic_input(self) -> dict[str, Any]:

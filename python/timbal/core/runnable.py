@@ -4,6 +4,7 @@ import contextvars
 import hashlib
 import inspect
 import json
+import logging
 import os
 import secrets
 import time
@@ -17,9 +18,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
     TypeAdapter,
-    ValidationInfo,
     computed_field,
     field_validator,
     model_serializer,
@@ -60,13 +59,28 @@ from ..types.events import (
 from ..types.events.delta import Custom, DeltaEvent, DeltaItem
 from ..types.message import Message
 from ..types.run_status import RunStatus
-from ..utils import dump, sync_to_async_gen
+from ..utils import dump, invalidate_message_dump_caches, sync_to_async_gen
 
 
 def _get_logger():
     import structlog
 
     return structlog.get_logger("timbal.core.runnable")
+
+
+_stdlib_events_logger = logging.getLogger("timbal.core.runnable")
+
+
+def _events_logging_enabled() -> bool:
+    """Cheap gate for per-event INFO logging.
+
+    ``event.model_dump()`` is expensive and is evaluated eagerly as a call
+    argument, so callers must check this BEFORE building the log kwargs.
+    Timbal's structlog setup is stdlib-backed (see logs.setup_logging), so the
+    stdlib effective level (which also respects ``logging.disable``) is
+    authoritative.
+    """
+    return _stdlib_events_logger.isEnabledFor(logging.INFO)
 
 
 def _collector_output_on_interrupt(collector: Any) -> Any:
@@ -100,33 +114,41 @@ def _collector_output_on_interrupt(collector: Any) -> Any:
     return raw
 
 
+_Tool = None
+_record_tool_requests = None
+
+
 def _emit_default_tool_usage(runnable: Any) -> None:
-    """On successful Tool completion, record ``{tool.name}:requests`` for billing defaults."""
-    from .tool import Tool
+    """On successful Tool completion, record ``{tool.name}:requests`` for billing defaults.
 
-    if not isinstance(runnable, Tool):
-        return
-    if not getattr(runnable, "record_default_request_usage", True):
-        return
-    from ..state import _record_tool_requests
+    Runs on every successful call — the imports are cached in module globals
+    after the first invocation.
+    """
+    global _Tool, _record_tool_requests
+    if _Tool is None:
+        from ..state import _record_tool_requests as _record_fn
+        from .tool import Tool
 
+        _Tool = Tool
+        _record_tool_requests = _record_fn
+
+    if not isinstance(runnable, _Tool):
+        return
+    if not runnable.record_default_request_usage:
+        return
     _record_tool_requests(runnable.name)
 
 
-def _timbal_collector_wrap(fn):
-    """Lazy wrapper for @TimbalCollector.wrap — avoids importing the collector at module load."""
-    from functools import wraps
-
-    @wraps(fn)
-    def wrapper(self, **kwargs):
-        from ..collectors.impl.timbal import TimbalCollector
-
-        return TimbalCollector(async_gen=fn(self, **kwargs))
-
-    return wrapper
+_TimbalCollector = None
+"""Lazily imported TimbalCollector class — avoids importing collectors at module load."""
 
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+_BLOCKING_HANDLER_WARN_MS = float(os.getenv("TIMBAL_BLOCKING_WARN_MS", "100"))
+"""Sync handlers running inline for longer than this (ms) get a one-time
+warning suggesting offload_blocking=True / an async handler. Set to 0 to warn
+on any sync handler; raise it (or set very high) to silence."""
 
 
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
@@ -211,8 +233,6 @@ class Runnable(ABC, BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
-    _is_timbal_runnable: bool = True  # Marker for fast isinstance check in dump() without circular imports
-
     name: str
     """The unique identifier for this runnable component."""
     description: str | None = None
@@ -284,6 +304,15 @@ class Runnable(ABC, BaseModel):
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
 
+    offload_blocking: bool = False
+    """If True, plain sync handlers run in the default thread pool so blocking
+    code doesn't stall the event loop. Default False: sync handlers run inline
+    on the event loop, which avoids a threadpool round-trip per call. Set this
+    on tools whose sync handler blocks (network/disk I/O, heavy CPU) and that
+    must not serialize concurrent runs — or better, make the handler async.
+    Sync generator handlers always stream via the thread pool regardless of
+    this flag."""
+
     tracing_provider: Any = Field(
         default=TRACING_UNSET,
         description=(
@@ -311,20 +340,30 @@ class Runnable(ABC, BaseModel):
     applicable to all Runnable types.
     """
 
-    _path: str = PrivateAttr()
-    _is_orchestrator: bool = PrivateAttr()
-    _is_coroutine: bool = PrivateAttr()
-    _is_gen: bool = PrivateAttr()
-    _is_async_gen: bool = PrivateAttr()
-    _dependencies: list[str] = PrivateAttr(default_factory=list)
-    _default_fixed_params: dict[str, Any] = PrivateAttr(default_factory=dict)
-    _default_runtime_params: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
-    _pre_hook_is_coroutine: bool | None = PrivateAttr()
-    _pre_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
-    _post_hook_is_coroutine: bool | None = PrivateAttr()
-    _post_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
-    _log_events: set[str] = PrivateAttr()
-    _bg_tasks: dict[str, Any] = PrivateAttr(default_factory=dict)
+    # Workflow wiring. Declared as real (excluded-from-schema) fields rather than
+    # relying on extra="allow" attributes: declared fields live in the instance
+    # __dict__ and read ~8x faster than __pydantic_extra__ lookups, and these are
+    # read on every step execution. Set by Workflow.step(); None outside workflows.
+    previous_steps: Any = Field(default=None, exclude=True)
+    """Names of steps this step waits for (set by Workflow.step)."""
+    next_steps: Any = Field(default=None, exclude=True)
+    """Names of steps that depend on this step (set by Workflow.step)."""
+    previous_steps_kinds: Any = Field(default=None, exclude=True)
+    """Per-source edge kinds ('ordering' | 'when' | 'param') for introspection."""
+    when: Any = Field(default=None, exclude=True)
+    """Optional {'callable', 'is_coroutine', ...} guard evaluated before the step runs."""
+
+    # NOTE — hot runtime attributes are plain instance attributes assigned in
+    # model_post_init, NOT pydantic PrivateAttr declarations. PrivateAttr reads
+    # route through BaseModel.__getattr__ (~20x slower than __dict__ lookup) and
+    # these are read multiple times on every call:
+    #   _path, _is_orchestrator, _is_coroutine, _is_gen, _is_async_gen,
+    #   _dependencies, _default_fixed_params, _default_runtime_params,
+    #   _pre_hook_is_coroutine, _pre_hook_dependencies,
+    #   _post_hook_is_coroutine, _post_hook_dependencies,
+    #   _log_events, _bg_tasks
+    # Do not add class-level annotations for them — pydantic would turn any
+    # annotated underscore name back into a (slow) private attribute.
 
     @classmethod
     def _inspect_callable(
@@ -414,17 +453,17 @@ class Runnable(ABC, BaseModel):
 
     @field_validator("pre_hook", "post_hook")
     @classmethod
-    def _validate_hooks(cls, v: Any, info: ValidationInfo) -> Callable[[], Any] | None:
-        """Validate a hook, raise ValueError if invalid."""
+    def _validate_hooks(cls, v: Any) -> Callable[[], Any] | None:
+        """Validate a hook, raise ValueError if invalid.
+
+        Inspection *results* (is_coroutine, dependencies) are stored per instance
+        in model_post_init. They used to be written to ``cls`` here, which let two
+        instances of the same class with different sync/async hooks clobber each
+        other's flags.
+        """
         if v is None:
             return v
-        inspect_result = cls._inspect_callable(v)
-        if info.field_name == "pre_hook":
-            cls._pre_hook_is_coroutine = inspect_result["is_coroutine"]
-            cls._pre_hook_dependencies = inspect_result["dependencies"]
-        elif info.field_name == "post_hook":
-            cls._post_hook_is_coroutine = inspect_result["is_coroutine"]
-            cls._post_hook_dependencies = inspect_result["dependencies"]
+        cls._inspect_callable(v)
         return v
 
     def _prepare_default_params(self, default_params: dict[str, Any]) -> None:
@@ -443,6 +482,27 @@ class Runnable(ABC, BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the Runnable after Pydantic model creation."""
+        # Plain instance attributes (see NOTE above the field declarations).
+        self._dependencies: list[str] = []
+        self._default_fixed_params: dict[str, Any] = {}
+        self._default_runtime_params: dict[str, dict[str, Any]] = {}
+        self._bg_tasks: dict[str, Any] = {}
+        self._blocking_warned: bool = False
+        if self.pre_hook is not None:
+            pre_hook_inspect = self._inspect_callable(self.pre_hook)
+            self._pre_hook_is_coroutine: bool | None = pre_hook_inspect["is_coroutine"]
+            self._pre_hook_dependencies: list[str] = pre_hook_inspect["dependencies"]
+        else:
+            self._pre_hook_is_coroutine = None
+            self._pre_hook_dependencies = []
+        if self.post_hook is not None:
+            post_hook_inspect = self._inspect_callable(self.post_hook)
+            self._post_hook_is_coroutine: bool | None = post_hook_inspect["is_coroutine"]
+            self._post_hook_dependencies: list[str] = post_hook_inspect["dependencies"]
+        else:
+            self._post_hook_is_coroutine = None
+            self._post_hook_dependencies = []
+
         log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
         self._log_events = set(event.strip() for event in log_events)
         self._prepare_default_params(self.default_params)
@@ -796,17 +856,18 @@ class Runnable(ABC, BaseModel):
             return {"status": "running", "events": events, "name": task_info["name"], "input": task_info["input"]}
 
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
-        """Execute a runtime callable handling async context automatically."""
+        """Execute a runtime callable handling async context automatically.
+
+        Sync callables run inline on the event loop. These are param/`when`
+        lambdas and hooks — documented as cheap accessors over the run context
+        (e.g. ``step_span()``) — so a threadpool round-trip per evaluation is
+        pure overhead. Running inline also lets them see the live context vars
+        (the workflow sets ``parent_call_id`` right before evaluating them)
+        without a context copy.
+        """
         if is_coroutine:
             return await fn()
-        else:
-            loop = asyncio.get_running_loop()
-            ctx = contextvars.copy_context()
-
-            def fn_with_ctx():
-                return ctx.run(fn)
-
-            return await loop.run_in_executor(None, fn_with_ctx)
+        return fn()
 
     async def _execute_approval_callable(self, fn: Callable[..., Any], validated_input: dict[str, Any]) -> Any:
         """Execute an approval policy callable with matching validated input parameters."""
@@ -950,6 +1011,42 @@ class Runnable(ABC, BaseModel):
         resolved.update(input)
         return resolved
 
+    async def _execute_simple(self, validated_input: dict[str, Any]) -> Any:
+        """Execute a non-streaming (plain sync or coroutine) handler and return its output.
+
+        Fast path used by __call__ for handlers that cannot yield events — skips
+        the async-generator/tuple protocol of :meth:`_execute_handler` entirely.
+        Subclasses may override to add fallback behavior (see Tool's proxy path).
+        """
+        if self._is_coroutine:
+            return await self.handler(**validated_input)
+        if self.offload_blocking:
+            loop = asyncio.get_running_loop()
+            ctx = contextvars.copy_context()
+
+            def handler_func():
+                return ctx.run(self.handler, **validated_input)
+
+            return await loop.run_in_executor(None, handler_func)
+        # Sync handlers run inline on the event loop: while one runs, every
+        # other coroutine on this worker waits. Cheap handlers benefit (no
+        # threadpool hop); blocking ones degrade concurrent request latency,
+        # so flag them once with an actionable warning.
+        t0 = time.perf_counter()
+        try:
+            return self.handler(**validated_input)
+        finally:
+            elapsed_ms = (time.perf_counter() - t0) * 1e3
+            if elapsed_ms >= _BLOCKING_HANDLER_WARN_MS and not self._blocking_warned:
+                self._blocking_warned = True
+                _get_logger().warning(
+                    "Sync handler blocked the event loop; concurrent runs stall while it executes. "
+                    "Make the handler async, or set offload_blocking=True to run it in a thread.",
+                    runnable_path=self._path,
+                    handler_elapsed_ms=round(elapsed_ms, 1),
+                    threshold_ms=_BLOCKING_HANDLER_WARN_MS,
+                )
+
     async def _execute_handler(
         self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None
     ) -> AsyncGenerator[tuple[Event | None, Any, Any], None]:
@@ -963,22 +1060,15 @@ class Runnable(ABC, BaseModel):
         output = None
         collector = None
 
-        if not self._is_async_gen and not self._is_coroutine:
+        if self._is_gen:
             loop = asyncio.get_running_loop()
             ctx = contextvars.copy_context()
-            if self._is_gen:
-                gen = self.handler(**validated_input)
-                async_gen = sync_to_async_gen(gen, loop, ctx)
-            else:
-
-                def handler_func():
-                    return ctx.run(self.handler, **validated_input)
-
-                output = await loop.run_in_executor(None, handler_func)
-        elif self._is_coroutine:
-            output = await self.handler(**validated_input)
-        else:
+            gen = self.handler(**validated_input)
+            async_gen = sync_to_async_gen(gen, loop, ctx)
+        elif self._is_async_gen:
             async_gen = self.handler(**validated_input)
+        else:
+            output = await self._execute_simple(validated_input)
 
         if async_gen:
             output = None
@@ -1016,7 +1106,7 @@ class Runnable(ABC, BaseModel):
                         parent_call_id=span.parent_call_id,
                         item=event,
                     )
-                    if event.type in self._log_events:
+                    if event.type in self._log_events and _events_logging_enabled():
                         _get_logger().info(event.type, **event.model_dump())
                     if event_queue:
                         event_queue.put_nowait(event)
@@ -1049,29 +1139,333 @@ class Runnable(ABC, BaseModel):
         # Yield a final marker with the output and collector
         yield (None, output, collector)
 
-    @_timbal_collector_wrap
-    async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
-        """Execute the runnable with the given parameters.
+    async def _apply_approval_gate(
+        self,
+        approval_decision: ApprovalPolicyDecision,
+        validated_input: dict[str, Any],
+        span: Any,
+        run_context: Any,
+    ) -> tuple[bool, "ApprovalEvent | None", dict[str, Any]]:
+        """Run the human-approval gate for one invocation.
 
-        This is the main entry point for executing a runnable. It handles:
-        - Parameter validation and merging with default_params
-        - Run context management and tracing setup
-        - Event streaming (StartEvent, DeltaEvents, OutputEvent)
-        - Error handling and cleanup
-        - Integration with the collectors system
+        All span status/output/metadata mutations for the gate happen here.
 
-        The @collectable decorator wraps the returned async generator to add
-        a .collect() method for easy result collection.
+        Returns ``(proceed, approval_event, validated_input)``:
+
+        - ``proceed=False, event=None`` — the gate ended the run (claimed by
+          another worker, cancelled, or denied); the caller just returns.
+        - ``proceed=False, event=ApprovalEvent`` — the gate is pending; the
+          caller yields the event and returns.
+        - ``proceed=True`` — approved; ``validated_input`` may carry the
+          human's edit-on-approve overrides.
+        """
+        # ``approval_id`` MUST be derived from the unredacted input
+        # so the resume call (which carries the full input) lands
+        # on the same id as the original gate.
+        input_dump = await dump(validated_input)
+        approval_id = _approval_id_for(span.path, input_dump)
+
+        # Compute the redacted view once and use it for every
+        # public surface. The unredacted ``validated_input`` is
+        # still what the handler sees on resume.
+        redacted_input = self._redact_validated_input(validated_input)
+        redaction_active = self.approval_redactor is not None or bool(self.approval_redact_keys)
+        if redaction_active:
+            span.input = redacted_input
+            span._input_dump = await dump(redacted_input)
+
+        try:
+            input_schema = self.format_params_model_schema()
+        except Exception:
+            input_schema = None
+        # Set by the agent on the START event when this gate fires inside a
+        # tool call (see Agent._safe_tool_dispatch). None for direct calls.
+        tool_call_id = span.metadata.get("tool_call_id")
+        span.metadata["approval"] = {
+            "id": approval_id,
+            "required": True,
+            "prompt": approval_decision.prompt,
+            "description": approval_decision.description,
+            "kind": approval_decision.kind,
+            "ui": approval_decision.ui,
+            "input_schema": input_schema,
+            "tool_call_id": tool_call_id,
+            "metadata": approval_decision.metadata,
+            "input": redacted_input,
+        }
+        approval_resolution = None
+        approval_cancel: Cancel | None = None
+        if approval_id in run_context._resume_values:
+            run_context._used_resume_ids.add(approval_id)
+            raw_resume = run_context._resume_values[approval_id]
+            # A Cancel value aborts the whole run rather than approving or
+            # denying. It is not a valid ApprovalResolution input, so it
+            # routes around coercion — but still flows through the durable
+            # claim below so a cancel and an approve racing on two workers
+            # can't both win.
+            if isinstance(raw_resume, Cancel):
+                approval_cancel = raw_resume
+            else:
+                approval_resolution = _coerce_approval_resolution(raw_resume)
+        if approval_resolution is not None and approval_resolution.is_expired():
+            span.metadata["approval"]["expired"] = True
+            span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
+            # Counter fires for the *expired* resolution. The gate
+            # then re-emits below, which adds a fresh :required tick.
+            run_context.update_usage("approvals:expired", 1)
+            approval_resolution = None
+
+        # A decision OR a cancel claims the gate; the first claimer wins and
+        # any later duplicate (resolve or cancel) stops here.
+        if (approval_resolution is not None or approval_cancel is not None) and (
+            run_context._tracing_provider is not None
+        ):
+            claimed = await run_context._tracing_provider.claim_approval(
+                str(run_context.parent_id) if run_context.parent_id else None,
+                approval_id,
+                str(run_context.id),
+            )
+            if not claimed:
+                span.metadata["approval"]["claim"] = {
+                    "claimed": False,
+                    "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
+                }
+                span.status = RunStatus(
+                    code="cancelled",
+                    reason="approval_already_claimed",
+                    message="Approval was already claimed by another resume run.",
+                )
+                span.output = {
+                    "approval_id": approval_id,
+                    "status": "approval_already_claimed",
+                }
+                span._output_dump = await dump(span.output)
+                return False, None, validated_input
+
+        if approval_cancel is not None:
+            run_context.update_usage("approvals:cancelled", 1)
+            message = approval_cancel.reason or "Run cancelled by user."
+            span.metadata["approval"]["cancelled"] = True
+            span.status = RunStatus(code="cancelled", reason="cancelled", message=message)
+            span.output = {"approval_id": approval_id, "status": "cancelled", "reason": message}
+            span._output_dump = await dump(span.output)
+            return False, None, validated_input
+
+        if approval_resolution is None:
+            # Status/output MUST be set BEFORE the caller yields the event.
+            # If the consumer breaks the stream right after seeing the
+            # ApprovalEvent, GeneratorExit fires at the yield and we'd
+            # otherwise persist this span as 'interrupted'.
+            span.status = RunStatus(
+                code="cancelled",
+                reason="approval_required",
+                message="Approval required before runnable execution.",
+            )
+            span.output = {
+                "approval_id": approval_id,
+                "status": "approval_required",
+                "prompt": approval_decision.prompt,
+            }
+            span._output_dump = await dump(span.output)
+
+            approval_event = ApprovalEvent(
+                run_id=run_context.id,
+                parent_run_id=run_context.parent_id,
+                path=span.path,
+                call_id=span.call_id,
+                parent_call_id=span.parent_call_id,
+                t0=int(time.time() * 1000),
+                approval_id=approval_id,
+                runnable_path=span.path,
+                runnable_name=self.name,
+                runnable_type=self.metadata.get("type", self.__class__.__name__),
+                tool_call_id=tool_call_id,
+                input=redacted_input,
+                input_schema=input_schema,
+                prompt=approval_decision.prompt,
+                description=approval_decision.description,
+                kind=approval_decision.kind,
+                ui=approval_decision.ui,
+                metadata=approval_decision.metadata,
+            )
+            run_context.update_usage("approvals:required", 1)
+            return False, approval_event, validated_input
+
+        # Resolution found and not expired — capture the audit
+        # snapshot before deciding the gate's outcome. Typed fields
+        # are surfaced under ``resolution`` so trace consumers can
+        # query e.g. ``approval.resolution.approver_id`` directly.
+        span.metadata["approval"]["resolution"] = {
+            "approved": approval_resolution.approved,
+            "reason": approval_resolution.reason,
+            "approver_id": approval_resolution.approver_id,
+            "comment": approval_resolution.comment,
+            "decided_at": approval_resolution.decided_at,
+            "expires_at": approval_resolution.expires_at,
+            "override_input": approval_resolution.override_input,
+            "metadata": approval_resolution.metadata,
+        }
+        if not approval_resolution.approved:
+            run_context.update_usage("approvals:denied", 1)
+            span.status = RunStatus(
+                code="cancelled",
+                reason="approval_denied",
+                message=approval_resolution.reason or "Approval denied.",
+            )
+            span.output = {
+                "approval_id": approval_id,
+                "status": "approval_denied",
+                "reason": approval_resolution.reason,
+            }
+            span._output_dump = await dump(span.output)
+            return False, None, validated_input
+
+        run_context.update_usage("approvals:approved", 1)
+
+        # Edit-on-approve: merge the human's overrides over the proposed
+        # input (override wins) and re-validate so the handler runs with
+        # the corrected, type-checked values. The audit snapshot above
+        # already recorded what was overridden.
+        if approval_resolution.override_input:
+            merged_input = {**validated_input, **approval_resolution.override_input}
+            validated_input = dict(self.params_model.model_validate(merged_input))
+            # Reflect what actually runs on the public input surface (redacted).
+            span.input = self._redact_validated_input(validated_input)
+            span._input_dump = await dump(span.input)
+            span.metadata["approval"]["effective_input"] = span.input
+
+        return True, None, validated_input
+
+    async def _finalize_suspend(self, suspend_signal: Suspend, span: Any, run_context: Any) -> InteractionEvent:
+        """Record a ``suspend()`` pause on the span and build its InteractionEvent.
+
+        The same durable resume rails as approvals (parent_id + tracing
+        provider) re-fire the handler with the supplied value on resume.
+        """
+        span.status = RunStatus(
+            code="cancelled",
+            reason="input_required",
+            message="Input required to resume.",
+        )
+        span.output = {
+            "suspension_id": suspend_signal.suspension_id,
+            "status": "input_required",
+            "kind": suspend_signal.kind,
+            "payload": suspend_signal.payload,
+        }
+        span._output_dump = await dump(span.output)
+        # Set by the agent on the START event when this suspension fires
+        # inside a tool call. None for direct (non-agent) calls.
+        tool_call_id = span.metadata.get("tool_call_id")
+        span.metadata["suspension"] = {
+            "id": suspend_signal.suspension_id,
+            "kind": suspend_signal.kind,
+            "payload": suspend_signal.payload,
+            "response_schema": suspend_signal.response_schema,
+            "tool_call_id": tool_call_id,
+        }
+        run_context.update_usage("suspends:required", 1)
+        return InteractionEvent(
+            run_id=run_context.id,
+            parent_run_id=run_context.parent_id,
+            path=span.path,
+            call_id=span.call_id,
+            parent_call_id=span.parent_call_id,
+            t0=int(time.time() * 1000),
+            interaction_id=suspend_signal.suspension_id,
+            kind=suspend_signal.kind,
+            runnable_path=span.path,
+            runnable_name=self.name,
+            runnable_type=self.metadata.get("type", self.__class__.__name__),
+            tool_call_id=tool_call_id,
+            payload=suspend_signal.payload,
+            response_schema=suspend_signal.response_schema,
+        )
+
+    def _spawn_background_task(
+        self, validated_input: dict[str, Any], input: dict[str, Any], run_context: Any, span: Any
+    ) -> dict[str, Any]:
+        """Spawn the handler as a background task registered on the parent runnable.
+
+        Returns the ``{"task_id", "status"}`` placeholder output for the
+        launching span. The task streams its events into a queue polled via
+        :meth:`get_background_task` and records its real output on the span
+        when it completes.
+        """
+        parent_span = run_context.parent_span()
+        if not parent_span:
+            raise ValueError("Parent span not found. Cannot run in background.")
+        task_id = "".join(secrets.choice(ALPHABET) for _ in range(6))
+        event_queue = asyncio.Queue()
+
+        async def _bg_handler_execution():
+            output = None
+            try:
+                async for _, final_output, _handler_collector in self._execute_handler(
+                    validated_input, run_context, span, event_queue
+                ):
+                    if final_output is not None:
+                        output = final_output
+
+                # Post hook might modify the output, so we dump afterwards
+                span._output_dump = await dump(output)
+                span.output = output
+                _emit_default_tool_usage(self)
+
+                set_parent_call_id(span.parent_call_id)
+                set_call_id(span.call_id)
+                if self.post_hook is not None:
+                    await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+
+            except asyncio.CancelledError:
+                # Re-raise so asyncio marks the task as cancelled
+                raise
+
+        task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
+
+        # Store task with event queue in parent runnable if available
+        parent_span.runnable._bg_tasks[task_id] = {
+            "task": task,
+            "event_queue": event_queue,
+            "name": self.name,
+            "input": input,
+        }
+        return {"task_id": task_id, "status": "running"}
+
+    def __call__(self, **kwargs: Any) -> Any:
+        """Execute the runnable, returning a TimbalCollector over its event stream.
+
+        This is the public entry point. The collector is the API boundary: it
+        supports ``async for`` iteration and ``.collect()``, and enriches the
+        final OutputEvent with pending approvals/interactions. Framework
+        internals (workflow steps, agent tools) iterate :meth:`_stream`
+        directly, skipping the per-event collector layer.
 
         Args:
             **kwargs: Runtime parameters for the runnable execution.
 
         Returns:
-            A BaseCollector that yields Events and provides collect() method
+            A TimbalCollector that yields Events and provides collect().
 
         Raises:
             ValidationError: If input parameters don't match the params_model
             Exception: Any exception raised during handler execution (captured in OutputEvent)
+        """
+        global _TimbalCollector
+        if _TimbalCollector is None:
+            from ..collectors.impl.timbal import TimbalCollector
+
+            _TimbalCollector = TimbalCollector
+        return _TimbalCollector(async_gen=self._stream(**kwargs))
+
+    async def _stream(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
+        """Raw event stream for one runnable execution (internal entry point).
+
+        Handles:
+        - Parameter validation and merging with default_params
+        - Run context management and tracing setup
+        - Event streaming (StartEvent, DeltaEvents, OutputEvent)
+        - Error handling and cleanup
         """
         t0 = int(time.time() * 1000)
 
@@ -1091,6 +1485,13 @@ class Runnable(ABC, BaseModel):
         _parent_call_id = get_parent_call_id()
         _call_id = get_call_id()
         run_context = get_run_context()
+        # Entry snapshot for the finally block. A non-None entry call id means
+        # we're executing inside another runnable's call on this task; if we
+        # swap in a fresh RunContext below (top-level runnable invoked from a
+        # handler, e.g. an agent called inside a tool), the caller's context
+        # must be restored on exit or the swap leaks into the caller's run.
+        _entry_run_context = run_context
+        _entry_call_id = _call_id
         if run_context is None:
             run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
@@ -1122,13 +1523,15 @@ class Runnable(ABC, BaseModel):
                 )
             _parent_call_id = None
             _call_id = None
-        await run_context.get_session()
+        # Session data is loaded once per run; nested calls see it already set.
+        if run_context._session_data is None:
+            await run_context.get_session()
         previous_resume_values = dict(run_context._resume_values)
         run_context._resume_values.update(resume_values)
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
-        _new_call_id: str = uuid7(as_type="str").replace("-", "")  # type: ignore
+        _new_call_id: str = uuid7(as_type="hex")  # type: ignore
         set_parent_call_id(_new_parent_call_id)
         set_call_id(_new_call_id)
 
@@ -1149,9 +1552,11 @@ class Runnable(ABC, BaseModel):
             Between yields, another coroutine sharing the same asyncio Task
             may overwrite the context vars. Call this after every yield to
             reclaim ownership. Skips the writes if context is already correct
-            (the common single-consumer case).
+            (the common single-consumer case). The run-context check matters
+            independently of the call-id one: a nested top-level runnable may
+            have swapped in (and restored the ids around) a fresh RunContext.
             """
-            if get_call_id() != _new_call_id:
+            if get_call_id() != _new_call_id or get_run_context() is not run_context:
                 set_run_context(run_context)
                 set_parent_call_id(_new_parent_call_id)
                 set_call_id(_new_call_id)
@@ -1172,7 +1577,7 @@ class Runnable(ABC, BaseModel):
                 call_id=span.call_id,
                 parent_call_id=span.parent_call_id,
             )
-            if start_event.type in self._log_events:
+            if start_event.type in self._log_events and _events_logging_enabled():
                 _get_logger().info(start_event.type, **start_event.model_dump())
             yield start_event
             _restore_context()
@@ -1186,188 +1591,21 @@ class Runnable(ABC, BaseModel):
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
 
-            approval_decision = await self._resolve_approval_decision(validated_input)
-            if approval_decision.required:
-                # ``approval_id`` MUST be derived from the unredacted input
-                # so the resume call (which carries the full input) lands
-                # on the same id as the original gate.
-                input_dump = await dump(validated_input)
-                approval_id = _approval_id_for(span.path, input_dump)
-
-                # Compute the redacted view once and use it for every
-                # public surface. The unredacted ``validated_input`` is
-                # still what the handler sees on resume.
-                redacted_input = self._redact_validated_input(validated_input)
-                redaction_active = (
-                    self.approval_redactor is not None or bool(self.approval_redact_keys)
-                )
-                if redaction_active:
-                    span.input = redacted_input
-                    span._input_dump = await dump(redacted_input)
-
-                try:
-                    input_schema = self.format_params_model_schema()
-                except Exception:
-                    input_schema = None
-                # Set by the agent on the START event when this gate fires inside a
-                # tool call (see Agent._safe_tool_dispatch). None for direct calls.
-                tool_call_id = span.metadata.get("tool_call_id")
-                span.metadata["approval"] = {
-                    "id": approval_id,
-                    "required": True,
-                    "prompt": approval_decision.prompt,
-                    "description": approval_decision.description,
-                    "kind": approval_decision.kind,
-                    "ui": approval_decision.ui,
-                    "input_schema": input_schema,
-                    "tool_call_id": tool_call_id,
-                    "metadata": approval_decision.metadata,
-                    "input": redacted_input,
-                }
-                approval_resolution = None
-                approval_cancel: Cancel | None = None
-                if approval_id in run_context._resume_values:
-                    run_context._used_resume_ids.add(approval_id)
-                    raw_resume = run_context._resume_values[approval_id]
-                    # A Cancel value aborts the whole run rather than approving or
-                    # denying. It is not a valid ApprovalResolution input, so it
-                    # routes around coercion — but still flows through the durable
-                    # claim below so a cancel and an approve racing on two workers
-                    # can't both win.
-                    if isinstance(raw_resume, Cancel):
-                        approval_cancel = raw_resume
-                    else:
-                        approval_resolution = _coerce_approval_resolution(raw_resume)
-                if approval_resolution is not None and approval_resolution.is_expired():
-                    span.metadata["approval"]["expired"] = True
-                    span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
-                    # Counter fires for the *expired* resolution. The gate
-                    # then re-emits below, which adds a fresh :required tick.
-                    run_context.update_usage("approvals:expired", 1)
-                    approval_resolution = None
-
-                # A decision OR a cancel claims the gate; the first claimer wins and
-                # any later duplicate (resolve or cancel) stops here.
-                if (approval_resolution is not None or approval_cancel is not None) and (
-                    run_context._tracing_provider is not None
-                ):
-                    claimed = await run_context._tracing_provider.claim_approval(
-                        str(run_context.parent_id) if run_context.parent_id else None,
-                        approval_id,
-                        str(run_context.id),
+            # Fast path: requires_approval=False (the default) skips the whole
+            # gate — no policy resolution, no ApprovalPolicyDecision construction.
+            if self.requires_approval is not False:
+                approval_decision = await self._resolve_approval_decision(validated_input)
+                if approval_decision.required:
+                    proceed, approval_event, validated_input = await self._apply_approval_gate(
+                        approval_decision, validated_input, span, run_context
                     )
-                    if not claimed:
-                        span.metadata["approval"]["claim"] = {
-                            "claimed": False,
-                            "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
-                        }
-                        span.status = RunStatus(
-                            code="cancelled",
-                            reason="approval_already_claimed",
-                            message="Approval was already claimed by another resume run.",
-                        )
-                        span.output = {
-                            "approval_id": approval_id,
-                            "status": "approval_already_claimed",
-                        }
-                        span._output_dump = await dump(span.output)
+                    if approval_event is not None:
+                        if approval_event.type in self._log_events and _events_logging_enabled():
+                            _get_logger().info(approval_event.type, **approval_event.model_dump())
+                        yield approval_event
+                        _restore_context()
+                    if not proceed:
                         return
-
-                if approval_cancel is not None:
-                    run_context.update_usage("approvals:cancelled", 1)
-                    message = approval_cancel.reason or "Run cancelled by user."
-                    span.metadata["approval"]["cancelled"] = True
-                    span.status = RunStatus(code="cancelled", reason="cancelled", message=message)
-                    span.output = {"approval_id": approval_id, "status": "cancelled", "reason": message}
-                    span._output_dump = await dump(span.output)
-                    return
-
-                if approval_resolution is None:
-                    # Status/output MUST be set BEFORE the yield. If the
-                    # consumer breaks the stream right after seeing the
-                    # ApprovalEvent, GeneratorExit fires at the yield and
-                    # we'd otherwise persist this span as 'interrupted'.
-                    span.status = RunStatus(
-                        code="cancelled",
-                        reason="approval_required",
-                        message="Approval required before runnable execution.",
-                    )
-                    span.output = {
-                        "approval_id": approval_id,
-                        "status": "approval_required",
-                        "prompt": approval_decision.prompt,
-                    }
-                    span._output_dump = await dump(span.output)
-
-                    approval_event = ApprovalEvent(
-                        run_id=run_context.id,
-                        parent_run_id=run_context.parent_id,
-                        path=span.path,
-                        call_id=span.call_id,
-                        parent_call_id=span.parent_call_id,
-                        t0=int(time.time() * 1000),
-                        approval_id=approval_id,
-                        runnable_path=span.path,
-                        runnable_name=self.name,
-                        runnable_type=self.metadata.get("type", self.__class__.__name__),
-                        tool_call_id=tool_call_id,
-                        input=redacted_input,
-                        input_schema=input_schema,
-                        prompt=approval_decision.prompt,
-                        description=approval_decision.description,
-                        kind=approval_decision.kind,
-                        ui=approval_decision.ui,
-                        metadata=approval_decision.metadata,
-                    )
-                    run_context.update_usage("approvals:required", 1)
-                    if approval_event.type in self._log_events:
-                        _get_logger().info(approval_event.type, **approval_event.model_dump())
-                    yield approval_event
-                    _restore_context()
-                    return
-
-                # Resolution found and not expired — capture the audit
-                # snapshot before deciding the gate's outcome. Typed fields
-                # are surfaced under ``resolution`` so trace consumers can
-                # query e.g. ``approval.resolution.approver_id`` directly.
-                span.metadata["approval"]["resolution"] = {
-                    "approved": approval_resolution.approved,
-                    "reason": approval_resolution.reason,
-                    "approver_id": approval_resolution.approver_id,
-                    "comment": approval_resolution.comment,
-                    "decided_at": approval_resolution.decided_at,
-                    "expires_at": approval_resolution.expires_at,
-                    "override_input": approval_resolution.override_input,
-                    "metadata": approval_resolution.metadata,
-                }
-                if not approval_resolution.approved:
-                    run_context.update_usage("approvals:denied", 1)
-                    span.status = RunStatus(
-                        code="cancelled",
-                        reason="approval_denied",
-                        message=approval_resolution.reason or "Approval denied.",
-                    )
-                    span.output = {
-                        "approval_id": approval_id,
-                        "status": "approval_denied",
-                        "reason": approval_resolution.reason,
-                    }
-                    span._output_dump = await dump(span.output)
-                    return
-
-                run_context.update_usage("approvals:approved", 1)
-
-                # Edit-on-approve: merge the human's overrides over the proposed
-                # input (override wins) and re-validate so the handler runs with
-                # the corrected, type-checked values. The audit snapshot above
-                # already recorded what was overridden.
-                if approval_resolution.override_input:
-                    merged_input = {**validated_input, **approval_resolution.override_input}
-                    validated_input = dict(self.params_model.model_validate(merged_input))
-                    # Reflect what actually runs on the public input surface (redacted).
-                    span.input = self._redact_validated_input(validated_input)
-                    span._input_dump = await dump(span.input)
-                    span.metadata["approval"]["effective_input"] = span.input
 
             # pre_hook runs only when we're actually going to execute the
             # handler. We deliberately defer it past the approval gate so
@@ -1379,48 +1617,14 @@ class Runnable(ABC, BaseModel):
 
             # Background task
             if run_in_background:
-                parent_span = run_context.parent_span()
-                if not parent_span:
-                    raise ValueError("Parent span not found. Cannot run in background.")
-                # task_id = uuid7(as_type="str").replace("-", "")
-                task_id = "".join(secrets.choice(ALPHABET) for _ in range(6))
-                event_queue = asyncio.Queue()
-
-                async def _bg_handler_execution():
-                    nonlocal output, collector
-                    try:
-                        async for _, final_output, handler_collector in self._execute_handler(
-                            validated_input, run_context, span, event_queue
-                        ):
-                            if handler_collector is not None:
-                                collector = handler_collector
-                            if final_output is not None:
-                                output = final_output
-
-                        # Post hook might modify the output, so we dump afterwards
-                        span._output_dump = await dump(output)
-                        span.output = output
-                        _emit_default_tool_usage(self)
-
-                        set_parent_call_id(_new_parent_call_id)
-                        set_call_id(_new_call_id)
-                        if self.post_hook is not None:
-                            await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
-
-                    except asyncio.CancelledError:
-                        # Re-raise so asyncio marks the task as cancelled
-                        raise
-
-                task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
-
-                # Store task with event queue in parent runnable if available
-                parent_span.runnable._bg_tasks[task_id] = {
-                    "task": task,
-                    "event_queue": event_queue,
-                    "name": self.name,
-                    "input": input,
-                }
-                output = {"task_id": task_id, "status": "running"}
+                output = self._spawn_background_task(validated_input, input, run_context, span)
+            elif not self._is_async_gen and not self._is_gen:
+                # Fast path: plain sync/coroutine handlers cannot yield events,
+                # so skip the async-generator/tuple protocol entirely.
+                try:
+                    output = await self._execute_simple(validated_input)
+                except Suspend as susp:
+                    suspend_signal = susp
             else:
                 # Iterate over events from handler and yield them
                 try:
@@ -1455,46 +1659,8 @@ class Runnable(ABC, BaseModel):
                     suspend_signal = susp
 
             if suspend_signal is not None:
-                span.status = RunStatus(
-                    code="cancelled",
-                    reason="input_required",
-                    message="Input required to resume.",
-                )
-                span.output = {
-                    "suspension_id": suspend_signal.suspension_id,
-                    "status": "input_required",
-                    "kind": suspend_signal.kind,
-                    "payload": suspend_signal.payload,
-                }
-                span._output_dump = await dump(span.output)
-                # Set by the agent on the START event when this suspension fires
-                # inside a tool call. None for direct (non-agent) calls.
-                tool_call_id = span.metadata.get("tool_call_id")
-                span.metadata["suspension"] = {
-                    "id": suspend_signal.suspension_id,
-                    "kind": suspend_signal.kind,
-                    "payload": suspend_signal.payload,
-                    "response_schema": suspend_signal.response_schema,
-                    "tool_call_id": tool_call_id,
-                }
-                run_context.update_usage("suspends:required", 1)
-                interaction_event = InteractionEvent(
-                    run_id=run_context.id,
-                    parent_run_id=run_context.parent_id,
-                    path=span.path,
-                    call_id=span.call_id,
-                    parent_call_id=span.parent_call_id,
-                    t0=int(time.time() * 1000),
-                    interaction_id=suspend_signal.suspension_id,
-                    kind=suspend_signal.kind,
-                    runnable_path=span.path,
-                    runnable_name=self.name,
-                    runnable_type=self.metadata.get("type", self.__class__.__name__),
-                    tool_call_id=tool_call_id,
-                    payload=suspend_signal.payload,
-                    response_schema=suspend_signal.response_schema,
-                )
-                if interaction_event.type in self._log_events:
+                interaction_event = await self._finalize_suspend(suspend_signal, span, run_context)
+                if interaction_event.type in self._log_events and _events_logging_enabled():
                     _get_logger().info(interaction_event.type, **interaction_event.model_dump())
                 yield interaction_event
                 _restore_context()
@@ -1524,6 +1690,9 @@ class Runnable(ABC, BaseModel):
                 set_call_id(_new_call_id)
                 if self.post_hook is not None and not run_in_background:
                     await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+                    # Hooks may mutate message content in place; drop any cached
+                    # dumps on the output so the re-dump below sees the changes.
+                    invalidate_message_dump_caches(span.output)
 
                 # Post hook might modify the output, so we dump afterwards
                 span._output_dump = await dump(span.output)
@@ -1691,7 +1860,16 @@ class Runnable(ABC, BaseModel):
             run_context._resume_values = previous_resume_values
             set_parent_call_id(_parent_call_id)
             set_call_id(_call_id)
-            if output_event.type in self._log_events:
+            if _entry_call_id is not None:
+                # Nested invocation: restore the caller's run context. A
+                # top-level runnable invoked from a handler may have swapped in
+                # a fresh RunContext above; with direct in-task iteration
+                # (agent tool fast path, linear workflow steps) that swap would
+                # otherwise leak into the caller's run. Top-level invocations
+                # (entry call id None) deliberately leave their context set so
+                # sequential same-task runs chain sessions implicitly.
+                set_run_context(_entry_run_context)
+            if output_event.type in self._log_events and _events_logging_enabled():
                 _get_logger().info(output_event.type, **output_event.model_dump())
             if not _generator_closed:
                 yield output_event

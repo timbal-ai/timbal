@@ -9,7 +9,7 @@ These tests run live against the Timbal API and require a populated
     TIMBAL_APP_ID=<app id to record traces under>
 
 All tests are skipped automatically if the file is absent.
-Run with:  uv run pytest python/tests/core/test_platform_tracing_provider.py -v
+Run with:  uv run pytest python/tests/state/tracing/providers/test_platform_tracing_provider.py -v
 """
 
 import os
@@ -20,7 +20,7 @@ import pytest
 TEST_ENV_FILE = Path(__file__).parent / ".env.test_platform_tracing"
 SKIP_REASON = (
     "Platform tracing integration tests require "
-    ".env.test_platform_tracing in tests/core/. "
+    ".env.test_platform_tracing in this directory. "
     "See the module docstring for required variables."
 )
 

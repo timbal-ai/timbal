@@ -45,7 +45,7 @@ def _assert_agent_answer(res: OutputEvent, expected: str) -> None:
         "openai/gpt-4o-mini",
         "openai/gpt-4o-mini-responses",
         "google/gemini-3.1-flash-lite",
-        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-sonnet-5",
         # ? Add more tests for other models.
     ]
 )

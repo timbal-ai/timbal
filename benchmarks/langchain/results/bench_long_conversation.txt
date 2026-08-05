@@ -1,0 +1,80 @@
+
+[1m════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal vs LangGraph — long conversations / long messages[0m
+  50 iters · histories [10, 50, 200] · msg sizes [200, 5000, 20000]
+  sessions: 15 × 20 turns
+  [2mLLMs faked (instant answer, no tools) — pure framework overhead.[0m
+  [2mTimbal: built-in tracing on. LangGraph: bare (no LangSmith).[0m
+[1m════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mVerifying correctness...[0m
+  stateless n=10: Timbal='ok (10 msgs seen)'  LangGraph='ok (10 msgs seen)'
+  session turn 3: Timbal='ok (5 msgs seen)'  LangGraph='ok (5 msgs seen)'
+  [2mok — both frameworks accumulate identical histories[0m
+
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 1: Long history, single turn  (N messages in → 1 LLM turn, ×50)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+  [2mHistory injected per call (stateless). ~60-char messages.[0m
+
+  [1mLatency p50 by history length[0m
+    N messages    Timbal p50        LG p50     ratio
+  ────────────  ────────────  ────────────  ────────
+            10      121.8 µs       1.10 ms     9.06x
+            50      180.5 µs       1.44 ms     8.01x
+           200      409.3 µs       2.93 ms     7.15x
+
+  [1mMarginal cost per message  (slope 10 → 200)[0m
+  Timbal          +1.51 µs / message
+  LG (bare)       +9.60 µs / message
+
+  [1mMemory per run  (N=200, ×50 runs)[0m
+  Timbal               1.1 KB
+  LG (bare)            2.9 KB
+
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 2: Long messages, single turn  (20-message history, size scales, ×50)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency p50 by message size[0m
+     msg bytes    Timbal p50        LG p50     ratio
+  ────────────  ────────────  ────────────  ────────
+           200      138.5 µs       1.20 ms     8.67x
+          5000      135.0 µs       1.35 ms    10.00x
+         20000      144.0 µs       2.42 ms    16.82x
+
+  [1mMarginal cost per KB of message  (slope 200 → 20000)[0m
+  Timbal          +0.28 µs / KB of message
+  LG (bare)       +61.75 µs / KB of message
+
+  [1mMemory per run  (msg=20000 B, ×50 runs)[0m
+  Timbal               0.8 KB
+  LG (bare)           18.9 KB
+
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 3: Multi-turn session  (20 turns, ×15 sessions)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+  [2mStateful memory: Timbal parent_id chaining (in-memory tracing provider)[0m
+  [2mvs LangGraph MemorySaver checkpointer. History grows every turn.[0m
+
+  [1mPer-turn latency p50 (history grows with turn index)[0m
+          turn        Timbal     LG (bare)     ratio
+  ────────────  ────────────  ────────────  ────────
+             1      125.1 µs       1.36 ms    10.91x
+             5      117.1 µs       1.36 ms    11.60x
+            10      129.0 µs       1.50 ms    11.63x
+            20      152.5 µs       1.84 ms    12.08x
+
+  [1mFull-session wall time  (20 turns)[0m
+  Timbal               2.7 ms
+  LG (bare)           31.1 ms
+
+  [1mMemory per session  (20 turns, peak / 3 sessions)[0m
+  Timbal              45.2 KB
+  LG (bare)          158.7 KB
+
+[2m────────────────────────────────────────────────────────────────────────────
+  Agent/graph creation excluded (except fresh per-session checkpointers,
+  mirrored by Timbal's cleared traces). Histories prebuilt outside timing.
+────────────────────────────────────────────────────────────────────────────[0m
+

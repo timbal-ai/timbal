@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .model import create_model_from_handler, issubclass_safe, resolve_default
     from .net import is_port_in_use
     from .schema import SupportedStringFormats, SupportedTypes, assert_never, is_list, transform_schema
-    from .serialization import coerce_to_dict, dump, safe_is_nan, sync_to_async_gen
+    from .serialization import coerce_to_dict, dump, invalidate_message_dump_caches, safe_is_nan, sync_to_async_gen
 
 __all__ = [
     # import_spec
@@ -28,6 +28,7 @@ __all__ = [
     "resolve_default",
     # serialization
     "dump",
+    "invalidate_message_dump_caches",
     "safe_is_nan",
     "coerce_to_dict",
     "sync_to_async_gen",
@@ -50,6 +51,7 @@ _LAZY_IMPORTS = {
     "resolve_default": ".model",
     # serialization
     "dump": ".serialization",
+    "invalidate_message_dump_caches": ".serialization",
     "safe_is_nan": ".serialization",
     "coerce_to_dict": ".serialization",
     "sync_to_async_gen": ".serialization",

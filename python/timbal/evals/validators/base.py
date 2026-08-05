@@ -118,6 +118,30 @@ class BaseValidator(ABC, BaseModel):
 
         return data
 
+    def _normalize_bool_value(self) -> None:
+        """Normalize ``value`` to a boolean expectation (default True)."""
+        self.value = True if self.value is None else bool(self.value)
+
+    def _resolve_expected_str(self, ctx: ValidationContext, kind: str) -> str | None:
+        """Resolve the target to a string for boolean-expectation validators.
+
+        Returns None when the value is non-string and the expectation is False
+        (nothing further to check). Raises when a string was expected.
+        """
+        from ...types.message import Message
+        from ..utils import resolve_target
+
+        _, actual_value = resolve_target(ctx.trace, self.target, self.path_key)
+
+        if isinstance(actual_value, Message):
+            actual_value = actual_value.collect_text()
+
+        if not isinstance(actual_value, str):
+            if self.value:
+                raise AssertionError(f"expected {kind} string, got {type(actual_value).__name__}")
+            return None
+        return actual_value
+
     def apply_transform(self, value: str) -> str:
         """Apply configured transforms to a value.
 

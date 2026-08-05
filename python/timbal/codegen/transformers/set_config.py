@@ -4,9 +4,12 @@ import libcst as cst
 
 from ..cli_utils import arg_input, parse_json_arg
 from ..cst_utils import (
+    assignment_resolves_to,
     build_cst_value,
     collect_assignments,
+    insert_before_assignments,
     is_bare_function_step,
+    merge_config_kwargs,
     resolve_entry_point_type,
     resolve_runnable_name,
     wrap_bare_function_step,
@@ -334,23 +337,8 @@ class ToolConfigSetter(cst.CSTTransformer):
             return updated_node
 
         body = list(updated_node.body)
-
         # Insert before the entry point assignment (plain or annotated).
-        insert_idx = len(body)
-        for i, stmt in enumerate(body):
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for item in stmt.body:
-                    if isinstance(item, cst.Assign):
-                        for t in item.targets:
-                            if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
-                                insert_idx = min(insert_idx, i)
-                    elif isinstance(item, cst.AnnAssign):
-                        if isinstance(item.target, cst.Name) and item.target.value == self.entry_point:
-                            insert_idx = min(insert_idx, i)
-
-        for stmt in reversed(stmts_to_add):
-            body.insert(insert_idx, stmt)
-
+        insert_before_assignments(body, stmts_to_add, target_names={self.entry_point})
         return updated_node.with_changes(body=body)
 
     def _migrate_inline(self, call: cst.Call) -> cst.Call:
@@ -374,16 +362,7 @@ class ToolConfigSetter(cst.CSTTransformer):
 
     def _build_configured_call(self, existing_call: cst.Call) -> cst.Call:
         """Merge new config kwargs into an existing Call, preserving all other args."""
-        # Keep existing args except those being overridden or removed.
-        args = [
-            a for a in existing_call.args
-            if not (isinstance(a.keyword, cst.Name) and a.keyword.value in self.config)
-        ]
-        # Append new/updated config kwargs (None = remove, already dropped above).
-        for key, value in self.config.items():
-            if value is not None:
-                args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
-        return existing_call.with_changes(args=args)
+        return merge_config_kwargs(existing_call, self.config)
 
 
 class StepConstructorConfigSetter(cst.CSTTransformer):
@@ -414,46 +393,21 @@ class StepConstructorConfigSetter(cst.CSTTransformer):
     # -- Constructor kwargs update ---------------------------------------------
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
-        for target in updated_node.targets:
-            if not isinstance(target.target, cst.Name):
-                continue
-            target_name = target.target.value
-            if target_name == self.entry_point:
-                continue
-            if isinstance(updated_node.value, cst.Call):
-                resolved = resolve_runnable_name(updated_node.value)
-                if resolved == self.step_name:
-                    self.matched = True
-                    return updated_node.with_changes(
-                        value=self._merge_config_into_call(updated_node.value),
-                    )
+        if assignment_resolves_to(updated_node, self.entry_point, self.step_name):
+            self.matched = True
+            return updated_node.with_changes(
+                value=merge_config_kwargs(updated_node.value, self.config),
+            )
         return updated_node
 
     def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
         """Handle annotated step variables, e.g. ``agent_a: Agent = Agent(...)``."""
-        if (
-            not isinstance(updated_node.target, cst.Name)
-            or updated_node.target.value == self.entry_point
-            or not isinstance(updated_node.value, cst.Call)
-        ):
-            return updated_node
-        if resolve_runnable_name(updated_node.value) == self.step_name:
+        if assignment_resolves_to(updated_node, self.entry_point, self.step_name):
             self.matched = True
             return updated_node.with_changes(
-                value=self._merge_config_into_call(updated_node.value),
+                value=merge_config_kwargs(updated_node.value, self.config),
             )
         return updated_node
-
-    def _merge_config_into_call(self, call: cst.Call) -> cst.Call:
-        """Drop overridden kwargs and append the new config values."""
-        args = [
-            a for a in call.args
-            if not (isinstance(a.keyword, cst.Name) and a.keyword.value in self.config)
-        ]
-        for key, value in self.config.items():
-            if value is not None:
-                args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
-        return call.with_changes(args=args)
 
     # -- Context tracking for depends_on / step_span string replacement --------
 

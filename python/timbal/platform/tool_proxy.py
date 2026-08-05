@@ -32,7 +32,7 @@ def build_tool_proxy_headers() -> dict[str, str]:
         "x-timbal-version": __version__,
     }
 
-    # Match llm_router: always attach call_id when the context var is set (tool runs always set it).
+    # Match the llm router: always attach call_id when the context var is set (tool runs always set it).
     call_id = get_call_id()
     if call_id is not None:
         headers["x-timbal-call-id"] = call_id

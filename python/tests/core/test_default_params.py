@@ -1,5 +1,4 @@
 import asyncio
-import threading
 import time
 from datetime import datetime
 
@@ -353,21 +352,23 @@ class TestDefaultParamsPerformance:
 
     @pytest.mark.asyncio
     async def test_parallel_callable_execution(self):
-        """Test that multiple callable params are executed in parallel."""
+        """Test that multiple async callable params are executed in parallel.
+
+        Sync param callables run inline on the event loop (they are cheap
+        accessors by contract), so concurrent resolution is only observable
+        with async callables.
+        """
 
         state = {"active": 0, "overlap": False}
-        lock = threading.Lock()
 
         def make_probe(name: str):
-            def fn() -> str:
-                with lock:
-                    state["active"] += 1
-                    if state["active"] == 2:
-                        state["overlap"] = True
-                # Yield the thread so the sibling callable can enter while we're still active.
-                time.sleep(0.05)
-                with lock:
-                    state["active"] -= 1
+            async def fn() -> str:
+                state["active"] += 1
+                if state["active"] == 2:
+                    state["overlap"] = True
+                # Yield the loop so the sibling callable can enter while we're still active.
+                await asyncio.sleep(0.05)
+                state["active"] -= 1
                 return name
 
             return fn

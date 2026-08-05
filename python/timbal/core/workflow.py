@@ -12,7 +12,7 @@ except ImportError:
     from typing_extensions import override
 
 import structlog
-from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
+from pydantic import BaseModel, ConfigDict, computed_field, create_model
 
 from ..errors import InterruptError, PauseRequired, RunCancelled, SpanNotFound, WorkflowStepError
 from ..state import get_call_id, get_parent_call_id, set_parent_call_id
@@ -30,12 +30,16 @@ class StepState(Enum):
 
 
 class StepStatus:
-    __slots__ = ("state", "done", "error")
+    __slots__ = ("state", "done", "error", "signal")
 
     def __init__(self) -> None:
         self.state: StepState = StepState.PENDING
         self.done: asyncio.Event = asyncio.Event()
         self.error: dict[str, Any] | None = None
+        self.signal: BaseException | None = None
+        """Deferred outcome signal recorded by _run_step: PauseRequired,
+        RunCancelled, or the exception raised while streaming the step.
+        Aggregated by handler() after the step finishes."""
 
 
 logger = structlog.get_logger("timbal.core.workflow")
@@ -44,10 +48,11 @@ logger = structlog.get_logger("timbal.core.workflow")
 class Workflow(Runnable):
     """Orchestrates execution of multiple steps in a DAG with automatic dependency linking."""
 
-    _steps: dict[str, Runnable] = PrivateAttr(default_factory=dict)
-
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
+        # Plain instance attributes (not PrivateAttr) — hot reads on every run.
+        self._steps: dict[str, Runnable] = {}
+        self._is_linear: bool = True
         self._path = self.name
         self._is_orchestrator = True
         self._is_coroutine = False
@@ -192,34 +197,44 @@ class Workflow(Runnable):
             logger.info("Linking steps", previous_step=dep, next_step=runnable.name)
             self._link(dep, runnable.name)
 
+        # A workflow is a linear chain when each step depends exactly on its
+        # predecessor (and the first on nothing). handler() then skips the
+        # task/queue fan-in machinery entirely.
+        steps = list(self._steps.values())
+        self._is_linear = all(
+            (not s.previous_steps) if i == 0 else s.previous_steps == {steps[i - 1].name}
+            for i, s in enumerate(steps)
+        )
+
         return self
 
-    async def _enqueue_step_events(
+    async def _run_step(
         self,
         step: Runnable,
-        queue: asyncio.Queue,
         statuses: dict[str, StepStatus],
         **kwargs: Any,
-    ) -> None:
-        """Execute a single workflow step and enqueue its events to the shared queue.
+    ) -> AsyncGenerator[Any, None]:
+        """Execute a single workflow step and yield its events.
 
-        Sentinel contract: this coroutine MUST push exactly one sentinel value to
-        ``queue`` on every exit path (None, an Exception, or a PauseRequired).
-        The consumer in :meth:`handler` decrements ``remaining`` on each sentinel,
-        and a missed sentinel hangs the consumer on ``queue.get()`` forever. The
-        outer try/finally below guarantees this even when a ``BaseException``
-        subclass (e.g. a user-defined ``when`` callable raising ``BaseException``,
-        or task-level ``CancelledError``) leaks past ``except Exception``.
+        The step's outcome is recorded on ``statuses[step.name]``:
+        ``state``/``error`` for regular completion/failure/skip, and ``signal``
+        for deferred control flow (PauseRequired, RunCancelled, or the raised
+        exception). ``done`` is ALWAYS set on exit so dependents never hang.
+
+        Shared by both execution modes in :meth:`handler` — the sequential
+        fast path iterates it directly; the concurrent path drives it from a
+        task via :meth:`_enqueue_step_events`.
         """
         status = statuses[step.name]
-        # Value pushed to the queue exactly once when this coroutine exits.
-        # Defaults to None (= regular completion); branches that need a different
-        # signal (Exception, PauseRequired) overwrite it before returning.
-        sentinel: Any = None
 
         try:
-            # Await for the completion of all ancestors
-            await asyncio.gather(*[statuses[step_name].done.wait() for step_name in step.previous_steps])
+            # Await for the completion of all ancestors. Sequential awaits are
+            # equivalent to gather() for waiting on ALL events, without a task
+            # per dependency; the is_set() guard skips already-completed ones.
+            for step_name in step.previous_steps:
+                dep_done = statuses[step_name].done
+                if not dep_done.is_set():
+                    await dep_done.wait()
             # This serves multiple purposes.
             # - It ensures that the step is not executed multiple times.
             # - It allows the step to be skipped from other steps, e.g. if a previous step failed.
@@ -270,8 +285,11 @@ class Workflow(Runnable):
 
             status.state = StepState.RUNNING
             try:
-                async for event in step(**resolved_input):
-                    await queue.put(event)
+                # Iterate the raw stream: the TimbalCollector wrapper is only
+                # needed at the public API boundary (.collect(), pending-gate
+                # enrichment); a per-event collector layer here is pure overhead.
+                async for event in step._stream(**resolved_input):
+                    yield event
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
@@ -279,7 +297,7 @@ class Workflow(Runnable):
                     ):
                         logger.info(f"Step {step.name} paused ({event.status.reason}).")
                         status.state = StepState.FAILED
-                        sentinel = PauseRequired(event)
+                        status.signal = PauseRequired(event)
                         return
                     if (
                         isinstance(event, OutputEvent)
@@ -290,7 +308,7 @@ class Workflow(Runnable):
                         # whole workflow run rather than continuing other steps.
                         logger.info(f"Step {step.name} cancelled by user.")
                         status.state = StepState.FAILED
-                        sentinel = RunCancelled(event.status.message or "Run cancelled by user.")
+                        status.signal = RunCancelled(event.status.message or "Run cancelled by user.")
                         return
                     if isinstance(event, OutputEvent) and event.error is not None:
                         logger.info(f"Step {step.name} completed with error.")
@@ -306,20 +324,19 @@ class Workflow(Runnable):
                     "message": str(e),
                     "traceback": traceback.format_exc(),
                 }
-                sentinel = e
+                status.signal = e
                 return
             finally:
                 status.done.set()
 
         except BaseException as e:
             # Catch BaseException subclasses that bypass the inner `except Exception`
-            # (custom BaseException from user `when`/resolver callables, task-level
-            # CancelledError, etc.). Without this branch the outer `finally` still
-            # guarantees the sentinel, but flagging the step as FAILED keeps
-            # downstream-step state consistent. Re-raise so workflow cleanup
-            # (gather(..., return_exceptions=True) in handler's finally) proceeds.
+            # (custom BaseException from user `when`/resolver callables, consumer
+            # GeneratorExit, task-level CancelledError, etc.). Flagging the step
+            # as FAILED and setting `done` keeps downstream-step state consistent.
+            # Re-raise so the consumer (or task cleanup) proceeds.
             logger.warning(
-                "Step %s exited via BaseException %s; ensuring sentinel is enqueued.",
+                "Step %s exited via BaseException %s.",
                 step.name,
                 type(e).__name__,
             )
@@ -329,17 +346,44 @@ class Workflow(Runnable):
             raise
 
         finally:
-            # GUARANTEE the consumer in handler() always sees a sentinel for this
-            # step. put_nowait is safe because the queue is unbounded; using a
-            # non-awaiting call here also avoids re-entering the event loop during
-            # exception unwinding.
+            if not status.done.is_set():
+                status.done.set()
+
+    async def _enqueue_step_events(
+        self,
+        step: Runnable,
+        queue: asyncio.Queue,
+        statuses: dict[str, StepStatus],
+        **kwargs: Any,
+    ) -> None:
+        """Drive one step for concurrent execution, forwarding its events to the queue.
+
+        Sentinel contract: exactly one sentinel — the step's own StepStatus —
+        is pushed on every exit path. The consumer in :meth:`handler`
+        decrements ``remaining`` per StepStatus and reads its ``signal``; a
+        missed sentinel would hang the consumer on ``queue.get()`` forever,
+        so the finally guarantees it even for BaseException exits.
+        """
+        status = statuses[step.name]
+        try:
+            async for event in self._run_step(step, statuses, **kwargs):
+                # put_nowait: the queue is unbounded, so put() never suspends —
+                # awaiting it is pure coroutine overhead per event.
+                queue.put_nowait(event)
+        finally:
             try:
-                queue.put_nowait(sentinel)
+                queue.put_nowait(status)
             except Exception:
                 logger.exception("Failed to enqueue sentinel for step %s", step.name)
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
-        """Execute all steps concurrently, respecting dependencies.
+        """Execute all steps, respecting dependencies.
+
+        Linear chains (each step depends exactly on its predecessor — the
+        common sequential pipeline) run in a direct loop with no tasks or
+        queue: concurrency is impossible, so the fan-in machinery is pure
+        overhead. Everything else runs one task per step multiplexed
+        through a queue.
 
         When multiple parallel steps pause (approval gate or suspend()), every
         pause is drained (so each step emits its OutputEvent + Approval/
@@ -349,55 +393,88 @@ class Workflow(Runnable):
         tool-multiplexing behaviour and prevents the first pause from cancelling
         later ones.
         """
-        queue = asyncio.Queue()
         statuses = {step_name: StepStatus() for step_name in self._steps.keys()}
-        tasks = [
-            asyncio.create_task(self._enqueue_step_events(step, queue, statuses, **kwargs))
-            for step in self._steps.values()
-        ]
-
         first_pending_pause: PauseRequired | None = None
         first_pending_exception: Exception | None = None
 
-        try:
-            remaining = len(tasks)
-            while remaining > 0:
-                event = await queue.get()
-                if isinstance(event, InterruptError):
-                    raise event
-                if isinstance(event, PauseRequired):
-                    if first_pending_pause is None:
-                        first_pending_pause = event
-                    remaining -= 1
-                    continue
-                if isinstance(event, Exception):
-                    if first_pending_exception is None:
-                        first_pending_exception = event
-                    remaining -= 1
-                    continue
-                if event is None:
-                    remaining -= 1
-                else:
-                    yield event
-            # A pause (approval or suspend) takes precedence over a step error in
-            # the surfaced status; both ride the same durable resume rails.
-            if first_pending_pause is not None:
-                raise first_pending_pause
-            if first_pending_exception is not None:
-                raise first_pending_exception
-            failed_steps = sorted(
-                (name, step_status)
-                for name, step_status in statuses.items()
-                if step_status.state == StepState.FAILED
-            )
-            if failed_steps:
-                step_name, step_status = failed_steps[0]
-                raise WorkflowStepError(step_name, step_status.error)
-        except (asyncio.CancelledError, InterruptError):
-            raise
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+        def _record_signal(signal: BaseException | None) -> None:
+            nonlocal first_pending_pause, first_pending_exception
+            if isinstance(signal, InterruptError):
+                raise signal
+            if isinstance(signal, PauseRequired):
+                if first_pending_pause is None:
+                    first_pending_pause = signal
+            elif isinstance(signal, Exception):
+                if first_pending_exception is None:
+                    first_pending_exception = signal
+
+        if self._is_linear:
+            # Sequential fast path — insertion order is topological (links can
+            # only point at already-registered steps).
+            current_task = asyncio.current_task()
+
+            def _cancel_pending() -> bool:
+                # A cancelled step records 'interrupted' on its own span and
+                # swallows the CancelledError. In concurrent mode the workflow
+                # still sees the cancellation at queue.get() (and never yields
+                # the interrupted step's final event); here we share the task
+                # with the step, so detect the still-pending cancel request and
+                # re-raise before forwarding post-cancel events.
+                return current_task is not None and current_task.cancelling()
+
+            for step in self._steps.values():
+                try:
+                    async for event in self._run_step(step, statuses, **kwargs):
+                        if _cancel_pending():
+                            raise asyncio.CancelledError
+                        yield event
+                except (asyncio.CancelledError, GeneratorExit, InterruptError):
+                    raise
+                except BaseException:  # noqa: BLE001
+                    # Parity with concurrent mode, where a BaseException from a
+                    # user `when`/resolver callable dies inside the step task
+                    # (gather(..., return_exceptions=True)) and the workflow
+                    # surfaces the failure via failed_steps below. _run_step
+                    # already marked the step FAILED and logged.
+                    pass
+                if _cancel_pending():
+                    raise asyncio.CancelledError
+                _record_signal(statuses[step.name].signal)
+        else:
+            queue = asyncio.Queue()
+            tasks = [
+                asyncio.create_task(self._enqueue_step_events(step, queue, statuses, **kwargs))
+                for step in self._steps.values()
+            ]
+            try:
+                remaining = len(tasks)
+                while remaining > 0:
+                    item = await queue.get()
+                    if isinstance(item, StepStatus):
+                        remaining -= 1
+                        _record_signal(item.signal)
+                    else:
+                        yield item
+            except (asyncio.CancelledError, InterruptError):
+                raise
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+        # A pause (approval or suspend) takes precedence over a step error in
+        # the surfaced status; both ride the same durable resume rails.
+        if first_pending_pause is not None:
+            raise first_pending_pause
+        if first_pending_exception is not None:
+            raise first_pending_exception
+        failed_steps = sorted(
+            (name, step_status)
+            for name, step_status in statuses.items()
+            if step_status.state == StepState.FAILED
+        )
+        if failed_steps:
+            step_name, step_status = failed_steps[0]
+            raise WorkflowStepError(step_name, step_status.error)

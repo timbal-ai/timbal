@@ -34,16 +34,20 @@ def reset_platform_config_cache(request):
     if is_integration:
         _cl._cached_default_config = None
         _cl._default_config_resolved = False
+        _cl._file_config_cache.clear()
         yield
         _cl._cached_default_config = None
         _cl._default_config_resolved = False
+        _cl._file_config_cache.clear()
         return
 
     _cl._cached_default_config = None
     _cl._default_config_resolved = True
+    _cl._file_config_cache.clear()
     yield
     _cl._cached_default_config = None
     _cl._default_config_resolved = True
+    _cl._file_config_cache.clear()
 
 
 @pytest.fixture(autouse=True)

@@ -1,7 +1,7 @@
 # Source of truth for all supported LLM models.
 # Pricing is in USD per 1M tokens (input / output). null = unknown or not publicly listed.
 # context_window is in tokens. null = unknown.
-# Run scripts/generate_models.py to regenerate the Model Literal in llm_router.py.
+# Run scripts/generate_models.py to regenerate the Model Literal in core/llm/router.py.
 #
 # Availability flags (optional; set one at most):
 #   requires_activation: true  — model exists but must be enabled in the provider console first

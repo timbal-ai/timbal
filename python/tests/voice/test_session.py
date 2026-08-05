@@ -438,7 +438,7 @@ class TestLlmWarmup:
         async def _fake_warmup(model: str) -> None:
             warmed.append(model)
 
-        monkeypatch.setattr("timbal.core.llm_router.warmup_llm_connection", _fake_warmup)
+        monkeypatch.setattr("timbal.core.llm.warmup_llm_connection", _fake_warmup)
         agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
         session = VoiceSession(
             agent=agent,
@@ -458,7 +458,7 @@ class TestLlmWarmup:
         async def _fake_warmup(model: str) -> None:
             warmed.append(model)
 
-        monkeypatch.setattr("timbal.core.llm_router.warmup_llm_connection", _fake_warmup)
+        monkeypatch.setattr("timbal.core.llm.warmup_llm_connection", _fake_warmup)
         agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
         session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
         session._start_llm_warmup()

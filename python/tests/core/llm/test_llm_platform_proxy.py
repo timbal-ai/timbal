@@ -1,6 +1,6 @@
 """Tests for LLM platform proxy configuration.
 
-IMPORTANT: These tests require a .env.test_llm_platform_proxy file in the tests/core/ directory.
+IMPORTANT: These tests require a .env.test_llm_platform_proxy file in this directory.
 Copy .env.test_llm_platform_proxy.example to .env.test_llm_platform_proxy and configure the following variables:
     - TIMBAL_API_HOST (e.g., api.timbal.ai)
     - TIMBAL_ORG_ID (your organization ID)
@@ -38,6 +38,7 @@ def load_test_env():
     return True
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not TEST_ENV_FILE.exists(), reason=SKIP_REASON)
 class TestPlatformProxy:
     """Test that agents use platform proxy when configured."""

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -109,9 +110,14 @@ class ChildServer:
             # cwd = the agent file's directory: `uv run` walks up from there to
             # find the agent project's pyproject/venv, and load_dotenv picks up
             # that project's .env — not the launcher's.
+            # TIMBAL_VOICE_WARMUP=1: playground children pre-load the voice
+            # stack so picking "Smart Turn" on first Start doesn't eat the
+            # ONNX/HuggingFace cold path; production servers gate warmup on
+            # actual voice intent (see server.voice.voice_warmup_intended).
             proc = subprocess.Popen(  # noqa: S603
                 cmd,
                 cwd=spec_path.parent,
+                env={**os.environ, "TIMBAL_VOICE_WARMUP": "1"},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

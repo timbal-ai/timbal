@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
+from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
@@ -74,8 +75,13 @@ def parallel_task_3(duration: float = 1) -> str:
 
 @pytest.fixture
 def long_running_sync_tool():
-    """Create a long-running synchronous tool."""
-    return Tool(name="long_sync", handler=long_running_sync_handler)
+    """Create a long-running synchronous tool.
+
+    offload_blocking=True runs the blocking sync handler in the thread pool so
+    the event loop stays responsive and cancellation can land mid-execution.
+    Without it, sync handlers run inline and cannot be interrupted mid-flight.
+    """
+    return Tool(name="long_sync", handler=long_running_sync_handler, offload_blocking=True)
 
 
 @pytest.fixture
@@ -380,6 +386,84 @@ class TestAgentInterruption:
         assert result.status.code == "cancelled"
 
 
+class TestAgentToolCancellation:
+    """Regression: cancelling an agent mid-tool must end the RUN as cancelled.
+
+    The single-tool fast path iterates the tool on the agent's own task; the
+    tool's _stream swallows the CancelledError (recording its own span as
+    interrupted), so the agent must detect the still-pending cancel request
+    and re-raise — otherwise the loop continues and the run ends 'success'.
+    Offline twin of test_key_agent_interruptions::test_tool_interrupt_and_continue
+    (integration-marked, deselected from default runs), which caught this.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_async_tool_via_agent(self):
+        started = asyncio.Event()
+
+        async def internal_search(query: str) -> str:
+            started.set()
+            await asyncio.sleep(10)
+            return f"Found results for: {query}"
+
+        agent = Agent(
+            name="cancel_tool_agent",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="internal_search", input={"query": "alpha"})],
+                    stop_reason="tool_use",
+                ),
+                "Should never get here.",
+            ]),
+            tools=[internal_search],
+        )
+
+        task = asyncio.create_task(agent(prompt="search alpha").collect())
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        await asyncio.sleep(0.05)  # ensure we're inside the tool's sleep
+        task.cancel()
+        result = await task
+
+        assert isinstance(result, OutputEvent)
+        assert result.status.code == "cancelled", f"got '{result.status.code}'"
+        assert result.status.reason == "interrupted"
+        assert result.error is None
+        # LLM-output salvage: the interrupted turn keeps the tool_use the model issued.
+        assert result.output is not None
+        assert any(isinstance(c, ToolUseContent) for c in result.output.content)
+
+    @pytest.mark.asyncio
+    async def test_agent_usable_after_tool_cancellation(self):
+        async def slow_tool() -> str:
+            await asyncio.sleep(10)
+            return "done"
+
+        agent = Agent(
+            name="reuse_after_cancel_agent",
+            model=TestModel(handler=lambda messages: (
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="slow_tool", input={})],
+                    stop_reason="tool_use",
+                )
+                if len(messages) == 1
+                else "follow-up answer"
+            )),
+            tools=[slow_tool],
+        )
+
+        task = asyncio.create_task(agent(prompt="go").collect())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        result1 = await task
+        assert result1.status.code == "cancelled"
+
+        result2 = await agent(prompt="what is 2+2?").collect()
+        assert result2.status.code == "success"
+        assert result2.output is not None
+
+
 class TestWorkflowInterruption:
     """Test workflow interruption during step execution."""
 
@@ -439,11 +523,13 @@ class TestWorkflowInterruption:
     @pytest.mark.asyncio
     async def test_workflow_interruption_during_parallel_steps(self):
         """Test workflow interruption when parallel steps are executing."""
+        # offload_blocking=True: blocking sync handlers must run in the thread
+        # pool for the loop to stay responsive and cancellation to land mid-run.
         workflow = (
             Workflow(name="parallel_workflow")
-            .step(parallel_task_1, duration=1)
-            .step(parallel_task_2, duration=1)
-            .step(parallel_task_3, duration=1)
+            .step(Tool(handler=parallel_task_1, offload_blocking=True), duration=1)
+            .step(Tool(handler=parallel_task_2, offload_blocking=True), duration=1)
+            .step(Tool(handler=parallel_task_3, offload_blocking=True), duration=1)
         )
 
         # Start workflow (all steps run in parallel)

@@ -121,6 +121,112 @@ class TestRunnableBase:
         assert serialized['name'] == 'simple'
 
 
+class TestHookIntrospectionIsolation:
+    """Regression: hook is_coroutine flags must be per instance, not per class.
+
+    They used to be written to ``cls`` by a field validator, so two instances
+    of the same class with different sync/async hooks clobbered each other —
+    the last-constructed instance's flag won for both.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_and_async_hooks_do_not_clobber_each_other(self):
+        calls: list[str] = []
+
+        def sync_hook():
+            calls.append("sync")
+
+        async def async_hook():
+            calls.append("async")
+
+        def handler(x: str) -> str:
+            return x
+
+        sync_tool = Tool(name="sync_hooked", handler=handler, pre_hook=sync_hook)
+        # Constructing the async-hooked tool AFTER must not flip the sync tool's flag.
+        async_tool = Tool(name="async_hooked", handler=handler, pre_hook=async_hook)
+
+        assert sync_tool._pre_hook_is_coroutine is False
+        assert async_tool._pre_hook_is_coroutine is True
+
+        result = await sync_tool(x="a").collect()
+        assert result.error is None
+        result = await async_tool(x="b").collect()
+        assert result.error is None
+        assert calls == ["sync", "async"]
+
+
+class TestBlockingHandlerWarning:
+    """Sync handlers run inline on the event loop; ones that block past the
+    threshold must be flagged once with an actionable warning."""
+
+    @pytest.mark.asyncio
+    async def test_slow_sync_handler_sets_warned_flag(self):
+        import time as _time
+
+        def slow_handler() -> str:
+            _time.sleep(0.15)  # > default 100ms threshold
+            return "done"
+
+        tool = Tool(name="slow_sync", handler=slow_handler)
+        result = await tool().collect()
+        assert result.error is None
+        assert tool._blocking_warned is True
+
+        # Warned once — the flag stays set on subsequent runs (no re-warning).
+        await tool().collect()
+        assert tool._blocking_warned is True
+
+    @pytest.mark.asyncio
+    async def test_fast_sync_handler_does_not_warn(self):
+        def fast_handler() -> str:
+            return "done"
+
+        tool = Tool(name="fast_sync", handler=fast_handler)
+        result = await tool().collect()
+        assert result.error is None
+        assert tool._blocking_warned is False
+
+    @pytest.mark.asyncio
+    async def test_offloaded_handler_does_not_warn(self):
+        import time as _time
+
+        def slow_handler() -> str:
+            _time.sleep(0.15)
+            return "done"
+
+        tool = Tool(name="slow_offloaded", handler=slow_handler, offload_blocking=True)
+        result = await tool().collect()
+        assert result.error is None
+        assert tool._blocking_warned is False
+
+
+class TestSyncGeneratorNoneYield:
+    """Regression: sync_to_async_gen used None as its end-of-stream sentinel,
+    silently truncating sync generators that legitimately yield None."""
+
+    @pytest.mark.asyncio
+    async def test_sync_generator_yielding_none_is_not_truncated(self):
+        def gen():
+            yield 1
+            yield None
+            yield 3
+
+        tool = Tool(name="none_yielder", handler=gen)
+        events = [e async for e in tool()]
+        # Chunks after the None must survive (the old sentinel ended the stream
+        # at the None, silently dropping everything behind it)...
+        deltas = [e for e in events if e.type == "DELTA"]
+        assert [d.item.data for d in deltas] == [1, 3]
+        # ...and the final output must retain the None itself. (The None chunk
+        # isn't surfaced as a streaming delta: the collector protocol treats
+        # process()->None as "skip" — a separate, purely cosmetic quirk.)
+        output_event = events[-1]
+        assert output_event.type == "OUTPUT"
+        assert output_event.status.code == "success"
+        assert output_event.output == [1, None, 3]
+
+
 class TestErrorHandling:
     """Test error handling in Runnable execution."""
     

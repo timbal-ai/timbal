@@ -5,16 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from anthropic import APIConnectionError as AnthropicAPIConnectionError
-from anthropic import APIStatusError as AnthropicAPIStatusError
-from anthropic import APITimeoutError as AnthropicAPITimeoutError
-from anthropic import RateLimitError as AnthropicRateLimitError
-from openai import APIConnectionError as OpenAIAPIConnectionError
-from openai import APIStatusError as OpenAIAPIStatusError
-from openai import APITimeoutError as OpenAIAPITimeoutError
-from openai import RateLimitError as OpenAIRateLimitError
 
 from ..errors import FallbackExhausted
+from .provider_errors import provider_error_classes
 
 logger = structlog.get_logger("timbal.core.fallback_model")
 
@@ -131,13 +124,16 @@ class FallbackModel:
 
 
 def is_retryable_provider_error(exc: BaseException) -> bool:
-    if isinstance(exc, (OpenAIRateLimitError, AnthropicRateLimitError)):
+    # Classes resolved lazily — this runs on an LLM error path, where the SDK
+    # that raised is already imported (see provider_errors).
+    err_cls = provider_error_classes()
+    if isinstance(exc, err_cls["rate_limit"]):
         return True
-    if isinstance(exc, (OpenAIAPITimeoutError, AnthropicAPITimeoutError)):
+    if isinstance(exc, err_cls["timeout"]):
         return True
-    if isinstance(exc, (OpenAIAPIConnectionError, AnthropicAPIConnectionError)):
+    if isinstance(exc, err_cls["connection"]):
         return True
-    if isinstance(exc, (OpenAIAPIStatusError, AnthropicAPIStatusError)):
+    if isinstance(exc, err_cls["status"]):
         status_code = getattr(exc, "status_code", None)
         if status_code is None:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)

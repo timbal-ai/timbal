@@ -2,7 +2,6 @@ from typing import Literal
 
 from pydantic import model_validator
 
-from ...types.message import Message
 from .base import BaseValidator
 from .context import ValidationContext
 
@@ -14,11 +13,7 @@ class JsonValidator(BaseValidator):
 
     @model_validator(mode="after")
     def validate_value(self) -> "JsonValidator":
-        # Normalize value to boolean (default True if not provided)
-        if self.value is None:
-            self.value = True
-        else:
-            self.value = bool(self.value)
+        self._normalize_bool_value()
         return self
 
     async def __call__(self, ctx: ValidationContext) -> None:
@@ -29,19 +24,10 @@ class JsonValidator(BaseValidator):
         Raises:
             AssertionError: If JSON validity doesn't match expected state.
         """
-        from ..utils import resolve_target
-
-        _, actual_value = resolve_target(ctx.trace, self.target, self.path_key)
-
-        if isinstance(actual_value, Message):
-            actual_value = actual_value.collect_text()
-
-        if not isinstance(actual_value, str):
-            if self.value:
-                raise AssertionError(f"expected JSON string, got {type(actual_value).__name__}")
-            else:
-                # Non-string is not JSON, which is what we wanted
-                return
+        actual_value = self._resolve_expected_str(ctx, "JSON")
+        if actual_value is None:
+            # Non-string is not JSON, which is what we wanted
+            return
 
         # Strip markdown code blocks (```json ... ``` or ``` ... ```)
         import re
@@ -55,7 +41,6 @@ class JsonValidator(BaseValidator):
         # Try to parse as JSON
         import json
 
-        is_valid_json = False
         try:
             json.loads(actual_value)
             is_valid_json = True

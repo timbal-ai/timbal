@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
@@ -53,7 +53,7 @@ class RunContext(BaseModel):
     )
 
     id: str = Field(
-        default_factory=lambda: uuid7(as_type="str").replace("-", ""),  # type: ignore
+        default_factory=lambda: uuid7(as_type="hex"),  # type: ignore
         description="Unique identifier for the run.",
     )
     parent_id: str | None = Field(
@@ -89,19 +89,22 @@ class RunContext(BaseModel):
                 del data["timbal_platform_config"]
         return data
 
-    _base_path: Path | None = PrivateAttr(default=None)
-    _trace: Trace = PrivateAttr()
-    _tracing_provider: type[TracingProvider] = PrivateAttr()
-    _session_data: dict[str, Any] | None = PrivateAttr(default=None)
-    _resume_values: dict[str, Any] = PrivateAttr(default_factory=dict)
-    """Active resume values keyed by id, supplied via ``resume=`` to fulfill a
-    paused run. The id is an approval_id for an approval gate (value normalized
-    to ``ApprovalResolution``) or a suspension_id for a ``suspend()`` call (value
-    is arbitrary). The two id-spaces are disjoint hashes, so one store routes
-    unambiguously to the right consumer."""
-    _used_resume_ids: set[str] = PrivateAttr(default_factory=set)
-    """Resume ids that matched a gate or ``suspend()`` during this run. Used to
-    warn about unrecognized resume values (typos, stale IDs) at run completion."""
+    # NOTE — runtime state is stored as plain instance attributes assigned in
+    # model_post_init, NOT pydantic PrivateAttr declarations. PrivateAttr reads
+    # route through BaseModel.__getattr__ (~20x slower than __dict__ lookup) and
+    # _trace/_resume_values/_tracing_provider are read on every runnable call:
+    #   _base_path: Path | None
+    #   _trace: Trace
+    #   _tracing_provider: type[TracingProvider] | None
+    #   _session_data: dict | None
+    #   _resume_values: dict — active resume values keyed by id, supplied via
+    #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
+    #       approval gate (value normalized to ``ApprovalResolution``) or a
+    #       suspension_id for a ``suspend()`` call (value is arbitrary).
+    #   _used_resume_ids: set — resume ids that matched a gate or ``suspend()``
+    #       during this run; used to warn about unrecognized resume values.
+    # Do not add class-level annotations for them — pydantic would turn any
+    # annotated underscore name back into a (slow) private attribute.
 
     def pending_approvals(self) -> list[dict[str, Any]]:
         """Return metadata for every span currently waiting on approval.
@@ -184,6 +187,11 @@ class RunContext(BaseModel):
         """
         from .config_loader import resolve_platform_config
 
+        # Plain instance attributes (see NOTE above).
+        self._base_path: Path | None = None
+        self._session_data: dict[str, Any] | None = None
+        self._resume_values: dict[str, Any] = {}
+        self._used_resume_ids: set[str] = set()
         self._trace = Trace()
 
         # Explicit provider set on the runnable — skip auto-detection entirely.
@@ -256,9 +264,11 @@ class RunContext(BaseModel):
         tracing provider. Manual calls to this method may interfere with
         the framework's automatic tracing lifecycle.
         """
-        # Sync session data to root span before saving
+        # Sync session data to root span before saving. Skip when the session
+        # was never populated ({} from get_session()) and never synced before —
+        # avoids a dump() per span completion for the common no-session case.
         root = self.root_span()
-        if root is not None and self._session_data is not None:
+        if root is not None and self._session_data is not None and (self._session_data or root.session is not None):
             from ..utils import dump
 
             root.session = self._session_data

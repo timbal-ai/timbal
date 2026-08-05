@@ -20,7 +20,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
     SecretStr,
     SkipValidation,
     ValidationError,
@@ -36,7 +35,7 @@ from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump
-from .llm_router import _llm_router
+from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, get_context_window
 from .runnable import Runnable, RunnableLike
@@ -209,14 +208,13 @@ class Agent(Runnable):
     api_key: SecretStr | None = None
     """Custom API key for the LLM API."""
 
-    _llm: Tool = PrivateAttr()
-    _system_prompt_fn: Callable | None = PrivateAttr(default=None)
-    _system_prompt_fn_is_async: bool = PrivateAttr(default=False)
-    _system_prompt_skills: str | None = PrivateAttr(default=None)
-
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
         super().model_post_init(__context)
+        # Plain instance attributes (not PrivateAttr) — read on every agent turn.
+        self._system_prompt_fn: Callable | None = None
+        self._system_prompt_fn_is_async: bool = False
+        self._system_prompt_skills: str | None = None
         self._path = self.name
 
         # Handle callable system_prompt
@@ -746,7 +744,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
                 should_compact = True
             elif prev_usage:
-                prev_input_tokens = sum(v for k, v in prev_usage.items() if ":input" in k and "token" in k)
+                # Anthropic's input_tokens excludes cached tokens: full context =
+                # input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+                # (disjoint totals). Count the two cache totals explicitly — not via a
+                # loose "input" match, which would double-count the flattened per-TTL
+                # breakdown keys (e.g. ephemeral_5m_input_tokens).
+                prev_input_tokens = sum(
+                    v
+                    for k, v in prev_usage.items()
+                    if (":input" in k and "token" in k)
+                    or k.endswith((":cache_creation_input_tokens", ":cache_read_input_tokens"))
+                )
                 prev_output_tokens = sum(v for k, v in prev_usage.items() if ":output" in k and "token" in k)
                 utilization = (prev_input_tokens + prev_output_tokens) / context_window
                 should_compact = utilization >= self.memory_compaction_ratio
@@ -866,7 +874,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             run_id=run_context.id if run_context is not None else "",
             parent_run_id=None,
             path=f"{self._path}.{tool_call.name}",
-            call_id=uuid7(as_type="str").replace("-", ""),
+            call_id=uuid7(as_type="hex"),
             parent_call_id=None,
             input=tool_call.input,
             status=RunStatus(code="error", reason="tool_not_found", message=message),
@@ -878,67 +886,108 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             metadata={"tool_not_found": True, "requested_tool": tool_call.name},
         )
 
+    def _build_dispatch_failed_event(self, tool_call: ToolUseContent, e: Exception) -> OutputEvent:
+        """Build the synthetic OutputEvent fed back to the LLM when tool dispatch itself fails."""
+        logger.exception(
+            "Unexpected error dispatching tool; feeding error back to LLM.",
+            agent_path=self._path,
+            tool=tool_call.name,
+        )
+        run_context = get_run_context()
+        now = int(time.time() * 1000)
+        return OutputEvent(
+            run_id=run_context.id if run_context is not None else "",
+            parent_run_id=None,
+            path=f"{self._path}.{tool_call.name}",
+            call_id=uuid7(as_type="hex"),
+            parent_call_id=None,
+            input=tool_call.input,
+            status=RunStatus(code="error", reason="dispatch_failed", message=str(e)),
+            output=None,
+            error={
+                "type": type(e).__name__,
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+            },
+            t0=now,
+            t1=now,
+            usage={},
+            metadata={"dispatch_failed": True, "requested_tool": tool_call.name},
+        )
+
+    def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
+        """Find the tool for a call, logging when the LLM asked for an unknown one."""
+        tool = next((t for t in tools if t.name == tool_call.name), None)
+        if tool is None:
+            logger.warning(
+                "LLM called unknown tool; feeding error back so it can self-correct.",
+                agent_path=self._path,
+                requested_tool=tool_call.name,
+                available_tools=sorted(t.name for t in tools),
+            )
+        return tool
+
+    @staticmethod
+    def _link_tool_call_span(event: Any, tool_call: ToolUseContent) -> None:
+        """Link the LLM tool_call id to the tool's span for memory resolution."""
+        if event.type == "START":
+            tool_call_span = get_run_context()._trace[event.call_id]
+            tool_call_span.metadata["tool_call_id"] = tool_call.id
+
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
+        # Fast path: a single tool call needs no queue/task fan-in — iterate the
+        # tool directly, exactly like Workflow consumes its steps. This is the
+        # common case for most agent iterations.
+        if len(tool_calls) == 1:
+            tool_call = tool_calls[0]
+            tool = self._resolve_tool_for_call(tools, tool_call)
+            if tool is None:
+                yield tool_call, self._build_unknown_tool_event(tool_call, tools)
+                return
+            # A cancelled tool records 'interrupted' on its own span and swallows
+            # the CancelledError. In the queue/task path the agent still sees the
+            # cancellation at queue.get(); here we share the task with the tool,
+            # so detect the still-pending cancel request and re-raise before
+            # forwarding post-cancel events (keeps LLM-output salvage semantics).
+            current_task = asyncio.current_task()
+            try:
+                # Raw stream: the collector wrapper is only needed at the public
+                # API boundary; internal consumers forward events themselves.
+                async for event in tool._stream(**tool_call.input):
+                    if current_task is not None and current_task.cancelling():
+                        raise asyncio.CancelledError
+                    self._link_tool_call_span(event, tool_call)
+                    yield tool_call, event
+            except (asyncio.CancelledError, GeneratorExit, InterruptError):
+                raise
+            except Exception as e:
+                yield tool_call, self._build_dispatch_failed_event(tool_call, e)
+            if current_task is not None and current_task.cancelling():
+                raise asyncio.CancelledError
+            return
+
         queue = asyncio.Queue()
         tasks = []
 
         async def consume_tool(tool_call: ToolUseContent):
             try:
-                tool = next((t for t in tools if t.name == tool_call.name), None)
+                tool = self._resolve_tool_for_call(tools, tool_call)
                 if tool is None:
-                    logger.warning(
-                        "LLM called unknown tool; feeding error back so it can self-correct.",
-                        agent_path=self._path,
-                        requested_tool=tool_call.name,
-                        available_tools=sorted(t.name for t in tools),
-                    )
-                    await queue.put((tool_call, self._build_unknown_tool_event(tool_call, tools)))
+                    queue.put_nowait((tool_call, self._build_unknown_tool_event(tool_call, tools)))
                     return
-                async for event in tool(**tool_call.input):
-                    # Link tool call id to span for memory resolution
-                    if event.type == "START":
-                        tool_call_id = event.call_id
-                        tool_call_span = get_run_context()._trace[tool_call_id]
-                        tool_call_span.metadata["tool_call_id"] = tool_call.id
-                    await queue.put((tool_call, event))
+                async for event in tool._stream(**tool_call.input):
+                    self._link_tool_call_span(event, tool_call)
+                    queue.put_nowait((tool_call, event))
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
             except Exception as e:
                 # Defensive: any unexpected error in dispatch must NOT swallow the
                 # sentinel. Without this, a bug here would hang the agent forever
                 # because the consumer loop waits on `remaining` to hit zero.
-                logger.exception(
-                    "Unexpected error dispatching tool; feeding error back to LLM.",
-                    agent_path=self._path,
-                    tool=tool_call.name,
-                )
-                run_context = get_run_context()
-                now = int(time.time() * 1000)
-                await queue.put((
-                    tool_call,
-                    OutputEvent(
-                        run_id=run_context.id if run_context is not None else "",
-                        parent_run_id=None,
-                        path=f"{self._path}.{tool_call.name}",
-                        call_id=uuid7(as_type="str").replace("-", ""),
-                        parent_call_id=None,
-                        input=tool_call.input,
-                        status=RunStatus(code="error", reason="dispatch_failed", message=str(e)),
-                        output=None,
-                        error={
-                            "type": type(e).__name__,
-                            "message": str(e),
-                            "traceback": traceback.format_exc(),
-                        },
-                        t0=now,
-                        t1=now,
-                        usage={},
-                        metadata={"dispatch_failed": True, "requested_tool": tool_call.name},
-                    ),
-                ))
+                queue.put_nowait((tool_call, self._build_dispatch_failed_event(tool_call, e)))
             finally:
-                await queue.put((tool_call, None))
+                queue.put_nowait((tool_call, None))
 
         try:
             for tc in tool_calls:
@@ -1096,14 +1145,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             if command in commands:
                                 tool = commands[command]
                                 tool_input = {}
-                                for i, field_name in enumerate(tool.params_model.model_fields.keys()):
+                                # NOTE: do not name this loop variable `i` — it would shadow
+                                # the agent-loop iteration counter in the enclosing scope.
+                                for arg_idx, field_name in enumerate(tool.params_model.model_fields.keys()):
                                     # Params model preserves the ordering of the fields as they appear in the signature
                                     # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
-                                    if i >= len(args):
+                                    if arg_idx >= len(args):
                                         break
-                                    tool_input[field_name] = args[i]
+                                    tool_input[field_name] = args[arg_idx]
                                 # Craft a fake tool_use so we can keep this interaction in the agent memory
-                                tool_use_id = uuid7(as_type="str").replace("-", "")
+                                tool_use_id = uuid7(as_type="hex")
                                 current_span._memory_dump.append(
                                     {
                                         "role": "assistant",
@@ -1117,8 +1168,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         ],
                                     }
                                 )
-                                # Run the tool
-                                async for event in tool(**tool_input):
+                                # Run the tool (raw stream — see _multiplex_tools;
+                                # same pending-cancel detection as the fast path)
+                                _cmd_task = asyncio.current_task()
+                                async for event in tool._stream(**tool_input):
+                                    if _cmd_task is not None and _cmd_task.cancelling():
+                                        raise asyncio.CancelledError
                                     await _process_tool_event(event, tool_use_id, append_to_messages=False)
                                     if isinstance(event, OutputEvent) and event.output is not None:
                                         if (
@@ -1192,7 +1247,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Compaction rewrote memory out of lockstep with the dump; rebuild it.
                         current_span._memory_dump = await dump(current_span.memory)
 
-                async for event in self._llm(
+                async for event in self._llm._stream(
                     model=model,
                     messages=current_span.memory,
                     system_prompt=system_prompt,

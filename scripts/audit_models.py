@@ -128,7 +128,7 @@ def _load_models() -> list[dict]:
 def _offline_audit(models: list[dict]) -> list[str]:
     """Return a list of structural error messages."""
     errors: list[str] = []
-    from timbal.core.llm_router import _PROVIDERS
+    from timbal.core.llm import _PROVIDERS
 
     seen: set[str] = set()
     for m in models:
@@ -146,7 +146,7 @@ def _offline_audit(models: list[dict]) -> list[str]:
             errors.append(f"provider mismatch for {mid}: yaml={m.get('provider')} id={provider}")
 
         if provider not in _PROVIDERS:
-            errors.append(f"unknown provider '{provider}' for {mid} (not in llm_router._PROVIDERS)")
+            errors.append(f"unknown provider '{provider}' for {mid} (not in llm registry _PROVIDERS)")
 
         for cap in m.get("capabilities", []):
             if cap not in STANDARD_CAPABILITIES:
@@ -295,7 +295,7 @@ async def _probe_completion(
     dedicated_only: bool,
     catalog: set[str] | None,
 ) -> tuple[Status, str]:
-    # Match llm_router: prefer max_completion_tokens on chat/completions.
+    # Match the llm router: prefer max_completion_tokens on chat/completions.
     r = await _probe_chat_completions(
         client, base_url, api_key, api_name, use_max_completion_tokens=True
     )
@@ -379,7 +379,7 @@ async def _audit_model(
 
 
 async def _live_audit(models: list[dict]) -> list[ModelResult]:
-    from timbal.core.llm_router import _PROVIDERS
+    from timbal.core.llm import _PROVIDERS
 
     by_provider: dict[str, list[dict]] = {}
     for m in models:

@@ -122,6 +122,38 @@ class Tool(Runnable):
         self._dependencies = inspect_result["dependencies"]
 
     @override
+    async def _execute_simple(self, validated_input: dict[str, Any]) -> Any:
+        """Execute a non-streaming handler locally; on missing credentials, run via
+        platform tool proxy. Same fallback contract as :meth:`_execute_handler`
+        (which covers streaming handlers) — see its docstring for the rationale.
+        """
+        cred_error: CredentialNotAvailable | None = None
+        try:
+            return await super()._execute_simple(validated_input)
+        except CredentialNotAvailable as e:
+            # Captured and handled outside the except block so proxy failures
+            # don't implicitly chain the credential error (see _execute_handler).
+            cred_error = e
+
+        from ..state import get_run_context
+
+        try:
+            return await execute_tool_proxy(self.name, validated_input)
+        except ToolProxyUnavailable:
+            run_context = get_run_context()
+            if run_context is None or run_context.platform_config is None:
+                # Local run without platform config — fall back to credential error.
+                raise cred_error from None
+            raise
+        except PlatformError as proxy_error:
+            # 403 is what the platform returns when no proxy is available for this
+            # tool (no service-account credentials configured). 404/501 are kept as
+            # fallbacks. In all these cases, surface the actionable credential error.
+            if proxy_error.status_code in (403, 404, 501):
+                raise cred_error from None
+            raise
+
+    @override
     async def _execute_handler(
         self,
         validated_input: dict[str, Any],
@@ -141,6 +173,11 @@ class Tool(Runnable):
         ``TIMBAL_API_KEY`` without ``TIMBAL_ORG_ID``), propagate
         ``ToolProxyUnavailable`` so the user fixes platform setup rather than
         local provider credentials.
+
+        Note: non-streaming handlers reached through this method (background
+        mode) already get proxy fallback inside ``_execute_simple``; the catch
+        here can then only re-fire on the re-raised credential error, causing
+        at most one redundant proxy attempt on an already-failing path.
         """
         cred_error: CredentialNotAvailable | None = None
         try:

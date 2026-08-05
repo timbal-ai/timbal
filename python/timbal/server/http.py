@@ -46,13 +46,18 @@ async def lifespan(
 
     app.state.single_session_guard = init_single_session_guard()
     # Voice warmup off the boot path: pre-import the voice stack (and pre-load
-    # the local turn-detection models when server-configured) so the first
-    # voice session doesn't pay those costs. No-op-ish for non-voice usage.
+    # the local turn-detection ONNX models) so the first voice session doesn't
+    # pay those costs. Gated on actual voice intent — non-voice deployments
+    # must not download/load ONNX models just because timbal[voice] is
+    # installed. The playground launcher opts its child servers in via
+    # TIMBAL_VOICE_WARMUP=1 (see voice.voice_warmup_intended).
     from ..core.agent import Agent
-    from .voice import warmup_voice_stack
+    from .voice import voice_warmup_intended, warmup_voice_stack
 
     warmup_task = (
-        asyncio.create_task(warmup_voice_stack(app.state.voice_config)) if isinstance(runnable, Agent) else None
+        asyncio.create_task(warmup_voice_stack(app.state.voice_config))
+        if isinstance(runnable, Agent) and voice_warmup_intended(runnable)
+        else None
     )
     try:
         yield
