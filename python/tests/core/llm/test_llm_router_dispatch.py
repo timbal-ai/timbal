@@ -412,6 +412,74 @@ class TestLlmRouterAnthropicKwargs:
 
         assert "cache_control" not in captured_kwargs
 
+    @pytest.mark.asyncio
+    async def test_provider_params_tools_merge_with_client_tools(self):
+        """Server-side tool defs in provider_params merge with (not clobber) client tools."""
+        from timbal.core.llm import _llm_router
+        _make_run_context()
+
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.messages.create = fake_create
+
+        mock_tool = MagicMock()
+        mock_tool.anthropic_schema = {"name": "my_tool", "description": "does stuff", "input_schema": {}}
+        server_tool = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+
+        provider_params = {"tools": [server_tool]}
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="anthropic/claude-sonnet-4-6",
+                        max_tokens=100,
+                        tools=[mock_tool],
+                        provider_params=provider_params,
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assert captured_kwargs["tools"] == [mock_tool.anthropic_schema, server_tool]
+        # Caller's dict must not be mutated by the pop
+        assert provider_params == {"tools": [server_tool]}
+
+    @pytest.mark.asyncio
+    async def test_provider_params_tools_alone(self):
+        """Server-side tool defs work without any client tools."""
+        from timbal.core.llm import _llm_router
+        _make_run_context()
+
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.messages.create = fake_create
+
+        server_tool = {"type": "web_search_20250305", "name": "web_search"}
+
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="anthropic/claude-sonnet-4-6",
+                        max_tokens=100,
+                        provider_params={"tools": [server_tool]},
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assert captured_kwargs["tools"] == [server_tool]
+
 
 class TestLlmRouterChatCompletionsKwargs:
     """Test Chat Completions path kwargs (groq, cerebras, etc.)."""
@@ -444,6 +512,39 @@ class TestLlmRouterChatCompletionsKwargs:
         messages = captured_kwargs.get("messages", [])
         assert messages[0]["role"] == "system"
         assert messages[0]["content"] == "Be concise."
+
+    @pytest.mark.asyncio
+    async def test_provider_params_tools_merge_with_client_tools(self):
+        """Extra tool defs in provider_params merge with (not clobber) client tools."""
+        from timbal.core.llm import _llm_router
+        _make_run_context()
+
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = fake_create
+
+        mock_tool = MagicMock()
+        mock_tool.openai_chat_completions_schema = {"type": "function", "function": {"name": "my_tool"}}
+        extra_tool = {"type": "function", "function": {"name": "extra_tool"}}
+
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="groq/llama-3.3-70b-versatile",
+                        tools=[mock_tool],
+                        provider_params={"tools": [extra_tool]},
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assert captured_kwargs["tools"] == [mock_tool.openai_chat_completions_schema, extra_tool]
 
     @pytest.mark.asyncio
     async def test_flatten_text_content_for_xiaomi(self):
@@ -910,6 +1011,33 @@ class TestLlmRouterOpenAIResponsesPath:
                         pass
 
         assert captured_kwargs.get("instructions") == "system prompt"
+
+    @pytest.mark.asyncio
+    async def test_responses_provider_params_tools_merge_with_client_tools(self):
+        """Server-side tool defs in provider_params merge with (not clobber) client tools."""
+        from timbal.core.llm import _llm_router
+
+        _make_run_context()
+        mock_client, captured_kwargs = self._make_mock_client_and_capturer()
+
+        mock_tool = MagicMock()
+        mock_tool.openai_responses_schema = {"type": "function", "name": "my_tool", "parameters": {}}
+        server_tool = {"type": "web_search"}
+
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "key"}):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
+                    try:
+                        async for _ in _llm_router(
+                            model="openai/gpt-4o",
+                            tools=[mock_tool],
+                            provider_params={"tools": [server_tool]},
+                        ):
+                            pass
+                    except (RuntimeError, StopAsyncIteration):
+                        pass
+
+        assert captured_kwargs["tools"] == [mock_tool.openai_responses_schema, server_tool]
 
     @pytest.mark.asyncio
     async def test_responses_path_max_tokens(self):

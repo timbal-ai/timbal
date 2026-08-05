@@ -166,3 +166,50 @@ def test_message_with_tool_result_to_openai_chat_completions_input() -> None:
 def test_message_with_tool_result_to_anthropic_input() -> None:
     message = Message(role="user", content=[ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])])
     assert message.to_anthropic_input() == {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "123", "content": [{"type": "text", "text": "Hello, World!"}]}]}
+
+
+# --- Cross-provider replay of server-side tool blocks -----------------------
+# Anthropic memory keeps server_tool_use (ToolUseContent) and
+# web_search_tool_result (CustomContent) blocks. When replayed to another
+# API shape (e.g. after a fallback-model switch) they must be skipped, not
+# raise or leak Anthropic-only block types.
+
+
+def _anthropic_server_tool_message() -> Message:
+    from timbal.types.content import CustomContent
+
+    return Message(
+        role="assistant",
+        content=[
+            ToolUseContent(id="srvtoolu_1", name="web_search", input={"query": "weather"}, is_server_tool_use=True),
+            CustomContent(value={"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []}),
+            TextContent(text="It is sunny. [[weather.com](https://weather.com)]"),
+        ],
+    )
+
+
+def test_server_tool_blocks_skipped_in_openai_responses_input() -> None:
+    inputs = _anthropic_server_tool_message().to_openai_responses_input()
+    assert inputs == [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "It is sunny. [[weather.com](https://weather.com)]"}]}
+    ]
+
+
+def test_server_tool_blocks_skipped_in_openai_chat_completions_input() -> None:
+    result = _anthropic_server_tool_message().to_openai_chat_completions_input()
+    assert result == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "It is sunny. [[weather.com](https://weather.com)]"}],
+    }
+    assert "tool_calls" not in result
+
+
+def test_server_tool_blocks_preserved_in_anthropic_input() -> None:
+    result = _anthropic_server_tool_message().to_anthropic_input()
+    assert result["content"][0] == {
+        "type": "server_tool_use",
+        "id": "srvtoolu_1",
+        "name": "web_search",
+        "input": {"query": "weather"},
+    }
+    assert result["content"][1] == {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []}

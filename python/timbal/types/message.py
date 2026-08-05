@@ -74,12 +74,14 @@ class Message:
         inputs = []
         message_content = []
         for content_item in self.content:
-            if isinstance(content_item, ToolUseContent):
-                inputs.append(content_item.to_openai_responses_input())
-            elif isinstance(content_item, ToolResultContent):
-                inputs.append(content_item.to_openai_responses_input())
+            if isinstance(content_item, ToolUseContent | ToolResultContent):
+                item_input = content_item.to_openai_responses_input()
+                if item_input is not None:
+                    inputs.append(item_input)
             else:
-                message_content.append(content_item.to_openai_responses_input(role=self.role))
+                item_input = content_item.to_openai_responses_input(role=self.role)
+                if item_input is not None:
+                    message_content.append(item_input)
         if message_content:
             # Role here should only be 'user' or 'assistant'
             inputs.append({"role": self.role, "content": message_content})
@@ -106,7 +108,9 @@ class Message:
         reasoning_parts: list[str] = []
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent):
-                tool_calls.append(content_item.to_openai_chat_completions_input())
+                tool_call = content_item.to_openai_chat_completions_input()
+                if tool_call is not None:
+                    tool_calls.append(tool_call)
             elif isinstance(content_item, ToolResultContent):
                 return content_item.to_openai_chat_completions_input()
             elif isinstance(content_item, ThinkingContent):

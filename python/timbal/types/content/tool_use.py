@@ -28,11 +28,14 @@ class ToolUseContent(BaseContent):
         return coerce_to_dict(v)
 
     @override
-    def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:
+    def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any] | None:
         """See base class."""
-        # TODO Review is_server_tool_use
+        # Server-side tool calls are provider-internal execution records (e.g.
+        # Anthropic web search replayed after a fallback switch to OpenAI).
+        # They can't be represented in another provider's API; skip them — the
+        # assistant text already carries the results.
         if self.is_server_tool_use:
-            raise NotImplementedError("is_server_tool_use is not supported for OpenAI responses yet")
+            return None
         return {
             "call_id": self.id,
             "type": "function_call",
@@ -41,10 +44,10 @@ class ToolUseContent(BaseContent):
         }
 
     @override
-    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
+    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any] | None:
         """See base class."""
         if self.is_server_tool_use:
-            raise ValueError("is_server_tool_use is not supported for OpenAI chat completions")
+            return None  # see to_openai_responses_input
 
         data = {"id": self.id, "type": "function", "function": {"arguments": json.dumps(self.input), "name": self.name}}
 

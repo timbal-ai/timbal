@@ -14,14 +14,23 @@ class CustomContent(BaseContent):
     type: Literal["custom"] = "custom"
     value: dict[str, Any] 
 
+    # Anthropic server-side tool result blocks stored verbatim in memory (see
+    # AnthropicCollector.result()). Meaningless to other APIs — skip on
+    # cross-provider replay instead of sending an unknown block type.
+    _ANTHROPIC_SERVER_BLOCKS = ("web_search_tool_result",)
+
     @override
-    def to_openai_responses_input(self, role: str, **kwargs: Any) -> dict[str, Any]:
+    def to_openai_responses_input(self, role: str, **kwargs: Any) -> dict[str, Any] | None:
         """See base class."""
+        if self.value.get("type") in self._ANTHROPIC_SERVER_BLOCKS:
+            return None
         return self.value
 
     @override
-    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
+    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any] | None:
         """See base class."""
+        if self.value.get("type") in self._ANTHROPIC_SERVER_BLOCKS:
+            return None
         return self.value
 
     @override

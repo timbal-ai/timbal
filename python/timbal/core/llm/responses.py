@@ -60,7 +60,14 @@ def prepare_responses_request(
             }
         }
 
+    # provider_params may carry provider-native (server-side) tool defs, e.g.
+    # {"type": "web_search"}. Merge them with the client tools instead of
+    # letting dict.update clobber the generated list.
+    provider_params = dict(provider_params)
+    extra_tools = provider_params.pop("tools", None)
     responses_kwargs.update(provider_params)
+    if extra_tools:
+        responses_kwargs["tools"] = [*responses_kwargs.get("tools", []), *extra_tools]
 
     async def _create_stream():
         res = await client.responses.create(extra_headers=request_headers, **responses_kwargs)

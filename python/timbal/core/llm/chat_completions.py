@@ -84,7 +84,13 @@ def prepare_chat_completions_request(
             },
         }
 
+    # provider_params may carry extra tool defs; merge them with the client
+    # tools instead of letting dict.update clobber the generated list.
+    provider_params = dict(provider_params)
+    extra_tools = provider_params.pop("tools", None)
     chat_completions_kwargs.update(provider_params)
+    if extra_tools:
+        chat_completions_kwargs["tools"] = [*chat_completions_kwargs.get("tools", []), *extra_tools]
 
     async def _create_stream():
         res = await client.chat.completions.create(extra_headers=request_headers, **chat_completions_kwargs)
