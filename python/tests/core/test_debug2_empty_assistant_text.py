@@ -21,7 +21,7 @@ from anthropic.types import (
 )
 from timbal import Agent
 from timbal.collectors.impl.anthropic import AnthropicCollector
-from timbal.core.llm_router import _llm_router
+from timbal.core.llm import _llm_router
 from timbal.core.test_model import TestModel
 from timbal.state import set_call_id, set_run_context
 from timbal.state.context import RunContext
@@ -232,7 +232,7 @@ class TestDebug2LlmRouterFix:
         mock_client = MagicMock()
         mock_client.messages.create = fake_create
         set_run_context(RunContext(tracing_provider=None))
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -294,7 +294,7 @@ class TestDebug2AgentSessionFix:
             max_tokens=1024,
             tools=[],
         )
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "key"}):
                 turn2 = await agent2(
                     prompt="Dels municipis del valles oriental diguem quins sin els que tenem temes pendents",

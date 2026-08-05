@@ -4,7 +4,7 @@ import pytest
 from openai import APIStatusError as OpenAIAPIStatusError
 from timbal import Agent
 from timbal.core.fallback_model import FallbackModel, ModelEntry
-from timbal.core.llm_router import _llm_router
+from timbal.core.llm import _llm_router
 from timbal.errors import FallbackExhausted
 
 

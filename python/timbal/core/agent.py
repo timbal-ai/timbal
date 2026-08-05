@@ -35,7 +35,7 @@ from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump
-from .llm_router import _llm_router
+from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, get_context_window
 from .runnable import Runnable, RunnableLike

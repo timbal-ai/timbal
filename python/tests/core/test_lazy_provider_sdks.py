@@ -51,7 +51,7 @@ class TestLazyProviderSdks:
     def test_anthropic_client_resolution_does_not_import_openai(self):
         out = _run(
             "import sys\n"
-            "from timbal.core.llm_router import _PROVIDERS, _resolve_client\n"
+            "from timbal.core.llm import _PROVIDERS, _resolve_client\n"
             "from timbal.state.context import RunContext\n"
             "ctx = RunContext(tracing_provider=None)\n"
             "client, _ = _resolve_client('anthropic', _PROVIDERS['anthropic'], 'sk-fake', None, ctx)\n"
@@ -63,7 +63,7 @@ class TestLazyProviderSdks:
     def test_openai_client_resolution_does_not_import_anthropic(self):
         out = _run(
             "import sys\n"
-            "from timbal.core.llm_router import _PROVIDERS, _resolve_client\n"
+            "from timbal.core.llm import _PROVIDERS, _resolve_client\n"
             "from timbal.state.context import RunContext\n"
             "ctx = RunContext(tracing_provider=None)\n"
             "client, _ = _resolve_client('openai', _PROVIDERS['openai'], 'sk-fake', None, ctx)\n"

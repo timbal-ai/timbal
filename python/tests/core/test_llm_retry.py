@@ -19,7 +19,7 @@ from openai import (
 from openai import (
     RateLimitError as OpenAIRateLimitError,
 )
-from timbal.core.llm_router import _retry_on_error
+from timbal.core.llm import _retry_on_error
 
 
 class TestRetryOnError:
@@ -247,7 +247,7 @@ class TestRetryOnError:
             await original_sleep(0.001)  # Actually sleep a tiny bit
 
         with patch("asyncio.sleep", side_effect=mock_sleep):
-            with patch("timbal.core.llm_router.random.uniform", side_effect=lambda _min, cap: cap) as mock_jitter:
+            with patch("timbal.core.llm.retry.random.uniform", side_effect=lambda _min, cap: cap) as mock_jitter:
                 with pytest.raises(OpenAIRateLimitError):
                     async for _ in _retry_on_error(always_fails_stream, max_retries=3, retry_delay=1.0, context="Test"):
                         pass
@@ -272,7 +272,7 @@ class TestRetryOnError:
             delays.append(delay)
 
         with patch("asyncio.sleep", side_effect=mock_sleep):
-            with patch("timbal.core.llm_router.random.uniform", return_value=0.25):
+            with patch("timbal.core.llm.retry.random.uniform", return_value=0.25):
                 with pytest.raises(OpenAIRateLimitError):
                     async for _ in _retry_on_error(rate_limited_stream, max_retries=1, retry_delay=1.0, context="Test"):
                         pass
@@ -294,7 +294,7 @@ class TestRetryOnError:
             delays.append(delay)
 
         with patch("asyncio.sleep", side_effect=mock_sleep):
-            with patch("timbal.core.llm_router.random.uniform", return_value=0.25):
+            with patch("timbal.core.llm.retry.random.uniform", return_value=0.25):
                 with pytest.raises(OpenAIRateLimitError):
                     async for _ in _retry_on_error(rate_limited_stream, max_retries=1, retry_delay=1.0, context="Test"):
                         pass

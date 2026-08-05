@@ -605,7 +605,7 @@ class VoiceSession:
         if not (isinstance(model, str) and "/" in model):
             return
 
-        from ..core.llm_router import warmup_llm_connection
+        from ..core.llm import warmup_llm_connection
 
         self._llm_warmup_task = asyncio.create_task(warmup_llm_connection(model))
 

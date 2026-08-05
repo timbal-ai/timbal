@@ -91,14 +91,14 @@ class TestXaiRouterDispatch:
 
     @pytest.mark.asyncio
     async def test_grok_45_uses_responses_path(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"XAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="xai/grok-4.5",
@@ -113,14 +113,14 @@ class TestXaiRouterDispatch:
 
     @pytest.mark.asyncio
     async def test_grok_43_uses_responses_path(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"XAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="xai/grok-4.3",
@@ -156,12 +156,12 @@ class TestFireworksRouterDispatch:
     )
     @pytest.mark.asyncio
     async def test_fireworks_models_use_chat_completions(self, model_id: str, api_name: str):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"FIREWORKS_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(model=model_id, max_tokens=16):
@@ -197,12 +197,12 @@ class TestMoonshotRouterDispatch:
     )
     @pytest.mark.asyncio
     async def test_moonshot_models_use_chat_completions(self, model_id: str, api_name: str):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"MOONSHOT_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(

@@ -98,7 +98,7 @@ async def test_frontier_model_llm_router_streams(model: str, env_key: str, fallb
     """Direct router smoke test — ensures streaming path works, not only Agent.collect."""
     _skip_if_no_key(env_key, fallback_env)
 
-    from timbal.core.llm_router import _llm_router
+    from timbal.core.llm import _llm_router
     from timbal.types.message import Message
     from timbal.types.content import TextContent
 

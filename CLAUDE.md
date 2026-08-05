@@ -34,7 +34,7 @@ timbal/
 │   │   │   ├── tool.py       # Tool wrapper
 │   │   │   ├── tool_set.py   # ToolSet ABC for runtime tool resolution
 │   │   │   ├── mcp.py        # MCPServer — MCP servers as tool sources
-│   │   │   ├── llm_router.py # Multi-provider LLM dispatch
+│   │   │   ├── llm/          # Multi-provider LLM dispatch (router, registry, clients, retry + one module per API)
 │   │   │   ├── models.py     # Model strings + context window lookup
 │   │   │   └── test_model.py # Offline TestModel for testing
 │   │   ├── state/

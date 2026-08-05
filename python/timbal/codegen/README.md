@@ -576,7 +576,7 @@ When filtering, response includes pagination metadata and full model objects:
 
 **Model registry (`models.yaml`):**
 
-Model metadata lives in `python/timbal/models.yaml`. To add or update a model, edit the YAML — it is the single source of truth. The `model=` type annotation in `llm_router.py` is derived from it via `scripts/generate_models.py`:
+Model metadata lives in `python/timbal/models.yaml`. To add or update a model, edit the YAML — it is the single source of truth. The `model=` type annotation in `core/llm/router.py` is derived from it via `scripts/generate_models.py`:
 
 ```bash
 uv run python scripts/generate_models.py

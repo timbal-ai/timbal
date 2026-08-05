@@ -6,7 +6,7 @@ import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from pydantic import BaseModel, SecretStr
-from timbal.core.llm_router import _PROVIDERS, _get_client, _resolve_client
+from timbal.core.llm import _PROVIDERS, _get_client, _resolve_client
 
 
 async def _empty_async_stream():
@@ -37,7 +37,7 @@ def _make_run_context(platform_config=None):
 
 class TestGetClients:
     def test_get_openai_client_cached(self):
-        from timbal.core.llm_router import _CLIENT_CACHE
+        from timbal.core.llm import _CLIENT_CACHE
         _CLIENT_CACHE.clear()
 
         c1 = _get_client(AsyncOpenAI, "key_a", None, "openai")
@@ -45,7 +45,7 @@ class TestGetClients:
         assert c1 is c2
 
     def test_get_openai_client_different_keys(self):
-        from timbal.core.llm_router import _CLIENT_CACHE
+        from timbal.core.llm import _CLIENT_CACHE
         _CLIENT_CACHE.clear()
 
         c1 = _get_client(AsyncOpenAI, "key_a", None, "openai")
@@ -53,7 +53,7 @@ class TestGetClients:
         assert c1 is not c2
 
     def test_get_openai_client_with_base_url(self):
-        from timbal.core.llm_router import _CLIENT_CACHE
+        from timbal.core.llm import _CLIENT_CACHE
         _CLIENT_CACHE.clear()
 
         c1 = _get_client(AsyncOpenAI, "key", "https://custom.api.com/v1", "groq")
@@ -61,7 +61,7 @@ class TestGetClients:
         assert c1 is not c2
 
     def test_get_anthropic_client_cached(self):
-        from timbal.core.llm_router import _CLIENT_CACHE
+        from timbal.core.llm import _CLIENT_CACHE
         _CLIENT_CACHE.clear()
 
         c1 = _get_client(AsyncAnthropic, "key_a", None, "anthropic")
@@ -69,7 +69,7 @@ class TestGetClients:
         assert c1 is c2
 
     def test_get_anthropic_client_different_keys(self):
-        from timbal.core.llm_router import _CLIENT_CACHE
+        from timbal.core.llm import _CLIENT_CACHE
         _CLIENT_CACHE.clear()
 
         c1 = _get_client(AsyncAnthropic, "key_a", None, "anthropic")
@@ -148,7 +148,7 @@ class TestLlmRouterProviderValidation:
     """Test model string parsing and validation in _llm_router."""
 
     async def _collect(self, **kwargs):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         chunks = []
         async for chunk in _llm_router(**kwargs):
             chunks.append(chunk)
@@ -156,7 +156,7 @@ class TestLlmRouterProviderValidation:
 
     @pytest.mark.asyncio
     async def test_missing_provider_prefix_raises(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
         with pytest.raises(ValueError, match="provider/model_name"):
             async for _ in _llm_router(model="gpt-4o"):
@@ -164,7 +164,7 @@ class TestLlmRouterProviderValidation:
 
     @pytest.mark.asyncio
     async def test_unsupported_provider_raises(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
         with pytest.raises(ValueError, match="Unsupported provider"):
             async for _ in _llm_router(model="fakeprovider/some-model"):
@@ -172,7 +172,7 @@ class TestLlmRouterProviderValidation:
 
     @pytest.mark.asyncio
     async def test_anthropic_missing_max_tokens_raises(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
             with pytest.raises(ValueError, match="max_tokens"):
@@ -182,7 +182,7 @@ class TestLlmRouterProviderValidation:
     @pytest.mark.asyncio
     async def test_secretstr_converted_before_use(self):
         """SecretStr values for api_key and base_url are unwrapped."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         mock_client = MagicMock()
@@ -193,7 +193,7 @@ class TestLlmRouterProviderValidation:
 
         mock_client.messages.create = AsyncMock(return_value=_empty_stream())
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             try:
                 async for _ in _llm_router(
                     model="anthropic/claude-sonnet-4-6",
@@ -211,7 +211,7 @@ class TestLlmRouterAnthropicKwargs:
 
     @pytest.mark.asyncio
     async def test_system_prompt_included(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         captured_kwargs = {}
@@ -223,7 +223,7 @@ class TestLlmRouterAnthropicKwargs:
         mock_client = MagicMock()
         mock_client.messages.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -239,7 +239,7 @@ class TestLlmRouterAnthropicKwargs:
 
     @pytest.mark.asyncio
     async def test_temperature_included_when_set(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         captured_kwargs = {}
@@ -251,7 +251,7 @@ class TestLlmRouterAnthropicKwargs:
         mock_client = MagicMock()
         mock_client.messages.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -267,7 +267,7 @@ class TestLlmRouterAnthropicKwargs:
 
     @pytest.mark.asyncio
     async def test_provider_params_forwarded(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         captured_kwargs = {}
@@ -279,7 +279,7 @@ class TestLlmRouterAnthropicKwargs:
         mock_client = MagicMock()
         mock_client.messages.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -296,7 +296,7 @@ class TestLlmRouterAnthropicKwargs:
 
     @pytest.mark.asyncio
     async def test_tools_included_in_kwargs(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         captured_kwargs = {}
@@ -311,7 +311,7 @@ class TestLlmRouterAnthropicKwargs:
         mock_tool = MagicMock()
         mock_tool.anthropic_schema = {"name": "my_tool", "description": "does stuff", "input_schema": {}}
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -332,7 +332,7 @@ class TestLlmRouterChatCompletionsKwargs:
 
     @pytest.mark.asyncio
     async def test_system_prompt_as_system_message(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         captured_kwargs = {}
@@ -344,7 +344,7 @@ class TestLlmRouterChatCompletionsKwargs:
         mock_client = MagicMock()
         mock_client.chat.completions.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -362,7 +362,7 @@ class TestLlmRouterChatCompletionsKwargs:
     @pytest.mark.asyncio
     async def test_flatten_text_content_for_xiaomi(self):
         """xiaomi provider has flatten_text_content=True."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         from timbal.types.content.text import TextContent
         from timbal.types.message import Message
         _make_run_context()
@@ -378,7 +378,7 @@ class TestLlmRouterChatCompletionsKwargs:
 
         user_msg = Message(role="user", content=[TextContent(text="hello")])
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"XIAOMI_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -399,7 +399,7 @@ class TestLlmRouterChatCompletionsKwargs:
     @pytest.mark.asyncio
     async def test_no_stream_options_when_not_supported(self):
         """xiaomi has supports_stream_options=False."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         captured_kwargs = {}
@@ -411,7 +411,7 @@ class TestLlmRouterChatCompletionsKwargs:
         mock_client = MagicMock()
         mock_client.chat.completions.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"XIAOMI_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(model="xiaomi/some-model"):
@@ -424,7 +424,7 @@ class TestLlmRouterChatCompletionsKwargs:
     @pytest.mark.asyncio
     async def test_thinking_omitted_for_providers_without_reasoning_content(self):
         """Groq path: omit CoT from outbound messages (do not dump into content)."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         from timbal.types.content.text import TextContent
         from timbal.types.content.thinking import ThinkingContent
         from timbal.types.message import Message
@@ -443,7 +443,7 @@ class TestLlmRouterChatCompletionsKwargs:
             content=[ThinkingContent(thinking="plan"), TextContent(text="ok")],
         )
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -460,7 +460,7 @@ class TestLlmRouterChatCompletionsKwargs:
 
     @pytest.mark.asyncio
     async def test_thinking_serialized_as_reasoning_content_for_moonshot(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         from timbal.types.content.text import TextContent
         from timbal.types.content.thinking import ThinkingContent
         from timbal.types.message import Message
@@ -479,7 +479,7 @@ class TestLlmRouterChatCompletionsKwargs:
             content=[ThinkingContent(thinking="plan"), TextContent(text="ok")],
         )
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"MOONSHOT_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -496,7 +496,7 @@ class TestLlmRouterChatCompletionsKwargs:
 
     @pytest.mark.asyncio
     async def test_output_model_adds_response_format(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         _make_run_context()
 
         class MyOutput(BaseModel):
@@ -511,7 +511,7 @@ class TestLlmRouterChatCompletionsKwargs:
         mock_client = MagicMock()
         mock_client.chat.completions.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -572,7 +572,7 @@ class TestLlmRouterTestModelPath:
     @pytest.mark.asyncio
     async def test_testmodel_yields_chunks(self):
         """TestModel.stream() is called directly; no network call occurs."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         from timbal.core.test_model import TestModel
 
         _make_run_context()
@@ -588,7 +588,7 @@ class TestLlmRouterTestModelPath:
     @pytest.mark.asyncio
     async def test_testmodel_increments_call_count(self):
         """call_count reflects actual calls via the router."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         from timbal.core.test_model import TestModel
 
         _make_run_context()
@@ -602,7 +602,7 @@ class TestLlmRouterTestModelPath:
     @pytest.mark.asyncio
     async def test_testmodel_skips_provider_validation(self):
         """TestModel short-circuit means no ValueError for missing provider prefix."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         from timbal.core.test_model import TestModel
 
         _make_run_context()
@@ -633,7 +633,7 @@ class TestLlmRouterPlatformHeaders:
 
     @pytest.mark.asyncio
     async def test_app_id_added_to_headers(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         self._make_platform_context(app_id="app_123")
 
@@ -646,7 +646,7 @@ class TestLlmRouterPlatformHeaders:
         mock_client = MagicMock()
         mock_client.messages.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             try:
                 async for _ in _llm_router(
                     model="anthropic/claude-sonnet-4-6",
@@ -662,7 +662,7 @@ class TestLlmRouterPlatformHeaders:
 
     @pytest.mark.asyncio
     async def test_app_id_absent_omits_header(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         self._make_platform_context(app_id=None)
 
@@ -675,7 +675,7 @@ class TestLlmRouterPlatformHeaders:
         mock_client = MagicMock()
         mock_client.messages.create = fake_create
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             try:
                 async for _ in _llm_router(
                     model="anthropic/claude-sonnet-4-6",
@@ -695,7 +695,7 @@ class TestLlmRouterAnthropicStructuredOutput:
 
     @pytest.mark.asyncio
     async def test_output_model(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
 
@@ -712,7 +712,7 @@ class TestLlmRouterAnthropicStructuredOutput:
         mock_client.messages.create = fake_stable_create
         mock_client.beta.messages.create = AsyncMock(side_effect=AssertionError("should not call beta"))
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -728,7 +728,7 @@ class TestLlmRouterAnthropicStructuredOutput:
 
     @pytest.mark.asyncio
     async def test_output_model_sets_output_config(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
 
@@ -745,7 +745,7 @@ class TestLlmRouterAnthropicStructuredOutput:
         mock_client.messages.create = fake_stable_create
         mock_client.beta.messages.create = AsyncMock(side_effect=AssertionError("should not call beta"))
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -762,7 +762,7 @@ class TestLlmRouterAnthropicStructuredOutput:
 
     @pytest.mark.asyncio
     async def test_no_output_model_uses_stable_endpoint(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
 
@@ -776,7 +776,7 @@ class TestLlmRouterAnthropicStructuredOutput:
         mock_client.messages.create = fake_stable_create
         mock_client.beta.messages.create = AsyncMock(side_effect=AssertionError("should not call beta"))
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
@@ -806,14 +806,14 @@ class TestLlmRouterOpenAIResponsesPath:
 
     @pytest.mark.asyncio
     async def test_responses_path_system_prompt_as_instructions(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"OPENAI_API_KEY": "key", "TIMBAL_OPENAI_API": "responses"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="openai/gpt-4o",
@@ -827,14 +827,14 @@ class TestLlmRouterOpenAIResponsesPath:
 
     @pytest.mark.asyncio
     async def test_responses_path_max_tokens(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"OPENAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="openai/gpt-4o",
@@ -849,7 +849,7 @@ class TestLlmRouterOpenAIResponsesPath:
 
     @pytest.mark.asyncio
     async def test_responses_path_output_model(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
 
@@ -858,9 +858,9 @@ class TestLlmRouterOpenAIResponsesPath:
 
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"OPENAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="openai/gpt-4o",
@@ -877,7 +877,7 @@ class TestLlmRouterOpenAIResponsesPath:
 
     @pytest.mark.asyncio
     async def test_responses_path_tools(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
@@ -885,9 +885,9 @@ class TestLlmRouterOpenAIResponsesPath:
         mock_tool = MagicMock()
         mock_tool.openai_responses_schema = {"type": "function", "name": "my_tool"}
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"OPENAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="openai/gpt-4o",
@@ -902,14 +902,14 @@ class TestLlmRouterOpenAIResponsesPath:
 
     @pytest.mark.asyncio
     async def test_responses_path_temperature(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"OPENAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="openai/gpt-4o",
@@ -924,14 +924,14 @@ class TestLlmRouterOpenAIResponsesPath:
     @pytest.mark.asyncio
     async def test_xai_uses_responses_path(self):
         """xai provider also routes through the Responses API path."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"XAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
                             model="xai/grok-3",
@@ -963,14 +963,14 @@ class TestLlmRouterChatCompletionsMore:
 
     @pytest.mark.asyncio
     async def test_max_tokens_as_max_completion_tokens(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "chat_completions"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(
                             model="groq/llama-3.3-70b-versatile",
@@ -985,14 +985,14 @@ class TestLlmRouterChatCompletionsMore:
 
     @pytest.mark.asyncio
     async def test_temperature_forwarded(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "chat_completions"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(
                             model="groq/llama-3.3-70b-versatile",
@@ -1006,7 +1006,7 @@ class TestLlmRouterChatCompletionsMore:
 
     @pytest.mark.asyncio
     async def test_tools_forwarded_with_correct_schema(self):
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
@@ -1017,9 +1017,9 @@ class TestLlmRouterChatCompletionsMore:
             "function": {"name": "do_thing", "description": "does a thing", "parameters": {}},
         }
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "chat_completions"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(
                             model="groq/llama-3.3-70b-versatile",
@@ -1035,14 +1035,14 @@ class TestLlmRouterChatCompletionsMore:
     @pytest.mark.asyncio
     async def test_no_max_tokens_omits_max_completion_tokens(self):
         """When max_tokens is not provided, max_completion_tokens should be absent."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "chat_completions"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(model="groq/llama-3.3-70b-versatile"):
                             pass
@@ -1054,14 +1054,14 @@ class TestLlmRouterChatCompletionsMore:
     @pytest.mark.asyncio
     async def test_no_temperature_omits_temperature(self):
         """When temperature is not passed, it should not appear in kwargs."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
         mock_client, captured_kwargs = self._make_mock_client_and_capturer()
 
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "chat_completions"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(model="groq/llama-3.3-70b-versatile"):
                             pass
@@ -1077,7 +1077,7 @@ class TestLlmRouterYieldsChunks:
     @pytest.mark.asyncio
     async def test_anthropic_path_yields_chunks_with_messages(self):
         """Cover lines 372-373 (message building) and 412, 415 (yield chunk)."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
         from timbal.types.content.text import TextContent
         from timbal.types.message import Message
 
@@ -1096,7 +1096,7 @@ class TestLlmRouterYieldsChunks:
 
         user_msg = Message(role="user", content=[TextContent(text="hello")])
         chunks = []
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 async for chunk in _llm_router(
                     model="anthropic/claude-sonnet-4-6",
@@ -1110,7 +1110,7 @@ class TestLlmRouterYieldsChunks:
     @pytest.mark.asyncio
     async def test_openai_responses_path_yields_chunks(self):
         """Cover lines 458, 461 (yield chunk in responses path)."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
 
@@ -1126,9 +1126,9 @@ class TestLlmRouterYieldsChunks:
         mock_client.responses.create = fake_create
 
         chunks = []
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"OPENAI_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "responses"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     async for chunk in _llm_router(
                         model="openai/gpt-4o",
                     ):
@@ -1139,7 +1139,7 @@ class TestLlmRouterYieldsChunks:
     @pytest.mark.asyncio
     async def test_chat_completions_path_yields_chunks(self):
         """Cover lines 520, 525 (yield chunk in chat completions path)."""
-        from timbal.core.llm_router import _llm_router
+        from timbal.core.llm import _llm_router
 
         _make_run_context()
 
@@ -1155,9 +1155,9 @@ class TestLlmRouterYieldsChunks:
         mock_client.chat.completions.create = fake_create
 
         chunks = []
-        with patch("timbal.core.llm_router._get_client", return_value=mock_client):
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
-                with patch("timbal.core.llm_router.TIMBAL_OPENAI_API", "chat_completions"):
+                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     async for chunk in _llm_router(
                         model="groq/llama-3.3-70b-versatile",
                     ):
@@ -1170,7 +1170,7 @@ class TestGetAnthropicClientWithBaseUrl:
     """Cover _get_client when base_url is provided for Anthropic."""
 
     def test_base_url_set_on_client(self):
-        from timbal.core.llm_router import _CLIENT_CACHE
+        from timbal.core.llm import _CLIENT_CACHE
         _CLIENT_CACHE.clear()
 
         c_with_url = _get_client(AsyncAnthropic, "key_x", "https://custom.api.com/v1", "anthropic")
@@ -1179,7 +1179,7 @@ class TestGetAnthropicClientWithBaseUrl:
         assert c_with_url is not c_without_url
 
     def test_base_url_cached_separately(self):
-        from timbal.core.llm_router import _CLIENT_CACHE
+        from timbal.core.llm import _CLIENT_CACHE
         _CLIENT_CACHE.clear()
 
         c1 = _get_client(AsyncAnthropic, "key_y", "https://proxy.example.com", "anthropic")

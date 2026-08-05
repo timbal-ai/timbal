@@ -204,7 +204,7 @@ async def _call_summarizer(model: Any, prompt: str, max_summary_tokens: int) -> 
     import time
 
     from ..collectors import get_collector_registry
-    from .llm_router import _llm_router
+    from .llm import _llm_router
 
     prompt_message = Message.validate({"role": "user", "content": prompt})
     chunks = _llm_router(
