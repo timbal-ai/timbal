@@ -111,6 +111,9 @@ class VoiceConfig(BaseModel):
 
     stt_provider: str = "elevenlabs"
     stt_model: str = "scribe_v2_realtime"
+    tts_provider: str = "elevenlabs"
+    """``"elevenlabs"``, ``"munsit"`` (Arabic; requires ``MUNSIT_API_KEY``), or
+    ``"fishaudio"`` (requires ``FISH_API_KEY``)."""
     tts_model: str = "eleven_flash_v2_5"
     voice: str = DEFAULT_VOICE_ID
     language: str | None = None

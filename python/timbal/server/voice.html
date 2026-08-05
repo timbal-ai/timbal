@@ -576,6 +576,9 @@
     background: var(--primary);
   }
   .btn-session[data-mode="start"]:hover:not(:disabled) {
+    /* Re-declare: the generic button:hover rule out-specifies the base
+       .btn-session[data-mode="start"] and would repaint this #fafafa. */
+    background: var(--primary);
     opacity: 0.9;
   }
   .btn-session-icon--stop {
@@ -787,6 +790,21 @@
               <option value="webrtc">WebRTC (Opus)</option>
             </select>
           </label>
+          <label class="field">
+            <span class="field-label">TTS provider</span>
+            <select id="tts-select" aria-label="TTS provider" title="Text-to-speech provider — applied on the next Start. Munsit (Arabic) needs MUNSIT_API_KEY, Fish Audio needs FISH_API_KEY on the server.">
+              <option value="">Server default</option>
+              <option value="elevenlabs">ElevenLabs</option>
+              <option value="fishaudio">Fish Audio</option>
+              <option value="munsit">Munsit (Arabic)</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">TTS model</span>
+            <select id="tts-model-select" aria-label="TTS model" title="Text-to-speech model — options follow the selected provider. Applied on the next Start.">
+              <option value="">Server default</option>
+            </select>
+          </label>
         </div>
       </section>
       <section class="panel-section" aria-label="Filler speech">
@@ -969,6 +987,51 @@ sttSelect.onchange = () => {
   syncTdForStt();
 };
 syncTdForStt();
+
+const ttsSelect = document.getElementById('tts-select');
+const ttsModelSelect = document.getElementById('tts-model-select');
+const TTS_STORAGE_KEY = 'timbal-voice-tts-provider';
+const TTS_MODEL_STORAGE_KEY = 'timbal-voice-tts-model';
+// Models per provider — the model picker follows the provider so a foreign
+// model id never rides a provider's wire.
+const TTS_MODELS = {
+  elevenlabs: ['eleven_flash_v2_5', 'eleven_turbo_v2_5', 'eleven_multilingual_v2'],
+  fishaudio: ['s2.1-pro', 's2.1-pro-free', 's2-pro', 's1'],
+  munsit: ['faseeh-v1-preview'],
+};
+function syncTtsModels() {
+  const models = TTS_MODELS[ttsSelect.value] || [];
+  const prev = ttsModelSelect.value;
+  ttsModelSelect.innerHTML = '';
+  const def = document.createElement('option');
+  def.value = '';
+  def.textContent = 'Server default';
+  ttsModelSelect.appendChild(def);
+  for (const m of models) {
+    const o = document.createElement('option');
+    o.value = m;
+    o.textContent = m;
+    ttsModelSelect.appendChild(o);
+  }
+  ttsModelSelect.value = models.includes(prev) ? prev : '';
+  // "Server default" provider → the server picks the model too.
+  ttsModelSelect.disabled = !models.length;
+}
+ttsSelect.value = localStorage.getItem(TTS_STORAGE_KEY) || '';
+syncTtsModels();
+{
+  const savedModel = localStorage.getItem(TTS_MODEL_STORAGE_KEY) || '';
+  if ((TTS_MODELS[ttsSelect.value] || []).includes(savedModel)) ttsModelSelect.value = savedModel;
+}
+ttsSelect.onchange = () => {
+  // Applied on the next Start — the provider is fixed per WebSocket hello.
+  localStorage.setItem(TTS_STORAGE_KEY, ttsSelect.value);
+  syncTtsModels();
+  localStorage.setItem(TTS_MODEL_STORAGE_KEY, ttsModelSelect.value);
+};
+ttsModelSelect.onchange = () => {
+  localStorage.setItem(TTS_MODEL_STORAGE_KEY, ttsModelSelect.value);
+};
 
 const modelSelect = document.getElementById('model-select');
 const modelProviderSelect = document.getElementById('model-provider-select');
@@ -1913,6 +1976,8 @@ function sessionConfigPayload() {
   const cfg = {};
   if (tdSelect.value) cfg.turn_detector = tdSelect.value;
   if (sttSelect.value) cfg.stt_provider = sttSelect.value;
+  if (ttsSelect.value) cfg.tts_provider = ttsSelect.value;
+  if (ttsModelSelect.value) cfg.tts_model = ttsModelSelect.value;
   if (modelSelect.value) cfg.model = modelSelect.value;
   if (fillerSelect.value === 'off') {
     cfg.filler = { enabled: false };
@@ -2099,6 +2164,7 @@ function handleServerMessage(msg) {
           const bits = [];
           if (msg.model) bits.push(msg.model);
           if (msg.stt_provider) bits.push(`STT ${msg.stt_provider}${msg.stt_model ? `/${msg.stt_model}` : ''}`);
+          if (msg.tts_provider) bits.push(`TTS ${msg.tts_provider}`);
           if (msg.turn_detector) bits.push(msg.turn_detector);
           if (msg.vad_endpointing) bits.push('VAD endpointing');
           setConn('live', 'Listening', bits.length

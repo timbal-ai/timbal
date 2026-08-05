@@ -564,6 +564,11 @@ if TYPE_CHECKING:
         MongoUpdateDocument,
         MongoUpdateDocuments,
     )
+    from .munsit import (
+        MunsitListModels,
+        MunsitListVoices,
+        MunsitTextToSpeech,
+    )
     from .netsuite import (
         NetSuiteCreateAccount,
         NetSuiteCreateAccountingPeriod,
@@ -2358,6 +2363,9 @@ __all__ = [
     "MongoUpdateDocuments",
     "MongoDeleteDocument",
     "MongoExecuteAggregation",
+    "MunsitListModels",
+    "MunsitListVoices",
+    "MunsitTextToSpeech",
     "OneDriveSearchFiles",
     "OneDriveUploadFile",
     "OneDriveListFiles",
@@ -3572,6 +3580,9 @@ _LAZY_IMPORTS = {
     "MongoUpdateDocuments": ".mongodb",
     "MongoDeleteDocument": ".mongodb",
     "MongoExecuteAggregation": ".mongodb",
+    "MunsitListModels": ".munsit",
+    "MunsitListVoices": ".munsit",
+    "MunsitTextToSpeech": ".munsit",
     "OneDriveSearchFiles": ".onedrive",
     "OneDriveUploadFile": ".onedrive",
     "OneDriveListFiles": ".onedrive",

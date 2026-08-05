@@ -147,6 +147,7 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
 CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "stt_provider",
     "stt_model",
+    "tts_provider",
     "tts_model",
     "voice",
     "language",
@@ -491,7 +492,23 @@ def build_voice_session(
     # Config id for clients/logs (``deepgram-flux``), not the class name.
     stt_provider = stt_provider_id(stt)
     stt_model = effective_stt_model(stt, stt_model_requested)
-    tts = ElevenLabsStreamTTS()
+
+    tts_provider = (merged.tts_provider or "elevenlabs").strip().lower()
+    if tts_provider in ("munsit", "faseeh"):
+        from ..voice.munsit import MunsitStreamTTS
+
+        tts = MunsitStreamTTS()
+        tts_provider = "munsit"
+    elif tts_provider in ("fishaudio", "fish-audio", "fish"):
+        from ..voice.fish_audio import FishAudioStreamTTS
+
+        tts = FishAudioStreamTTS()
+        tts_provider = "fishaudio"
+    else:
+        if tts_provider not in ("elevenlabs", "el", "11labs"):
+            logger.warning("voice_ws_bad_tts_provider", requested_provider=merged.tts_provider)
+        tts = ElevenLabsStreamTTS()
+        tts_provider = "elevenlabs"
 
     # Client extras are unvalidated (model_copy in the merge): tolerate a
     # non-dict rather than 500-ing the socket.
@@ -565,6 +582,8 @@ def build_voice_session(
         stt_provider=stt_provider,
         stt_model=stt_model,
         stt_model_requested=merged.stt_model,
+        tts=type(tts).__name__,
+        tts_provider=tts_provider,
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
@@ -636,6 +655,7 @@ def build_voice_session(
         "session_id": session.session_id,
         "stt_provider": stt_provider,
         "stt_model": stt_model,
+        "tts_provider": tts_provider,
         "model": llm_model,
         "turn_detector": turn_detector_label,
         # Server config, not client-settable. Phase 1: the browser mixes this

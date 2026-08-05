@@ -81,6 +81,14 @@ def __getattr__(name: str):
         from .elevenlabs import ElevenLabsRealtimeSTT
 
         return ElevenLabsRealtimeSTT
+    if name == "MunsitStreamTTS":
+        from .munsit import MunsitStreamTTS
+
+        return MunsitStreamTTS
+    if name == "FishAudioStreamTTS":
+        from .fish_audio import FishAudioStreamTTS
+
+        return FishAudioStreamTTS
     if name == "SmartTurnEouModel":
         from .smart_turn import SmartTurnEouModel
 
@@ -114,9 +122,11 @@ __all__ = [
     "EouPredictor",
     "FillerConfig",
     "FillerSpoken",
+    "FishAudioStreamTTS",
     "HeuristicTurnDetector",
     "LexicalTurnDetector",
     "LocalAudioTurnDetector",
+    "MunsitStreamTTS",
     "NamoTextEouPredictor",
     "PartialDecision",
     "PlaybackTracker",
