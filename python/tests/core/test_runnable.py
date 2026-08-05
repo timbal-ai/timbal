@@ -201,6 +201,32 @@ class TestBlockingHandlerWarning:
         assert tool._blocking_warned is False
 
 
+class TestSyncGeneratorNoneYield:
+    """Regression: sync_to_async_gen used None as its end-of-stream sentinel,
+    silently truncating sync generators that legitimately yield None."""
+
+    @pytest.mark.asyncio
+    async def test_sync_generator_yielding_none_is_not_truncated(self):
+        def gen():
+            yield 1
+            yield None
+            yield 3
+
+        tool = Tool(name="none_yielder", handler=gen)
+        events = [e async for e in tool()]
+        # Chunks after the None must survive (the old sentinel ended the stream
+        # at the None, silently dropping everything behind it)...
+        deltas = [e for e in events if e.type == "DELTA"]
+        assert [d.item.data for d in deltas] == [1, 3]
+        # ...and the final output must retain the None itself. (The None chunk
+        # isn't surfaced as a streaming delta: the collector protocol treats
+        # process()->None as "skip" — a separate, purely cosmetic quirk.)
+        output_event = events[-1]
+        assert output_event.type == "OUTPUT"
+        assert output_event.status.code == "success"
+        assert output_event.output == [1, None, 3]
+
+
 class TestErrorHandling:
     """Test error handling in Runnable execution."""
     

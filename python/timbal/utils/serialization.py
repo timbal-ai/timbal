@@ -249,6 +249,11 @@ async def dump(value: Any) -> Any:
         return await _dump_async(value)
 
 
+_GEN_DONE = object()
+"""Unique end-of-generator sentinel for sync_to_async_gen. Using None would
+silently truncate sync generators that legitimately yield None."""
+
+
 async def sync_to_async_gen(
     gen: Generator[Any, None, None],
     loop: asyncio.AbstractEventLoop,
@@ -257,18 +262,22 @@ async def sync_to_async_gen(
     """Auxiliary function to convert a sync generator to an async generator.
     This function also shares the context of the caller to the executor.
     """
-    while True:
-        # StopIteration is special in Python. It's used to implement generator protocol and can't
-        # be pickled/transferred across threads properly. By catching it explicitly in the executor
-        # function and converting it to a sentinel value, we avoid problematic exception propagation.
-        def _next():
-            try:
-                return next(gen)
-            except StopIteration:
-                return None
 
-        value = await loop.run_in_executor(None, lambda: ctx.run(_next))
-        if value is None:
+    # StopIteration is special in Python. It's used to implement generator protocol and can't
+    # be pickled/transferred across threads properly. By catching it explicitly in the executor
+    # function and converting it to a sentinel value, we avoid problematic exception propagation.
+    def _next():
+        try:
+            return next(gen)
+        except StopIteration:
+            return _GEN_DONE
+
+    def _next_with_ctx():
+        return ctx.run(_next)
+
+    while True:
+        value = await loop.run_in_executor(None, _next_with_ctx)
+        if value is _GEN_DONE:
             break
         yield value
 
