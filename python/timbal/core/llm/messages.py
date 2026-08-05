@@ -44,7 +44,16 @@ def prepare_messages_request(
     if temperature is not None:
         anthropic_kwargs["temperature"] = temperature
 
+    # Server-side automatic prompt caching (anthropic SDK >= 0.83): the API
+    # places a breakpoint on the last cacheable block and advances it as the
+    # conversation grows. Cache reads cost 0.1x input; prefixes below the
+    # model's minimum (1024-4096 tokens) are simply not cached, so this is
+    # safe to default on. Opt out with model_params={"cache_control": None}.
+    anthropic_kwargs["cache_control"] = {"type": "ephemeral"}
+
     anthropic_kwargs.update(provider_params)
+    if anthropic_kwargs["cache_control"] is None:
+        del anthropic_kwargs["cache_control"]
 
     async def _create_stream():
         if output_model is not None:

@@ -1584,6 +1584,59 @@ class TestContextWindowTriggering:
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
+    async def test_cached_input_tokens_count_toward_utilization(self, monkeypatch) -> None:
+        """Anthropic prompt caching moves most input into cache_read/cache_creation
+        keys (input_tokens only covers the uncached suffix). Utilization must count
+        them, or compaction would never trigger on cached conversations."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(),
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+
+        # 90% utilization, but almost all of it sits in cache keys — the
+        # pre-fix predicate saw only 1k input + 4k output = 5% utilization.
+        root1 = ctx1.root_span()
+        root1.usage["anthropic/claude-haiku-4-5:input_tokens"] = 1_000
+        root1.usage["anthropic/claude-haiku-4-5:cache_read_input_tokens"] = 80_000
+        root1.usage["anthropic/claude-haiku-4-5:cache_creation_input_tokens"] = 5_000
+        root1.usage["anthropic/claude-haiku-4-5:output_tokens"] = 4_000
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "Cache token usage must count toward context utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
     async def test_compaction_skipped_at_low_utilization(self, monkeypatch) -> None:
         """When previous run used only 10% of context window, compactors should NOT fire."""
         from timbal.core.agent import Agent

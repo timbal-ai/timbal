@@ -326,6 +326,92 @@ class TestLlmRouterAnthropicKwargs:
         assert "tools" in captured_kwargs
         assert captured_kwargs["tools"] == [mock_tool.anthropic_schema]
 
+    @pytest.mark.asyncio
+    async def test_automatic_prompt_caching_default(self):
+        """Top-level cache_control (automatic prompt caching) is sent by default."""
+        from timbal.core.llm import _llm_router
+        _make_run_context()
+
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.messages.create = fake_create
+
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="anthropic/claude-sonnet-4-6",
+                        max_tokens=100,
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assert captured_kwargs.get("cache_control") == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_automatic_prompt_caching_override_ttl(self):
+        """provider_params can replace the default cache_control (e.g. 1h TTL)."""
+        from timbal.core.llm import _llm_router
+        _make_run_context()
+
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.messages.create = fake_create
+
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="anthropic/claude-sonnet-4-6",
+                        max_tokens=100,
+                        provider_params={"cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assert captured_kwargs.get("cache_control") == {"type": "ephemeral", "ttl": "1h"}
+
+    @pytest.mark.asyncio
+    async def test_automatic_prompt_caching_opt_out(self):
+        """cache_control=None in provider_params removes the kwarg entirely."""
+        from timbal.core.llm import _llm_router
+        _make_run_context()
+
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.messages.create = fake_create
+
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="anthropic/claude-sonnet-4-6",
+                        max_tokens=100,
+                        provider_params={"cache_control": None},
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        assert "cache_control" not in captured_kwargs
+
 
 class TestLlmRouterChatCompletionsKwargs:
     """Test Chat Completions path kwargs (groq, cerebras, etc.)."""

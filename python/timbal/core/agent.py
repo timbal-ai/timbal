@@ -744,7 +744,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
                 should_compact = True
             elif prev_usage:
-                prev_input_tokens = sum(v for k, v in prev_usage.items() if ":input" in k and "token" in k)
+                # Anthropic's input_tokens excludes cached tokens: full context =
+                # input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+                # (disjoint totals). Count the two cache totals explicitly — not via a
+                # loose "input" match, which would double-count the flattened per-TTL
+                # breakdown keys (e.g. ephemeral_5m_input_tokens).
+                prev_input_tokens = sum(
+                    v
+                    for k, v in prev_usage.items()
+                    if (":input" in k and "token" in k)
+                    or k.endswith((":cache_creation_input_tokens", ":cache_read_input_tokens"))
+                )
                 prev_output_tokens = sum(v for k, v in prev_usage.items() if ":output" in k and "token" in k)
                 utilization = (prev_input_tokens + prev_output_tokens) / context_window
                 should_compact = utilization >= self.memory_compaction_ratio
