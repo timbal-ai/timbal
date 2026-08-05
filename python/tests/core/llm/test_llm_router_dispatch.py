@@ -547,6 +547,51 @@ class TestLlmRouterChatCompletionsKwargs:
         assert captured_kwargs["tools"] == [mock_tool.openai_chat_completions_schema, extra_tool]
 
     @pytest.mark.asyncio
+    async def test_server_tool_only_turn_dropped_from_messages(self):
+        """Anthropic memory whose assistant turn is ONLY server-tool blocks must not
+        produce a bare {"role": "assistant"} message on the chat completions path."""
+        from timbal.core.llm import _llm_router
+        from timbal.types.content import CustomContent, TextContent, ToolUseContent
+        from timbal.types.message import Message
+        _make_run_context()
+
+        captured_kwargs = {}
+
+        async def fake_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _empty_async_stream()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = fake_create
+
+        memory = [
+            Message(role="user", content=[TextContent(text="weather?")]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="s1", name="web_search", input={"query": "w"}, is_server_tool_use=True),
+                    CustomContent(value={"type": "web_search_tool_result", "tool_use_id": "s1", "content": []}),
+                ],
+            ),
+            Message(role="user", content=[TextContent(text="and tomorrow?")]),
+        ]
+
+        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
+            with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
+                try:
+                    async for _ in _llm_router(
+                        model="groq/llama-3.3-70b-versatile",
+                        messages=memory,
+                    ):
+                        pass
+                except (RuntimeError, StopAsyncIteration):
+                    pass
+
+        sent = captured_kwargs["messages"]
+        assert all(m.keys() != {"role"} for m in sent), f"bare role dict in {sent}"
+        assert [m["role"] for m in sent] == ["user", "user"]
+
+    @pytest.mark.asyncio
     async def test_flatten_text_content_for_xiaomi(self):
         """xiaomi provider has flatten_text_content=True."""
         from timbal.core.llm import _llm_router

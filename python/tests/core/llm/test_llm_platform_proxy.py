@@ -38,6 +38,7 @@ def load_test_env():
     return True
 
 
+@pytest.mark.integration
 @pytest.mark.skipif(not TEST_ENV_FILE.exists(), reason=SKIP_REASON)
 class TestPlatformProxy:
     """Test that agents use platform proxy when configured."""

@@ -42,7 +42,10 @@ def prepare_chat_completions_request(
     reasoning_as = "reasoning_content" if config.supports_chat_reasoning_content else "omit"
     for message in messages:
         chat_completions_message = message.to_openai_chat_completions_input(reasoning_as=reasoning_as)
-        chat_completions_messages.append(chat_completions_message)
+        # None = turn with no exportable payload (e.g. only server-side tool
+        # blocks after a cross-provider switch) — skip it.
+        if chat_completions_message is not None:
+            chat_completions_messages.append(chat_completions_message)
 
     # Some providers have incomplete OpenAI chat completions support.
     # Flatten text-only content arrays to plain strings for compatibility.

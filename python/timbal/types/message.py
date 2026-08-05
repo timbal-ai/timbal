@@ -91,7 +91,7 @@ class Message:
         self,
         *,
         reasoning_as: Literal["omit", "reasoning_content"] = "omit",
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Convert the message to OpenAI's chat completions api expected input format.
 
         Args:
@@ -134,6 +134,11 @@ class Message:
             openai_input["tool_calls"] = tool_calls
         if reasoning_parts:
             openai_input["reasoning_content"] = "".join(reasoning_parts)
+        if len(openai_input) == 1:
+            # Every content item was skipped (e.g. server-side tool blocks on
+            # cross-provider replay, or thinking-only turns with omit). A bare
+            # role dict is invalid for the API — drop the turn entirely.
+            return None
         return openai_input
 
     def to_anthropic_input(self) -> dict[str, Any]:
