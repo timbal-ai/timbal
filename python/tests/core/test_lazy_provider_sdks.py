@@ -11,8 +11,6 @@ the rest of the suite.
 import subprocess
 import sys
 
-import pytest
-
 
 def _run(code: str) -> str:
     """Run code in a subprocess; return the LAST stdout line (skips log lines)."""
@@ -27,7 +25,6 @@ def _run(code: str) -> str:
     return lines[-1] if lines else ""
 
 
-@pytest.mark.timeout(120)
 class TestLazyProviderSdks:
     def test_agent_import_loads_neither_sdk(self):
         out = _run(

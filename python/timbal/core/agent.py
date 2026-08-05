@@ -1112,12 +1112,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             if command in commands:
                                 tool = commands[command]
                                 tool_input = {}
-                                for i, field_name in enumerate(tool.params_model.model_fields.keys()):
+                                # NOTE: do not name this loop variable `i` — it would shadow
+                                # the agent-loop iteration counter in the enclosing scope.
+                                for arg_idx, field_name in enumerate(tool.params_model.model_fields.keys()):
                                     # Params model preserves the ordering of the fields as they appear in the signature
                                     # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
-                                    if i >= len(args):
+                                    if arg_idx >= len(args):
                                         break
-                                    tool_input[field_name] = args[i]
+                                    tool_input[field_name] = args[arg_idx]
                                 # Craft a fake tool_use so we can keep this interaction in the agent memory
                                 tool_use_id = uuid7(as_type="hex")
                                 current_span._memory_dump.append(
