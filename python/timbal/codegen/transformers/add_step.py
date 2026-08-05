@@ -7,6 +7,10 @@ from ..cst_utils import (
     build_cst_value,
     collect_assignments,
     has_import,
+    insert_before_assignments,
+    insert_imports,
+    is_step_call,
+    parse_function_def,
     resolve_entry_point_type,
     resolve_runnable_name,
 )
@@ -216,14 +220,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         _reject_non_name_config(config, "Custom")
         if not args.definition:
             raise ValueError("--definition is required for Custom steps.")
-        func_tree = cst.parse_module(args.definition)
-        func_def = None
-        for stmt in func_tree.body:
-            if isinstance(stmt, cst.FunctionDef):
-                func_def = stmt
-                break
-        if func_def is None:
-            raise ValueError("--definition must contain a function definition.")
+        func_def = parse_function_def(args.definition)
         func_name = func_def.name.value
         runtime_name = args.step_name or config.get("name") or func_name
         var_name = runtime_name
@@ -366,7 +363,7 @@ class StepAdder(cst.CSTTransformer):
         call = updated_node.value
         if not isinstance(call, cst.Call):
             return updated_node
-        if not self._is_step_call(call):
+        if not is_step_call(call, self.entry_point):
             return updated_node
 
         # Check if first arg resolves to our step name.
@@ -418,30 +415,9 @@ class StepAdder(cst.CSTTransformer):
             stmts_to_add.append(assign_stmt)
 
         body = list(updated_node.body)
-
-        # Insert imports after the last existing import.
-        if imports_to_add:
-            import_insert_idx = 0
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, cst.SimpleStatementLine):
-                    for item in stmt.body:
-                        if isinstance(item, (cst.Import, cst.ImportFrom)):
-                            import_insert_idx = i + 1
-            for stmt in reversed(imports_to_add):
-                body.insert(import_insert_idx, stmt)
-
+        insert_imports(body, imports_to_add)
         # Insert definitions/assignments before the entry point.
-        if stmts_to_add:
-            insert_idx = len(body)
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, cst.SimpleStatementLine):
-                    for item in stmt.body:
-                        if isinstance(item, cst.Assign):
-                            for t in item.targets:
-                                if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
-                                    insert_idx = min(insert_idx, i)
-            for stmt in reversed(stmts_to_add):
-                body.insert(insert_idx, stmt)
+        insert_before_assignments(body, stmts_to_add, target_names={self.entry_point})
 
         # --- Append .step() call ---
         if not self._step_call_updated:
@@ -456,7 +432,7 @@ class StepAdder(cst.CSTTransformer):
                 if isinstance(stmt, cst.SimpleStatementLine):
                     for item in stmt.body:
                         if isinstance(item, cst.Expr) and isinstance(item.value, cst.Call):
-                            if self._is_step_call(item.value):
+                            if is_step_call(item.value, self.entry_point):
                                 step_insert_idx = i + 1
                         if isinstance(item, cst.Assign):
                             for t in item.targets:
@@ -472,15 +448,6 @@ class StepAdder(cst.CSTTransformer):
         return updated_node.with_changes(body=body)
 
     # -- Helpers ------------------------------------------------------------
-
-    def _is_step_call(self, call: cst.Call) -> bool:
-        """Check if a Call node is entry_point.step(...)."""
-        return (
-            isinstance(call.func, cst.Attribute)
-            and isinstance(call.func.value, cst.Name)
-            and call.func.value.value == self.entry_point
-            and call.func.attr.value == "step"
-        )
 
     def _resolve_step_name(self, element: cst.BaseExpression) -> str | None:
         """Resolve the name of a step from the first arg of .step()."""

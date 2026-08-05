@@ -1,6 +1,7 @@
 from typing import Literal
 
 from ...state.tracing.span import Span
+from ._spans import get_span_name, validate_parallel_spans
 from .base import BaseValidator
 from .context import ValidationContext
 
@@ -73,53 +74,6 @@ class ParallelValidator(BaseValidator):
 
         return expected_spans, tolerance_ms
 
-    def _get_span_name(self, span_path: str) -> str:
-        """Extract the span name from a full path."""
-        return span_path.rsplit(".", 1)[-1] if "." in span_path else span_path
-
-    def _spans_overlap(self, span_a: Span, span_b: Span, tolerance_ms: int = 0) -> bool:
-        """Check if two spans have overlapping time ranges.
-
-        Two spans overlap if they share any point in time (within tolerance).
-        Using <= to handle edge case where spans have identical start/end times.
-
-        Args:
-            span_a: First span
-            span_b: Second span
-            tolerance_ms: Tolerance in milliseconds - spans can have this much gap and still be considered parallel
-        """
-        # If either span hasn't completed, use a large value for t1
-        t1_a = span_a.t1 if span_a.t1 is not None else float("inf")
-        t1_b = span_b.t1 if span_b.t1 is not None else float("inf")
-
-        # Add tolerance to the end times
-        return span_a.t0 <= t1_b + tolerance_ms and span_b.t0 <= t1_a + tolerance_ms
-
-    def _all_spans_parallel(self, spans: list[Span], tolerance_ms: int = 0) -> tuple[bool, str]:
-        """Check if all spans ran in parallel (all pairs overlap).
-
-        Returns:
-            Tuple of (all_parallel, error_message)
-        """
-        if len(spans) < 2:
-            return True, ""
-
-        # Check all pairs
-        for i, span_a in enumerate(spans):
-            for span_b in spans[i + 1 :]:
-                if not self._spans_overlap(span_a, span_b, tolerance_ms):
-                    name_a = self._get_span_name(span_a.path)
-                    name_b = self._get_span_name(span_b.path)
-                    t1_a_str = f"{span_a.t1}" if span_a.t1 else "running"
-                    t1_b_str = f"{span_b.t1}" if span_b.t1 else "running"
-                    return False, (
-                        f"spans '{name_a}' and '{name_b}' did not run in parallel. "
-                        f"'{name_a}': {span_a.t0}-{t1_a_str}, "
-                        f"'{name_b}': {span_b.t0}-{t1_b_str}"
-                    )
-
-        return True, ""
-
     async def __call__(self, ctx: ValidationContext) -> None:
         """Check if all expected spans exist and ran in parallel.
 
@@ -137,7 +91,7 @@ class ParallelValidator(BaseValidator):
         # Build a map of span name to span
         span_map: dict[str, Span] = {}
         for span in all_spans:
-            name = self._get_span_name(span.path)
+            name = get_span_name(span.path)
             span_map[name] = span
 
         # Check that all expected spans exist
@@ -149,6 +103,6 @@ class ParallelValidator(BaseValidator):
         matched_spans = [span_map[name] for name in expected_spans]
 
         # Check that all matched spans ran in parallel
-        all_parallel, error_msg = self._all_spans_parallel(matched_spans, tolerance_ms)
+        all_parallel, error_msg = validate_parallel_spans(matched_spans, tolerance_ms)
         if not all_parallel:
             raise AssertionError(error_msg)

@@ -338,29 +338,16 @@ class _BareFunctionWrapper(cst.CSTTransformer):
 
         # Add ``from timbal.core import Tool`` if missing.
         if not has_import(original_node, "timbal.core", "Tool"):
-            import_insert_idx = 0
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, cst.SimpleStatementLine):
-                    for item_node in stmt.body:
-                        if isinstance(item_node, (cst.Import, cst.ImportFrom)):
-                            import_insert_idx = i + 1
-            body.insert(import_insert_idx, cst.parse_statement("from timbal.core import Tool\n"))
+            insert_imports(body, [cst.parse_statement("from timbal.core import Tool\n")])
 
         # Build ``step_name = Tool(name="step_name", handler=step_name_fn)``
+        # and insert it before the entry-point assignment.
         assignment_code = (
             f'{self.step_name} = Tool(name="{self.step_name}", handler={self.step_name}_fn)\n'
         )
-
-        # Insert before the entry-point assignment.
-        insert_idx = len(body)
-        for i, stmt in enumerate(body):
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for item_node in stmt.body:
-                    if isinstance(item_node, cst.Assign):
-                        for t in item_node.targets:
-                            if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
-                                insert_idx = min(insert_idx, i)
-        body.insert(insert_idx, cst.parse_statement(assignment_code))
+        insert_before_assignments(
+            body, [cst.parse_statement(assignment_code)], target_names={self.entry_point},
+        )
 
         return updated_node.with_changes(body=body)
 
@@ -368,6 +355,198 @@ class _BareFunctionWrapper(cst.CSTTransformer):
 def wrap_bare_function_step(tree: cst.Module, entry_point: str, step_name: str) -> cst.Module:
     """Wrap a bare function step in a ``Tool`` and return the modified tree."""
     return tree.visit(_BareFunctionWrapper(entry_point, step_name))
+
+
+def is_step_call(call: cst.Call, entry_point: str) -> bool:
+    """Check if a Call node is ``<entry_point>.step(...)``."""
+    return (
+        isinstance(call.func, cst.Attribute)
+        and isinstance(call.func.value, cst.Name)
+        and call.func.value.value == entry_point
+        and call.func.attr.value == "step"
+    )
+
+
+def step_matches_target(
+    call: cst.Call,
+    target: str,
+    step_names: dict[str, str],
+    assignments: dict[str, cst.Call] | None = None,
+) -> bool:
+    """Check if a ``.step()`` call's first argument refers to *target*.
+
+    Matches when *target* equals either the step variable name or its runtime
+    name (from ``step_names``, or resolved from *assignments* when provided).
+    """
+    if not call.args:
+        return False
+    first_arg = call.args[0].value
+    if isinstance(first_arg, cst.Name):
+        var_name = first_arg.value
+        if var_name == target:
+            return True
+        runtime_name = step_names.get(var_name)
+        if runtime_name is None and assignments and var_name in assignments:
+            runtime_name = resolve_runnable_name(assignments[var_name])
+        if runtime_name is not None and runtime_name == target:
+            return True
+    return False
+
+
+class StepCallRewriter(cst.CSTTransformer):
+    """Base for transformers that rewrite the target step's ``.step()`` call.
+
+    Subclasses set ``entry_point``, ``target``, ``step_names`` and
+    ``assignments`` attributes and implement ``_build_step_call_code(call)``.
+    """
+
+    def leave_Expr(self, original_node: cst.Expr, updated_node: cst.Expr) -> cst.Expr:  # noqa: ARG002
+        call = updated_node.value
+        if not isinstance(call, cst.Call):
+            return updated_node
+        if not is_step_call(call, self.entry_point) or not step_matches_target(
+            call, self.target, self.step_names, self.assignments,
+        ):
+            return updated_node
+
+        new_call = parse_call_statement(self._build_step_call_code(call))
+        if new_call is not None:
+            return updated_node.with_changes(value=new_call)
+        return updated_node
+
+
+def assignment_resolves_to(assign: cst.Assign, entry_point: str, name: str) -> bool:
+    """True when a (non-entry-point) assignment's Call value resolves to *name*."""
+    for target in assign.targets:
+        if not isinstance(target.target, cst.Name) or target.target.value == entry_point:
+            continue
+        if isinstance(assign.value, cst.Call) and resolve_runnable_name(assign.value) == name:
+            return True
+    return False
+
+
+def parse_call_statement(code: str) -> cst.Call | None:
+    """Parse *code* (a single expression statement) and return its Call node."""
+    parsed = cst.parse_module(code + "\n")
+    for stmt in parsed.body:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if isinstance(item, cst.Expr) and isinstance(item.value, cst.Call):
+                    return item.value
+    return None
+
+
+def parse_function_def(definition: str) -> cst.FunctionDef:
+    """Parse a ``--definition`` source string and return its FunctionDef.
+
+    Raises ``ValueError`` when the source contains no function definition.
+    """
+    func_tree = cst.parse_module(definition)
+    for stmt in func_tree.body:
+        if isinstance(stmt, cst.FunctionDef):
+            return stmt
+    raise ValueError("--definition must contain a function definition.")
+
+
+def insert_imports(body: list[cst.BaseStatement], imports: list[cst.BaseStatement]) -> None:
+    """Insert import statements after the last existing import (in place)."""
+    import_insert_idx = 0
+    for i, stmt in enumerate(body):
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if isinstance(item, (cst.Import, cst.ImportFrom)):
+                    import_insert_idx = i + 1
+    for stmt in reversed(imports):
+        body.insert(import_insert_idx, stmt)
+
+
+def insert_before_assignments(
+    body: list[cst.BaseStatement],
+    stmts: list[cst.BaseStatement],
+    *,
+    target_names: set[str],
+    runnable_names: set[str] = frozenset(),
+) -> None:
+    """Insert statements before the earliest anchoring assignment (in place).
+
+    Anchors are top-level assignments whose target is in *target_names*, or
+    whose Call value resolves (via ``resolve_runnable_name``) to a name in
+    *runnable_names*. Appends at the end when no anchor is found.
+    """
+    insert_idx = len(body)
+    for i, stmt in enumerate(body):
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if isinstance(item, cst.Assign):
+                    if runnable_names and isinstance(item.value, cst.Call):
+                        if resolve_runnable_name(item.value) in runnable_names:
+                            insert_idx = min(insert_idx, i)
+                    for t in item.targets:
+                        if isinstance(t.target, cst.Name) and t.target.value in target_names:
+                            insert_idx = min(insert_idx, i)
+    for stmt in reversed(stmts):
+        body.insert(insert_idx, stmt)
+
+
+def validate_tools_target(
+    tree: cst.Module | None,
+    entry_point: str,
+    step: str | None,
+    *,
+    operation: str,
+) -> tuple[str, dict[str, cst.Call]]:
+    """Validate the add-tool/add-mcp target and return (target, assignments).
+
+    With ``--step`` the entry point must be a Workflow and the step must exist;
+    without it the entry point must be an Agent assigned in the source.
+    """
+    if tree is not None:
+        ep_type = resolve_entry_point_type(tree, entry_point)
+        if step:
+            if ep_type is not None and ep_type != "Workflow":
+                raise ValueError(f"--step requires a Workflow entry point, but '{entry_point}' is a {ep_type}.")
+        else:
+            if ep_type is not None and ep_type != "Agent":
+                raise ValueError(f"{operation} requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
+
+    target = step if step else entry_point
+    assignments = collect_assignments(tree) if tree else {}
+
+    if tree is not None:
+        if step:
+            step_names = collect_step_names(tree, entry_point, assignments)
+            if (
+                step not in step_names
+                and step not in assignments
+                and not is_bare_function_step(tree, entry_point, step, assignments)
+            ):
+                raise ValueError(
+                    f"Workflow step '{step}' not found. "
+                    "Use the step variable name from .step(...), not the runtime name."
+                )
+        elif entry_point not in assignments:
+            raise ValueError(
+                f"Entry point variable '{entry_point}' not found in source. "
+                "Ensure timbal.yaml fqn matches the Agent/Workflow variable name."
+            )
+
+    return target, assignments
+
+
+def merge_config_kwargs(call: cst.Call, config: dict) -> cst.Call:
+    """Merge *config* kwargs into an existing Call, preserving all other args.
+
+    Existing kwargs named in *config* are dropped (overridden or removed);
+    new kwargs are appended, skipping ``None`` values (None = remove).
+    """
+    args = [
+        a for a in call.args
+        if not (isinstance(a.keyword, cst.Name) and a.keyword.value in config)
+    ]
+    for key, value in config.items():
+        if value is not None:
+            args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
+    return call.with_changes(args=args)
 
 
 def has_import(tree: cst.Module, module: str, name: str) -> bool:

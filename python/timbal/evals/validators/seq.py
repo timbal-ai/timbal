@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ...state.tracing.span import Span
+from ._spans import get_span_name, validate_parallel_spans
 from .base import BaseValidator
 from .context import ValidationContext
 
@@ -167,11 +168,6 @@ class SeqValidator(BaseValidator):
 
         return patterns
 
-    def _get_span_name(self, span_path: str) -> str:
-        """Extract the span name from a full path."""
-        # Path is like "agent.tool.subtool", we want "subtool"
-        return span_path.rsplit(".", 1)[-1] if "." in span_path else span_path
-
     def _dp_match(self, patterns: list[str | AnyPattern | ParallelPattern], span_names: list[str]) -> tuple[bool, str]:
         """Use dynamic programming to match patterns against span names.
 
@@ -262,40 +258,6 @@ class SeqValidator(BaseValidator):
             f"expected sequence ({' -> '.join(pattern_strs)}) but got ({' -> '.join(span_names)})",
         )
 
-    def _spans_overlap(self, span_a: Span, span_b: Span, tolerance_ms: int = 0) -> bool:
-        """Check if two spans have overlapping time ranges.
-
-        Two spans overlap if they share any point in time (within tolerance).
-        Using <= to handle edge case where spans have identical start/end times.
-
-        Args:
-            span_a: First span
-            span_b: Second span
-            tolerance_ms: Tolerance in milliseconds - spans can have this much gap and still be considered parallel
-        """
-        t1_a = span_a.t1 if span_a.t1 is not None else float("inf")
-        t1_b = span_b.t1 if span_b.t1 is not None else float("inf")
-        return span_a.t0 <= t1_b + tolerance_ms and span_b.t0 <= t1_a + tolerance_ms
-
-    def _validate_parallel_spans(self, spans: list[Span], tolerance_ms: int = 0) -> tuple[bool, str]:
-        """Check if all spans ran in parallel (all pairs overlap)."""
-        if len(spans) < 2:
-            return True, ""
-
-        for i, span_a in enumerate(spans):
-            for span_b in spans[i + 1 :]:
-                if not self._spans_overlap(span_a, span_b, tolerance_ms):
-                    name_a = self._get_span_name(span_a.path)
-                    name_b = self._get_span_name(span_b.path)
-                    t1_a_str = f"{span_a.t1}" if span_a.t1 else "running"
-                    t1_b_str = f"{span_b.t1}" if span_b.t1 else "running"
-                    return False, (
-                        f"spans '{name_a}' and '{name_b}' in parallel! did not run in parallel. "
-                        f"'{name_a}': {span_a.t0}-{t1_a_str}, "
-                        f"'{name_b}': {span_b.t0}-{t1_b_str}"
-                    )
-        return True, ""
-
     def _find_parallel_matches(
         self, patterns: list[str | AnyPattern | ParallelPattern], spans: list[Span]
     ) -> list[tuple[ParallelPattern, list[Span]]]:
@@ -305,7 +267,6 @@ class SeqValidator(BaseValidator):
         """
         matches = []
         span_idx = 0
-        span_names = [self._get_span_name(s.path) for s in spans]
 
         for pattern in patterns:
             if isinstance(pattern, ParallelPattern):
@@ -346,7 +307,7 @@ class SeqValidator(BaseValidator):
 
         # Get all spans that are direct children of the target. Should already be sorted
         spans = ctx.trace.get_level(self.target)
-        span_names = [self._get_span_name(s.path) for s in spans]
+        span_names = [get_span_name(s.path) for s in spans]
 
         if not patterns:
             raise AssertionError(f"no patterns defined in seq! value: {self.value}")
@@ -379,6 +340,8 @@ class SeqValidator(BaseValidator):
         # If matched, also validate that parallel patterns actually ran in parallel
         parallel_matches = self._find_parallel_matches(patterns, spans)
         for pattern, matched_spans in parallel_matches:
-            is_parallel, parallel_error = self._validate_parallel_spans(matched_spans, pattern.tolerance_ms)
+            is_parallel, parallel_error = validate_parallel_spans(
+                matched_spans, pattern.tolerance_ms, label=" in parallel!",
+            )
             if not is_parallel:
                 raise AssertionError(parallel_error)

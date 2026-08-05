@@ -2,7 +2,7 @@ import argparse
 
 import libcst as cst
 
-from ..cst_utils import collect_assignments, resolve_entry_point_type, resolve_runnable_name
+from ..cst_utils import collect_assignments, is_step_call, resolve_entry_point_type, resolve_runnable_name
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -42,7 +42,7 @@ class StepRemover(cst.CSTTransformer):
         for item in updated_node.body:
             if isinstance(item, cst.Expr) and isinstance(item.value, cst.Call):
                 call = item.value
-                if not self._is_standalone_step_call(call):
+                if not is_step_call(call, self.entry_point):
                     continue
                 # Remove the target step entirely.
                 if self._matches_step_name(call):
@@ -95,15 +95,6 @@ class StepRemover(cst.CSTTransformer):
     def _is_dot_step(self, call: cst.Call) -> bool:
         """Check if a Call node is <something>.step(...)."""
         return isinstance(call.func, cst.Attribute) and call.func.attr.value == "step"
-
-    def _is_standalone_step_call(self, call: cst.Call) -> bool:
-        """Check if a Call node is entry_point.step(...) as a standalone expression."""
-        return (
-            isinstance(call.func, cst.Attribute)
-            and isinstance(call.func.value, cst.Name)
-            and call.func.value.value == self.entry_point
-            and call.func.attr.value == "step"
-        )
 
     def _matches_step_name(self, call: cst.Call) -> bool:
         """Check if the first argument of .step() resolves to the target step name."""

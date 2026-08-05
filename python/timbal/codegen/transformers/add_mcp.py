@@ -14,12 +14,11 @@ import libcst as cst
 
 from ..cli_utils import arg_input, parse_json_arg
 from ..cst_utils import (
-    collect_assignments,
-    collect_step_names,
     has_import,
-    is_bare_function_step,
-    resolve_entry_point_type,
+    insert_before_assignments,
+    insert_imports,
     resolve_runnable_name,
+    validate_tools_target,
 )
 
 _ENV_PLACEHOLDER = re.compile(r"\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*)")
@@ -166,35 +165,7 @@ def _servers_from_args(args: argparse.Namespace) -> list[tuple[str, dict]]:
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
     step = getattr(args, "step", None)
-    if tree is not None:
-        ep_type = resolve_entry_point_type(tree, entry_point)
-        if step:
-            if ep_type is not None and ep_type != "Workflow":
-                raise ValueError(f"--step requires a Workflow entry point, but '{entry_point}' is a {ep_type}.")
-        else:
-            if ep_type is not None and ep_type != "Agent":
-                raise ValueError(f"add-mcp requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
-
-    target = step if step else entry_point
-    assignments = collect_assignments(tree) if tree else {}
-
-    if tree is not None:
-        if step:
-            step_names = collect_step_names(tree, entry_point, assignments)
-            if (
-                step not in step_names
-                and step not in assignments
-                and not is_bare_function_step(tree, entry_point, step, assignments)
-            ):
-                raise ValueError(
-                    f"Workflow step '{step}' not found. "
-                    "Use the step variable name from .step(...), not the runtime name."
-                )
-        elif entry_point not in assignments:
-            raise ValueError(
-                f"Entry point variable '{entry_point}' not found in source. "
-                "Ensure timbal.yaml fqn matches the Agent/Workflow variable name."
-            )
+    target, assignments = validate_tools_target(tree, entry_point, step, operation="add-mcp")
 
     servers = _servers_from_args(args)
 
@@ -375,32 +346,12 @@ class MCPAdder(cst.CSTTransformer):
             return updated_node
 
         body = list(updated_node.body)
-
-        if imports_to_add:
-            import_insert_idx = 0
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, cst.SimpleStatementLine):
-                    for item in stmt.body:
-                        if isinstance(item, (cst.Import, cst.ImportFrom)):
-                            import_insert_idx = i + 1
-            for stmt in reversed(imports_to_add):
-                body.insert(import_insert_idx, stmt)
-
-        if stmts_to_add:
-            insert_idx = len(body)
-            runtime_names = {rn for _, rn, _ in self.servers}
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, cst.SimpleStatementLine):
-                    for item in stmt.body:
-                        if isinstance(item, cst.Assign) and isinstance(item.value, cst.Call):
-                            if resolve_runnable_name(item.value) in runtime_names:
-                                insert_idx = min(insert_idx, i)
-                            for t in item.targets:
-                                if isinstance(t.target, cst.Name) and t.target.value == self.target:
-                                    insert_idx = min(insert_idx, i)
-            for stmt in reversed(stmts_to_add):
-                body.insert(insert_idx, stmt)
-
+        insert_imports(body, imports_to_add)
+        insert_before_assignments(
+            body, stmts_to_add,
+            target_names={self.target},
+            runnable_names={rn for _, rn, _ in self.servers},
+        )
         return updated_node.with_changes(body=body)
 
     def _add_to_tools(self, call: cst.Call) -> cst.Call:

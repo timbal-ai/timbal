@@ -4,10 +4,12 @@ import libcst as cst
 
 from ..cli_utils import arg_input
 from ..cst_utils import (
+    StepCallRewriter,
     collect_assignments,
     collect_chained_step_names,
     collect_step_names,
     has_import,
+    insert_imports,
     require_step,
     resolve_entry_point_type,
 )
@@ -59,7 +61,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     return EdgeAdder(entry_point, source, args.target, when_expr, assignments, step_names)
 
 
-class EdgeAdder(cst.CSTTransformer):
+class EdgeAdder(StepCallRewriter):
     """Add an ordering or conditional edge between two workflow steps."""
 
     needs_reorder = True
@@ -80,34 +82,6 @@ class EdgeAdder(cst.CSTTransformer):
         self.assignments = assignments
         self.step_names = step_names or {}
 
-    def _is_step_call(self, call: cst.Call) -> bool:
-        return (
-            isinstance(call.func, cst.Attribute)
-            and isinstance(call.func.value, cst.Name)
-            and call.func.value.value == self.entry_point
-            and call.func.attr.value == "step"
-        )
-
-    def _matches_target(self, call: cst.Call) -> bool:
-        """Check if a .step() call is the target step.
-
-        Matches when self.target equals either the variable name or the
-        runtime name (the ``name=`` kwarg) of the step.
-        """
-        if not call.args:
-            return False
-        first_arg = call.args[0].value
-        if isinstance(first_arg, cst.Name):
-            var_name = first_arg.value
-            # Match by variable name.
-            if var_name == self.target:
-                return True
-            # Match by runtime name (name= kwarg).
-            runtime_name = self.step_names.get(var_name)
-            if runtime_name is not None and runtime_name == self.target:
-                return True
-        return False
-
     def _get_existing_depends_on(self, call: cst.Call) -> list[str]:
         """Extract existing depends_on list from a .step() call."""
         for arg in call.args[1:]:
@@ -120,34 +94,10 @@ class EdgeAdder(cst.CSTTransformer):
                     return deps
         return []
 
-    def leave_Expr(self, original_node: cst.Expr, updated_node: cst.Expr) -> cst.Expr:
-        """Update the target's .step() call to add the edge."""
-        call = updated_node.value
-        if not isinstance(call, cst.Call):
-            return updated_node
-        if not self._is_step_call(call) or not self._matches_target(call):
-            return updated_node
-
-        step_call_code = self._build_step_call_code(call)
-        parsed = cst.parse_module(step_call_code + "\n")
-        for stmt in parsed.body:
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for item in stmt.body:
-                    if isinstance(item, cst.Expr) and isinstance(item.value, cst.Call):
-                        return updated_node.with_changes(value=item.value)
-        return updated_node
-
     def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
         if self.when_expr and not has_import(original_node, "timbal.state", "get_run_context"):
             body = list(updated_node.body)
-            import_stmt = cst.parse_statement("from timbal.state import get_run_context\n")
-            import_insert_idx = 0
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, cst.SimpleStatementLine):
-                    for item in stmt.body:
-                        if isinstance(item, (cst.Import, cst.ImportFrom)):
-                            import_insert_idx = i + 1
-            body.insert(import_insert_idx, import_stmt)
+            insert_imports(body, [cst.parse_statement("from timbal.state import get_run_context\n")])
             return updated_node.with_changes(body=body)
         return updated_node
 

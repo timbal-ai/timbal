@@ -2,7 +2,6 @@ from typing import Literal
 
 from pydantic import BaseModel, EmailStr, ValidationError, model_validator
 
-from ...types.message import Message
 from .base import BaseValidator
 from .context import ValidationContext
 
@@ -20,11 +19,7 @@ class EmailValidator(BaseValidator):
 
     @model_validator(mode="after")
     def validate_value(self) -> "EmailValidator":
-        # Normalize value to boolean (default True if not provided)
-        if self.value is None:
-            self.value = True
-        else:
-            self.value = bool(self.value)
+        self._normalize_bool_value()
         return self
 
     async def __call__(self, ctx: ValidationContext) -> None:
@@ -35,24 +30,14 @@ class EmailValidator(BaseValidator):
         Raises:
             AssertionError: If email validity doesn't match expected state.
         """
-        from ..utils import resolve_target
-
-        _, actual_value = resolve_target(ctx.trace, self.target, self.path_key)
-
-        if isinstance(actual_value, Message):
-            actual_value = actual_value.collect_text()
-
-        if not isinstance(actual_value, str):
-            if self.value:
-                raise AssertionError(f"expected email string, got {type(actual_value).__name__}")
-            else:
-                # Non-string is not an email, which is what we wanted
-                return
+        actual_value = self._resolve_expected_str(ctx, "email")
+        if actual_value is None:
+            # Non-string is not an email, which is what we wanted
+            return
 
         actual_value = actual_value.strip()
 
         # Use Pydantic model to validate email
-        is_valid_email = False
         try:
             _EmailModel(email=actual_value)
             is_valid_email = True
