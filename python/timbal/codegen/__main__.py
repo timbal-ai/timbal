@@ -3,6 +3,40 @@ import json
 import sys
 from pathlib import Path
 
+# Static registry of transformer subcommands: cli-name -> (module, help line).
+# Lets `--help` list every operation and lightweight ops dispatch WITHOUT
+# importing the transformer modules (each imports libcst at module level,
+# ~160ms). Only the operation actually invoked registers its full parser.
+# A test asserts this table stays in sync with the modules on disk.
+_TRANSFORMER_OPS: dict[str, tuple[str, str]] = {
+    "add-edge": ("add_edge", "Add an ordering or conditional edge between two workflow steps."),
+    "add-mcp": ("add_mcp", "Add an MCP server to the agent's tools list."),
+    "add-step": ("add_step", "Add a step to the workflow."),
+    "add-tool": ("add_tool", "Add a tool to the agent's tools list."),
+    "remove-edge": ("remove_edge", "Remove an edge between two workflow steps."),
+    "remove-step": ("remove_step", "Remove a step from the workflow by name."),
+    "remove-tool": ("remove_tool", "Remove a tool from the agent's tools list by name."),
+    "set-config": ("set_config", "Set configuration on the agent/step or on a specific tool."),
+    "set-param": ("set_param", "Set a parameter on a workflow step (static value or mapped from another step's output)."),
+    "set-position": ("set_position", "Set the (x, y) canvas position for a node, stored in metadata."),
+}
+
+
+def _requested_operation(argv: list[str]) -> str | None:
+    """Extract the subcommand from argv without building the full parser.
+
+    Uses a pre-parser that knows the global flags, so values like
+    ``--path some-dir add-mcp`` don't get mistaken for the operation.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--path")
+    pre.add_argument("--dry-run", action="store_true")
+    _, rest = pre.parse_known_args(argv)
+    for token in rest:
+        if not token.startswith("-"):
+            return token
+    return None
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -115,16 +149,22 @@ def main() -> None:
         "completes; 'pretty' is the rich terminal report.",
     )
 
-    # Defer transformer module loading (pulls in libcst + timbal.codegen which
-    # are expensive) — only needed for transformer operations, not for
-    # list-tools, get-flow, or test.
-    _lightweight_ops = {"get-models", "get-tools", "get-flow", "test", "evals"}
-    if not (_lightweight_ops & set(sys.argv[1:])):
-        from timbal.codegen.transformers import load_modules
+    # Transformer subcommands register lazily: only the operation actually
+    # invoked imports its module (and therefore libcst, ~160ms). Everything
+    # else — including top-level --help — gets stub parsers carrying just the
+    # help line, which is all argparse needs to list them.
+    requested = _requested_operation(sys.argv[1:])
+    if requested in _TRANSFORMER_OPS:
+        import importlib
 
-        transformer_modules = load_modules()
-        for mod in transformer_modules.values():
-            mod.register(subparsers)
+        module_name, _ = _TRANSFORMER_OPS[requested]
+        importlib.import_module(f"timbal.codegen.transformers.{module_name}").register(subparsers)
+        for op, (_, help_line) in _TRANSFORMER_OPS.items():
+            if op != requested:
+                subparsers.add_parser(op, help=help_line)
+    else:
+        for op, (_, help_line) in _TRANSFORMER_OPS.items():
+            subparsers.add_parser(op, help=help_line)
 
     args = parser.parse_args()
 
