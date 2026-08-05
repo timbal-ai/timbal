@@ -63,6 +63,18 @@ class TestFrameworkTool:
         ns = _exec_agent(output)
         assert "web_search" in [t.name for t in ns["agent"].tools]
 
+    def test_annotated_entry_point(self, workspace):
+        """add-tool appends to the tools list of an annotated agent assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        output = _run_dry(ws, "--type", "WebSearch")
+        assert "tools=[web_search]" in output
+        ns = _exec_agent(output)
+        assert "web_search" in [t.name for t in ns["agent"].tools]
+
     def test_idempotent(self, workspace):
         """Re-adding an existing variable-style tool doesn't duplicate it."""
         ws = workspace("""\

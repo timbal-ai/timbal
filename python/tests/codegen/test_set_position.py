@@ -91,6 +91,32 @@ class TestAgentPosition:
         ns = _exec_agent(output)
         assert ns["agent"].metadata["position"] == {"x": 300.0, "y": 400.0}
 
+    def test_annotated_entry_point(self, workspace):
+        """set-position works on an annotated agent assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        output = _run_dry(ws, "--x", "100", "--y", "200")
+        ns = _exec_agent(output)
+        assert ns["agent"].metadata["position"] == {"x": 100.0, "y": 200.0}
+
+    def test_same_position_is_idempotent_success(self, workspace):
+        """Setting the current coordinates again succeeds without changes."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(
+            name="a",
+            model="openai/gpt-4o-mini",
+            metadata={"position": {"x": 10.0, "y": 20.0}},
+        )
+        """)
+        output = _run_dry(ws, "--x", "10", "--y", "20")
+        ns = _exec_agent(output)
+        assert ns["agent"].metadata["position"] == {"x": 10.0, "y": 20.0}
+
     def test_preserves_other_kwargs(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent
@@ -135,6 +161,20 @@ class TestWorkflowStepPosition:
         from timbal import Agent, Workflow
 
         agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry(ws, "--name", "agent_a", "--x", "150", "--y", "250")
+        ns = _exec_agent(output)
+        assert ns["agent_a"].metadata["position"] == {"x": 150.0, "y": 250.0}
+
+    def test_annotated_step_variable(self, wf_workspace):
+        """Set position on an annotated step variable."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a: Agent = Agent(name="agent_a", model="openai/gpt-4o-mini")
 
         workflow = Workflow(name="my_workflow")
         workflow.step(agent_a)

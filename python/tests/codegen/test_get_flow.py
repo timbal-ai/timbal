@@ -1,3 +1,4 @@
+import json
 import textwrap
 from pathlib import Path
 
@@ -143,6 +144,76 @@ class TestAgentNode:
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         assert config["system_prompt"]["value"] is None
+
+    def test_voice_config_dict(self, workspace):
+        """voice_config set in the source round-trips through get-flow."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(
+            name="a",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            voice_config={"voice": "CURRENT_VOICE", "tts_extra": {"auto_mode": True}},
+        )
+        """)
+        config = _single_node(_flow(ws))["data"]["config"]
+        assert config["voice_config"]["value"] == {
+            "voice": "CURRENT_VOICE",
+            "tts_extra": {"auto_mode": True},
+        }
+
+    def test_voice_config_absent(self, workspace):
+        """Agents without voice_config still expose the key with a None value."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
+        """)
+        config = _single_node(_flow(ws))["data"]["config"]
+        assert "voice_config" in config
+        assert config["voice_config"]["value"] is None
+
+    def test_voice_config_callable(self, workspace):
+        """A callable voice_config is rendered as an opaque placeholder."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        def make_voice_config():
+            return {"voice": "CURRENT_VOICE"}
+
+        agent = Agent(
+            name="a",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            voice_config=make_voice_config,
+        )
+        """)
+        config = _single_node(_flow(ws))["data"]["config"]
+        assert config["voice_config"]["value"] == "<make_voice_config>"
+        # Schema must advertise the callable variant (mirrors system_prompt).
+        any_of_types = [v.get("type") for v in config["voice_config"]["anyOf"]]
+        assert "callable" in any_of_types
+        assert "object" in any_of_types
+
+    def test_voice_config_instance(self, workspace):
+        """A VoiceConfig instance is dumped to a JSON-safe dict."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.voice.config import VoiceConfig
+
+        agent = Agent(
+            name="a",
+            model="openai/gpt-4o-mini",
+            max_tokens=128,
+            voice_config=VoiceConfig(voice="my-voice"),
+        )
+        """)
+        config = _single_node(_flow(ws))["data"]["config"]
+        value = config["voice_config"]["value"]
+        assert isinstance(value, dict)
+        assert value["voice"] == "my-voice"
+        json.dumps(value)  # must stay JSON-serialisable
 
     def test_has_params_and_return(self, workspace):
         ws = workspace("""\

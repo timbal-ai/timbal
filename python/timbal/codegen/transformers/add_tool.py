@@ -125,6 +125,10 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
 
 class ToolAdder(cst.CSTTransformer):
+    # Re-adding an existing tool is an idempotent success (no duplicate entry,
+    # file unchanged), not a silent failure.
+    allow_noop = True
+
     def __init__(
         self,
         entry_point: str,
@@ -189,6 +193,21 @@ class ToolAdder(cst.CSTTransformer):
                     return updated_node.with_changes(
                         value=self._merge_config_into_call(updated_node.value),
                     )
+        return updated_node
+
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated assignments, e.g. ``agent: Agent = Agent(...)``."""
+        if not isinstance(updated_node.target, cst.Name) or not isinstance(updated_node.value, cst.Call):
+            return updated_node
+        target_name = updated_node.target.value
+
+        if target_name == self.target:
+            return updated_node.with_changes(value=self._add_to_tools(updated_node.value))
+
+        resolved = resolve_runnable_name(updated_node.value)
+        if resolved == self.runtime_name:
+            self._assignment_updated = True
+            return updated_node.with_changes(value=self._merge_config_into_call(updated_node.value))
         return updated_node
 
     # -- Module: add imports, function defs, and variable assignments -------

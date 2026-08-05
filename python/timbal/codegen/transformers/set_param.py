@@ -199,6 +199,10 @@ class ParamSetter(StepCallRewriter):
         self.assignments = assignments or {}
         self.step_names = step_names or {}
         self.needs_reorder = param_type == "map"
+        # Set to True by StepCallRewriter once the target .step() call was
+        # found — an unchanged file is then an idempotent save (param already
+        # set to this value).
+        self.matched = False
 
     def _source_uses_attribute_access(self) -> bool:
         """Whether the source step's output is accessed via attributes (not subscript).

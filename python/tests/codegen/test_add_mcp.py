@@ -70,6 +70,20 @@ class TestAddStdioServer:
         assert server.transport == "stdio"
         assert server.args == ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
+    def test_annotated_entry_point(self, workspace):
+        """add-mcp appends to the tools list of an annotated agent assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        output = _run(ws, "--name", "fs", "--command", "npx")
+        assert "tools=[fs]" in output
+        ns = _exec_agent(output)
+        server = ns["agent"].tools[0]
+        assert server.name == "fs"
+        assert server.transport == "stdio"
+
     def test_transport_inferred_from_command(self, workspace):
         ws = workspace(AGENT_SOURCE)
         output = _run(ws, "--name", "fs", "--command", "npx")

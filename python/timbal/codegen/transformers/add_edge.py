@@ -65,6 +65,9 @@ class EdgeAdder(StepCallRewriter):
     """Add an ordering or conditional edge between two workflow steps."""
 
     needs_reorder = True
+    # Adding an edge that already exists deduplicates to an unchanged file —
+    # that is a legitimate success, not a silent failure.
+    allow_noop = True
 
     def __init__(
         self,

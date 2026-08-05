@@ -50,6 +50,9 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 class EdgeRemover(StepCallRewriter):
     """Remove an edge between two workflow steps by modifying the target's .step() call."""
 
+    # Removing an edge that is already absent is an idempotent success.
+    allow_noop = True
+
     def __init__(
         self,
         entry_point: str,

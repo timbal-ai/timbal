@@ -485,6 +485,164 @@ class TestToolNameAndDescription:
 
 
 # ---------------------------------------------------------------------------
+# Entry point shapes (annotated / aliased / factory assignments)
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPointShapes:
+    def test_annotated_assignment(self, workspace):
+        """``agent: Agent = Agent(...)`` is transformed like a plain assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].voice_config == {"voice": "NEW_VOICE"}
+
+    def test_annotated_assignment_set_model(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o"})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o"
+
+    def test_aliased_assignment_fails_loudly(self, workspace):
+        """``agent = _agent`` cannot be transformed — must exit non-zero, not silently no-op."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        _agent = Agent(name="a", model="openai/gpt-4o-mini")
+        agent = _agent
+        """)
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        result = _run_dry_fail(ws, "--config", config)
+        assert result.returncode != 0
+        assert "produced no changes" in result.stderr
+
+    def test_factory_call_fails_loudly(self, workspace):
+        """``agent = build()`` must error instead of appending kwargs to build()."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        def build():
+            return Agent(name="a", model="openai/gpt-4o-mini")
+
+        agent = build()
+        """)
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        result = _run_dry_fail(ws, "--config", config)
+        assert result.returncode != 0
+        assert "factory" in result.stderr
+
+    def test_imported_factory_call_fails_loudly(self, workspace):
+        """An imported factory must also error, not get kwargs injected."""
+        ws = workspace("""\
+        from helpers import build
+
+        agent = build()
+        """)
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        result = _run_dry_fail(ws, "--config", config)
+        assert result.returncode != 0
+        assert "factory" in result.stderr
+
+    def test_aliased_agent_import_still_works(self, workspace):
+        """``from timbal.core import Agent as A`` is recognized as a constructor."""
+        ws = workspace("""\
+        from timbal.core import Agent as A
+
+        agent = A(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o"})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o"
+
+    def test_module_qualified_constructor_works(self, workspace):
+        """``timbal.Agent(...)`` is recognized as a constructor."""
+        ws = workspace("""\
+        import timbal
+
+        agent = timbal.Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o"})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o"
+
+    def test_annotated_assignment_tool_config(self, workspace):
+        """Tool-level set-config works when the agent uses an annotated assignment."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.core.tool import Tool
+
+        def my_func():
+            return "hello"
+
+        my_tool = Tool(handler=my_func, name="my_tool")
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[my_tool])
+        """)
+        config = json.dumps({"description": "Does something useful"})
+        output = _run_dry(ws, "--name", "my_tool", "--config", config)
+        ns = _exec_agent(output)
+        assert ns["my_tool"].description == "Does something useful"
+
+    def test_annotated_assignment_inline_tool_migration(self, workspace):
+        """Inline tool migration inserts the variable before an annotated entry point."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        agent: Agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[WebSearch()])
+        """)
+        config = json.dumps({"allowed_domains": ["example.com"]})
+        output = _run_dry(ws, "--name", "web_search", "--config", config)
+        # exec fails with NameError if the variable lands after the entry point.
+        ns = _exec_agent(output)
+        tool = next(t for t in ns["agent"].tools if t.name == "web_search")
+        assert tool.allowed_domains == ["example.com"]
+
+    def test_noop_same_value_is_idempotent_success(self, workspace):
+        """Setting a field to its current value is a success: the transformer
+        matched the entry point, the source was already in the desired state."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o-mini"})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o-mini"
+
+    def test_write_mode_noop_leaves_file_untouched(self, workspace):
+        """A failed no-op without --dry-run must not rewrite the source file."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        _agent = Agent(name="a", model="openai/gpt-4o-mini")
+        agent = _agent
+        """)
+        original = (ws / "agent.py").read_text()
+        config = json.dumps({"voice_config": {"voice": "NEW_VOICE"}})
+        result = subprocess.run(
+            codegen_cmd("--path", str(ws), "set-config", "--config", config),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert (ws / "agent.py").read_text() == original
+
+
+# ---------------------------------------------------------------------------
 # Workflow step config
 # ---------------------------------------------------------------------------
 
@@ -530,6 +688,19 @@ class TestStepConstructorConfig:
         from timbal import Agent, Workflow
 
         agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
+        assert 'model="openai/gpt-4o"' in output
+
+    def test_annotated_step_variable(self, wf_workspace):
+        """Update constructor config on an annotated step variable."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a: Agent = Agent(name="agent_a", model="openai/gpt-4o-mini")
 
         workflow = Workflow(name="my_workflow")
         workflow.step(agent_a)

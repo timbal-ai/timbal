@@ -7,6 +7,7 @@ from ..cst_utils import (
     build_cst_value,
     collect_assignments,
     has_import,
+    has_step_expr,
     insert_before_assignments,
     insert_imports,
     is_step_call,
@@ -81,15 +82,21 @@ def _count_workflow_steps(tree: cst.Module, entry_point: str) -> int:
                     and call.func.attr.value == "step"
                 ):
                     count += 1
-            # Chained: workflow = Workflow().step().step()
+            # Chained: workflow = Workflow().step().step() (plain or annotated)
+            chained_value = None
             if isinstance(item, cst.Assign):
                 for t in item.targets:
                     if isinstance(t.target, cst.Name) and t.target.value == entry_point:
-                        node = item.value
-                        while isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute):
-                            if node.func.attr.value == "step":
-                                count += 1
-                            node = node.func.value
+                        chained_value = item.value
+            elif isinstance(item, cst.AnnAssign):
+                if isinstance(item.target, cst.Name) and item.target.value == entry_point:
+                    chained_value = item.value
+            if chained_value is not None:
+                node = chained_value
+                while isinstance(node, cst.Call) and isinstance(node.func, cst.Attribute):
+                    if node.func.attr.value == "step":
+                        count += 1
+                    node = node.func.value
     return count
 
 
@@ -192,6 +199,17 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             raise ValueError(f"add-step requires a Workflow entry point, but '{entry_point}' is a {ep_type}.")
 
     assignments = collect_assignments(tree) if tree else {}
+
+    # The entry point must resolve to a constructor assignment (plain or
+    # annotated) or already have standalone .step() statements (covers aliases
+    # like ``workflow = _wf``). Otherwise the emitted ``<entry>.step(...)``
+    # would reference an undefined or wrong name.
+    if tree is not None and entry_point not in assignments and not has_step_expr(tree, entry_point):
+        raise ValueError(
+            f"Entry point variable '{entry_point}' not found in source. "
+            "Ensure timbal.yaml fqn matches the Agent/Workflow variable name."
+        )
+
     step_type = args.step_type
     config = parse_json_arg(args.config, "--config") if args.config else {}
 
@@ -291,6 +309,9 @@ class StepAdder(cst.CSTTransformer):
     # A re-added step's .step() call is appended last; if existing steps depend
     # on it, topologically re-sort so dependencies precede their dependents.
     needs_reorder = True
+    # Re-adding an identical step is an idempotent success (existing assignment
+    # and .step() call updated in place), not a silent failure.
+    allow_noop = True
 
     def __init__(
         self,
@@ -356,6 +377,19 @@ class StepAdder(cst.CSTTransformer):
                     )
         return updated_node
 
+    def leave_AnnAssign(self, original_node: cst.AnnAssign, updated_node: cst.AnnAssign) -> cst.AnnAssign:  # noqa: ARG002
+        """Handle annotated step variables, e.g. ``agent_a: Agent = Agent(...)``."""
+        if (
+            not isinstance(updated_node.target, cst.Name)
+            or updated_node.target.value == self.entry_point
+            or not isinstance(updated_node.value, cst.Call)
+        ):
+            return updated_node
+        if resolve_runnable_name(updated_node.value) == self.runtime_name:
+            self._assignment_updated = True
+            return updated_node.with_changes(value=self._build_assignment_call())
+        return updated_node
+
     # -- ExpressionStatement: update existing .step() call -----------------
 
     def leave_Expr(self, original_node: cst.Expr, updated_node: cst.Expr) -> cst.Expr:
@@ -416,8 +450,13 @@ class StepAdder(cst.CSTTransformer):
 
         body = list(updated_node.body)
         insert_imports(body, imports_to_add)
-        # Insert definitions/assignments before the entry point.
-        insert_before_assignments(body, stmts_to_add, target_names={self.entry_point})
+        # Insert definitions/assignments before the entry point (plain or
+        # annotated assignment), or before its first standalone .step() call
+        # (aliased entry points), so the new step variable precedes the
+        # ``.step()`` statement that references it.
+        insert_before_assignments(
+            body, stmts_to_add, target_names={self.entry_point}, step_calls_of=self.entry_point,
+        )
 
         # --- Append .step() call ---
         if not self._step_call_updated:
@@ -438,6 +477,9 @@ class StepAdder(cst.CSTTransformer):
                             for t in item.targets:
                                 if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
                                     entry_point_idx = i + 1
+                        if isinstance(item, cst.AnnAssign):
+                            if isinstance(item.target, cst.Name) and item.target.value == self.entry_point:
+                                entry_point_idx = i + 1
 
             insert_at = step_insert_idx if step_insert_idx is not None else entry_point_idx
             if insert_at is not None:

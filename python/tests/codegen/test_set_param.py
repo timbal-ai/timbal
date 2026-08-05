@@ -362,6 +362,19 @@ class TestValueParam:
         output = _run(ws, target="agent_b", name="prompt", param_type="value", source=None, key=None, value="null")
         assert "prompt=" not in output
 
+    def test_set_same_value_is_idempotent_success(self, wf_workspace):
+        """Setting a param to its current value succeeds without changes."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a, prompt="Hello world")
+        """)
+        output = _run(ws, target="agent_a", name="prompt", param_type="value", source=None, key=None, value='"Hello world"')
+        assert 'prompt="Hello world"' in output
+
     def test_update_existing_value_param(self, wf_workspace):
         ws = wf_workspace("""\
         from timbal import Agent, Workflow
