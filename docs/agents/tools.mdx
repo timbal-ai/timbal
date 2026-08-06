@@ -197,6 +197,39 @@ travel_agent = Agent(
 **Automatic Nesting:** When an agent is used as a tool within another agent (as shown above), it's automatically nested for proper tracing and context management. However, if you use an agent inside a `pre_hook` or `post_hook`, you must manually call `.nest()`. See [Using Agents in Hooks](/core-concepts/context#using-agents-in-hooks) for details.
 </Note>
 
+### Pinning results against compaction
+
+Some tool results are durable context the model must keep referencing (loaded policy docs, skill guidance). Opt in with `pin_result=True` — [memory compaction](/agents/memory-compaction) never drops or truncates those results, and [tool result offloading](/agents/memory-compaction#tool-result-offloading) skips them too:
+
+```python
+Tool(
+    handler=load_policy,
+    pin_result=True,  # survive compaction for the life of the conversation
+)
+```
+
+The built-in `read_skill` tool sets this automatically. See [Pinned results](/agents/memory-compaction#pinned-results).
+
+### Limiting oversized results
+
+When a tool can return huge payloads, set a per-tool size limit. Results over the threshold are spilled to a store (or truncated) **once, when produced**, before they enter memory:
+
+```python
+from timbal.core import ToolResultLimit, Truncate
+
+Tool(
+    handler=run_tests,
+    result_limit=ToolResultLimit(threshold=8_000, action=Truncate(strategy="tail")),
+)
+
+Tool(
+    handler=load_policy,
+    result_limit=None,  # exempt — never reduced
+)
+```
+
+An agent-wide default is `Agent(tool_result_limit=...)`. Precedence: `Tool.result_limit` > agent default. See [Tool Result Offloading](/agents/memory-compaction#tool-result-offloading).
+
 ## Commands
 
 Register a `command` on any tool, agent, or workflow to let users invoke it directly with a `/` prefix — bypassing the LLM for that turn:
@@ -262,5 +295,6 @@ See [Dynamic Agents](/agents/dynamic#dynamic-tools) for implementation details a
 - **Tool Sets**: Dynamic tool resolution
 - **MCP Servers**: Any Model Context Protocol server as a tool source — see [MCP Servers](/agents/mcp)
 - **Commands**: Slash-command shortcuts for direct tool invocation — see [Commands](/agents/commands)
+- **Result limits & pinning**: Keep oversized or durable tool output under control — see [Memory Compaction](/agents/memory-compaction)
 
 For more advanced patterns, see [Dynamic Agents](/agents/dynamic) and explore the built-in tools in the Timbal library.

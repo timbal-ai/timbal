@@ -95,6 +95,50 @@ def main() -> None:
     # Test run operation
     from timbal.codegen.cli_utils import arg_input
 
+    # Org tool library operations
+    extract_tool_parser = subparsers.add_parser(
+        "extract-tool",
+        help="Extract a custom tool as a portable module + manifest (JSON to stdout).",
+    )
+    extract_tool_parser.add_argument(
+        "--tool", required=True, help="Runtime name (or variable name) of the tool to extract."
+    )
+    extract_tool_parser.add_argument(
+        "--step", default=None, help="Workflow step whose tools list contains the tool."
+    )
+
+    add_library_tool_parser = subparsers.add_parser(
+        "add-library-tool",
+        help="Vendor an org library tool module into the workspace and wire it into the tools list.",
+    )
+    add_library_tool_parser.add_argument(
+        "--tool", required=True, help="Library tool name (also used for the vendored module filename)."
+    )
+    add_library_tool_parser.add_argument(
+        "--source",
+        required=True,
+        type=arg_input,
+        help="Library tool module source. Use '@path' to read from file or '-' to read from stdin.",
+    )
+    add_library_tool_parser.add_argument(
+        "--binding",
+        default=None,
+        help="Importable symbol exported by the module. Inferred from the source when omitted.",
+    )
+    add_library_tool_parser.add_argument(
+        "--provenance",
+        default=None,
+        help="Provenance marker '<name>@<rev>' written as a '# timbal-tool:' header in the vendored file.",
+    )
+    add_library_tool_parser.add_argument(
+        "--step", default=None, help="Target step name within a Workflow."
+    )
+    add_library_tool_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing vendored module whose content differs (a local fork or another revision).",
+    )
+
     test_parser = subparsers.add_parser("test", help="Execute a single test run of the workspace entry point.")
     test_parser.add_argument(
         "--input",
@@ -263,6 +307,31 @@ def main() -> None:
             print(json.dumps(flow, indent=2))
         else:
             print(format_compact(flow))
+        return
+
+    if operation == "extract-tool":
+        from timbal.codegen.library import extract_tool
+
+        try:
+            result = extract_tool(workspace_path, args.tool, step=args.step)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(result, indent=2))
+        return
+
+    if operation == "add-library-tool":
+        from timbal.codegen.library import run_add_library_tool
+
+        try:
+            result = run_add_library_tool(workspace_path, args)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if result.get("dry_run"):
+            print(result["source"])
+        else:
+            print(json.dumps(result))
         return
 
     if operation == "test":

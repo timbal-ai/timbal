@@ -584,6 +584,66 @@ uv run python scripts/generate_models.py
 
 ---
 
+### `extract-tool` — Extract a custom tool as a portable module
+
+```bash
+python -m timbal.codegen extract-tool --tool search_products
+python -m timbal.codegen extract-tool --tool search_products --step agent_a
+```
+
+Locates the tool in the entry point's (or step's) `tools=[...]` list, computes
+its dependency closure via scope analysis — the handler function, every
+top-level helper/constant/class it transitively references, and the imports
+they use — and prints a JSON manifest to stdout:
+
+```json
+{
+  "name": "search_products",
+  "binding": "search_tool",
+  "description": "Product catalog search.",
+  "source": "<self-contained python module>",
+  "params": [{ "name": "query", "annotation": "str", "default": null }],
+  "requirements": ["httpx>=0.27"],
+  "integrations": [],
+  "env_vars": ["EXAMPLE_API_KEY"]
+}
+```
+
+- `binding` is the importable symbol (the `Tool(...)` assignment variable, the
+  bare function name, or a synthesized `<name>_tool` for inline calls).
+- `requirements` maps the closure's non-stdlib imports to specs from the
+  member's `pyproject.toml` (falling back to dist-mapped import names).
+- Only custom tools extract (`Tool(...)` wrappers or bare functions). Fails
+  loudly on framework tools, references to the entry point, relative or
+  local-module imports, and names bound by unsupported statement shapes.
+
+### `add-library-tool` — Vendor an org library tool into the workspace
+
+```bash
+python -m timbal.codegen add-library-tool \
+  --tool search_products \
+  --source @/tmp/tool_module.py \
+  --provenance search_products@abc1234
+```
+
+Writes the module to `tools/<module>.py` under the member dir (prefixed with a
+`# timbal-tool: <name>@<rev>` provenance header when `--provenance` is given),
+adds the import, and appends the binding to the entry point's (or `--step`'s)
+`tools=[...]` list. Prints a JSON summary
+(`{"vendored", "binding", "local_name", "name", "module"}`).
+
+- `--binding` overrides the importable symbol; otherwise inferred from the
+  source (last `Tool(...)` assignment, else last function).
+- A *different* tool already answering to the same runtime name is rejected;
+  a symbol-name collision gets an aliased import
+  (`from tools.x import y as z`) automatically.
+- Idempotent — re-adding an existing library tool doesn't duplicate.
+- An existing `tools/<module>.py` with **different content** (a local fork, or a
+  vendored copy from another revision) is never silently overwritten — the op
+  fails unless `--force` is passed.
+
+---
+
 ### `get-flow` — Print the execution graph
 
 ```bash

@@ -29,7 +29,7 @@ Memory storage depends on your deployment environment:
 
 ## Nested Agent Memory
 
-When agents call other agents, memory flows seamlessly between them. Child agents automatically receive conversation context from their parent, enabling sophisticated multi-agent workflows while maintaining conversation continuity.
+When an agent is used as a tool of another agent, the **child gets an isolated context** — it does not inherit the parent's conversation history. The parent only sees what the child returns as its tool result. That keeps specialist agents focused and prevents parent history from bloating every nested call.
 
 ```python
 from timbal import Agent
@@ -37,7 +37,7 @@ from timbal import Agent
 billing_agent = Agent(
     name="billing_agent",
     model="anthropic/claude-haiku-4-5",
-    # Receives full conversation history from parent when used as a tool
+    # Fresh context per call — only the tool prompt from the parent, not the full chat
 )
 
 support_agent = Agent(
@@ -46,6 +46,8 @@ support_agent = Agent(
     tools=[billing_agent],  # add more specialist agents as needed
 )
 ```
+
+To hand the child specific context, put it in the tool call (the parent's prompt / args). To share state across turns of the *parent*, use the parent's own memory via `parent_id` session chaining — see [Rewind](#rewind) and [Tracing](/core-concepts/tracing).
 
 ## Configuration
 
@@ -104,10 +106,11 @@ This creates branching conversations:
 Each branch maintains independent memory from the branching point. Learn more about the underlying mechanisms in [Context](/core-concepts/context).
 </Note>
 
-## Memory Compaction
+## Keeping memory within the context window
 
-For long-running conversations, memory can grow large enough to exceed the model's context window. Timbal provides built-in **memory compaction** strategies — such as keeping only the last N turns, truncating tool results, or summarizing older messages with an LLM — that fire automatically when context utilization crosses a configurable threshold.
+For long-running conversations, memory can grow large enough to exceed the model's context window. Timbal has two complementary layers:
 
-<Note>
-Memory compaction is a beta feature. See [Memory Compaction](/agents/memory-compaction) for the full reference.
-</Note>
+1. **[Tool result offloading](/agents/memory-compaction#tool-result-offloading)** — oversized tool results are spilled to a store *when produced*, so they never dominate every later LLM call. Lossless; the model pages content back via `read_tool_result`.
+2. **[Memory compaction](/agents/memory-compaction)** — strategies (keep last N turns, shrink old tool results, LLM summarize) that fire when context utilization crosses `memory_compaction_ratio` (default 75%).
+
+Most long-running agents want both: offloading prevents the bloat at the source; compaction handles everything else. See [Memory Compaction](/agents/memory-compaction) for the full reference.
