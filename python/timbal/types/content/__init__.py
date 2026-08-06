@@ -44,10 +44,11 @@ def content_factory(value: Any) -> BaseContent:
             if not isinstance(tool_result_content, list):
                 tool_result_content = [tool_result_content]
             return ToolResultContent(
-                id=value.get("id"), 
+                id=value.get("id"),
                 # TODO Change this
                 content=[content_factory(item) for item in tool_result_content],
                 pinned=value.get("pinned", False),
+                offload_handle=value.get("offload_handle"),
             )
     # By default try to convert whatever python object we have into a string.
     return TextContent(text=str(value))

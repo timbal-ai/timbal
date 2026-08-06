@@ -1,7 +1,7 @@
 import inspect
 from collections.abc import Callable
 from functools import cached_property
-from typing import Any
+from typing import Any, Literal
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -15,6 +15,7 @@ from ..errors import CredentialNotAvailable, PlatformError, ToolProxyUnavailable
 from ..platform.tool_proxy import execute_tool_proxy
 from ..utils import create_model_from_handler
 from .runnable import Runnable
+from .tool_result_offload import ToolResultLimit
 
 
 class Tool(Runnable):
@@ -47,6 +48,16 @@ class Tool(Runnable):
             "If True, the agent marks this tool's results as pinned, so memory compaction never "
             "drops or truncates them. Use for tools whose output is durable context the model must "
             "keep referencing (e.g. loaded skill documentation)."
+        ),
+    )
+
+    result_limit: ToolResultLimit | int | None | Literal["inherit"] = Field(
+        default="inherit",
+        description=(
+            "Size limit applied to this tool's results when they are produced (see "
+            "timbal.core.tool_result_offload). 'inherit' (default) uses the agent's "
+            "tool_result_limit; an int is shorthand for ToolResultLimit(threshold=int); "
+            "None exempts this tool entirely. Pinned tools (pin_result=True) are always exempt."
         ),
     )
 

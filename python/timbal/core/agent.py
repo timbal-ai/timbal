@@ -41,6 +41,13 @@ from .models import Model, get_context_window
 from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
 from .tool import Tool
+from .tool_result_offload import (
+    LocalOffloadStore,
+    Spill,
+    ToolResultLimit,
+    apply_tool_result_limit,
+    create_read_tool_result,
+)
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
@@ -195,6 +202,13 @@ class Agent(Runnable):
     """Context window utilization ratio that triggers compaction. Uses previous run's token
     usage from span data and the model's context window from models.yaml. Set to 0.0 to
     always compact, or 1.0 to effectively disable auto-triggering. Default: 0.75 (75%)."""
+    tool_result_limit: SkipValidation[ToolResultLimit | int | None] = None
+    """Size limit applied to every tool result when it is produced (before it enters memory).
+    An int is shorthand for ToolResultLimit(threshold=int). The default action (Spill) persists
+    oversized results to an offload store, keeps a preview + handle inline, and auto-registers a
+    read_tool_result tool so the model can page the full content back on demand. Override per
+    tool with Tool(result_limit=...); pinned tools and error results are always exempt.
+    See timbal.core.tool_result_offload."""
     temperature: float | None = None
     """Sampling temperature for the LLM response."""
     output_model: type[BaseModel] | None = None
@@ -316,10 +330,52 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             read_skill_tool.nest(self._path)
             self.tools.append(read_skill_tool)
 
+        self._init_tool_result_offload()
+
         self._is_orchestrator = True
         self._is_coroutine = False
         self._is_gen = False
         self._is_async_gen = True
+
+    def _init_tool_result_offload(self) -> None:
+        """Normalize tool result limits and set up the offload store + read-back tool.
+
+        The store is only created when some configuration can actually spill (agent-level or
+        static per-tool Spill action). ``read_tool_result`` is registered whenever a store is
+        reachable — including a store brought by a ``summarize(store=...)`` compactor for its
+        canonical record — so every handle the model may encounter is readable.
+        """
+        if isinstance(self.tool_result_limit, int):
+            self.tool_result_limit = ToolResultLimit(threshold=self.tool_result_limit)
+        for t in self.tools:
+            if isinstance(t, Tool) and isinstance(t.result_limit, int):
+                t.result_limit = ToolResultLimit(threshold=t.result_limit)
+
+        def _can_spill(limit: Any) -> bool:
+            return isinstance(limit, ToolResultLimit) and isinstance(limit.action, Spill)
+
+        needs_store = _can_spill(self.tool_result_limit) or any(
+            _can_spill(getattr(t, "result_limit", None)) for t in self.tools if isinstance(t, Tool)
+        )
+        self._offload_store = None
+        if needs_store:
+            configured = self.tool_result_limit.store if isinstance(self.tool_result_limit, ToolResultLimit) else None
+            self._offload_store = configured or LocalOffloadStore()
+
+        read_store = self._offload_store
+        if read_store is None and self.memory_compaction is not None:
+            compactors = (
+                self.memory_compaction if isinstance(self.memory_compaction, list) else [self.memory_compaction]
+            )
+            for compactor in compactors:
+                state = getattr(compactor, "_state", None)
+                if isinstance(state, dict) and state.get("store") is not None:
+                    read_store = state["store"]
+                    break
+        self._read_tool_result = None
+        if read_store is not None:
+            self._read_tool_result = create_read_tool_result(read_store)
+            self._read_tool_result.nest(self._path)
 
     def _init_skills(self) -> None:
         """Validate skill filter params and append filtered Skill instances from `skills_path` to `self.tools`."""
@@ -779,9 +835,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         )
         compaction_steps = []
         for compactor in compactors:
-            # Set the agent's model on compactors that support it (e.g. summarize)
+            # Set the agent's model on compactors that support it (e.g. summarize), and share
+            # the offload store so summarize can write its canonical record of compacted
+            # messages (readable back via read_tool_result).
             if hasattr(compactor, "_state"):
                 compactor._state["agent_model"] = str(self.model)
+                if "store" in compactor._state and compactor._state["store"] is None:
+                    compactor._state["store"] = getattr(self, "_offload_store", None)
             before = len(current_span.memory)
             if asyncio.iscoroutinefunction(compactor):
                 current_span.memory = await compactor(current_span.memory)
@@ -832,6 +892,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     _register(tool)
             else:
                 _register(t)
+
+        if self._read_tool_result is not None:
+            _register(self._read_tool_result)
 
         if self._bg_tasks:
             bg_tool = Tool(
@@ -1066,6 +1129,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Names of tools (resolved for the current iteration) whose results must be pinned
         # against memory compaction. Updated each iteration from the resolved tool list.
         pinned_tool_names: set[str] = set()
+        # Per-tool result limits resolved for the current iteration (None = exempt).
+        tool_result_limits: dict[str, ToolResultLimit | None] = {}
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
@@ -1099,7 +1164,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
-            pinned = event.path.rsplit(".", 1)[-1] in pinned_tool_names
+            tool_name = event.path.rsplit(".", 1)[-1]
+            pinned = tool_name in pinned_tool_names
             tool_result = Message.validate(
                 {
                     "role": "tool",
@@ -1113,6 +1179,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     ],
                 }
             )
+            # Production-time offload: reduce an oversized result once, before it enters
+            # memory or the dump, so history stays append-only (prompt-cache friendly) and
+            # the reduction persists into traces. Errors are never reduced — the model needs
+            # the full error to recover.
+            result_limit = tool_result_limits.get(tool_name)
+            if result_limit is not None and not pinned and event.status.code == "success":
+                for c in tool_result.content:
+                    if isinstance(c, ToolResultContent):
+                        offload_record = await apply_tool_result_limit(
+                            c,
+                            limit=result_limit,
+                            tool_name=tool_name,
+                            store=self._offload_store,
+                            run_id=run_context.id,
+                        )
+                        if offload_record is not None:
+                            current_span.metadata.setdefault("offload", []).append(offload_record)
+                            logger.info("Reduced oversized tool result.", **offload_record)
             if append_to_messages:
                 current_span.memory.append(tool_result)
             tool_result_dump = await dump(tool_result)
@@ -1131,6 +1215,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # ? We could resolve the system prompt at each iteration
                 tools, commands = await self._resolve_tools(i)
                 pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
+                tool_result_limits = {}
+                for t in tools:
+                    resolved_limit = getattr(t, "result_limit", "inherit")
+                    if resolved_limit == "inherit":
+                        resolved_limit = self.tool_result_limit
+                    elif isinstance(resolved_limit, int):
+                        # Dynamic (ToolSet-resolved) tools may still carry the int shorthand.
+                        resolved_limit = ToolResultLimit(threshold=resolved_limit)
+                    tool_result_limits[t.name] = resolved_limit
                 if commands:
                     # Commands will only be user messages with a single text content
                     if len(current_span.memory[-1].content) == 1:

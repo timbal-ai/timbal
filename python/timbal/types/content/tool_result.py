@@ -20,6 +20,10 @@ class ToolResultContent(BaseContent):
     """When True, memory compaction must never drop or truncate this result (nor orphan its
     paired tool_use). Used to keep durable context — e.g. loaded skill documentation — alive
     for as long as the conversation lives. Internal hint only: never serialized to providers."""
+    offload_handle: str | None = None
+    """Set when the original result was offloaded to an OffloadStore and replaced with a
+    placeholder + handle (see ``timbal.core.tool_result_offload``). Compaction treats these
+    results as already compacted. Internal hint only: never serialized to providers."""
 
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:
