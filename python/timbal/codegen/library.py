@@ -16,7 +16,6 @@ read-only/special ops, not via the transformer table):
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
@@ -103,6 +102,14 @@ def _bound_names(stmt: cst.BaseStatement) -> set[str]:
                         if isinstance(el.value, cst.Name):
                             names.add(el.value.value)
         elif isinstance(item, cst.AnnAssign):
+            if isinstance(item.target, cst.Name):
+                names.add(item.target.value)
+        elif isinstance(item, cst.AugAssign):
+            # An AugAssign both reads and rebinds the name. Registering it as a
+            # binding pulls the statement into the extraction closure, where the
+            # statement-shape validation rejects it loudly — without this, the
+            # closure would keep only the initial `X = ...` and silently emit a
+            # module with the wrong value.
             if isinstance(item.target, cst.Name):
                 names.add(item.target.value)
         elif isinstance(item, cst.Import):
@@ -404,18 +411,36 @@ def extract_tool(workspace_path: str | Path, tool_ref: str, step: str | None = N
     stmt_deps: dict[int, set[str]] = {}
     inline_ids: set[int] = {id(n) for n in _walk(inline_element)} if inline_element is not None else set()
     inline_deps: set[str] = set()
+
+    def _record_dep(access_node: cst.CSTNode, name: str) -> None:
+        stmt_idx = stmt_of_node.get(id(access_node))
+        if stmt_idx is not None:
+            stmt_deps.setdefault(stmt_idx, set()).add(name)
+        if id(access_node) in inline_ids:
+            inline_deps.add(name)
+
     for scope in all_scopes:
         for access in scope.accesses:
+            has_assignment_referent = False
             for referent in access.referents:
                 if not isinstance(referent, Assignment):
                     continue  # builtins etc.
+                has_assignment_referent = True
                 if referent.scope is not global_scope:
                     continue
-                stmt_idx = stmt_of_node.get(id(access.node))
-                if stmt_idx is not None:
-                    stmt_deps.setdefault(stmt_idx, set()).add(referent.name)
-                if id(access.node) in inline_ids:
-                    inline_deps.add(referent.name)
+                _record_dep(access.node, referent.name)
+            # Forward references get no referent link from the scope analysis:
+            # an annotation under `from __future__ import annotations` (or a
+            # quoted one) may legally name a class defined *later* in the
+            # module. Fall back to the bare name when it is bound at the top
+            # level. Locally shadowed names are unaffected — their access has
+            # an Assignment referent (the local one) and never reaches this.
+            if (
+                not has_assignment_referent
+                and isinstance(access.node, cst.Name)
+                and access.node.value in name_def_stmts
+            ):
+                _record_dep(access.node, access.node.value)
 
     if inline_element is not None:
         seed_names = inline_deps
@@ -485,9 +510,30 @@ def extract_tool(workspace_path: str | Path, tool_ref: str, step: str | None = N
     import_stmts = [i for i in ordered if _is_import_stmt(body[i])]
     other_stmts = [i for i in ordered if i not in set(import_stmts)]
     parts: list[str] = []
+    # `from __future__ import ...` changes annotation semantics module-wide
+    # (annotations become lazy strings) but binds a name nothing ever accesses,
+    # so the closure never picks it up. Dropping it would make the extracted
+    # module evaluate annotations eagerly at def time — breaking forward
+    # references that were legal in the producer. Always carry it.
+    future_import = next(
+        (
+            i
+            for i, stmt in enumerate(body)
+            if isinstance(stmt, cst.SimpleStatementLine)
+            and any(
+                isinstance(item, cst.ImportFrom)
+                and isinstance(item.module, cst.Name)
+                and item.module.value == "__future__"
+                for item in stmt.body
+            )
+        ),
+        None,
+    )
+    if future_import is not None and future_import not in import_stmts:
+        parts.append(tree.code_for_node(body[future_import]).strip("\n"))
     for i in import_stmts:
         parts.append(tree.code_for_node(body[i]).strip("\n"))
-    if import_stmts:
+    if import_stmts or future_import is not None:
         parts.append("")
     for i in other_stmts:
         parts.append(tree.code_for_node(body[i]).strip("\n"))
@@ -666,12 +712,17 @@ def vendor_module_name(tool_name: str) -> str:
     return module_name
 
 
-def run_add_library_tool(workspace_path: str | Path, args: argparse.Namespace) -> None:
+def run_add_library_tool(workspace_path: str | Path, args: argparse.Namespace) -> dict:
     """Vendor a library tool module and wire it into the entry point.
 
     Writes ``tools/<module>.py`` (with a provenance header when provided) and
-    updates the entry point source. With ``--dry-run``, prints the updated
-    entry point source and writes nothing.
+    updates the entry point source. Returns a summary dict for ``__main__`` to
+    print; with ``--dry-run`` the dict carries the updated entry point source
+    and nothing is written.
+
+    An existing vendored file whose content differs is a local fork (or a
+    different library revision): overwriting would silently destroy edits, so
+    it is rejected unless ``--force`` is passed.
     """
     workspace_path = Path(workspace_path)
     spec = parse_fqn(workspace_path)
@@ -755,22 +806,27 @@ def run_add_library_tool(workspace_path: str | Path, args: argparse.Namespace) -
     vendor_content = header + module_source.strip("\n") + "\n"
 
     if getattr(args, "dry_run", False):
-        print(formatted)
-        return
+        return {"dry_run": True, "source": formatted}
 
     vendor_path = workspace_path / VENDOR_DIR / f"{module_name}.py"
+    if (
+        vendor_path.exists()
+        and vendor_path.read_text() != vendor_content
+        and not getattr(args, "force", False)
+    ):
+        raise ValueError(
+            f"'{vendor_path.relative_to(workspace_path)}' already exists with different content — "
+            "it was edited locally (a fork) or vendored from another revision. "
+            "Pass --force to overwrite it."
+        )
     vendor_path.parent.mkdir(parents=True, exist_ok=True)
     vendor_path.write_text(vendor_content)
     spec.path.write_text(formatted)
 
-    print(
-        json.dumps(
-            {
-                "vendored": str(vendor_path.relative_to(workspace_path)),
-                "binding": binding,
-                "local_name": local_name,
-                "name": runtime_name,
-                "module": import_module,
-            }
-        )
-    )
+    return {
+        "vendored": str(vendor_path.relative_to(workspace_path)),
+        "binding": binding,
+        "local_name": local_name,
+        "name": runtime_name,
+        "module": import_module,
+    }

@@ -133,6 +133,11 @@ def main() -> None:
     add_library_tool_parser.add_argument(
         "--step", default=None, help="Target step name within a Workflow."
     )
+    add_library_tool_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing vendored module whose content differs (a local fork or another revision).",
+    )
 
     test_parser = subparsers.add_parser("test", help="Execute a single test run of the workspace entry point.")
     test_parser.add_argument(
@@ -319,10 +324,14 @@ def main() -> None:
         from timbal.codegen.library import run_add_library_tool
 
         try:
-            run_add_library_tool(workspace_path, args)
+            result = run_add_library_tool(workspace_path, args)
         except (FileNotFoundError, ValueError) as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
+        if result.get("dry_run"):
+            print(result["source"])
+        else:
+            print(json.dumps(result))
         return
 
     if operation == "test":

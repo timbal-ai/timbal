@@ -638,6 +638,9 @@ adds the import, and appends the binding to the entry point's (or `--step`'s)
   a symbol-name collision gets an aliased import
   (`from tools.x import y as z`) automatically.
 - Idempotent — re-adding an existing library tool doesn't duplicate.
+- An existing `tools/<module>.py` with **different content** (a local fork, or a
+  vendored copy from another revision) is never silently overwritten — the op
+  fails unless `--force` is passed.
 
 ---
 
