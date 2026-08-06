@@ -1,12 +1,14 @@
 """Org tool library ops: extract-tool and add-library-tool."""
 
 import json
+import re
 import subprocess
 import textwrap
 from pathlib import Path
 
+import libcst as cst
 import pytest
-from timbal.codegen.library import extract_tool
+from timbal.codegen.library import _find_import_alias, extract_tool
 
 from .conftest import codegen_cmd
 
@@ -729,6 +731,58 @@ class TestAddLibraryTool:
         agent_src = (ws / "agent.py").read_text()
         assert "from tools.org_shout import shout_tool as org_shout" in agent_src
         assert "tools=[org_shout]" in agent_src
+
+    def test_unrelated_import_from_same_module_does_not_steal_binding(self, workspace, tmp_path):
+        """Existing ``from tools.x import HELPER`` must not become this tool's local_name.
+
+        Before the fix, any import from the vendor module made add-library-tool
+        reuse the first symbol and skip importing the real binding — wiring the
+        wrong name into tools=[] while exiting successfully.
+        """
+        lib_src = textwrap.dedent("""\
+        from timbal.core import Tool
+
+        HELPER = "shared"
+
+
+        def shout(text: str) -> str:
+            return text.upper()
+
+
+        shout_tool = Tool(handler=shout)
+        """)
+        lib = tmp_path / "lib_module.py"
+        lib.write_text(lib_src)
+
+        ws = workspace("""\
+        from timbal.core import Agent
+        from tools.shout import HELPER
+
+
+        agent = Agent(name="agent", model="openai/gpt-5.2", tools=[HELPER])
+        """, subdir="consumer")
+        # Same bytes as --source so re-vendor is a no-op (not a fork conflict).
+        (ws / "tools").mkdir()
+        (ws / "tools" / "shout.py").write_text(lib_src)
+
+        result = _run_cli(
+            "--path", str(ws), "add-library-tool",
+            "--tool", "shout", "--source", f"@{lib}",
+        )
+        info = json.loads(result.stdout)
+        assert info["local_name"] == "shout_tool"
+        agent_src = (ws / "agent.py").read_text()
+        # May be a new line or merged into the existing from-import.
+        assert re.search(r"from tools\.shout import .*\bshout_tool\b", agent_src)
+        assert "tools=[HELPER, shout_tool]" in agent_src
+
+    def test_find_import_alias_matches_binding_not_first_symbol(self):
+        tree = cst.parse_module(textwrap.dedent("""\
+        from tools.shout import HELPER, shout_tool as shout
+        """))
+        assert _find_import_alias(tree, "tools.shout", "shout_tool") == "shout"
+        assert _find_import_alias(tree, "tools.shout", "HELPER") == "HELPER"
+        assert _find_import_alias(tree, "tools.shout", "missing") is None
 
     def test_bare_function_module_binding_inferred(self, workspace, tmp_path):
         ws = workspace(self.CONSUMER, subdir="consumer")

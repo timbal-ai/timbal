@@ -611,8 +611,13 @@ def _infer_binding(source_tree: cst.Module) -> tuple[str, str]:
     raise ValueError("Could not infer the tool binding from the module (no Tool assignment or function found).")
 
 
-def _find_import_alias(tree: cst.Module, module: str) -> str | None:
-    """Return the local name bound by an existing ``from <module> import ...``."""
+def _find_import_alias(tree: cst.Module, module: str, binding: str) -> str | None:
+    """Return the local name for *binding* if already imported from *module*.
+
+    Only matches the specific imported symbol (``from tools.x import binding`` or
+    ``from tools.x import binding as local``). An import of a *different* name
+    from the same module — e.g. a helper — is not treated as this tool's import.
+    """
     for stmt in tree.body:
         if not isinstance(stmt, cst.SimpleStatementLine):
             continue
@@ -629,10 +634,11 @@ def _find_import_alias(tree: cst.Module, module: str) -> str | None:
             if ".".join(reversed(parts)) != module:
                 continue
             for alias in item.names:
+                if not isinstance(alias.name, cst.Name) or alias.name.value != binding:
+                    continue
                 if alias.asname is not None and isinstance(alias.asname.name, cst.Name):
                     return alias.asname.name.value
-                if isinstance(alias.name, cst.Name):
-                    return alias.name.value
+                return binding
     return None
 
 
@@ -693,7 +699,7 @@ class LibraryToolAdder(cst.CSTTransformer):
         return updated_node
 
     def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
-        if _find_import_alias(original_node, self.import_module) is not None:
+        if _find_import_alias(original_node, self.import_module, self.binding) is not None:
             return updated_node
         if self.local_name != self.binding:
             import_stmt = f"from {self.import_module} import {self.binding} as {self.local_name}\n"
@@ -751,9 +757,12 @@ def run_add_library_tool(workspace_path: str | Path, args: argparse.Namespace) -
     target, assignments = validate_tools_target(tree, spec.target, step, operation="add-library-tool")
 
     # Resolve the local name for the imported binding. An existing import of
-    # the vendor module wins (idempotent re-add); otherwise a collision with
-    # any top-level name gets an aliased import.
-    existing_alias = _find_import_alias(tree, import_module)
+    # *this* binding from the vendor module wins (idempotent re-add); otherwise
+    # a collision with any top-level name gets an aliased import. A different
+    # symbol already imported from the same module (e.g. a helper) is ignored —
+    # treating it as this tool's local name would wire the wrong name into tools
+    # and skip adding the real import.
+    existing_alias = _find_import_alias(tree, import_module, binding)
     if existing_alias is not None:
         local_name = existing_alias
     else:
