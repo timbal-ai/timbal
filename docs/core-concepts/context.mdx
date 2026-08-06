@@ -176,7 +176,7 @@ agent = Agent(
 )
 ```
 
-The `.nest()` method updates the agent's path hierarchy, ensuring proper tracing structure (e.g., `agent.agent_is_company` instead of just `agent_is_company`), correct context propagation, and accurate memory resolution for nested agent calls.
+The `.nest()` method updates the agent's path hierarchy, ensuring proper tracing structure (e.g., `agent.agent_is_company` instead of just `agent_is_company`) and correct span nesting under the parent. Nested agents still run with **isolated memory** — they do not inherit the parent's conversation history (see [Nested Agent Memory](/agents/memory#nested-agent-memory)).
 
 ## Early Exit with bail()
 

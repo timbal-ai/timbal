@@ -90,6 +90,8 @@ Timbal loads the parent trace (input messages, pending gates/suspensions, prior 
 
 If the agent has `memory_compaction` configured, a resume turn is treated like a continuation of the paused turn, not a fresh one. The loaded memory ends with the gated/suspended `tool_use` that has **no `tool_result` yet** — that trailing block is exactly what Timbal re-executes to settle the pause without re-calling the model.
 
+[Tool result offloading](/agents/memory-compaction#tool-result-offloading) applies on resume the same way it does on a fresh turn: when the gated tool finally runs after approval, an oversized result is reduced once before it enters memory.
+
 Compaction is structure-aware about this:
 
 - The pending `tool_use` is **never** compacted away. (A naive pass would treat it as an orphaned tool call, strip it, and force the model to re-plan — which is nondeterministic and would silently drop the human's decision.)

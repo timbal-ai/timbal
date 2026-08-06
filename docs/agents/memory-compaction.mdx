@@ -1,15 +1,145 @@
 ---
 title: "Memory Compaction"
-description: "Keep agent memory within context window limits using built-in compaction strategies"
+description: "Keep agent memory within context window limits with tool result offloading and built-in compaction strategies"
 ---
 
-<Warning>
-Memory compaction is in **beta**. The API may change in future releases.
-</Warning>
+As conversations grow longer, the accumulated message history can exceed a model's context window. Timbal keeps memory bounded with two complementary layers, both configured on the agent and applied without changing how you call it:
 
-As conversations grow longer, the accumulated message history can exceed a model's context window. Memory compaction lets you define strategies that automatically trim or condense that history before each agent call, keeping token usage under control without changing how you call the agent.
+1. **[Tool result offloading](#tool-result-offloading)** — oversized tool results are moved out of the window *the moment they are produced*, losslessly: the payload goes to a store, and the model keeps a preview plus a handle it can page back on demand.
+2. **[Compaction strategies](#how-compaction-works)** — when context utilization crosses a threshold, the history already inside the window is trimmed or condensed (drop old tool results, keep the last N turns, summarize with an LLM).
 
-## How It Works
+Most long-running agents want both: offloading prevents the bloat at the source; compaction handles everything else.
+
+## Tool Result Offloading
+
+A single tool call can return hundreds of kilobytes — a big file read, a verbose log, a large API response. Because tool results persist in conversation memory, an oversized result is re-sent on **every subsequent LLM call**, paying its token cost for the rest of the run.
+
+Tool result offloading intercepts a result when it is produced. If it exceeds a size threshold, the full payload is persisted to an offload store and the model sees a short placeholder instead:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    tools=[search_docs, run_query],
+    tool_result_limit=20_000,  # offload results over 20,000 chars
+)
+```
+
+Results under the threshold pass through untouched. Oversized ones are replaced with a placeholder like:
+
+```text
+[Tool result offloaded: 184,203 chars from 'search_docs'. The full content was saved and
+can be read with read_tool_result(handle="06a7.../t1") — page with offset/limit or filter
+with pattern.]
+Shape: {"results": list[92], "total": int}
+Preview (first 1,000 of 184,203 chars):
+...
+```
+
+The reduction happens **once**, before the result ever enters memory, the serialized trace, or a provider request:
+
+- **Lossless** — unlike truncation or summarization, the full payload stays retrievable. The model decides whether it needs line 500 of that output.
+- **Prompt-cache friendly** — history stays append-only. The oversized payload never occupies a cached prefix that would later be rewritten (rewriting old messages invalidates provider prompt caches from that point on).
+- **Persistent** — the placeholder is what gets traced and what seeds the next turn's memory. The reduction is never recomputed per request.
+
+### Configuration
+
+`tool_result_limit` accepts an int (threshold shorthand) or a `ToolResultLimit`:
+
+```python
+from timbal.core import LocalOffloadStore, Spill, ToolResultLimit, Truncate
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    tool_result_limit=ToolResultLimit(
+        threshold=20_000,                  # chars of text content (default 20,000)
+        action=Spill(preview_chars=1_000), # what to do when the threshold is reached
+        store=LocalOffloadStore(),         # where spilled payloads live
+    ),
+)
+```
+
+**`Spill`** (default) — persist the full payload, keep a preview + handle inline. Lossless. If the store write fails, `fallback` (default `Truncate()`) applies so an oversized result never slips through:
+
+```python
+Spill(preview_chars=1_000, fallback=Truncate(max_chars=2_000))
+```
+
+**`Truncate`** — clamp to a character budget. Lossy, zero-cost, no store needed:
+
+```python
+Truncate(strategy="head")       # keep the start — headers, schemas
+Truncate(strategy="tail")       # keep the end — build/test output where errors land last
+Truncate(strategy="head_tail")  # keep both ends, elide the middle (default)
+```
+
+### Per-tool overrides
+
+`Tool(result_limit=...)` overrides the agent default. `None` exempts a tool entirely:
+
+```python
+from timbal.core import Tool, ToolResultLimit, Truncate
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    tool_result_limit=20_000,  # agent-wide default: spill over 20k
+    tools=[
+        Tool(name="run_tests", handler=run_tests,
+             result_limit=ToolResultLimit(threshold=8_000, action=Truncate(strategy="tail"))),
+        Tool(name="load_policy", handler=load_policy, result_limit=None),  # never reduced
+    ],
+)
+```
+
+Some results are never reduced, regardless of configuration:
+
+- **Error results** — the model needs the full error to recover.
+- **Pinned tools** (`pin_result=True`) — durable context like [skill](/agents/skills) documentation. See [Pinned results](#pinned-results).
+- **`read_tool_result`'s own output** — it is bounded by construction.
+
+### Reading content back
+
+When offloading is active, the agent auto-registers a `read_tool_result` tool:
+
+```python
+read_tool_result(handle, offset=0, limit=200, pattern=None)
+```
+
+- Line-numbered paging via `offset`/`limit` (hard-capped at 500 lines / 50,000 chars per call, so a read can never blow the window back up).
+- `pattern` filters to lines containing a **literal substring** (not a regex).
+- Unknown or expired handles return a clean tool error the model can react to.
+
+The model uses it on its own — the placeholder tells it how.
+
+### The offload store
+
+Spilled payloads go through a narrow protocol, so the backend is swappable:
+
+```python
+class OffloadStore(Protocol):
+    async def write(self, key: str, data: bytes) -> str:  # returns a handle
+    async def read(self, handle: str) -> bytes:
+```
+
+The default `LocalOffloadStore` writes one file per result under `~/.timbal/offload/` (owner-only permissions; reads are hardened against path traversal and symlink escapes). Handles are store-relative keys, not absolute paths, so a different backend can resolve the same handle in another process.
+
+Payloads are kept **forever by default** — deleting on run end would break a resumed or chained session that still holds handles. Bound disk usage with opt-in age-based pruning:
+
+```python
+from datetime import timedelta
+from timbal.core import LocalOffloadStore, ToolResultLimit
+
+store = LocalOffloadStore(cleanup_after=timedelta(days=7))
+agent = Agent(..., tool_result_limit=ToolResultLimit(store=store))
+```
+
+Pruning runs off the hot path and never fails a run.
+
+## How Compaction Works
 
 Compaction is triggered automatically when context-window utilization exceeds `memory_compaction_ratio` (default `0.75`, i.e. 75%), at two points:
 
@@ -31,6 +161,8 @@ agent = Agent(
 ```
 
 Set `memory_compaction_ratio=0.0` to always compact, or `1.0` to effectively disable auto-triggering.
+
+Offloading and compaction compose cleanly: offloaded placeholders are small, so they push utilization down and compaction triggers later or never; `compact_tool_results` keeps offloaded placeholders intact by default so their handles stay dereferenceable; and `summarize` writes its canonical record to the same store, readable back through the same `read_tool_result` tool.
 
 ## Built-in Strategies
 
@@ -85,8 +217,10 @@ agent = Agent(
 **`replacement` controls what happens to compacted tool results:**
 
 - `None` (default) — drop tool results and their corresponding `tool_use` entries entirely. Assistant messages that become empty are also dropped.
-- `str` — replace each result with a template string. Supported placeholders: `{tool_name}`, `{call_id}`, `{result_length}`.
+- `str` — replace each result with a template string. Supported placeholders: `{tool_name}`, `{call_id}`, `{result_length}`, and `{handle}` (the offload handle when the result was [offloaded](#tool-result-offloading), empty otherwise).
 - `callable(tool_name, call_id, result_text) -> str` — call a function per result and use the return value as the replacement.
+
+**`keep_offloaded`** (default `True`) — results already [offloaded at production time](#tool-result-offloading) are kept intact: they are small placeholders whose handle keeps the full payload reachable. Set `False` to compact them like any other result.
 
 ```python
 # Drop all tool results
@@ -127,6 +261,23 @@ agent = Agent(
 Use a smaller, cheaper model for summarization to reduce cost. For example, `model="openai/gpt-5.4-nano"` works well for summarization tasks.
 </Tip>
 
+The summary message is **sectioned**, and everything except the LLM summary itself is assembled mechanically — never paraphrased by the summarizer:
+
+- **Verbatim User Messages** — the user's own words from the summarized region, carried forward verbatim across passes (`preserve_user_messages=True`, default). Summaries that drop or mischaracterize user instructions are the most damaging compaction failure, so the user's words are never trusted to the LLM. Budgeted by `max_verbatim_chars` (default 10,000; oldest entries dropped first).
+- **Compacted Transcripts** — when an offload store is available, the full untruncated text of every summarized region is persisted and its handle listed, readable via `read_tool_result` (`canonical_record=True`, default). Summarization becomes recoverable instead of destructive. The store is shared automatically from the agent's [`tool_result_limit`](#tool-result-offloading), or passed explicitly via `store=`.
+- **Note** — conservative continuation guidance: the model is told to verify intent against the user's verbatim words rather than acting on the summary alone.
+- **Rehydrated Context** — output of an optional `rehydrate=` callable (sync or async, returning `str`, `list[str]`, or `None`), re-run on **every** compaction pass. Use it to re-inject working state that must survive summarization — the active plan, recently edited files:
+
+```python
+from pathlib import Path
+from timbal.core.memory_compaction import summarize
+
+memory_compaction=summarize(
+    threshold=20,
+    rehydrate=lambda: Path("PLAN.md").read_text(),
+)
+```
+
 ## Pinned results
 
 Some tool results are durable context the model must keep referencing — for example loaded
@@ -134,7 +285,7 @@ Some tool results are durable context the model must keep referencing — for ex
 preserves them verbatim (and never orphans their paired tool call), regardless of `keep_last_n`,
 turn windows, or drop/replacement mode. For `keep_last_n_messages` / `keep_last_n_turns` the
 effective behavior is "last N **plus** pinned"; for `summarize`, pinned results are kept verbatim
-and never fed to the summarizer (like system messages).
+and never fed to the summarizer (like system messages). Offloading skips pinned results too.
 
 You opt a tool in declaratively with `pin_result=True`:
 
@@ -187,5 +338,18 @@ When compaction fires, the agent span records a `compaction` key in its metadata
 - `utilization` — the context window fraction that triggered the most recent pass (`null` when `memory_compaction_ratio=0.0`).
 - `steps` — one entry per compactor with message counts before and after (for the most recent pass).
 - `passes` — how many times compaction fired on this span (turn start plus each mid-loop pass).
+
+Every offload is recorded separately, in an `offload` key:
+
+```json
+{
+  "offload": [
+    { "tool": "search_docs", "call_id": "t1", "original_chars": 184203,
+      "action": "spill", "handle": "06a7.../t1" }
+  ]
+}
+```
+
+`action` is `"spill"`, `"truncate"`, or `"truncate_fallback"` (a spill that degraded because the store was unavailable). The handle also persists on the tool result itself (`ToolResultContent.offload_handle`), surviving trace serialization and reload.
 
 This data is visible in the Timbal platform trace viewer alongside the other span metadata.
