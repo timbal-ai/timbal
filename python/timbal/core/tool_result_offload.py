@@ -340,7 +340,7 @@ def create_read_tool_result(store: OffloadStore) -> Any:
     from .tool import Tool  # Local import: tool.py imports this module for the config types.
 
     async def _read_tool_result(
-        handle: str,
+        handle: str = Field(..., description="The handle from an offload placeholder or compacted-transcript list."),
         offset: int = Field(0, description="Line offset to start reading from (0-based)."),
         limit: int = Field(200, description=f"Maximum lines to return (capped at {_READ_MAX_LINES})."),
         pattern: str | None = Field(

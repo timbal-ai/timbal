@@ -395,6 +395,42 @@ class MyProvider(TracingProvider):
 
 ---
 
+## Tool Result Offloading & Memory Compaction
+
+Two layers keep the context window bounded (`python/timbal/core/tool_result_offload.py` and `python/timbal/core/memory_compaction.py`):
+
+### Production-time offload (size-triggered, per result)
+
+```python
+from timbal.core import LocalOffloadStore, Spill, ToolResultLimit, Truncate
+
+agent = Agent(
+ model="...",
+ tool_result_limit=ToolResultLimit( # or an int shorthand for the threshold
+ threshold=20_000, # chars of text content
+ action=Spill(preview_chars=1_000), # or Truncate(strategy="head"|"tail"|"head_tail")
+ store=LocalOffloadStore(), # default; keep-forever, opt-in cleanup_after=timedelta
+ ),
+ tools=[
+ Tool(name="logs", handler=..., result_limit=ToolResultLimit(threshold=8_000, action=Truncate(strategy="tail"))),
+ Tool(name="docs", handler=..., result_limit=None), # exempt
+ ],
+)
+```
+
+- Oversized results are reduced **once, when produced** — before entering memory/dumps — so history stays append-only (prompt-cache friendly) and the reduction persists into traces.
+- `Spill` is lossless: payload goes to the store, a preview + handle stays inline, and a bounded `read_tool_result(handle, offset, limit, pattern)` tool is auto-registered for paged read-back. Falls back to `Truncate` when the store fails.
+- Always exempt: error results, pinned tools (`pin_result=True`), `read_tool_result` itself. Precedence: `Tool.result_limit` > agent `tool_result_limit`.
+- Offload events are recorded in `span.metadata["offload"]`; the handle lives on `ToolResultContent.offload_handle`.
+
+### History compaction (utilization-triggered, whole memory)
+
+`memory_compaction=` strategies fire at `memory_compaction_ratio` (default 0.75) of the context window: `compact_tool_results(keep_last_n, replacement, keep_offloaded=True)`, `keep_last_n_messages(n)`, `keep_last_n_turns(n)`, `summarize(...)`.
+
+`summarize()` builds a sectioned summary message where everything except the LLM summary is mechanical: user messages carried **verbatim** (`preserve_user_messages=True`), a **canonical record** of each summarized region written to the offload store and readable via `read_tool_result` (`canonical_record=True`; store shared automatically from `tool_result_limit`), a conservative continuation note, and an optional `rehydrate=` callable re-run every pass. `compact_tool_results` keeps offloaded placeholders intact by default so their handles stay dereferenceable.
+
+---
+
 ## RunContext & Context Access
 
 `RunContext` carries all execution state for a single run.

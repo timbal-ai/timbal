@@ -119,7 +119,10 @@ class TestLocalOffloadStore:
         outside.write_text("secret")
         store = LocalOffloadStore(root=root)
         await store.write("run/anchor", b"x")  # creates root
-        (root / "link").symlink_to(outside)
+        try:
+            (root / "link").symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink creation requires elevated privileges on this platform")
         with pytest.raises((ValueError, FileNotFoundError)):
             await store.read("link")
 
@@ -597,7 +600,7 @@ class TestAgentOffload:
 
         # Path.home() ignores $HOME on Windows (USERPROFILE wins) — patch the method
         # itself so the default store root lands in tmp_path on every platform.
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
 
         def model_handler(_messages):
             if _messages[-1].role == "user":
