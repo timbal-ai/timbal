@@ -593,7 +593,11 @@ class TestAgentOffload:
     @pytest.mark.asyncio
     async def test_int_shorthand(self, tmp_path, monkeypatch) -> None:
         """Agent(tool_result_limit=int) becomes a spill config with a default local store."""
-        monkeypatch.setenv("HOME", str(tmp_path))
+        from pathlib import Path
+
+        # Path.home() ignores $HOME on Windows (USERPROFILE wins) — patch the method
+        # itself so the default store root lands in tmp_path on every platform.
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
         def model_handler(_messages):
             if _messages[-1].role == "user":

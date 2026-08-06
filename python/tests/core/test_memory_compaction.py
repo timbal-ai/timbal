@@ -2319,6 +2319,47 @@ class TestSummarizeV2:
         assert "[user]: Fetch the data." in transcript
 
     @pytest.mark.asyncio
+    async def test_canonical_record_preserves_offload_handle_of_spilled_results(self, tmp_path) -> None:
+        """A summarized region may contain results that were offloaded at production time.
+        The transcript must carry their offload handle from the structured field — even
+        when a prior compact_tool_results(replacement=...) rewrite stripped the handle
+        from the placeholder prose — so the summary's 'recoverable' promise holds."""
+        from timbal.core.tool_result_offload import LocalOffloadStore
+
+        store = LocalOffloadStore(root=tmp_path)
+        spill_handle = await store.write("run0/t1", b"the original 100k payload")
+
+        # Placeholder rewritten by a custom replacement template WITHOUT {handle}:
+        # the prose has no pointer left, only the structured field does.
+        rewritten = Message(
+            role="tool",
+            content=[
+                ToolResultContent(
+                    id="t1",
+                    content=[TextContent(text="[old tool result removed]")],
+                    offload_handle=spill_handle,
+                )
+            ],
+        )
+        memory = [
+            _msg_user("Fetch the data."),
+            _msg_assistant_tool("t1", "fetch"),
+            rewritten,
+            *[_msg_assistant_text(f"work {i}") for i in range(6)],
+        ]
+        compactor = summarize(threshold=3, keep_last_n=2, model=TestModel(responses=["Summary."]), store=store)
+        result = await compactor(memory)
+
+        text = result[0].collect_text()
+        transcript_handle = next(line[2:].strip() for line in text.splitlines() if line.startswith("- "))
+        transcript = (await store.read(transcript_handle)).decode()
+        # The transcript points back to the original spill via the structured field.
+        assert f'read_tool_result(handle="{spill_handle}")' in transcript
+        assert "(offloaded; full content:" in transcript
+        # And the chain actually resolves to the payload.
+        assert (await store.read(spill_handle)).decode() == "the original 100k payload"
+
+    @pytest.mark.asyncio
     async def test_canonical_record_skipped_without_store(self) -> None:
         from timbal.core.memory_compaction import _TRANSCRIPT_MARKER
 

@@ -165,7 +165,13 @@ def _format_message_for_summary(msg: Message) -> str | None:
 def _format_message_for_transcript(msg: Message) -> str | None:
     """Format a message for the canonical-record transcript. Unlike
     ``_format_message_for_summary`` nothing is truncated — the transcript is the lossless
-    record of what compaction removed, read back on demand via ``read_tool_result``."""
+    record of what compaction removed, read back on demand via ``read_tool_result``.
+
+    Results that were offloaded at production time hold only a placeholder inline; their
+    payload lives in the offload store. The transcript records the handle from the
+    structured ``offload_handle`` field — never from the placeholder prose, which a
+    ``compact_tool_results(replacement=...)`` rewrite may have stripped — so the chain
+    back to the full payload survives any placeholder mutation."""
     parts = []
     for c in msg.content:
         if isinstance(c, TextContent):
@@ -175,7 +181,13 @@ def _format_message_for_transcript(msg: Message) -> str | None:
             parts.append(f"[Called tool '{c.name}' with: {input_str}]")
         elif isinstance(c, ToolResultContent):
             result_text = "".join(item.text for item in c.content if isinstance(item, TextContent))
-            parts.append(f"[Tool result for '{c.id}': {result_text}]")
+            if c.offload_handle:
+                parts.append(
+                    f"[Tool result for '{c.id}' (offloaded; full content: "
+                    f'read_tool_result(handle="{c.offload_handle}")): {result_text}]'
+                )
+            else:
+                parts.append(f"[Tool result for '{c.id}': {result_text}]")
     if parts:
         return f"[{msg.role}]: " + " ".join(parts)
     return None
