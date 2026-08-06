@@ -12,30 +12,41 @@ if TYPE_CHECKING:
     from .skill import Skill
     from .test_model import TestModel
     from .tool import Tool
+    from .tool_result_offload import LocalOffloadStore, OffloadStore, Spill, ToolResultLimit, Truncate
     from .tool_set import ToolSet
     from .workflow import Workflow
 
 __all__ = [
     "Agent",
     "FallbackModel",
+    "LocalOffloadStore",
     "MCPServer",
     "ModelEntry",
+    "OffloadStore",
     "Skill",
+    "Spill",
     "TestModel",
     "Tool",
+    "ToolResultLimit",
     "ToolSet",
+    "Truncate",
     "Workflow",
 ]
 
 _LAZY_IMPORTS = {
     "Agent": ".agent",
     "FallbackModel": ".fallback_model",
+    "LocalOffloadStore": ".tool_result_offload",
     "MCPServer": ".mcp",
     "ModelEntry": ".fallback_model",
+    "OffloadStore": ".tool_result_offload",
     "Skill": ".skill",
+    "Spill": ".tool_result_offload",
     "TestModel": ".test_model",
     "Tool": ".tool",
+    "ToolResultLimit": ".tool_result_offload",
     "ToolSet": ".tool_set",
+    "Truncate": ".tool_result_offload",
     "Workflow": ".workflow",
 }
 

@@ -4,12 +4,14 @@ Apply compaction to conversation memory before sending to the LLM to avoid
 exceeding context limits. Strategies can be composed (applied in order).
 """
 
+import inspect
 import json
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
+from uuid_extensions import uuid7
 
 from ..types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.message import Message
@@ -29,6 +31,25 @@ __all__ = [
 ]
 
 _SUMMARY_MARKER = "[Conversation Summary]"
+_VERBATIM_MARKER = "[Verbatim User Messages]"
+_TRANSCRIPT_MARKER = "[Compacted Transcripts]"
+_NOTE_MARKER = "[Note]"
+_REHYDRATED_MARKER = "[Rehydrated Context]"
+_SECTION_MARKERS = (_SUMMARY_MARKER, _VERBATIM_MARKER, _TRANSCRIPT_MARKER, _NOTE_MARKER, _REHYDRATED_MARKER)
+_VERBATIM_SEPARATOR = "\n----8<----\n"
+_VERBATIM_HEADER = "The user's own messages from the compacted region, verbatim, oldest first:"
+_VERBATIM_TRIMMED_NOTE = "[Earlier user messages were dropped from this section; they are covered by the summary above.]"
+_MAX_TRANSCRIPT_HANDLES = 5
+
+# The continuation guidance is deliberately conservative: post-compaction "continue without
+# asking" instructions are the most reported failure mode of lossy compaction (the model acts
+# on a mischaracterized summary). The user's verbatim words always outrank the summary.
+_CONTINUATION_NOTE = (
+    "The earlier conversation was compacted into the summary above. Treat the user's explicit "
+    "instructions (see the Verbatim User Messages section when present) as ground truth over "
+    "the summary. Do not assume a next step the user has not explicitly requested; when "
+    "uncertain about intent, ask the user before acting."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -141,15 +162,121 @@ def _format_message_for_summary(msg: Message) -> str | None:
     return None
 
 
-_INITIAL_SUMMARY_PROMPT = """\
+def _format_message_for_transcript(msg: Message) -> str | None:
+    """Format a message for the canonical-record transcript. Unlike
+    ``_format_message_for_summary`` nothing is truncated — the transcript is the lossless
+    record of what compaction removed, read back on demand via ``read_tool_result``."""
+    parts = []
+    for c in msg.content:
+        if isinstance(c, TextContent):
+            parts.append(c.text)
+        elif isinstance(c, ToolUseContent):
+            input_str = json.dumps(c.input) if c.input else "{}"
+            parts.append(f"[Called tool '{c.name}' with: {input_str}]")
+        elif isinstance(c, ToolResultContent):
+            result_text = "".join(item.text for item in c.content if isinstance(item, TextContent))
+            parts.append(f"[Tool result for '{c.id}': {result_text}]")
+    if parts:
+        return f"[{msg.role}]: " + " ".join(parts)
+    return None
+
+
+def _extract_section(text: str, marker: str) -> str | None:
+    """Return the content of a section: from after ``marker`` to the next section marker."""
+    start = text.find(marker)
+    if start == -1:
+        return None
+    start += len(marker)
+    end = len(text)
+    for other in _SECTION_MARKERS:
+        if other == marker:
+            continue
+        pos = text.find(other, start)
+        if pos != -1 and pos < end:
+            end = pos
+    return text[start:end].strip()
+
+
+def _parse_summary_message(full_text: str) -> tuple[str, list[str], list[str]]:
+    """Split a previous summary message into (summary, verbatim_entries, transcript_handles).
+
+    The verbatim and transcript sections are mechanical (never produced by the LLM), so they
+    are carried forward structurally rather than re-fed through the summarizer. The note and
+    rehydrated sections are regenerated on every pass and ignored here.
+    """
+    summary = _extract_section(full_text, _SUMMARY_MARKER) or ""
+    verbatim_section = _extract_section(full_text, _VERBATIM_MARKER) or ""
+    # Drop the boilerplate header/trim-note lines, then split into entries.
+    verbatim_section = "\n".join(
+        line for line in verbatim_section.splitlines() if line not in (_VERBATIM_HEADER, _VERBATIM_TRIMMED_NOTE)
+    )
+    verbatim_entries = [e.strip() for e in verbatim_section.split(_VERBATIM_SEPARATOR) if e.strip()]
+    transcript_section = _extract_section(full_text, _TRANSCRIPT_MARKER) or ""
+    handles = [line[2:].strip() for line in transcript_section.splitlines() if line.startswith("- ")]
+    return summary, verbatim_entries, handles
+
+
+def _build_summary_message_text(
+    summary: str,
+    verbatim_entries: list[str],
+    handles: list[str],
+    rehydrated: str | None,
+    max_verbatim_chars: int,
+) -> str:
+    parts = [f"{_SUMMARY_MARKER}\n{summary}"]
+
+    if verbatim_entries:
+        entries = list(verbatim_entries)
+        trimmed = False
+        while len(entries) > 1 and sum(len(e) for e in entries) > max_verbatim_chars:
+            entries.pop(0)  # drop oldest first — the newest instructions matter most
+            trimmed = True
+        if entries and len(entries[0]) > max_verbatim_chars:
+            # A single oversized message: clamp head+tail rather than dropping it entirely.
+            half = max_verbatim_chars // 2
+            entries[0] = entries[0][:half] + "\n[... middle elided ...]\n" + entries[0][-half:]
+            trimmed = True
+        lines = [_VERBATIM_HEADER]
+        if trimmed:
+            lines.append(_VERBATIM_TRIMMED_NOTE)
+        parts.append(f"{_VERBATIM_MARKER}\n" + "\n".join(lines) + "\n" + _VERBATIM_SEPARATOR.join(entries))
+
+    if handles:
+        kept_handles = handles[-_MAX_TRANSCRIPT_HANDLES:]
+        parts.append(
+            f"{_TRANSCRIPT_MARKER}\n"
+            "Full transcripts of the compacted messages were saved. Read them with "
+            'read_tool_result(handle="..."):\n' + "\n".join(f"- {h}" for h in kept_handles)
+        )
+
+    parts.append(f"{_NOTE_MARKER}\n{_CONTINUATION_NOTE}")
+
+    if rehydrated:
+        parts.append(f"{_REHYDRATED_MARKER}\n{rehydrated}")
+
+    return "\n\n".join(parts)
+
+
+_SUMMARY_RULES = """\
+Rules:
+- Write the summary in the same language the user writes in.
+- Only mention tools that actually appear in the messages.
+- Never state or imply an instruction, request, or decision the user did not explicitly make.
+- If the user's latest instruction is conditional (e.g. "review first, then implement"), \
+preserve the condition exactly — never collapse it into an unconditional next step."""
+
+
+_INITIAL_SUMMARY_PROMPT = f"""\
 Summarize the following conversation, preserving:
 1. All specific values, identifiers, names, URLs, dates, and numbers mentioned
 2. The outcome of every tool call (what tool was called, what it returned)
 3. User preferences, decisions, and explicit instructions
 4. Any constraints or requirements established
 
+{_SUMMARY_RULES}
+
 Conversation:
-{messages}
+{{messages}}
 
 Provide a structured summary using this format:
 
@@ -162,14 +289,14 @@ Provide a structured summary using this format:
 ## Flow
 - [brief chronological narrative of the conversation progression]"""
 
-_INCREMENTAL_SUMMARY_PROMPT = """\
+_INCREMENTAL_SUMMARY_PROMPT = f"""\
 Update this conversation summary with new messages.
 
 Current summary:
-{previous_summary}
+{{previous_summary}}
 
 New messages since last summary:
-{new_messages}
+{{new_messages}}
 
 Update the summary to incorporate the new messages. You must:
 1. Preserve all specific values, identifiers, names, URLs, dates, and numbers
@@ -177,6 +304,8 @@ Update the summary to incorporate the new messages. You must:
 3. Capture user preferences, decisions, and explicit instructions
 4. Drop information that has been superseded by newer messages
 5. Keep the summary concise but complete
+
+{_SUMMARY_RULES}
 
 Use this format:
 
@@ -240,6 +369,7 @@ def compact_tool_results(
     keep_last_n: int | None = None,
     threshold: int = 0,
     replacement: str | Callable[[str, str, str], str] | None = None,
+    keep_offloaded: bool = True,
 ) -> Callable[[list[Message]], list[Message]]:
     """Compact tool use and tool result messages to reduce token usage.
 
@@ -266,6 +396,12 @@ def compact_tool_results(
         threshold: Only apply when len(memory) > threshold. Use 0 (default)
             to always apply.
         replacement: Controls what happens to compacted tool results. See above.
+            String templates additionally support ``{handle}`` — the offload handle
+            when the result was offloaded (empty otherwise).
+        keep_offloaded: If True (default), results already offloaded at production
+            time (see ``timbal.core.tool_result_offload``) are kept intact: they are
+            small placeholders whose handle keeps the full payload reachable. Set
+            False to compact them like any other result.
 
     Returns:
         A compactor function.
@@ -299,6 +435,17 @@ def compact_tool_results(
         # Pinned results (and their paired tool_use) are never dropped or replaced.
         kept_ids |= _collect_pinned_ids(memory)
 
+        # Offloaded results are already-compacted placeholders; keep them (and their paired
+        # tool_use) so their handles stay dereferenceable, unless the caller opts out.
+        if keep_offloaded:
+            kept_ids |= {
+                c.id
+                for msg in memory
+                if msg.role == "tool"
+                for c in msg.content
+                if isinstance(c, ToolResultContent) and c.offload_handle
+            }
+
         drop_mode = replacement is None
 
         result: list[Message] = []
@@ -326,10 +473,15 @@ def compact_tool_results(
                                         tool_name=tool_name,
                                         call_id=c.id,
                                         result_length=str(len(result_text)),
+                                        handle=c.offload_handle or "",
                                     )
                                 )
                             new_content.append(
-                                ToolResultContent(id=c.id, content=[TextContent(text=placeholder)])
+                                ToolResultContent(
+                                    id=c.id,
+                                    content=[TextContent(text=placeholder)],
+                                    offload_handle=c.offload_handle,
+                                )
                             )
                     else:
                         new_content.append(c)
@@ -426,6 +578,11 @@ def summarize(
     model: Any | None = None,
     keep_last_n: int = 4,
     max_summary_tokens: int = 500,
+    preserve_user_messages: bool = True,
+    max_verbatim_chars: int = 10_000,
+    store: Any | None = None,
+    canonical_record: bool = True,
+    rehydrate: Callable[[], Any] | None = None,
 ) -> Callable[[list[Message]], Awaitable[list[Message]]]:
     """Summarize old messages using incremental/rolling summarization.
 
@@ -434,6 +591,22 @@ def summarize(
     is detected and updated incrementally (only new overflow messages are
     sent to the summarizer), making this cheaper and more stable than
     full re-summarization.
+
+    The summary message is structured in sections. Beyond the LLM summary itself,
+    all sections are mechanical (never paraphrased by the LLM):
+
+    - Verbatim User Messages: the user's own words from the summarized region are
+      carried forward verbatim (``preserve_user_messages``). Summaries that drop or
+      mischaracterize user instructions are the most damaging compaction failure —
+      the user's words are ground truth, so they are never trusted to the summarizer.
+    - Compacted Transcripts: when a store is available (``store=``, or shared from the
+      agent's ``tool_result_limit`` offload store), the full text of every summarized
+      region is persisted and its handle listed, readable via ``read_tool_result``
+      (``canonical_record``). Summarization thus becomes recoverable, not destructive.
+    - Note: conservative continuation guidance — the model is told to verify intent
+      against the user's words instead of barreling ahead on the summary.
+    - Rehydrated Context: output of the ``rehydrate`` callable, regenerated on every
+      compaction pass (e.g. re-read the files being worked on, re-inject a plan).
 
     Calls _llm_router directly (not a full Agent) to avoid context
     save/restore overhead.
@@ -447,14 +620,23 @@ def summarize(
             'openai/gpt-5.4-nano' to reduce cost.
         keep_last_n: Number of recent messages to keep unsummarized.
         max_summary_tokens: Maximum tokens for the summary response.
+        preserve_user_messages: Carry the user's messages from the summarized region
+            verbatim in the summary message (default True).
+        max_verbatim_chars: Budget for the verbatim section; oldest entries are
+            dropped first when exceeded.
+        store: OffloadStore for the canonical record. Defaults to None, which uses
+            the agent's offload store when one exists (see Agent.tool_result_limit).
+        canonical_record: Persist the full text of summarized messages to the store
+            (default True; skipped silently when no store is available).
+        rehydrate: Optional parameterless callable (sync or async) returning str,
+            list[str], or None — extra context re-injected after every summarization.
 
     Returns:
-        An async compactor function. The returned function has a `_model`
-        attribute that the agent sets to its own model before calling,
-        used as fallback when model=None.
+        An async compactor function. The returned function has a `_state`
+        attribute that the agent sets (model/store) before calling.
     """
-    # Mutable state: the agent sets _compact._agent_model before calling
-    _state = {"agent_model": None}
+    # Mutable state: the agent injects its model and offload store before calling.
+    _state = {"agent_model": None, "store": store}
 
     async def _compact(memory: list[Message]) -> list[Message]:
         resolved_model = model or _state["agent_model"]
@@ -472,10 +654,12 @@ def summarize(
 
         # Detect previous summary
         previous_summary = None
+        verbatim_entries: list[str] = []
+        transcript_handles: list[str] = []
         start_idx = 0
         if non_system and non_system[0].collect_text().startswith(_SUMMARY_MARKER):
             full_text = non_system[0].collect_text()
-            previous_summary = full_text[len(_SUMMARY_MARKER) :].strip()
+            previous_summary, verbatim_entries, transcript_handles = _parse_summary_message(full_text)
             start_idx = 1  # Skip the summary message itself
 
         # Determine what to keep vs. what to summarize.
@@ -523,8 +707,57 @@ def summarize(
             logger.warning("Summarizer returned no output; leaving memory unchanged.", model=resolved_model)
             return memory
 
+        # Mechanical sections — assembled by us, never trusted to the summarizer.
+        if preserve_user_messages:
+            for msg in to_summarize:
+                if msg.role != "user":
+                    continue
+                text = msg.collect_text().strip()
+                if text and not text.startswith(_SUMMARY_MARKER):
+                    verbatim_entries.append(text)
+
+        if canonical_record:
+            resolved_store = store or _state.get("store")
+            if resolved_store is not None:
+                transcript = "\n".join(
+                    formatted for msg in to_summarize if (formatted := _format_message_for_transcript(msg))
+                )
+                try:
+                    from ..state import get_run_context
+
+                    run_context = get_run_context()
+                    run_id = run_context.id if run_context is not None else uuid7(as_type="hex")
+                    handle = await resolved_store.write(
+                        f"{run_id}/compaction-{uuid7(as_type='hex')}", transcript.encode()
+                    )
+                    transcript_handles.append(handle)
+                except Exception:
+                    logger.exception("Failed to persist canonical record of summarized messages; continuing.")
+
+        rehydrated = None
+        if rehydrate is not None:
+            try:
+                rehydrated_value = rehydrate()
+                if inspect.isawaitable(rehydrated_value):
+                    rehydrated_value = await rehydrated_value
+                if isinstance(rehydrated_value, str):
+                    rehydrated = rehydrated_value or None
+                elif isinstance(rehydrated_value, list):
+                    rehydrated = "\n\n".join(str(v) for v in rehydrated_value if v) or None
+                elif rehydrated_value is not None:
+                    rehydrated = str(rehydrated_value)
+            except Exception:
+                logger.exception("Rehydrate callable failed; continuing without rehydrated context.")
+
         # Inject summary as first message with marker
-        summary_msg = Message.validate({"role": "user", "content": f"{_SUMMARY_MARKER}\n{summary_text}"})
+        summary_msg = Message.validate(
+            {
+                "role": "user",
+                "content": _build_summary_message_text(
+                    summary_text, verbatim_entries, transcript_handles, rehydrated, max_verbatim_chars
+                ),
+            }
+        )
 
         # Strict alternation fix: some providers (e.g. Anthropic) reject consecutive
         # same-role messages. After orphan cleanup above, to_keep[0] is always "user"
