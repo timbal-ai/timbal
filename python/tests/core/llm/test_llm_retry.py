@@ -280,6 +280,103 @@ class TestRetryOnError:
         assert delays == [2.5]
 
     @pytest.mark.asyncio
+    async def test_retry_after_capped_at_max_delay(self):
+        """A huge Retry-After must not turn into a multi-minute in-place sleep."""
+        from timbal.core.llm.retry import MAX_RETRY_DELAY
+
+        response = MagicMock()
+        response.headers = {"Retry-After": "999"}
+        delays = []
+
+        async def rate_limited_stream():
+            raise OpenAIRateLimitError("Rate limit exceeded", response=response, body=None)
+            yield
+
+        async def mock_sleep(delay):
+            delays.append(delay)
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            with patch("timbal.core.llm.retry.random.uniform", return_value=0.25):
+                with pytest.raises(OpenAIRateLimitError):
+                    async for _ in _retry_on_error(rate_limited_stream, max_retries=1, retry_delay=1.0, context="Test"):
+                        pass
+
+        assert delays == [MAX_RETRY_DELAY]
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_rate_limit_raises_without_retry(self):
+        """With fail_fast_rate_limit, rate limits raise immediately — no sleep, no retry."""
+        attempt_count = 0
+        response = MagicMock()
+        response.headers = {"Retry-After": "999"}
+        delays = []
+
+        async def rate_limited_stream():
+            nonlocal attempt_count
+            attempt_count += 1
+            raise OpenAIRateLimitError("Rate limit exceeded", response=response, body=None)
+            yield
+
+        async def mock_sleep(delay):
+            delays.append(delay)
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            with pytest.raises(OpenAIRateLimitError):
+                async for _ in _retry_on_error(
+                    rate_limited_stream, max_retries=3, retry_delay=1.0, context="Test", fail_fast_rate_limit=True,
+                ):
+                    pass
+
+        assert attempt_count == 1
+        assert delays == []
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_rate_limit_applies_to_429_status(self):
+        """429 APIStatusError (not just RateLimitError) also fails fast."""
+        attempt_count = 0
+        response = MagicMock()
+        response.status_code = 429
+        response.headers = {}
+
+        async def rate_limited_stream():
+            nonlocal attempt_count
+            attempt_count += 1
+            raise OpenAIAPIStatusError("Too many requests", response=response, body=None)
+            yield
+
+        with pytest.raises(OpenAIAPIStatusError):
+            async for _ in _retry_on_error(
+                rate_limited_stream, max_retries=3, retry_delay=0.01, context="Test", fail_fast_rate_limit=True,
+            ):
+                pass
+
+        assert attempt_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_rate_limit_still_retries_server_errors(self):
+        """fail_fast_rate_limit only affects rate limits — 5xx still retries in place."""
+        attempt_count = 0
+        response = MagicMock()
+        response.status_code = 503
+        response.headers = {}
+
+        async def flaky_stream():
+            nonlocal attempt_count
+            attempt_count += 1
+            if attempt_count < 2:
+                raise OpenAIAPIStatusError("Service unavailable", response=response, body=None)
+            yield "success"
+
+        chunks = []
+        async for chunk in _retry_on_error(
+            flaky_stream, max_retries=2, retry_delay=0.01, context="Test", fail_fast_rate_limit=True,
+        ):
+            chunks.append(chunk)
+
+        assert chunks == ["success"]
+        assert attempt_count == 2
+
+    @pytest.mark.asyncio
     async def test_invalid_retry_after_uses_jitter_delay(self):
         """Test that malformed Retry-After headers are ignored."""
         response = MagicMock()

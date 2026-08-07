@@ -29,6 +29,7 @@ async def _llm_router(
     api_key: str | SecretStr | None = None,
     max_retries: int = 0,
     retry_delay: float = 1.0,
+    fail_fast_rate_limit: bool = False,
     provider_params: dict[str, Any] | None = None,
 ) -> Message:  # type: ignore[misc]  # Declared as Message for framework schema generation; runtime is an async generator of provider-specific chunks.
     """
@@ -141,5 +142,7 @@ async def _llm_router(
             provider=provider, config=config, **request_kwargs,
         )
 
-    async for res_chunk in _retry_on_error(create_stream, max_retries, retry_delay, context):
+    async for res_chunk in _retry_on_error(
+        create_stream, max_retries, retry_delay, context, fail_fast_rate_limit=fail_fast_rate_limit,
+    ):
         yield res_chunk  # type: ignore[return-type]

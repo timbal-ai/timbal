@@ -51,6 +51,28 @@ class TestFallbackModel:
         assert all(call["temperature"] == 0.2 for call in calls)
 
     @pytest.mark.asyncio
+    async def test_fail_fast_rate_limit_set_for_all_but_last_entry(self):
+        """Every entry with a fallback behind it must fail over on 429 instead of
+        sleeping through Retry-After in place; the last entry retries normally."""
+        model = FallbackModel("openai/primary", "openai/middle", "openai/last")
+        calls = []
+
+        async def router(**kwargs):
+            calls.append(kwargs)
+            if kwargs["model"] != "openai/last":
+                raise _status_error(429)
+            yield "ok"
+
+        chunks = [chunk async for chunk in model.route(router)]
+
+        assert chunks == ["ok"]
+        assert [(call["model"], call["fail_fast_rate_limit"]) for call in calls] == [
+            ("openai/primary", True),
+            ("openai/middle", True),
+            ("openai/last", False),
+        ]
+
+    @pytest.mark.asyncio
     async def test_uses_per_entry_retry_and_auth_overrides(self):
         model = FallbackModel(
             ModelEntry("openai/primary", max_retries=4, retry_delay=0.5, api_key="entry_key", base_url="https://entry"),

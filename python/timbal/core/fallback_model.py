@@ -75,11 +75,17 @@ class FallbackModel:
 
         for index, entry in enumerate(self.entries):
             started = False
+            has_fallback = index + 1 < len(self.entries)
             kwargs = {
                 **llm_router_kwargs,
                 "model": entry.model,
                 "max_retries": entry.max_retries,
                 "retry_delay": entry.retry_delay,
+                # A rate limit means the provider is unavailable for a while by
+                # definition — while another model is still available, fail over
+                # immediately instead of sleeping through Retry-After in place.
+                # The last entry has nowhere to go, so it retries normally.
+                "fail_fast_rate_limit": has_fallback,
             }
             if entry.api_key is not None:
                 kwargs["api_key"] = entry.api_key
@@ -98,7 +104,7 @@ class FallbackModel:
                     raise
 
                 errors.append((entry.model, exc))
-                next_model = self.entries[index + 1].model if index + 1 < len(self.entries) else None
+                next_model = self.entries[index + 1].model if has_fallback else None
                 logger.warning(
                     "Falling back to next LLM model",
                     failed_model=entry.model,

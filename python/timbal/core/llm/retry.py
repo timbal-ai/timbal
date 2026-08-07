@@ -12,7 +12,9 @@ logger = structlog.get_logger("timbal.core.llm")
 MAX_RETRY_DELAY = 30.0
 
 
-async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, context: str):
+async def _retry_on_error(
+    async_gen_func, max_retries: int, retry_delay: float, context: str, fail_fast_rate_limit: bool = False,
+):
     """Helper to retry an async generator function on transient failures.
 
     Retryable errors (using SDK exception types):
@@ -28,11 +30,20 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
     - Invalid requests (400, 404)
     - Other 4xx client errors
 
+    Retry delays honor a ``Retry-After`` response header as a floor, but are
+    always capped at ``MAX_RETRY_DELAY`` — a provider-side cooldown of minutes
+    must never turn into an in-place sleep of minutes.
+
     Args:
         async_gen_func: Async callable that returns an async generator
         max_retries: Maximum number of retry attempts
         retry_delay: Base delay for exponential backoff
         context: Description for logging (e.g., "Anthropic API")
+        fail_fast_rate_limit: If True, rate-limit errors (RateLimitError / 429)
+            are raised immediately instead of retried in place. Set by
+            FallbackModel for every entry that still has a fallback behind it:
+            a rate-limited provider is unavailable for a while by definition,
+            so the chain should move on rather than sleep.
 
     Yields:
         Items from the async generator
@@ -103,13 +114,21 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
                 )
                 raise
 
+            if fail_fast_rate_limit and error_type == "rate_limit":
+                logger.warning(
+                    "Rate limited and a fallback model is configured, failing over without retrying",
+                    context=context,
+                    error=error_msg,
+                )
+                raise
+
         # Retry logic for retryable errors
         if attempt < max_retries:
             cap = min(retry_delay * (2**attempt), MAX_RETRY_DELAY)
             delay = random.uniform(0, cap)
             retry_after = _retry_after_seconds(last_error)
             if retry_after is not None:
-                delay = max(delay, retry_after)
+                delay = min(max(delay, retry_after), MAX_RETRY_DELAY)
             logger.warning(
                 "Retryable error from LLM provider, retrying...",
                 context=context,
