@@ -106,14 +106,15 @@ class MockedExporter extends BaseExporter {
 
 function withObservability(factory, name) {
   const wf = factory();
+  const observability = new Observability({
+    configs: { bench: { serviceName: 'bench', exporters: [new MockedExporter()] } },
+  });
   const mastra = new Mastra({
     workflows: { [name]: wf },
-    observability: new Observability({
-      configs: { bench: { serviceName: 'bench', exporters: [new MockedExporter()] } },
-    }),
+    observability,
     logger: false,
   });
-  return mastra.getWorkflow(name);
+  return { wf: mastra.getWorkflow(name), observability };
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -135,6 +136,9 @@ const common = {
   warmup: N_WARMUP,
   memIters: N_MEM,
   burstN: N_BURST,
+  // The Timbal side pre-runs 10 concurrent executions before burst timing
+  // (bench_workflow.py); keep the concurrent warmup identical.
+  burstWarmup: 10,
   throughputOps: THROUGHPUT_OPS,
   concurrencyLevels: CONCURRENCY_LEVELS,
 };
@@ -142,10 +146,14 @@ const common = {
 for (const [name, factory] of Object.entries(FACTORIES)) {
   console.error(`  scenario ${name}`);
   const bare = factory();
-  const obs = withObservability(factory, name);
+  const { wf: obs, observability } = withObservability(factory, name);
   results.scenarios[name] = {
     bare: await measure(runWorkflow(bare), { ...common, label: 'mastra bare' }),
-    obs: await measure(runWorkflow(obs), { ...common, label: 'mastra+obs' }),
+    obs: await measure(runWorkflow(obs), {
+      ...common,
+      label: 'mastra+obs',
+      drain: () => observability.flush(),
+    }),
   };
 }
 

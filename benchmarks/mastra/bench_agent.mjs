@@ -157,14 +157,15 @@ function makeObsAgent(scenario) {
     model: makeModel(scenario),
     tools: SCENARIO_TOOLS[scenario],
   });
+  const observability = new Observability({
+    configs: { bench: { serviceName: 'bench', exporters: [new MockedExporter()] } },
+  });
   const mastra = new Mastra({
     agents: { bench_agent_obs: agent },
-    observability: new Observability({
-      configs: { bench: { serviceName: 'bench', exporters: [new MockedExporter()] } },
-    }),
+    observability,
     logger: false,
   });
-  return mastra.getAgent('bench_agent_obs');
+  return { agent: mastra.getAgent('bench_agent_obs'), observability };
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -183,11 +184,15 @@ for (const scenario of [1, 2, 3]) {
   };
 
   const bare = makeBareAgent(scenario);
-  const obs = makeObsAgent(scenario);
+  const { agent: obs, observability } = makeObsAgent(scenario);
 
   results.scenarios[scenario] = {
     bare: await measure(() => bare.generate('go'), { ...common, label: 'mastra bare' }),
-    obs: await measure(() => obs.generate('go'), { ...common, label: 'mastra+obs' }),
+    obs: await measure(() => obs.generate('go'), {
+      ...common,
+      label: 'mastra+obs',
+      drain: () => observability.flush(),
+    }),
   };
 }
 

@@ -40,21 +40,34 @@ export function summarize(samples) {
   };
 }
 
-export async function latency(fn, iters, warmup) {
-  for (let i = 0; i < warmup; i++) await fn();
+/**
+ * `drain` is the Node analogue of the Python side's `_clear_traces()`: it is
+ * awaited wherever the Timbal harness resets its in-memory tracing storage
+ * (after warmup and between measured batches), so pending async observability
+ * work (span export through the event bus) never bleeds into a timed phase.
+ * Runners without observability pass no drain.
+ */
+const drainAndGc = async (drain) => {
+  if (drain) await drain();
   globalThis.gc();
+};
+
+export async function latency(fn, iters, warmup, drain) {
+  for (let i = 0; i < warmup; i++) await fn();
+  await drainAndGc(drain);
   const samples = [];
   for (let i = 0; i < iters; i++) {
     const t0 = nowUs();
     await fn();
     samples.push(elapsedUs(t0));
   }
+  await drainAndGc(drain);
   return samples;
 }
 
-export async function memory(fn, iters, warmup) {
+export async function memory(fn, iters, warmup, drain) {
   for (let i = 0; i < warmup; i++) await fn();
-  globalThis.gc();
+  await drainAndGc(drain);
   const baseline = process.memoryUsage().heapUsed;
   let peak = baseline;
   for (let i = 0; i < iters; i++) {
@@ -65,9 +78,9 @@ export async function memory(fn, iters, warmup) {
   return { peak_growth_bytes: peak - baseline, per_run_bytes: (peak - baseline) / iters };
 }
 
-export async function burst(fn, n) {
-  await Promise.all(Array.from({ length: Math.min(5, n) }, () => fn()));
-  globalThis.gc();
+export async function burst(fn, n, warmup, drain) {
+  await Promise.all(Array.from({ length: Math.min(warmup, n) }, () => fn()));
+  await drainAndGc(drain);
   const samples = [];
   const t0 = nowUs();
   await Promise.all(
@@ -78,11 +91,12 @@ export async function burst(fn, n) {
     }),
   );
   const wallMs = elapsedUs(t0) / 1e3;
+  await drainAndGc(drain);
   return { samples, wallMs };
 }
 
-export async function throughput(fn, ops, concurrency) {
-  globalThis.gc();
+export async function throughput(fn, ops, concurrency, drain) {
+  await drainAndGc(drain);
   let next = 0;
   const t0 = nowUs();
   const workers = Array.from({ length: Math.min(concurrency, ops) }, async () => {
@@ -92,24 +106,29 @@ export async function throughput(fn, ops, concurrency) {
     }
   });
   await Promise.all(workers);
-  return ops / (elapsedUs(t0) / 1e6);
+  const elapsed = elapsedUs(t0);
+  if (drain) await drain();
+  return ops / (elapsed / 1e6);
 }
 
 /** Full measurement suite for one runner. Returns a JSON-friendly record. */
-export async function measure(fn, { iters, warmup, memIters, burstN, throughputOps, concurrencyLevels, label }) {
+export async function measure(
+  fn,
+  { iters, warmup, memIters, burstN, burstWarmup = 5, throughputOps, concurrencyLevels, label, drain },
+) {
   console.error(`    [${label}] latency ×${iters}…`);
-  const lat = summarize(await latency(fn, iters, warmup));
+  const lat = summarize(await latency(fn, iters, warmup, drain));
 
   console.error(`    [${label}] memory ×${memIters}…`);
-  const mem = await memory(fn, memIters, warmup);
+  const mem = await memory(fn, memIters, warmup, drain);
 
   console.error(`    [${label}] burst ×${burstN}…`);
-  const b = await burst(fn, burstN);
+  const b = await burst(fn, burstN, burstWarmup, drain);
 
   const tp = {};
   for (const c of concurrencyLevels) {
     console.error(`    [${label}] throughput c=${c}…`);
-    tp[c] = await throughput(fn, throughputOps, c);
+    tp[c] = await throughput(fn, throughputOps, c, drain);
   }
 
   return {
