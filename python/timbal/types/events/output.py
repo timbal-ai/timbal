@@ -1,17 +1,26 @@
-from typing import Any
+from typing import Any, Generic
 
+from ..._typing import PayloadT
 from ...types.run_status import RunStatus
 from .base import BaseEvent
 
 
-class OutputEvent(BaseEvent):
-    """Event emitted when a step completes with its full output."""
+class OutputEvent(BaseEvent, Generic[PayloadT]):
+    """Event emitted when a step completes with its full output.
+
+    ``PayloadT`` is the static type of :attr:`output` (e.g. ``Message``, a
+    Pydantic ``output_model``, or a tool handler return). Generics are
+    type-checker only — runtime construction is unchanged.
+    """
 
     __slots__ = ("input", "status", "output", "error", "t0", "t1", "usage", "metadata", "_input_dump", "_output_dump")
 
     type = "OUTPUT"
 
     _FIELDS = BaseEvent._FIELDS + ("input", "status", "output", "error", "t0", "t1", "usage", "metadata")
+
+    output: PayloadT
+    """The result of the runnable."""
 
     def __init__(
         self,
@@ -25,7 +34,7 @@ class OutputEvent(BaseEvent):
         parent_run_id: str | None = None,
         parent_call_id: str | None = None,
         input: Any = None,
-        output: Any = None,
+        output: PayloadT | None = None,
         error: Any = None,
         usage: dict[str, int] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -48,8 +57,7 @@ class OutputEvent(BaseEvent):
         """The input arguments passed to the runnable."""
         self.status = status
         """The status summary of the runnable after it completed."""
-        self.output = output
-        """The result of the runnable."""
+        self.output = output  # type: ignore[assignment]
         self.error = error
         """The error that occurred during the runnable."""
         self.t0 = t0

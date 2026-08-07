@@ -45,8 +45,11 @@ class StepStatus:
 logger = structlog.get_logger("timbal.core.workflow")
 
 
-class Workflow(Runnable):
-    """Orchestrates execution of multiple steps in a DAG with automatic dependency linking."""
+class Workflow(Runnable[Any]):
+    """Orchestrates execution of multiple steps in a DAG with automatic dependency linking.
+
+    Workflow output typing is ``Any`` for now (``return_model`` is still TODO).
+    """
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)

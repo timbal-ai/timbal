@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Generic
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -8,6 +8,7 @@ except ImportError:
 
 import structlog
 
+from ..._typing import PayloadT
 from ...types.events.approval import ApprovalEvent as TimbalApprovalEvent
 from ...types.events.base import BaseEvent as TimbalBaseEvent
 from ...types.events.delta import DeltaEvent as TimbalDeltaEvent
@@ -21,12 +22,16 @@ logger = structlog.get_logger("timbal.collectors.impl.timbal")
 
 
 @register_collector
-class TimbalCollector(BaseCollector):
-    """Collector for Timbal events."""
+class TimbalCollector(BaseCollector[TimbalOutputEvent[PayloadT] | None], Generic[PayloadT]):
+    """Collector for Timbal events.
+
+    ``PayloadT`` is the static type of the wrapped ``OutputEvent.output``.
+    ``.collect()`` returns ``OutputEvent[PayloadT] | None``.
+    """
 
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
-        self._output_event: TimbalOutputEvent | None = None
+        self._output_event: TimbalOutputEvent[PayloadT] | None = None
         # Capture every approval gate that fires during the stream so callers
         # of .collect() can react to all pending approvals — not just the
         # first one — when concurrent runnables (parallel workflow steps,
@@ -92,7 +97,7 @@ class TimbalCollector(BaseCollector):
             logger.warning("Unknown Timbal event type", event_type=type(event), event=event)
 
     @override
-    def result(self) -> Any:
+    def result(self) -> TimbalOutputEvent[PayloadT] | None:
         """Returns the final OutputEvent enriched with pending gates.
 
         When concurrent runnables pause, the OutputEvent only references the

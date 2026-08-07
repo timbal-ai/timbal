@@ -2,13 +2,19 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from functools import wraps
-from typing import Any
+from typing import Any, Generic
+
+from .._typing import CollectT
 
 
-class BaseCollector(ABC):
-    """Base abstract class for all event collectors with internal state management."""
-    
-    def __init__(self, async_gen: AsyncGenerator[Any, None], **kwargs: Any): # noqa: ARG002
+class BaseCollector(ABC, Generic[CollectT]):
+    """Base abstract class for all event collectors with internal state management.
+
+    ``CollectT`` is the static type returned by :meth:`collect` / :meth:`result`
+    (e.g. ``OutputEvent[PayloadT] | None`` for ``TimbalCollector``).
+    """
+
+    def __init__(self, async_gen: AsyncGenerator[Any, None], **kwargs: Any):  # noqa: ARG002
         self._async_gen = async_gen
         self._collected = False
 
@@ -65,7 +71,7 @@ class BaseCollector(ABC):
         await self._async_gen.aclose()
         self._collected = True
     
-    async def collect(self) -> Any:
+    async def collect(self) -> CollectT:
         """Collect the final result by consuming the entire stream.
 
         This method consumes all remaining events from the async generator
@@ -99,30 +105,32 @@ class BaseCollector(ABC):
     @classmethod
     def wrap(cls, func):
         """Decorator that wraps async generator return with BaseCollector."""
+
         @wraps(func)
         def wrapper(self, **kwargs) -> cls:
             return cls(async_gen=func(self, **kwargs))
+
         return wrapper
-    
+
     @classmethod
     @abstractmethod
     def can_handle(cls, event: Any) -> bool:
         """Check if this collector can handle the given event type."""
         pass
-    
+
     @abstractmethod
     def process(self, event: Any) -> Any:
         """Process the event and update internal state.
-        
+
         Args:
             event: The event to process
-            
+
         Returns:
             Processed content if available for streaming, None otherwise
         """
         pass
 
     @abstractmethod
-    def result(self) -> Any:
+    def result(self) -> CollectT:
         """Return the final result."""
         pass

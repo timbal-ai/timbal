@@ -1,7 +1,7 @@
 import inspect
 from collections.abc import Callable
 from functools import cached_property
-from typing import Any, Literal
+from typing import Any, Generic, Literal
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -11,6 +11,7 @@ except ImportError:
 
 from pydantic import BaseModel, Field, SkipValidation, computed_field, model_validator
 
+from .._typing import PayloadT
 from ..errors import CredentialNotAvailable, PlatformError, ToolProxyUnavailable
 from ..platform.tool_proxy import execute_tool_proxy
 from ..utils import create_model_from_handler
@@ -18,8 +19,11 @@ from .runnable import Runnable
 from .tool_result_offload import ToolResultLimit
 
 
-class Tool(Runnable):
+class Tool(Runnable[PayloadT], Generic[PayloadT]):
     """A Tool is a Runnable that wraps a callable function or method.
+
+    ``PayloadT`` is the static type of the handler's return value (surfaced on
+    ``OutputEvent.output``). Infer via annotation, e.g. ``Tool[int](...)``.
 
     Tools automatically introspect the handler function to:
     - Generate parameter models from function signatures
@@ -31,7 +35,7 @@ class Tool(Runnable):
     composed into more complex Agents and Workflows.
     """
 
-    handler: SkipValidation[Callable[..., Any]]
+    handler: SkipValidation[Callable[..., PayloadT]]
     """The callable function or method that this tool wraps."""
 
     record_default_request_usage: bool = Field(
