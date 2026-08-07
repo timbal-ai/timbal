@@ -12,7 +12,7 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Generic, Literal
 
 from pydantic import (
     BaseModel,
@@ -23,6 +23,11 @@ from pydantic import (
     field_validator,
     model_serializer,
 )
+
+from .._typing import PayloadT
+
+if TYPE_CHECKING:
+    from ..collectors.impl.timbal import TimbalCollector
 from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
@@ -210,8 +215,13 @@ def _approval_id_for(path: str, input_dump: Any) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
-class Runnable(ABC, BaseModel):
+class Runnable(ABC, BaseModel, Generic[PayloadT]):
     """Abstract base class for all runnable components in the Timbal framework.
+
+    ``PayloadT`` is the static type of ``OutputEvent.output`` for this runnable
+    (e.g. ``Message``, a Pydantic ``output_model``, or a tool return type).
+    Calling the runnable returns a ``TimbalCollector[PayloadT]`` whose
+    ``.collect()`` yields ``OutputEvent[PayloadT] | None``.
 
     A Runnable represents an executable unit that can process inputs and produce outputs
     through an async generator interface. Runnables can be nested to form complex
@@ -1434,7 +1444,7 @@ class Runnable(ABC, BaseModel):
         }
         return {"task_id": task_id, "status": "running"}
 
-    def __call__(self, **kwargs: Any) -> Any:
+    def __call__(self, **kwargs: Any) -> "TimbalCollector[PayloadT]":
         """Execute the runnable, returning a TimbalCollector over its event stream.
 
         This is the public entry point. The collector is the API boundary: it

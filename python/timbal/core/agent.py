@@ -7,7 +7,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, overload
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -28,6 +28,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
+from .._typing import PayloadT
 from ..errors import InterruptError, PauseRequired, RunCancelled, bail
 from ..state import get_run_context
 from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
@@ -169,8 +170,14 @@ class AgentParams(BaseModel):
         }
 
 
-class Agent(Runnable):
-    """Orchestrates LLM interactions with autonomous tool calling."""
+class Agent(Runnable[PayloadT], Generic[PayloadT]):
+    """Orchestrates LLM interactions with autonomous tool calling.
+
+    ``PayloadT`` is the static type of ``OutputEvent.output``:
+    - default / ``output_model=None`` → ``Message``
+    - ``output_model=MyModel`` → ``MyModel`` (annotate as ``Agent[MyModel]`` or
+      rely on the ``__init__`` overloads below)
+    """
 
     model: SkipValidation[Model | str]
     """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5') or a TestModel for offline testing."""
@@ -211,8 +218,8 @@ class Agent(Runnable):
     See timbal.core.tool_result_offload."""
     temperature: float | None = None
     """Sampling temperature for the LLM response."""
-    output_model: type[BaseModel] | None = None
-    """BaseModel to generate a structured output."""
+    output_model: type[PayloadT] | None = None
+    """BaseModel to generate a structured output. When set, ``OutputEvent.output`` is this type."""
     output_model_context: Any = None
     """Validation context passed to Pydantic's model_validate when validating output_model responses."""
     model_params: dict[str, Any] = {}
@@ -221,6 +228,26 @@ class Agent(Runnable):
     """Custom base URL for the LLM API."""
     api_key: SecretStr | None = None
     """Custom API key for the LLM API."""
+
+    @overload
+    def __init__(
+        self: "Agent[PayloadT]",
+        *,
+        output_model: type[PayloadT],
+        **data: Any,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self: "Agent[Message]",
+        **data: Any,
+    ) -> None: ...
+
+    def __init__(self, **data: Any) -> None:
+        # Thin forwarder so the overloads above can teach the type checker that
+        # ``output_model=MyOut`` → ``Agent[MyOut]`` and otherwise ``Agent[Message]``.
+        # Runtime behaviour is identical to the Pydantic-generated constructor.
+        super().__init__(**data)
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
