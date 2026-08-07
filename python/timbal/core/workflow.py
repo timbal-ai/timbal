@@ -131,9 +131,18 @@ class Workflow(Runnable):
         runnable: RunnableLike,
         depends_on: list[str] | None = None,
         when: Callable[[], bool] | None = None,
+        while_: Callable[[], bool] | int | None = None,
         **kwargs: Any,
     ) -> "Workflow":
-        """Add a step to the workflow with automatic dependency linking."""
+        """Add a step to the workflow with automatic dependency linking.
+
+        ``while_`` (optional) repeats the step after each successful iteration
+        until the condition is false or the count is reached. Semantics are
+        do-while: the step always runs at least once when ``when`` allows it.
+        Each iteration produces its own span; ``step_span(name)`` returns the
+        latest. Self-references in a ``while_`` callable are not treated as
+        graph edges (the step's own span does not exist before iteration 1).
+        """
         if not isinstance(runnable, Runnable):
             if isinstance(runnable, dict):
                 runnable = Tool(**runnable)
@@ -148,11 +157,13 @@ class Workflow(Runnable):
         runnable.previous_steps = set()
         runnable.next_steps = set()
         # Per-source edge kinds: maps a previous step name -> set of kinds
-        # ("ordering" | "when" | "param"). Used by introspection (get_flow) to
-        # distinguish explicit sequencing from param/when-induced dependencies.
-        # Runtime sequencing only ever looks at ``previous_steps``.
+        # ("ordering" | "when" | "while" | "param"). Used by introspection
+        # (get_flow) to distinguish explicit sequencing from param/when/while-
+        # induced dependencies. Runtime sequencing only ever looks at
+        # ``previous_steps``.
         runnable.previous_steps_kinds = {}
         runnable.when = None
+        runnable.while_ = None
 
         # Explicit dependencies
         if depends_on and not isinstance(depends_on, list):
@@ -171,12 +182,27 @@ class Workflow(Runnable):
         # Handler-body step_span() references are data wiring, not explicit ordering.
         param_deps = set(runnable._dependencies)
         when_deps: set[str] = set()
+        while_deps: set[str] = set()
 
         # Optional handler to determine whether to execute the step, and inspect it to automatically link steps
         if when:
             inspect_result = runnable._inspect_callable(when)
             runnable.when = {"callable": when, **inspect_result}
             when_deps.update(inspect_result["dependencies"])
+
+        if isinstance(while_, int):
+            runnable.while_ = {"count": while_}
+        elif callable(while_):
+            inspect_result = runnable._inspect_callable(while_)
+            # Self-references are expected (condition reads this step's latest
+            # output) and must not become a DAG self-edge.
+            deps = set(inspect_result["dependencies"])
+            deps.discard(runnable.name)
+            inspect_result["dependencies"] = list(deps)
+            runnable.while_ = {"callable": while_, **inspect_result}
+            while_deps.update(deps)
+        elif while_ is not None:
+            raise ValueError("while_ must be a callable, an int, or None")
 
         # Use kwargs as default params for the runnable, and inspect callables to automatically link steps
         runnable._prepare_default_params(kwargs)
@@ -188,6 +214,8 @@ class Workflow(Runnable):
             edge_kinds.setdefault(dep, set()).add("ordering")
         for dep in when_deps:
             edge_kinds.setdefault(dep, set()).add("when")
+        for dep in while_deps:
+            edge_kinds.setdefault(dep, set()).add("while")
         for dep in param_deps:
             edge_kinds.setdefault(dep, set()).add("param")
         runnable.previous_steps_kinds = edge_kinds
@@ -284,38 +312,67 @@ class Workflow(Runnable):
                 set_parent_call_id(original_parent_call_id)
 
             status.state = StepState.RUNNING
+            iteration = 0
             try:
-                # Iterate the raw stream: the TimbalCollector wrapper is only
-                # needed at the public API boundary (.collect(), pending-gate
-                # enrichment); a per-event collector layer here is pure overhead.
-                async for event in step._stream(**resolved_input):
-                    yield event
-                    if (
-                        isinstance(event, OutputEvent)
-                        and event.status.code == "cancelled"
-                        and event.status.reason in {"approval_required", "approval_denied", "input_required"}
-                    ):
-                        logger.info(f"Step {step.name} paused ({event.status.reason}).")
-                        status.state = StepState.FAILED
-                        status.signal = PauseRequired(event)
-                        return
-                    if (
-                        isinstance(event, OutputEvent)
-                        and event.status.code == "cancelled"
-                        and event.status.reason == "cancelled"
-                    ):
-                        # A human cancelled this step via Cancel(); terminate the
-                        # whole workflow run rather than continuing other steps.
-                        logger.info(f"Step {step.name} cancelled by user.")
-                        status.state = StepState.FAILED
-                        status.signal = RunCancelled(event.status.message or "Run cancelled by user.")
-                        return
-                    if isinstance(event, OutputEvent) and event.error is not None:
-                        logger.info(f"Step {step.name} completed with error.")
-                        status.state = StepState.FAILED
-                        status.error = event.error
-                        status.done.set()
-                        return
+                # Do-while: always run once, then decide whether to continue.
+                # Each iteration is a full _stream → its own span. Downstream
+                # waits on status.done, which fires after all iterations.
+                # resolved_input is fixed across iterations; the step owns any
+                # cursor/accumulator state itself.
+                while True:
+                    # Iterate the raw stream: the TimbalCollector wrapper is only
+                    # needed at the public API boundary (.collect(), pending-gate
+                    # enrichment); a per-event collector layer here is pure overhead.
+                    async for event in step._stream(**resolved_input):
+                        yield event
+                        if (
+                            isinstance(event, OutputEvent)
+                            and event.status.code == "cancelled"
+                            and event.status.reason
+                            in {"approval_required", "approval_denied", "input_required"}
+                        ):
+                            logger.info(f"Step {step.name} paused ({event.status.reason}).")
+                            status.state = StepState.FAILED
+                            status.signal = PauseRequired(event)
+                            return
+                        if (
+                            isinstance(event, OutputEvent)
+                            and event.status.code == "cancelled"
+                            and event.status.reason == "cancelled"
+                        ):
+                            # A human cancelled this step via Cancel(); terminate the
+                            # whole workflow run rather than continuing other steps.
+                            logger.info(f"Step {step.name} cancelled by user.")
+                            status.state = StepState.FAILED
+                            status.signal = RunCancelled(
+                                event.status.message or "Run cancelled by user."
+                            )
+                            return
+                        if isinstance(event, OutputEvent) and event.error is not None:
+                            logger.info(f"Step {step.name} completed with error.")
+                            status.state = StepState.FAILED
+                            status.error = event.error
+                            status.done.set()
+                            return
+
+                    iteration += 1
+
+                    if not step.while_:
+                        break
+                    if "count" in step.while_:
+                        if iteration >= step.while_["count"]:
+                            break
+                    else:
+                        set_parent_call_id(workflow_call_id)
+                        try:
+                            should_continue = await step._execute_runtime_callable(
+                                step.while_["callable"], step.while_["is_coroutine"]
+                            )
+                        finally:
+                            set_parent_call_id(original_parent_call_id)
+                        if not should_continue:
+                            break
+
                 status.state = StepState.COMPLETED
             except Exception as e:
                 status.state = StepState.FAILED

@@ -347,9 +347,15 @@ class RunContext(BaseModel):
         from . import get_parent_call_id
 
         parent_call_id = get_parent_call_id()
+        # Last-wins: looping steps (while_) produce multiple spans with the same
+        # path; callers (while_ conditions, downstream lambdas) want the latest.
+        # Non-looping steps still produce exactly one span, so behavior is unchanged.
+        result = None
         for span in self._trace.values():
             if span.parent_call_id == parent_call_id and span.path.endswith("." + name):
-                return span
+                result = span
+        if result is not None:
+            return result
 
         if isinstance(default, _NoDefault):
             raise SpanNotFound(name)
