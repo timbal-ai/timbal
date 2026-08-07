@@ -12,6 +12,77 @@ from ..state import get_or_create_run_context
 
 logger = structlog.get_logger("timbal.platform.utils")
 
+# Connect/pool default. Write/read default to unbounded so large uploads (KB
+# ingest, recording multipart, …) don't die with an opaque httpx.WriteTimeout
+# after 10s of body send. Override via TIMBAL_HTTP_*_TIMEOUT env vars.
+_DEFAULT_CONNECT_TIMEOUT = 10.0
+
+
+def _env_timeout_seconds(name: str, default: float | None) -> float | None:
+    """Parse a timeout env var: float seconds, or none/null/inf/unlimited → None."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in ("", "none", "null", "inf", "unlimited"):
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {name}={raw!r}: expected a number of seconds, or 'none'."
+        ) from exc
+
+
+def _default_timeout() -> httpx.Timeout:
+    """Resolve the default httpx timeout for platform HTTP calls.
+
+    Env knobs (seconds; ``none`` = unbounded):
+      - ``TIMBAL_HTTP_TIMEOUT`` — connect + pool (default 10)
+      - ``TIMBAL_HTTP_WRITE_TIMEOUT`` — request body send (default unbounded)
+      - ``TIMBAL_HTTP_READ_TIMEOUT`` — response body read (default unbounded)
+    """
+    connect = _env_timeout_seconds("TIMBAL_HTTP_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT)
+    if connect is None:
+        # Connect must stay finite — otherwise a dead host hangs forever.
+        connect = _DEFAULT_CONNECT_TIMEOUT
+    write = _env_timeout_seconds("TIMBAL_HTTP_WRITE_TIMEOUT", None)
+    read = _env_timeout_seconds("TIMBAL_HTTP_READ_TIMEOUT", None)
+    return httpx.Timeout(connect, read=read, write=write)
+
+
+def _timeout_error_message(exc: httpx.TimeoutException, url: str, timeout: httpx.Timeout) -> str:
+    """Human-readable PlatformError body for httpx timeout failures."""
+    if isinstance(exc, httpx.WriteTimeout):
+        phase = "write"
+        detail = "sending the request body"
+        knob = "TIMBAL_HTTP_WRITE_TIMEOUT"
+        configured = timeout.write
+    elif isinstance(exc, httpx.ReadTimeout):
+        phase = "read"
+        detail = "waiting for / reading the response"
+        knob = "TIMBAL_HTTP_READ_TIMEOUT"
+        configured = timeout.read
+    elif isinstance(exc, httpx.ConnectTimeout):
+        phase = "connect"
+        detail = "establishing the connection"
+        knob = "TIMBAL_HTTP_TIMEOUT"
+        configured = timeout.connect
+    else:
+        phase = "timeout"
+        detail = "completing the request"
+        knob = "TIMBAL_HTTP_TIMEOUT"
+        configured = timeout.connect
+
+    limit = "unbounded" if configured is None else f"{configured:g}s"
+    return (
+        f"\n"
+        f"  URL: {url}\n"
+        f"  Error: {phase} timeout while {detail} (limit={limit})\n"
+        f"  Hint: raise the limit via {knob}=<seconds> (or '{knob}=none' for "
+        f"unbounded), or pass timeout= to the platform request helper."
+    )
+
 
 def _resolve_url_and_headers(
     service: str | None,
@@ -113,13 +184,17 @@ async def _request(
 
     ``backoff`` overrides the retry delay: called with the 0-based attempt
     index, returns seconds to wait (default: 0.1s doubling). A ``Retry-After``
-    on 429 still wins when longer. ``timeout`` overrides the default
-    ``Timeout(10.0, read=None)`` — e.g. large multipart uploads need an
-    unbounded write timeout.
+    on 429 still wins when longer. ``timeout`` overrides
+    :func:`_default_timeout` (connect 10s, read/write unbounded; see
+    ``TIMBAL_HTTP_*_TIMEOUT``).
     """
     url, headers = _resolve_url_and_headers(service, path, headers)
     if timeout is None:
-        timeout = httpx.Timeout(10.0, read=None)
+        timeout = _default_timeout()
+    elif isinstance(timeout, (int, float)):
+        # Match httpx: a bare number is an all-phases timeout. Keep read
+        # unbounded so long-running responses still work.
+        timeout = httpx.Timeout(float(timeout), read=None)
     payload_kwargs = {}
     # `is not None` so an empty dict still sends a JSON body + Content-Type
     # (parameterless POSTs would otherwise 415 Unsupported Media Type).
@@ -181,8 +256,19 @@ async def _request(
                 status_code=exc.response.status_code,
             )
             await asyncio.sleep(wait_time)
+        except httpx.TimeoutException as exc:
+            if attempt == max_retries:
+                raise PlatformError(_timeout_error_message(exc, url, timeout)) from exc
+            wait_time = backoff(attempt) if backoff is not None else 0.1 * (2**attempt)
+            logger.warning(
+                f"Request timed out, retrying in {wait_time:.1f}s",
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                error=type(exc).__name__,
+            )
+            await asyncio.sleep(wait_time)
         except Exception as exc:
-            # Retry on any other error (network, timeout, etc.)
+            # Retry on any other error (network, etc.)
             if attempt == max_retries:
                 raise
             wait_time = backoff(attempt) if backoff is not None else 0.1 * (2**attempt)
@@ -223,9 +309,10 @@ async def _stream(
     elif files:
         payload_kwargs["files"] = files
 
+    timeout = _default_timeout()
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None)) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream(method, url, headers=headers, params=params, **payload_kwargs) as response:
                     response.raise_for_status()
 
@@ -287,8 +374,19 @@ async def _stream(
                 status_code=exc.response.status_code,
             )
             await asyncio.sleep(wait_time)
+        except httpx.TimeoutException as exc:
+            if attempt == max_retries:
+                raise PlatformError(_timeout_error_message(exc, url, timeout)) from exc
+            wait_time = 0.1 * (2**attempt)
+            logger.warning(
+                f"Stream request timed out, retrying in {wait_time:.1f}s",
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                error=type(exc).__name__,
+            )
+            await asyncio.sleep(wait_time)
         except Exception as exc:
-            # Retry on any other error (network, timeout, etc.)
+            # Retry on any other error (network, etc.)
             if attempt == max_retries:
                 raise
             wait_time = 0.1 * (2**attempt)

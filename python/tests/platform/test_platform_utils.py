@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from timbal.errors import PlatformError
-from timbal.platform.utils import _request, _resolve_url_and_headers, _stream
+from timbal.platform.utils import (
+    _default_timeout,
+    _request,
+    _resolve_url_and_headers,
+    _stream,
+)
 from timbal.state import set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
@@ -55,6 +60,9 @@ def _isolated_env(monkeypatch):
         "TIMBAL_API_KEY",
         "TIMBAL_API_HOST",
         "TIMBAL_ORG_ID",
+        "TIMBAL_HTTP_TIMEOUT",
+        "TIMBAL_HTTP_WRITE_TIMEOUT",
+        "TIMBAL_HTTP_READ_TIMEOUT",
     ):
         monkeypatch.delenv(var, raising=False)
     # Reset config-loader cache so RunContext() doesn't pick up a stale hit
@@ -223,6 +231,40 @@ def _make_http_status_error(
 
 
 # ===========================================================================
+# TestDefaultTimeout
+# ===========================================================================
+
+
+class TestDefaultTimeout:
+    """Tests for env-driven platform HTTP timeouts."""
+
+    def test_defaults_unbounded_write_and_read(self):
+        timeout = _default_timeout()
+        assert timeout.connect == 10.0
+        assert timeout.write is None
+        assert timeout.read is None
+
+    def test_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_HTTP_TIMEOUT", "5")
+        monkeypatch.setenv("TIMBAL_HTTP_WRITE_TIMEOUT", "30")
+        monkeypatch.setenv("TIMBAL_HTTP_READ_TIMEOUT", "none")
+        timeout = _default_timeout()
+        assert timeout.connect == 5.0
+        assert timeout.write == 30.0
+        assert timeout.read is None
+
+    def test_connect_none_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_HTTP_TIMEOUT", "none")
+        timeout = _default_timeout()
+        assert timeout.connect == 10.0
+
+    def test_invalid_env_raises_value_error(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_HTTP_WRITE_TIMEOUT", "nope")
+        with pytest.raises(ValueError, match="TIMBAL_HTTP_WRITE_TIMEOUT"):
+            _default_timeout()
+
+
+# ===========================================================================
 # TestRequest
 # ===========================================================================
 
@@ -350,6 +392,99 @@ class TestRequest:
                 with pytest.raises(ConnectionError):
                     await _request("GET", "health", service="api", max_retries=2)
         assert mock_http.request.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_passed_to_client(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        ok_response = MagicMock()
+        ok_response.raise_for_status = MagicMock()
+        mock_http.request = AsyncMock(return_value=ok_response)
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm) as mock_cls:
+            await _request("GET", "health", service="api", max_retries=0)
+
+        _, kwargs = mock_cls.call_args
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.connect == 10.0
+        assert timeout.write is None
+        assert timeout.read is None
+
+    @pytest.mark.asyncio
+    async def test_float_timeout_keeps_read_unbounded(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        ok_response = MagicMock()
+        ok_response.raise_for_status = MagicMock()
+        mock_http.request = AsyncMock(return_value=ok_response)
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm) as mock_cls:
+            await _request("GET", "health", service="api", max_retries=0, timeout=30)
+
+        _, kwargs = mock_cls.call_args
+        timeout = kwargs["timeout"]
+        assert timeout.connect == 30.0
+        assert timeout.write == 30.0
+        assert timeout.read is None
+
+    @pytest.mark.asyncio
+    async def test_write_timeout_raises_platform_error_with_hint(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        mock_http.request = AsyncMock(side_effect=httpx.WriteTimeout("write timed out"))
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()):
+                with pytest.raises(PlatformError) as ei:
+                    await _request(
+                        "POST",
+                        "upload",
+                        service="api",
+                        content=b"big",
+                        max_retries=0,
+                        timeout=httpx.Timeout(10.0, read=None, write=10.0),
+                    )
+        msg = str(ei.value)
+        assert "write timeout" in msg
+        assert "TIMBAL_HTTP_WRITE_TIMEOUT" in msg
+        assert "limit=10s" in msg
+
+    @pytest.mark.asyncio
+    async def test_read_timeout_raises_platform_error_with_hint(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        mock_http.request = AsyncMock(side_effect=httpx.ReadTimeout("read timed out"))
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()):
+                with pytest.raises(PlatformError) as ei:
+                    await _request(
+                        "GET",
+                        "health",
+                        service="api",
+                        max_retries=0,
+                        timeout=httpx.Timeout(10.0, read=5.0),
+                    )
+        msg = str(ei.value)
+        assert "read timeout" in msg
+        assert "TIMBAL_HTTP_READ_TIMEOUT" in msg
+        assert "limit=5s" in msg
+
+    @pytest.mark.asyncio
+    async def test_timeout_retries_then_succeeds(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        ok_response = MagicMock()
+        ok_response.raise_for_status = MagicMock()
+        mock_http.request = AsyncMock(side_effect=[httpx.ConnectTimeout("connect timed out"), ok_response])
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+                result = await _request("GET", "health", service="api", max_retries=2)
+        assert result is ok_response
+        mock_sleep.assert_called_once()
+        assert mock_http.request.call_count == 2
 
     @pytest.mark.asyncio
     async def test_json_payload_forwarded(self):
