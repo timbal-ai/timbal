@@ -72,6 +72,10 @@ export async function memory(fn, iters, warmup, drain) {
   let peak = baseline;
   for (let i = 0; i < iters; i++) {
     await fn();
+    // The Timbal harness clears its tracing storage after every run inside the
+    // memory loop; drain pending observability work at the same point (no GC —
+    // the Python side doesn't collect per run either).
+    if (drain) await drain();
     const cur = process.memoryUsage().heapUsed;
     if (cur > peak) peak = cur;
   }

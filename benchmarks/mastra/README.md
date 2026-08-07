@@ -60,10 +60,11 @@ agents have no tracing, so Mastra gets two columns:
 - **Mastra+obs** — registered in a `Mastra` instance with `@mastra/observability`
   configured; spans are built and processed normally, and the exporter sink is a
   no-op subclass of `BaseExporter` (the analogue of LangSmith with HTTP mocked).
-  Pending observability work is flushed (`Observability.flush()`) after warmup
-  and between measured batches — the same points where the Timbal side clears
-  its in-memory tracing storage — so no side carries deferred work into a timed
-  phase.
+  Pending observability work is flushed (`Observability.flush()`) after warmup,
+  between measured batches, and after every run inside the memory loop — the
+  same points where the Timbal side clears its in-memory tracing storage — so
+  no side carries deferred work into a timed phase or accumulates it into the
+  memory measurement.
 
 The honest apples-to-apples column against Timbal is **Mastra+obs**; the bare
 column shows what Mastra costs with tracing off, which Timbal doesn't offer.
@@ -150,15 +151,15 @@ tracing built in and always on; compare against Mastra+obs for parity.
 
 | Scenario | Timbal p50 | Mastra p50 | Mastra+obs p50 |
 |----------|-----------:|-----------:|---------------:|
-| Single tool | 258.8 µs | 2.28 ms | 4.22 ms |
-| 3-step chain | 273.5 µs | 3.55 ms | 6.48 ms |
-| Parallel tools | 272.4 µs | 2.20 ms | 4.26 ms |
+| Single tool | 271.9 µs | 2.70 ms | 4.53 ms |
+| 3-step chain | 286.0 µs | 4.66 ms | 7.91 ms |
+| Parallel tools | 303.0 µs | 2.76 ms | 4.98 ms |
 
 | Scenario | Timbal c=10 | Mastra c=10 | Mastra+obs c=10 |
 |----------|------------:|------------:|----------------:|
-| Single tool | 4,211/s | 480/s | 278/s |
-| 3-step chain | 1,973/s | 270/s | 161/s |
-| Parallel tools | 2,592/s | 435/s | 239/s |
+| Single tool | 3,828/s | 511/s | 259/s |
+| 3-step chain | 1,845/s | 258/s | 145/s |
+| Parallel tools | 2,252/s | 373/s | 223/s |
 
 Timbal's agent loop is roughly an order of magnitude faster per run and in
 throughput — despite the V8-vs-CPython runtime handicap running the other way.
@@ -172,15 +173,15 @@ Trivial handlers, no LLM — pure scheduling overhead.
 
 | Scenario | Timbal p50 | Mastra p50 | Mastra+obs p50 |
 |----------|-----------:|-----------:|---------------:|
-| Sequential | 332.0 µs | 94.9 µs | 295.3 µs |
-| Fan-out/in | 492.2 µs | 129.3 µs | 334.2 µs |
-| Diamond | 432.4 µs | 105.3 µs | 270.8 µs |
+| Sequential | 355.0 µs | 94.7 µs | 303.0 µs |
+| Fan-out/in | 486.0 µs | 127.3 µs | 341.4 µs |
+| Diamond | 408.4 µs | 107.1 µs | 276.7 µs |
 
 | Scenario | Timbal c=10 | Mastra c=10 | Mastra+obs c=10 |
 |----------|------------:|------------:|----------------:|
-| Sequential | 3,892/s | 15,954/s | 4,214/s |
-| Fan-out/in | 3,000/s | 9,470/s | 3,306/s |
-| Diamond | 3,495/s | 11,184/s | 3,963/s |
+| Sequential | 3,954/s | 15,770/s | 3,973/s |
+| Fan-out/in | 3,025/s | 9,074/s | 3,183/s |
+| Diamond | 3,557/s | 10,772/s | 3,805/s |
 
 This one cuts the other way and we report it as-is: Mastra's bare workflow
 engine on V8 is ~3x faster than Timbal on trivial DAGs. That advantage is a mix
