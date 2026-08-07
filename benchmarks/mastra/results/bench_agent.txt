@@ -18,33 +18,33 @@
   Latency  (×100 sequential runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-          mean      268.0 µs       2.79 ms       4.62 ms
-           p50      271.9 µs       2.70 ms       4.53 ms
-           p95      426.9 µs       4.20 ms       6.02 ms
-           p99      586.7 µs       5.62 ms       9.80 ms
+          mean      264.2 µs       2.77 ms       4.28 ms
+           p50      265.2 µs       2.63 ms       4.09 ms
+           p95      416.7 µs       3.89 ms       6.09 ms
+           p99      560.0 µs       5.30 ms      10.29 ms
 
   Memory per run  (×100 runs) — different instruments, do not ratio across runtimes
   framework                        per run  method                  
   ────────────────────────  ──────────────  ────────────────────────
   Timbal                             492 B  tracemalloc peak/N      
-  Mastra                         294,563 B  V8 heap growth/N (≈)    
-  Mastra+obs                     345,372 B  V8 heap growth/N (≈)    
+  Mastra                         296,746 B  V8 heap growth/N (≈)    
+  Mastra+obs                     355,216 B  V8 heap growth/N (≈)    
 
   Burst p50/p95  (20 concurrent runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-           p50      252.4 µs      25.73 ms      61.40 ms
-           p75      324.0 µs      33.73 ms      72.39 ms
-           p95       1.56 ms      36.87 ms      84.40 ms
-           p99       1.56 ms      36.87 ms      84.40 ms
-           max       1.56 ms      36.87 ms      84.40 ms
+           p50      262.3 µs      26.58 ms      55.22 ms
+           p75      290.1 µs      33.14 ms      65.60 ms
+           p95      441.8 µs      37.41 ms      74.79 ms
+           p99      441.8 µs      37.41 ms      74.79 ms
+           max      441.8 µs      37.41 ms      74.79 ms
 
   Throughput  (200 runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-             1        3125/s         448/s         246/s
-            10        3828/s         511/s         259/s
-            50        3838/s         492/s         270/s
+             1        4008/s         490/s         246/s
+            10        4172/s         512/s         264/s
+            50        4045/s         509/s         266/s
 
 ────────────────────────────────────────────────────────────────────────────
   Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)
@@ -53,33 +53,33 @@
   Latency  (×100 sequential runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-          mean      288.0 µs       4.75 ms       8.06 ms
-           p50      286.0 µs       4.66 ms       7.91 ms
-           p95      419.9 µs       6.15 ms      10.06 ms
-           p99      655.7 µs       8.48 ms      13.51 ms
+          mean      290.7 µs       3.90 ms       6.72 ms
+           p50      274.8 µs       3.74 ms       6.64 ms
+           p95      461.4 µs       5.85 ms       8.23 ms
+           p99      664.2 µs       7.03 ms      11.25 ms
 
   Memory per run  (×100 runs) — different instruments, do not ratio across runtimes
   framework                        per run  method                  
   ────────────────────────  ──────────────  ────────────────────────
   Timbal                             897 B  tracemalloc peak/N      
-  Mastra                         418,271 B  V8 heap growth/N (≈)    
-  Mastra+obs                     472,252 B  V8 heap growth/N (≈)    
+  Mastra                         421,457 B  V8 heap growth/N (≈)    
+  Mastra+obs                     476,681 B  V8 heap growth/N (≈)    
 
   Burst p50/p95  (10 concurrent runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-           p50      515.0 µs      34.04 ms      66.78 ms
-           p75      541.0 µs      36.71 ms      70.57 ms
-           p95      824.2 µs      39.32 ms      77.03 ms
-           p99      824.2 µs      39.32 ms      77.03 ms
-           max      824.2 µs      39.32 ms      77.03 ms
+           p50      485.8 µs      33.81 ms      71.28 ms
+           p75      497.7 µs      36.25 ms      76.76 ms
+           p95      640.2 µs      38.40 ms      83.00 ms
+           p99      640.2 µs      38.40 ms      83.00 ms
+           max      640.2 µs      38.40 ms      83.00 ms
 
   Throughput  (200 runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-             1        1858/s         220/s         130/s
-            10        1845/s         258/s         145/s
-            50        1836/s         283/s         154/s
+             1        1947/s         247/s         128/s
+            10        1854/s         284/s         144/s
+            50        1848/s         304/s         163/s
 
 ────────────────────────────────────────────────────────────────────────────
   Scenario 3: Parallel tools  (LLM → [add, mul, neg] → LLM → answer)
@@ -88,33 +88,33 @@
   Latency  (×100 sequential runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-          mean      307.4 µs       2.87 ms       5.09 ms
-           p50      303.0 µs       2.76 ms       4.98 ms
-           p95      460.4 µs       4.24 ms       7.01 ms
-           p99      955.7 µs       5.01 ms       8.36 ms
+          mean      291.4 µs       2.77 ms       5.20 ms
+           p50      278.2 µs       2.60 ms       4.65 ms
+           p95      434.1 µs       4.07 ms      12.15 ms
+           p99      803.9 µs       4.58 ms      15.77 ms
 
   Memory per run  (×100 runs) — different instruments, do not ratio across runtimes
   framework                        per run  method                  
   ────────────────────────  ──────────────  ────────────────────────
-  Timbal                             780 B  tracemalloc peak/N      
-  Mastra                         343,108 B  V8 heap growth/N (≈)    
-  Mastra+obs                     391,458 B  V8 heap growth/N (≈)    
+  Timbal                             799 B  tracemalloc peak/N      
+  Mastra                         348,384 B  V8 heap growth/N (≈)    
+  Mastra+obs                     392,720 B  V8 heap growth/N (≈)    
 
   Burst p50/p95  (15 concurrent runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-           p50       4.16 ms      25.52 ms      53.04 ms
-           p75       4.38 ms      32.94 ms      61.54 ms
-           p95       4.70 ms      36.41 ms      67.96 ms
-           p99       4.70 ms      36.41 ms      67.96 ms
-           max       4.70 ms      36.41 ms      67.96 ms
+           p50       4.39 ms      25.24 ms      51.79 ms
+           p75       4.70 ms      30.82 ms      61.20 ms
+           p95       5.12 ms      33.61 ms      68.17 ms
+           p99       5.12 ms      33.61 ms      68.17 ms
+           max       5.12 ms      33.61 ms      68.17 ms
 
   Throughput  (200 runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-             1        1946/s         348/s         215/s
-            10        2252/s         373/s         223/s
-            50        2420/s         380/s         227/s
+             1        1851/s         380/s         241/s
+            10        2244/s         374/s         239/s
+            50        2440/s         411/s         240/s
 
 ────────────────────────────────────────────────────────────────────────────
   All measurements reuse 1 pre-built agent (creation excluded).

@@ -17,34 +17,34 @@
   Latency  (×200 sequential runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-          mean      370.9 µs      110.6 µs      365.9 µs
-           p50      355.0 µs       94.7 µs      303.0 µs
-           p95      476.3 µs      174.1 µs      753.7 µs
-           p99      653.9 µs      477.1 µs       1.56 ms
+          mean      322.3 µs      105.7 µs      328.3 µs
+           p50      315.1 µs       95.8 µs      289.4 µs
+           p95      364.1 µs      135.5 µs      508.2 µs
+           p99      438.0 µs      484.4 µs       1.26 ms
 
   Memory per run  (×200 runs) — different instruments, do not ratio across runtimes
   framework                        per run  method                  
   ────────────────────────  ──────────────  ────────────────────────
-  Timbal                             227 B  tracemalloc peak/N      
-  Mastra                          82,972 B  V8 heap growth/N (≈)    
-  Mastra+obs                      89,012 B  V8 heap growth/N (≈)    
+  Timbal                             258 B  tracemalloc peak/N      
+  Mastra                          82,979 B  V8 heap growth/N (≈)    
+  Mastra+obs                      88,540 B  V8 heap growth/N (≈)    
 
   Burst  (500 concurrent runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-           p50      77.99 ms      52.22 ms     154.31 ms
-           p75      84.51 ms      52.48 ms     154.76 ms
-           p95      90.05 ms      52.66 ms     155.16 ms
-           p99      91.12 ms      52.68 ms     155.25 ms
-           max      91.49 ms      52.76 ms     155.33 ms
+           p50      84.61 ms      48.33 ms     157.90 ms
+           p75      90.77 ms      48.53 ms     158.49 ms
+           p95     104.12 ms      48.70 ms     158.92 ms
+           p99     106.23 ms      48.73 ms     159.00 ms
+           max     107.55 ms      48.79 ms     159.07 ms
 
   Throughput  (1000 runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-             1        2523/s       14097/s        3661/s
-            10        3954/s       15770/s        3973/s
-            50        3996/s       15825/s        3740/s
-           200        4034/s       12451/s        3394/s
+             1        2036/s       13960/s        3753/s
+            10        4373/s       13091/s        4071/s
+            50        4230/s       14871/s        3392/s
+           200        4617/s       13621/s        3514/s
 
 ────────────────────────────────────────────────────────────────────────────
   Scenario: Fan-out/in  (A → [B, C, D] → E)
@@ -53,34 +53,34 @@
   Latency  (×200 sequential runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-          mean      504.2 µs      148.4 µs      386.7 µs
-           p50      486.0 µs      127.3 µs      341.4 µs
-           p95      659.4 µs      199.4 µs      614.2 µs
-           p99      737.5 µs      675.6 µs       1.45 ms
+          mean      530.6 µs      150.1 µs      373.4 µs
+           p50      467.6 µs      130.7 µs      337.9 µs
+           p95      806.3 µs      201.5 µs      646.2 µs
+           p99       1.66 ms      684.2 µs       1.14 ms
 
   Memory per run  (×200 runs) — different instruments, do not ratio across runtimes
   framework                        per run  method                  
   ────────────────────────  ──────────────  ────────────────────────
-  Timbal                             332 B  tracemalloc peak/N      
-  Mastra                          82,955 B  V8 heap growth/N (≈)    
-  Mastra+obs                      91,526 B  V8 heap growth/N (≈)    
+  Timbal                             365 B  tracemalloc peak/N      
+  Mastra                          83,200 B  V8 heap growth/N (≈)    
+  Mastra+obs                      92,211 B  V8 heap growth/N (≈)    
 
   Burst  (500 concurrent runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-           p50     149.51 ms      86.92 ms     193.62 ms
-           p75     154.65 ms      87.24 ms     194.05 ms
-           p95     159.15 ms      87.55 ms     194.43 ms
-           p99     159.97 ms      87.60 ms     194.50 ms
-           max     160.24 ms      87.66 ms     194.63 ms
+           p50     133.56 ms      82.91 ms     180.03 ms
+           p75     138.28 ms      83.30 ms     180.53 ms
+           p95     142.29 ms      83.67 ms     180.98 ms
+           p99     143.17 ms      83.74 ms     181.05 ms
+           max     143.37 ms      83.82 ms     181.17 ms
 
   Throughput  (1000 runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-             1        1883/s        8193/s        2978/s
-            10        3025/s        9074/s        3183/s
-            50        2979/s        9041/s        3073/s
-           200        2865/s        7320/s        2838/s
+             1        1996/s        8670/s        3130/s
+            10        3131/s        9433/s        3440/s
+            50        3462/s        9512/s        3279/s
+           200        3201/s        7995/s        2403/s
 
 ────────────────────────────────────────────────────────────────────────────
   Scenario: Diamond  (A → [B, C] → D)
@@ -89,34 +89,34 @@
   Latency  (×200 sequential runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-          mean      432.1 µs      126.8 µs      320.8 µs
-           p50      408.4 µs      107.1 µs      276.7 µs
-           p95      590.0 µs      172.1 µs      511.0 µs
-           p99      684.2 µs      774.2 µs       1.31 ms
+          mean      392.4 µs      118.5 µs      333.7 µs
+           p50      381.7 µs      104.9 µs      289.5 µs
+           p95      459.2 µs      161.5 µs      625.5 µs
+           p99      632.3 µs      576.8 µs       1.15 ms
 
   Memory per run  (×200 runs) — different instruments, do not ratio across runtimes
   framework                        per run  method                  
   ────────────────────────  ──────────────  ────────────────────────
-  Timbal                             310 B  tracemalloc peak/N      
-  Mastra                          83,157 B  V8 heap growth/N (≈)    
-  Mastra+obs                      90,475 B  V8 heap growth/N (≈)    
+  Timbal                             335 B  tracemalloc peak/N      
+  Mastra                          83,130 B  V8 heap growth/N (≈)    
+  Mastra+obs                      88,893 B  V8 heap growth/N (≈)    
 
   Burst  (500 concurrent runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-           p50     131.23 ms      63.63 ms     157.71 ms
-           p75     136.21 ms      64.01 ms     158.19 ms
-           p95     140.37 ms      64.34 ms     158.62 ms
-           p99     141.10 ms      64.46 ms     158.75 ms
-           max     141.36 ms      64.52 ms     158.83 ms
+           p50     113.30 ms      59.09 ms     148.40 ms
+           p75     117.71 ms      59.42 ms     148.88 ms
+           p95     121.70 ms      59.71 ms     149.36 ms
+           p99     122.41 ms      59.79 ms     149.45 ms
+           max     122.61 ms      59.85 ms     149.53 ms
 
   Throughput  (1000 runs)
                       Timbal        Mastra    Mastra+obs
   ────────────  ────────────  ────────────  ────────────
-             1        2122/s        9776/s        3378/s
-            10        3557/s       10772/s        3805/s
-            50        3628/s       10050/s        3485/s
-           200        3243/s        8884/s        3212/s
+             1        2427/s       10223/s        3567/s
+            10        4039/s       11265/s        4014/s
+            50        4384/s       10743/s        3698/s
+           200        3971/s        9778/s        3391/s
 
 ────────────────────────────────────────────────────────────────────────────
   Both frameworks execute identical DAGs with trivial handlers.

@@ -151,15 +151,15 @@ tracing built in and always on; compare against Mastra+obs for parity.
 
 | Scenario | Timbal p50 | Mastra p50 | Mastra+obs p50 |
 |----------|-----------:|-----------:|---------------:|
-| Single tool | 271.9 µs | 2.70 ms | 4.53 ms |
-| 3-step chain | 286.0 µs | 4.66 ms | 7.91 ms |
-| Parallel tools | 303.0 µs | 2.76 ms | 4.98 ms |
+| Single tool | 265.2 µs | 2.63 ms | 4.09 ms |
+| 3-step chain | 274.8 µs | 3.74 ms | 6.64 ms |
+| Parallel tools | 278.2 µs | 2.60 ms | 4.65 ms |
 
 | Scenario | Timbal c=10 | Mastra c=10 | Mastra+obs c=10 |
 |----------|------------:|------------:|----------------:|
-| Single tool | 3,828/s | 511/s | 259/s |
-| 3-step chain | 1,845/s | 258/s | 145/s |
-| Parallel tools | 2,252/s | 373/s | 223/s |
+| Single tool | 4,172/s | 512/s | 264/s |
+| 3-step chain | 1,854/s | 284/s | 144/s |
+| Parallel tools | 2,244/s | 374/s | 239/s |
 
 Timbal's agent loop is roughly an order of magnitude faster per run and in
 throughput — despite the V8-vs-CPython runtime handicap running the other way.
@@ -173,15 +173,15 @@ Trivial handlers, no LLM — pure scheduling overhead.
 
 | Scenario | Timbal p50 | Mastra p50 | Mastra+obs p50 |
 |----------|-----------:|-----------:|---------------:|
-| Sequential | 355.0 µs | 94.7 µs | 303.0 µs |
-| Fan-out/in | 486.0 µs | 127.3 µs | 341.4 µs |
-| Diamond | 408.4 µs | 107.1 µs | 276.7 µs |
+| Sequential | 315.1 µs | 95.8 µs | 289.4 µs |
+| Fan-out/in | 467.6 µs | 130.7 µs | 337.9 µs |
+| Diamond | 381.7 µs | 104.9 µs | 289.5 µs |
 
 | Scenario | Timbal c=10 | Mastra c=10 | Mastra+obs c=10 |
 |----------|------------:|------------:|----------------:|
-| Sequential | 3,954/s | 15,770/s | 3,973/s |
-| Fan-out/in | 3,025/s | 9,074/s | 3,183/s |
-| Diamond | 3,557/s | 10,772/s | 3,805/s |
+| Sequential | 4,373/s | 13,091/s | 4,071/s |
+| Fan-out/in | 3,131/s | 9,433/s | 3,440/s |
+| Diamond | 4,039/s | 11,265/s | 4,014/s |
 
 This one cuts the other way and we report it as-is: Mastra's bare workflow
 engine on V8 is ~3x faster than Timbal on trivial DAGs. That advantage is a mix

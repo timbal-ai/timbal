@@ -72,12 +72,15 @@ export async function memory(fn, iters, warmup, drain) {
   let peak = baseline;
   for (let i = 0; i < iters; i++) {
     await fn();
-    // The Timbal harness clears its tracing storage after every run inside the
-    // memory loop; drain pending observability work at the same point (no GC —
-    // the Python side doesn't collect per run either).
-    if (drain) await drain();
+    // Sample BEFORE draining: tracemalloc's peak is a continuous high-water
+    // mark that includes this run's allocations up to the moment Timbal calls
+    // _clear_traces(), so the heap must be read while buffered observability
+    // work is still resident.
     const cur = process.memoryUsage().heapUsed;
     if (cur > peak) peak = cur;
+    // Then drain, mirroring the per-run _clear_traces() on the Python side
+    // (no GC — the Python side doesn't collect per run either).
+    if (drain) await drain();
   }
   return { peak_growth_bytes: peak - baseline, per_run_bytes: (peak - baseline) / iters };
 }
