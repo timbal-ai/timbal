@@ -1,0 +1,17 @@
+{
+  "name": "timbal-bench-mastra",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Mastra side of the Timbal vs Mastra framework-overhead benchmarks",
+  "scripts": {
+    "bench:agent": "node --expose-gc bench_agent.mjs",
+    "bench:workflow": "node --expose-gc bench_workflow.mjs"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.57.0",
+    "@mastra/observability": "^1.16.5",
+    "ai": "^7.0.56",
+    "zod": "^4.4.3"
+  }
+}

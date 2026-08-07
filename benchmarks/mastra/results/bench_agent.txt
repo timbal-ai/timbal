@@ -1,0 +1,125 @@
+
+════════════════════════════════════════════════════════════════════════════
+  Timbal vs Mastra — agent loop benchmark (cross-language)
+  100 iters · burst {1: 20, 2: 10, 3: 15} · 100 mem · 200 throughput
+  Timbal: CPython 3.11/asyncio, built-in tracing (always on).
+  Mastra: Node/V8 subprocess, AI SDK MockLanguageModelV4, bare + observability (export mocked).
+  Same scenarios, same fake-LLM-by-message-inspection, same procedure per side.
+  Cross-runtime comparison — see README.md for what is and isn't comparable.
+════════════════════════════════════════════════════════════════════════════
+
+  running Mastra side: --expose-gc bench_agent.mjs…
+  Mastra side: node v22.18.0 · @mastra/core 1.57.0 · @mastra/observability 1.16.5 · ai 7.0.56
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 1: Single tool call  (LLM → add → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100 sequential runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+          mean      264.2 µs       2.77 ms       4.28 ms
+           p50      265.2 µs       2.63 ms       4.09 ms
+           p95      416.7 µs       3.89 ms       6.09 ms
+           p99      560.0 µs       5.30 ms      10.29 ms
+
+  Memory per run  (×100 runs) — different instruments, do not ratio across runtimes
+  framework                        per run  method                  
+  ────────────────────────  ──────────────  ────────────────────────
+  Timbal                             492 B  tracemalloc peak/N      
+  Mastra                         296,746 B  V8 heap growth/N (≈)    
+  Mastra+obs                     355,216 B  V8 heap growth/N (≈)    
+
+  Burst p50/p95  (20 concurrent runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+           p50      262.3 µs      26.58 ms      55.22 ms
+           p75      290.1 µs      33.14 ms      65.60 ms
+           p95      441.8 µs      37.41 ms      74.79 ms
+           p99      441.8 µs      37.41 ms      74.79 ms
+           max      441.8 µs      37.41 ms      74.79 ms
+
+  Throughput  (200 runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+             1        4008/s         490/s         246/s
+            10        4172/s         512/s         264/s
+            50        4045/s         509/s         266/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100 sequential runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+          mean      290.7 µs       3.90 ms       6.72 ms
+           p50      274.8 µs       3.74 ms       6.64 ms
+           p95      461.4 µs       5.85 ms       8.23 ms
+           p99      664.2 µs       7.03 ms      11.25 ms
+
+  Memory per run  (×100 runs) — different instruments, do not ratio across runtimes
+  framework                        per run  method                  
+  ────────────────────────  ──────────────  ────────────────────────
+  Timbal                             897 B  tracemalloc peak/N      
+  Mastra                         421,457 B  V8 heap growth/N (≈)    
+  Mastra+obs                     476,681 B  V8 heap growth/N (≈)    
+
+  Burst p50/p95  (10 concurrent runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+           p50      485.8 µs      33.81 ms      71.28 ms
+           p75      497.7 µs      36.25 ms      76.76 ms
+           p95      640.2 µs      38.40 ms      83.00 ms
+           p99      640.2 µs      38.40 ms      83.00 ms
+           max      640.2 µs      38.40 ms      83.00 ms
+
+  Throughput  (200 runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+             1        1947/s         247/s         128/s
+            10        1854/s         284/s         144/s
+            50        1848/s         304/s         163/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 3: Parallel tools  (LLM → [add, mul, neg] → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100 sequential runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+          mean      291.4 µs       2.77 ms       5.20 ms
+           p50      278.2 µs       2.60 ms       4.65 ms
+           p95      434.1 µs       4.07 ms      12.15 ms
+           p99      803.9 µs       4.58 ms      15.77 ms
+
+  Memory per run  (×100 runs) — different instruments, do not ratio across runtimes
+  framework                        per run  method                  
+  ────────────────────────  ──────────────  ────────────────────────
+  Timbal                             799 B  tracemalloc peak/N      
+  Mastra                         348,384 B  V8 heap growth/N (≈)    
+  Mastra+obs                     392,720 B  V8 heap growth/N (≈)    
+
+  Burst p50/p95  (15 concurrent runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+           p50       4.39 ms      25.24 ms      51.79 ms
+           p75       4.70 ms      30.82 ms      61.20 ms
+           p95       5.12 ms      33.61 ms      68.17 ms
+           p99       5.12 ms      33.61 ms      68.17 ms
+           max       5.12 ms      33.61 ms      68.17 ms
+
+  Throughput  (200 runs)
+                      Timbal        Mastra    Mastra+obs
+  ────────────  ────────────  ────────────  ────────────
+             1        1851/s         380/s         241/s
+            10        2244/s         374/s         239/s
+            50        2440/s         411/s         240/s
+
+────────────────────────────────────────────────────────────────────────────
+  All measurements reuse 1 pre-built agent (creation excluded).
+  LLMs faked via message inspection on both sides — no network, no API keys.
+  Each framework runs in its native runtime; numbers include runtime differences.
+  Memory uses per-runtime instruments (tracemalloc vs V8 heap) — not cross-comparable.
+────────────────────────────────────────────────────────────────────────────
+
