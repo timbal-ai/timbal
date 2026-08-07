@@ -456,6 +456,248 @@ class TestControlFlow:
         assert result.output == "aggregated"
 
 
+class TestWhileLoop:
+    """Do-while step loops: while_=int / callable, span-per-iteration, last-wins step_span."""
+
+    async def test_while_count_runs_exactly_n_times(self):
+        counter = {"n": 0}
+
+        def tick() -> dict:
+            counter["n"] += 1
+            return {"n": counter["n"]}
+
+        def take_last() -> int:
+            return get_run_context().step_span("tick").output["n"]
+
+        wf = (
+            Workflow(name="while_count_wf")
+            .step(tick, while_=3)
+            .step(take_last)
+        )
+        result = await wf().collect()
+        spans = get_run_context()._trace.get_path("while_count_wf.tick")
+        assert len(spans) == 3
+        assert [s.output["n"] for s in spans] == [1, 2, 3]
+        assert result.output == 3
+
+    async def test_while_callable_do_while_runs_at_least_once(self):
+        """Condition would be False if checked before the first run — still runs once."""
+        counter = {"n": 0}
+
+        def once() -> dict:
+            counter["n"] += 1
+            return {"n": counter["n"], "again": False}
+
+        wf = Workflow(name="while_once_wf").step(
+            once,
+            while_=lambda: get_run_context().step_span("once").output["again"],
+        )
+        await wf().collect()
+        spans = get_run_context()._trace.get_path("while_once_wf.once")
+        assert len(spans) == 1
+        assert spans[0].output == {"n": 1, "again": False}
+
+    async def test_while_callable_stops_after_two(self):
+        counter = {"n": 0}
+
+        def tick() -> dict:
+            counter["n"] += 1
+            return {"n": counter["n"], "again": counter["n"] < 2}
+
+        wf = Workflow(name="while_two_wf").step(
+            tick,
+            while_=lambda: get_run_context().step_span("tick").output["again"],
+        )
+        await wf().collect()
+        spans = get_run_context()._trace.get_path("while_two_wf.tick")
+        assert len(spans) == 2
+        assert spans[-1].output == {"n": 2, "again": False}
+
+    async def test_when_false_skips_while(self):
+        counter = {"n": 0}
+
+        def tick() -> int:
+            counter["n"] += 1
+            return counter["n"]
+
+        wf = Workflow(name="when_while_wf").step(tick, when=lambda: False, while_=3)
+        await wf().collect()
+        assert get_run_context()._trace.get_path("when_while_wf.tick") == []
+        assert counter["n"] == 0
+
+    async def test_error_on_second_iteration_stops_loop(self):
+        """Error mid-loop marks the step FAILED, stops further iterations, fails the workflow."""
+        counter = {"n": 0}
+
+        def flaky() -> int:
+            counter["n"] += 1
+            if counter["n"] >= 2:
+                raise ValueError("boom")
+            return counter["n"]
+
+        wf = Workflow(name="while_err_wf").step(flaky, while_=3)
+        result = await wf().collect()
+        assert result.status.code == "error"
+        assert counter["n"] == 2  # did not continue to iteration 3
+        spans = get_run_context()._trace.get_path("while_err_wf.flaky")
+        assert len(spans) == 2
+        assert spans[0].output == 1
+        assert spans[1].error is not None
+
+    async def test_step_span_returns_latest_iteration(self):
+        counter = {"n": 0}
+        seen_in_condition: list[int] = []
+
+        def tick() -> dict:
+            counter["n"] += 1
+            return {"n": counter["n"], "again": counter["n"] < 3}
+
+        def cond() -> bool:
+            n = get_run_context().step_span("tick").output["n"]
+            seen_in_condition.append(n)
+            return get_run_context().step_span("tick").output["again"]
+
+        def take_last() -> int:
+            return get_run_context().step_span("tick").output["n"]
+
+        wf = (
+            Workflow(name="while_latest_wf")
+            .step(tick, while_=cond)
+            .step(take_last)
+        )
+        result = await wf().collect()
+        assert seen_in_condition == [1, 2, 3]
+        assert result.output == 3
+
+    async def test_non_looping_step_span_unchanged(self):
+        """Single-span steps still resolve via step_span (last-wins == first-wins)."""
+
+        def produce() -> str:
+            return "only"
+
+        def consume() -> str:
+            return get_run_context().step_span("produce").output
+
+        wf = (
+            Workflow(name="no_while_wf")
+            .step(produce)
+            .step(consume)
+        )
+        result = await wf().collect()
+        assert result.output == "only"
+        assert len(get_run_context()._trace.get_path("no_while_wf.produce")) == 1
+
+    def test_while_invalid_type_raises(self):
+        with pytest.raises(ValueError, match="while_ must be"):
+            Workflow(name="bad_while").step(step1_handler, while_="nope")  # type: ignore[arg-type]
+
+    def test_while_bool_raises(self):
+        """bool is an int subclass — True would silently mean count=1, not 'loop forever'."""
+        with pytest.raises(ValueError, match="got a bool"):
+            Workflow(name="bad_while_bool").step(step1_handler, while_=True)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="got a bool"):
+            Workflow(name="bad_while_bool2").step(step1_handler, while_=False)  # type: ignore[arg-type]
+
+    def test_while_count_below_one_raises(self):
+        with pytest.raises(ValueError, match="while_ count must be >= 1"):
+            Workflow(name="bad_while_zero").step(step1_handler, while_=0)
+        with pytest.raises(ValueError, match="while_ count must be >= 1"):
+            Workflow(name="bad_while_neg").step(step1_handler, while_=-2)
+
+    async def test_while_self_ref_does_not_create_cycle(self):
+        """while_ reading its own step_span must not register a self-edge."""
+
+        def tick() -> dict:
+            return {"again": False}
+
+        wf = Workflow(name="while_self_wf").step(
+            tick,
+            while_=lambda: get_run_context().step_span("tick").output["again"],
+        )
+        assert "tick" not in wf._steps["tick"].previous_steps
+        await wf().collect()
+        assert len(get_run_context()._trace.get_path("while_self_wf.tick")) == 1
+
+
+class TestWhileLoopHITL:
+    """Pin the documented while_ + HITL semantics.
+
+    These behaviors are deliberate scope decisions, documented on
+    ``Workflow.step()`` and in docs/workflows/control-flow.mdx. If either
+    test fails after a behavior change (e.g. loop-progress persistence or
+    per-iteration approval ids), update the docs alongside the fix.
+    """
+
+    async def test_single_approval_covers_all_iterations(self):
+        """approval_id derives from (path, input); input is fixed across
+        iterations, so ONE resolution auto-approves every iteration of the
+        loop in the same resume run."""
+        from timbal.types.events import ApprovalEvent
+
+        calls: list[int] = []
+        counter = {"n": 0}
+
+        def deploy() -> int:
+            counter["n"] += 1
+            calls.append(counter["n"])
+            return counter["n"]
+
+        step = Tool(name="deploy", handler=deploy, requires_approval=True)
+        wf = Workflow(name="while_approval_wf").step(step, while_=3)
+
+        events = [e async for e in wf()]
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        first = next(e for e in reversed(events) if isinstance(e, OutputEvent))
+        assert first.status.reason == "approval_required"
+        assert calls == [], "gate fires before iteration 1 — no handler ran"
+        approvals = [e for e in events if isinstance(e, ApprovalEvent)]
+        assert len(approvals) == 1, "only iteration 1's gate fires before the pause"
+
+        resumed = await wf(resume={approval.approval_id: True}).collect()
+        assert resumed.status.code == "success"
+        assert calls == [1, 2, 3], (
+            "the single resolution must cover iterations 2 and 3 too "
+            "(same approval_id — path and input are fixed across iterations)"
+        )
+
+    async def test_suspend_mid_loop_restarts_from_iteration_one(self):
+        """Loop progress is not persisted across a pause: a suspend() on
+        iteration 2 pauses the run, and on resume the loop restarts from
+        iteration 1 — side effects of completed iterations run again."""
+        from timbal.state import suspend
+        from timbal.types.events import InteractionEvent
+
+        calls: list[int] = []
+        counter = {"n": 0}
+
+        def tick() -> int:
+            counter["n"] += 1
+            calls.append(counter["n"])
+            if counter["n"] == 2:
+                return suspend({"question": "continue?"}, kind="ask_user")
+            return counter["n"]
+
+        wf = Workflow(name="while_suspend_wf").step(tick, while_=3)
+
+        events = [e async for e in wf()]
+        interaction = next(e for e in events if isinstance(e, InteractionEvent))
+        first = next(e for e in reversed(events) if isinstance(e, OutputEvent))
+        assert first.status.reason == "input_required"
+        assert calls == [1, 2], "iteration 1 completed; iteration 2 suspended"
+
+        resumed = await wf(
+            parent_id=first.run_id,
+            resume={interaction.interaction_id: "go"},
+        ).collect()
+        assert resumed.status.code == "success"
+        # The resumed run restarts the loop and runs the full count of THREE
+        # fresh iterations (counter 3, 4, 5) — iteration 1's side effect is
+        # re-executed. Continuation from the pause point would have produced
+        # [1, 2, 3, 4] instead. The handler no longer suspends (counter != 2),
+        # so the supplied resume value is never consumed.
+        assert calls == [1, 2, 3, 4, 5]
+
+
 class TestParameterAndNesting:
     def test_params_model_validation(self, simple_workflow):
         """Test that params_model validates input correctly."""

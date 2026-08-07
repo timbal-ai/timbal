@@ -347,7 +347,13 @@ class RunContext(BaseModel):
         from . import get_parent_call_id
 
         parent_call_id = get_parent_call_id()
-        for span in self._trace.values():
+        # Last-wins: looping steps (while_) produce multiple spans with the same
+        # path; callers (while_ conditions, downstream lambdas) want the latest.
+        # Non-looping steps still produce exactly one span, so behavior is
+        # unchanged. Trace insertion order is chronological, so scanning the
+        # underlying dict in reverse finds the latest match first and keeps the
+        # early exit (this is a hot path for param lambdas / conditions).
+        for span in reversed(self._trace.data.values()):
             if span.parent_call_id == parent_call_id and span.path.endswith("." + name):
                 return span
 

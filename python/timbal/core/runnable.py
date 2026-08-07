@@ -349,9 +349,11 @@ class Runnable(ABC, BaseModel):
     next_steps: Any = Field(default=None, exclude=True)
     """Names of steps that depend on this step (set by Workflow.step)."""
     previous_steps_kinds: Any = Field(default=None, exclude=True)
-    """Per-source edge kinds ('ordering' | 'when' | 'param') for introspection."""
+    """Per-source edge kinds ('ordering' | 'when' | 'while' | 'param') for introspection."""
     when: Any = Field(default=None, exclude=True)
     """Optional {'callable', 'is_coroutine', ...} guard evaluated before the step runs."""
+    while_: Any = Field(default=None, exclude=True)
+    """Optional loop config: {'count': N} or {'callable', 'is_coroutine', ...} (do-while)."""
 
     # NOTE — hot runtime attributes are plain instance attributes assigned in
     # model_post_init, NOT pydantic PrivateAttr declarations. PrivateAttr reads

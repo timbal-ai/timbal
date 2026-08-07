@@ -39,6 +39,20 @@ def _get_when_source(step: Any) -> str | None:
     return _get_callable_source(step.when["callable"])
 
 
+def _get_while_info(step: Any) -> dict[str, Any] | None:
+    """Describe a step's while_ loop config for JSON output.
+
+    Returns ``{"count": N}`` for count loops, ``{"expr": "<source>"}`` for
+    callable conditions, or None when the step doesn't loop.
+    """
+    while_ = getattr(step, "while_", None)
+    if not while_:
+        return None
+    if "count" in while_:
+        return {"count": while_["count"]}
+    return {"expr": _get_callable_source(while_["callable"]) or "<callable>"}
+
+
 def _extract_key_from_lambda(fn: Any, source_step: str) -> str | None:
     """Extract the dot-notation key path from a runtime lambda's source.
 
@@ -208,9 +222,9 @@ def _edge_kind(kinds: set[str] | None) -> str:
 
     A dependency can arise from several sources at once (e.g. an explicit
     ``depends_on`` that also reads the step's output via a param map). Precedence
-    is ``ordering > when > param`` so explicit sequencing is never masked by
-    param wiring. Unknown/missing (e.g. edges from a direct ``_link``) default to
-    ``ordering`` — the safe choice, since ordering edges are never reduced away.
+    is ``ordering > when > while > param`` so explicit sequencing is never masked
+    by param wiring. Unknown/missing (e.g. edges from a direct ``_link``) default
+    to ``ordering`` — the safe choice, since ordering edges are never reduced away.
     """
     if not kinds:
         return "ordering"
@@ -218,6 +232,8 @@ def _edge_kind(kinds: set[str] | None) -> str:
         return "ordering"
     if "when" in kinds:
         return "when"
+    if "while" in kinds:
+        return "while"
     return "param"
 
 
@@ -253,7 +269,11 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
 
     if isinstance(runnable, Workflow):
         for step in runnable._steps.values():
-            nodes.append(_build_node(step, include_tools=isinstance(step, Agent)))
+            node = _build_node(step, include_tools=isinstance(step, Agent))
+            while_info = _get_while_info(step)
+            if while_info is not None:
+                node["data"]["while"] = while_info
+            nodes.append(node)
 
         for _step_name, step in runnable._steps.items():
             when_source = _get_when_source(step) if step.when else None
@@ -407,6 +427,13 @@ def _fmt_node_lines(node: dict, indent: str) -> list[str]:
     elif ntype == "workflow":
         lines.append(f"{indent}workflow  {name}")
 
+    while_info = node["data"].get("while")
+    if while_info:
+        if "count" in while_info:
+            lines.append(f"{indent}  while: count={while_info['count']}")
+        else:
+            lines.append(f"{indent}  while: {while_info.get('expr', '<callable>')}")
+
     return lines
 
 
@@ -420,9 +447,10 @@ def _reduce_param_edges(edges: list[dict]) -> list[dict]:
     first step.
 
     Only edges whose single ``kind`` is ``param`` are eligible for removal —
-    explicit ordering (``depends_on`` / hooks) and ``when`` edges are always
-    kept so user-added structure never silently disappears from the compact
-    view. The full edge set (including these) is retained in the JSON output.
+    explicit ordering (``depends_on`` / hooks), ``when``, and ``while`` edges
+    are always kept so user-added structure never silently disappears from the
+    compact view. The full edge set (including these) is retained in the JSON
+    output.
     """
     adj: dict[str, list[str]] = defaultdict(list)
     for e in edges:

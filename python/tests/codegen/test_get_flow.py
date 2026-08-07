@@ -1272,6 +1272,81 @@ class TestEdgeKinds:
 
 
 # ---------------------------------------------------------------------------
+# while_ loops
+# ---------------------------------------------------------------------------
+
+
+class TestWhileFlow:
+    def test_while_count_on_node(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def tick() -> int:
+            return 1
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=tick), while_=3)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        node = flow["nodes"][0]
+        assert node["data"]["while"] == {"count": 3}
+        out = format_compact(flow)
+        assert "while: count=3" in out
+
+    def test_while_callable_on_node_and_edge_kind(self, workspace):
+        """A while_ condition reading another step's span produces a 'while'
+        edge and an expr on the node; the self-reference produces neither."""
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+        from timbal.state import get_run_context
+
+        def seed() -> int:
+            return 3
+
+        def tick() -> int:
+            return 1
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=seed))
+        agent.step(
+            Tool(handler=tick),
+            while_=lambda: get_run_context().step_span("tick").output
+            < get_run_context().step_span("seed").output,
+        )
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        edge = _edge(flow, "seed", "tick")
+        assert edge is not None and edge["kind"] == "while"
+        assert _edge(flow, "tick", "tick") is None
+        tick_node = [n for n in flow["nodes"] if n["id"] == "wf.tick"][0]
+        assert "expr" in tick_node["data"]["while"]
+        assert "while:" in format_compact(flow)
+
+    def test_no_while_no_marker(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def tick() -> int:
+            return 1
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=tick))
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        assert "while" not in flow["nodes"][0]["data"]
+        assert "while:" not in format_compact(flow)
+
+
+# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 
