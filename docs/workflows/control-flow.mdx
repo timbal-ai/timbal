@@ -172,6 +172,40 @@ workflow = (
 **Key Point**: `step_span("name", default=None)` returns `None` if the step was skipped, allowing you to handle optional dependencies gracefully. Without `default=None`, accessing a skipped step would raise an error.
 </Note>
 
+## Loops
+
+Use `while_` to repeat a step. It accepts an int (run exactly N times) or a parameterless callable evaluated after each iteration (do-while — the step always runs at least once):
+
+```python
+def fetch_page() -> dict:
+    # The step owns its cursor state (module global, closure, or reading
+    # its own previous span) — params are NOT re-resolved per iteration.
+    span = get_run_context().step_span("fetch_page", default=None)
+    cursor = span.output["next_cursor"] if span else None
+    return api.fetch(cursor=cursor)
+
+workflow = (
+    Workflow(name="paginate")
+    .step(fetch_page,
+        while_=lambda: get_run_context().step_span("fetch_page").output["next_cursor"] is not None)
+    .step(summarize,
+        pages=lambda: get_run_context().step_span("fetch_page").output)
+)
+```
+
+Each iteration produces its own span. `step_span("name")` returns the **latest** one — both inside the `while_` condition and in downstream steps. `Trace.get_path()` returns all iterations.
+
+A `while_` condition that reads its own step's span does not create a dependency edge (the loop is not a cycle in the DAG). Conditions reading *other* steps' spans create dependencies as usual. `while_` combines with `when`: if `when` returns `False`, the step (and the whole loop) is skipped.
+
+<Warning>
+Things to keep in mind with `while_`:
+
+- **Params resolve once**, before the first iteration. Lambdas are not re-evaluated per iteration — a looping step must own its cursor/accumulator state (e.g. by reading its own previous span, as above).
+- **No built-in iteration cap** for callable conditions. A condition that never returns falsy loops forever; prefer an int count or make the condition provably terminating.
+- **Pausing mid-loop restarts the loop.** If the step hits an approval gate or calls `suspend()`, loop progress is not persisted — on resume the loop restarts from iteration 1, re-running side effects of completed iterations. Also, because approval ids derive from `(path, input)` and the input is fixed across iterations, a single approval covers every iteration in the same resume run. Avoid combining `while_` with approval-gated or suspending steps unless that behavior is acceptable.
+- An error in any iteration stops the loop and fails the step (and the workflow).
+</Warning>
+
 ## Explicit Dependencies
 
 Use `depends_on` when you need ordering without a data dependency:
@@ -192,3 +226,4 @@ workflow = (
 - Access sibling step data via `step_span()`, custom variables via `current_span()`
 - Lambda parameters **automatically create dependencies** — even if the referenced step hasn't executed yet
 - Use `depends_on` for explicit ordering without data dependency
+- Use `while_` (int count or callable, do-while) to repeat a step; `step_span()` returns the latest iteration

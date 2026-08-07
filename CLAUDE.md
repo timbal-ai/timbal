@@ -128,15 +128,16 @@ workflow = (
 result = await workflow.collect(url="https://...")
 ```
 
-**`.step(runnable, depends_on=None, when=None, **kwargs)`**
+**`.step(runnable, depends_on=None, when=None, while_=None, **kwargs)`**
 - `runnable` — function, dict, or `Runnable`
 - `depends_on` — explicit list of step names to wait for
 - `when` — parameterless callable returning bool; step is skipped if False
+- `while_` — int (>= 1, run exactly N times) or parameterless callable evaluated after each iteration (do-while: always runs at least once). Each iteration gets its own span; `step_span()` returns the latest. Params resolve ONCE before iteration 1 — the step owns its cursor state. No built-in cap for callable conditions. Pausing mid-loop (approval/suspend) restarts the loop from iteration 1 on resume, and one approval resolution covers every iteration (approval id derives from the fixed input).
 - `**kwargs` — param overrides; can be plain values or callables for runtime resolution
 - Returns `self` for chaining
 
 **Dependency resolution (automatic):**
-The framework inspects `when` and `**kwargs` callables for `step_span()` calls and automatically adds those steps as dependencies. No need to specify `depends_on` when using `get_run_context().step_span()`.
+The framework inspects `when`/`while_` and `**kwargs` callables for `step_span()` calls and automatically adds those steps as dependencies (a `while_` self-reference is ignored — not a cycle). No need to specify `depends_on` when using `get_run_context().step_span()`.
 
 **Concurrent execution:** Independent steps run in parallel via asyncio. DAG cycle detection runs after each `.step()`.
 

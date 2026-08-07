@@ -591,6 +591,19 @@ class TestWhileLoop:
         with pytest.raises(ValueError, match="while_ must be"):
             Workflow(name="bad_while").step(step1_handler, while_="nope")  # type: ignore[arg-type]
 
+    def test_while_bool_raises(self):
+        """bool is an int subclass — True would silently mean count=1, not 'loop forever'."""
+        with pytest.raises(ValueError, match="got a bool"):
+            Workflow(name="bad_while_bool").step(step1_handler, while_=True)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="got a bool"):
+            Workflow(name="bad_while_bool2").step(step1_handler, while_=False)  # type: ignore[arg-type]
+
+    def test_while_count_below_one_raises(self):
+        with pytest.raises(ValueError, match="while_ count must be >= 1"):
+            Workflow(name="bad_while_zero").step(step1_handler, while_=0)
+        with pytest.raises(ValueError, match="while_ count must be >= 1"):
+            Workflow(name="bad_while_neg").step(step1_handler, while_=-2)
+
     async def test_while_self_ref_does_not_create_cycle(self):
         """while_ reading its own step_span must not register a self-edge."""
 
@@ -604,6 +617,85 @@ class TestWhileLoop:
         assert "tick" not in wf._steps["tick"].previous_steps
         await wf().collect()
         assert len(get_run_context()._trace.get_path("while_self_wf.tick")) == 1
+
+
+class TestWhileLoopHITL:
+    """Pin the documented while_ + HITL semantics.
+
+    These behaviors are deliberate scope decisions, documented on
+    ``Workflow.step()`` and in docs/workflows/control-flow.mdx. If either
+    test fails after a behavior change (e.g. loop-progress persistence or
+    per-iteration approval ids), update the docs alongside the fix.
+    """
+
+    async def test_single_approval_covers_all_iterations(self):
+        """approval_id derives from (path, input); input is fixed across
+        iterations, so ONE resolution auto-approves every iteration of the
+        loop in the same resume run."""
+        from timbal.types.events import ApprovalEvent
+
+        calls: list[int] = []
+        counter = {"n": 0}
+
+        def deploy() -> int:
+            counter["n"] += 1
+            calls.append(counter["n"])
+            return counter["n"]
+
+        step = Tool(name="deploy", handler=deploy, requires_approval=True)
+        wf = Workflow(name="while_approval_wf").step(step, while_=3)
+
+        events = [e async for e in wf()]
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        first = next(e for e in reversed(events) if isinstance(e, OutputEvent))
+        assert first.status.reason == "approval_required"
+        assert calls == [], "gate fires before iteration 1 — no handler ran"
+        approvals = [e for e in events if isinstance(e, ApprovalEvent)]
+        assert len(approvals) == 1, "only iteration 1's gate fires before the pause"
+
+        resumed = await wf(resume={approval.approval_id: True}).collect()
+        assert resumed.status.code == "success"
+        assert calls == [1, 2, 3], (
+            "the single resolution must cover iterations 2 and 3 too "
+            "(same approval_id — path and input are fixed across iterations)"
+        )
+
+    async def test_suspend_mid_loop_restarts_from_iteration_one(self):
+        """Loop progress is not persisted across a pause: a suspend() on
+        iteration 2 pauses the run, and on resume the loop restarts from
+        iteration 1 — side effects of completed iterations run again."""
+        from timbal.state import suspend
+        from timbal.types.events import InteractionEvent
+
+        calls: list[int] = []
+        counter = {"n": 0}
+
+        def tick() -> int:
+            counter["n"] += 1
+            calls.append(counter["n"])
+            if counter["n"] == 2:
+                return suspend({"question": "continue?"}, kind="ask_user")
+            return counter["n"]
+
+        wf = Workflow(name="while_suspend_wf").step(tick, while_=3)
+
+        events = [e async for e in wf()]
+        interaction = next(e for e in events if isinstance(e, InteractionEvent))
+        first = next(e for e in reversed(events) if isinstance(e, OutputEvent))
+        assert first.status.reason == "input_required"
+        assert calls == [1, 2], "iteration 1 completed; iteration 2 suspended"
+
+        resumed = await wf(
+            parent_id=first.run_id,
+            resume={interaction.interaction_id: "go"},
+        ).collect()
+        assert resumed.status.code == "success"
+        # The resumed run restarts the loop and runs the full count of THREE
+        # fresh iterations (counter 3, 4, 5) — iteration 1's side effect is
+        # re-executed. Continuation from the pause point would have produced
+        # [1, 2, 3, 4] instead. The handler no longer suspends (counter != 2),
+        # so the supplied resume value is never consumed.
+        assert calls == [1, 2, 3, 4, 5]
 
 
 class TestParameterAndNesting:

@@ -142,6 +142,26 @@ class Workflow(Runnable):
         Each iteration produces its own span; ``step_span(name)`` returns the
         latest. Self-references in a ``while_`` callable are not treated as
         graph edges (the step's own span does not exist before iteration 1).
+
+        Loop semantics to be aware of:
+
+        - An int count must be >= 1 (bools are rejected). ``while_=1`` is
+          equivalent to no loop.
+        - Step params are resolved ONCE, before the first iteration — lambdas
+          are not re-evaluated per iteration. A step that needs a cursor or
+          accumulator owns that state itself (e.g. reads its own previous
+          output via ``step_span``).
+        - A callable condition has no built-in iteration cap; a condition that
+          never returns falsy loops forever. Prefer an int count or make the
+          condition provably terminating.
+        - Pausing mid-loop (an approval gate or ``suspend()`` inside the step)
+          restarts the loop from iteration 1 on resume: loop progress is not
+          persisted, so side effects of already-completed iterations run
+          again. Additionally, approval ids are derived from ``(path, input)``
+          and the input is fixed across iterations, so a single approval
+          resolution covers EVERY iteration of the loop in the same resume
+          run. Avoid combining ``while_`` with approval-gated or suspending
+          steps unless that is acceptable.
         """
         if not isinstance(runnable, Runnable):
             if isinstance(runnable, dict):
@@ -190,7 +210,13 @@ class Workflow(Runnable):
             runnable.when = {"callable": when, **inspect_result}
             when_deps.update(inspect_result["dependencies"])
 
+        if isinstance(while_, bool):
+            # bool is an int subclass — while_=True would silently mean "run
+            # once" rather than "loop forever". Reject it outright.
+            raise ValueError("while_ must be a callable, an int >= 1, or None (got a bool)")
         if isinstance(while_, int):
+            if while_ < 1:
+                raise ValueError(f"while_ count must be >= 1, got {while_}")
             runnable.while_ = {"count": while_}
         elif callable(while_):
             inspect_result = runnable._inspect_callable(while_)
