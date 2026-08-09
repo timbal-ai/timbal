@@ -53,11 +53,16 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
 
 
 def effective_sample_rate(config: AudioOutputConfig) -> int:
-    """Sample rate actually requested (endpoint accepts 8000–48000 Hz)."""
+    """Sample rate actually requested (endpoint accepts 8000–48000 Hz).
+
+    Out-of-range rates raise instead of remapping: the session clocks playback
+    at ``config.sample_rate``, so silently requesting a different rate would
+    desync audio (chipmunk/slow-motion speech).
+    """
     sr = config.sample_rate
-    if _SAMPLE_RATE_MIN <= sr <= _SAMPLE_RATE_MAX:
-        return sr
-    return 24_000
+    if not (_SAMPLE_RATE_MIN <= sr <= _SAMPLE_RATE_MAX):
+        raise ValueError(f"Munsit TTS supports {_SAMPLE_RATE_MIN}-{_SAMPLE_RATE_MAX} Hz; got {sr}.")
+    return sr
 
 
 def effective_tts_model(config: AudioOutputConfig) -> str:
@@ -92,6 +97,8 @@ class MunsitStreamTTS(TextToSpeech):
     segments, so per-segment requests skip the TCP+TLS handshake.
     """
 
+    provider_id = "munsit"
+
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
         self._api_key_explicit = api_key
         self._api_key: str | None = None
@@ -100,6 +107,8 @@ class MunsitStreamTTS(TextToSpeech):
 
     async def connect(self, config: AudioOutputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
+        # Fail at session start, not first reply, on an unsupported rate.
+        effective_sample_rate(config)
         self._out = config
         import httpx
 

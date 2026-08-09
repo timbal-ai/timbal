@@ -92,6 +92,9 @@ def build_start_request(config: AudioOutputConfig) -> dict[str, Any]:
             "speed": float(extra.get("speed", 1.0)),
             "volume": float(extra.get("volume", 0.0)),
         },
+        # Explicit (matches the server default): previous audio conditions
+        # later chunks, keeping one consistent voice across a reply's flushes.
+        "condition_on_previous_chunks": bool(extra.get("condition_on_previous_chunks", True)),
     }
     reference_id = effective_reference_id(config)
     if reference_id:
@@ -107,9 +110,12 @@ class FishAudioStreamTTS(TextToSpeech):
 
     ``open_stream`` returns a fresh :class:`_FishAudioTTSStream` per agent
     reply, so all flushes of a reply share one session and voice consistency
-    is kept via ``condition_on_previous_chunks``. ``synthesize`` is the
-    per-segment fallback (stream = feed once + end).
+    is kept via ``condition_on_previous_chunks`` (sent explicitly in the
+    ``start`` request). ``synthesize`` is the per-segment fallback
+    (stream = feed once + end).
     """
+
+    provider_id = "fishaudio"
 
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
         self._api_key_explicit = api_key
@@ -188,7 +194,9 @@ class _FishAudioTTSStream(TTSStream):
         except InvalidStatus as e:
             status = e.response.status_code
             if status == 402:
-                hint = f" — insufficient wallet balance for model {model!r}; use 's2.1-pro-free' or top up at fish.audio"
+                hint = (
+                    f" — insufficient wallet balance for model {model!r}; use 's2.1-pro-free' or top up at fish.audio"
+                )
             elif status in (401, 403):
                 hint = " — check FISH_API_KEY"
             else:

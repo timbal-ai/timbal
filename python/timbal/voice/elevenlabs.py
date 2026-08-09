@@ -271,6 +271,8 @@ class ElevenLabsStreamTTS(TextToSpeech):
     fine with ``eleven_flash_v2_5`` (the default for real-time voice).
     """
 
+    provider_id = "elevenlabs"
+
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
         self._api_key_explicit = api_key
         self._api_key: str | None = None

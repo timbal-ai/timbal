@@ -38,7 +38,18 @@ def test_resolve_api_key_missing(monkeypatch):
 def test_effective_sample_rate():
     assert effective_sample_rate(_cfg(sample_rate=16000)) == 16000
     assert effective_sample_rate(_cfg(sample_rate=48000)) == 48000
-    assert effective_sample_rate(_cfg(sample_rate=96000)) == 24000
+    # Out of range raises — a silent remap would desync session playback,
+    # which is clocked at config.sample_rate.
+    with pytest.raises(ValueError, match="8000-48000"):
+        effective_sample_rate(_cfg(sample_rate=96000))
+
+
+@pytest.mark.asyncio
+async def test_connect_rejects_unsupported_sample_rate(monkeypatch):
+    monkeypatch.setenv("MUNSIT_API_KEY", "test-key")
+    tts = MunsitStreamTTS()
+    with pytest.raises(ValueError, match="8000-48000"):
+        await tts.connect(_cfg(sample_rate=96000))
 
 
 def test_effective_tts_model_swaps_foreign_ids():

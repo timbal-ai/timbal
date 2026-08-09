@@ -65,9 +65,13 @@ def test_build_start_request(monkeypatch):
         "sample_rate": 16000,
         "latency": "balanced",
         "prosody": {"speed": 1.1, "volume": 0.0},
+        "condition_on_previous_chunks": True,
         "reference_id": "voice-1",
         "temperature": 0.6,
     }
+    # Overridable via tts_extra.
+    off = build_start_request(_cfg(voice=None, extra={"condition_on_previous_chunks": False}))
+    assert off["condition_on_previous_chunks"] is False
     # No reference_id key at all when the platform default voice is used.
     assert "reference_id" not in build_start_request(_cfg(voice=None, sample_rate=16000))
 

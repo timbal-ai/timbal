@@ -467,8 +467,7 @@ def build_voice_session(
         resolve_stt,
         stt_provider_id,
     )
-    from ..voice.elevenlabs import ElevenLabsStreamTTS
-    from ..voice.providers import AudioInputConfig, AudioOutputConfig
+    from ..voice.providers import AudioInputConfig, AudioOutputConfig, resolve_tts
     from ..voice.turn_detection import resolve_turn_detector
 
     merged = merge_client_voice_overrides(defaults, client_config)
@@ -493,22 +492,13 @@ def build_voice_session(
     stt_provider = stt_provider_id(stt)
     stt_model = effective_stt_model(stt, stt_model_requested)
 
-    tts_provider = (merged.tts_provider or "elevenlabs").strip().lower()
-    if tts_provider in ("munsit", "faseeh"):
-        from ..voice.munsit import MunsitStreamTTS
-
-        tts = MunsitStreamTTS()
-        tts_provider = "munsit"
-    elif tts_provider in ("fishaudio", "fish-audio", "fish"):
-        from ..voice.fish_audio import FishAudioStreamTTS
-
-        tts = FishAudioStreamTTS()
-        tts_provider = "fishaudio"
-    else:
-        if tts_provider not in ("elevenlabs", "el", "11labs"):
-            logger.warning("voice_ws_bad_tts_provider", requested_provider=merged.tts_provider)
-        tts = ElevenLabsStreamTTS()
-        tts_provider = "elevenlabs"
+    try:
+        tts = resolve_tts(merged.tts_provider)
+    except ValueError as e:
+        logger.warning("voice_ws_bad_tts_provider", error=str(e), requested_provider=merged.tts_provider)
+        tts = resolve_tts("elevenlabs")
+    # Config id for clients/logs (``fishaudio``), not the class name.
+    tts_provider = tts.provider_id
 
     # Client extras are unvalidated (model_copy in the merge): tolerate a
     # non-dict rather than 500-ing the socket.
