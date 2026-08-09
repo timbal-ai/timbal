@@ -81,6 +81,14 @@ class TestAddGuardrail:
         with pytest.raises(ValueError, match="Unknown guardrail shorthand"):
             apply_operation(ws, "add_guardrail", spec="pie:redact", step=None)
 
+    @pytest.mark.parametrize("spec", ["topic", "judge", "keywords", "length"])
+    def test_config_required_rails_get_a_pointer_to_code(self, workspace, spec):
+        """These rails are valid but have required params a shorthand can't carry —
+        the error must say so instead of dumping a pydantic validation error."""
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="needs configuration that --spec cannot express"):
+            apply_operation(ws, "add_guardrail", spec=spec, step=None)
+
     def test_non_literal_value_rejected(self, workspace):
         ws = workspace("""\
         from timbal import Agent
@@ -156,3 +164,52 @@ class TestRemoveGuardrail:
         ws = workspace(BARE_AGENT)
         out = apply_operation(ws, "remove_guardrail", name="pii", step=None)
         assert "guardrails" not in out
+
+
+class TestGuardrailsViaSetConfig:
+    """set-config owns the agent-level guardrail knobs and whole-list assignment."""
+
+    def test_agent_knobs(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(
+            ws, "set_config", name=None, config='{"guardrail_mode": "shadow", "max_guardrail_retries": 3}'
+        )
+        assert 'guardrail_mode="shadow"' in out
+        assert "max_guardrail_retries=3" in out
+
+    def test_whole_guardrails_list(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(ws, "set_config", name=None, config='{"guardrails": ["pii:redact", "secrets"]}')
+        assert 'guardrails=["pii:redact", "secrets"]' in out
+
+    def test_invalid_mode_rejected_at_the_cli(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="Invalid guardrail_mode"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrail_mode": "audit"}')
+
+    def test_shorthand_typo_in_list_rejected_at_the_cli(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="Unknown guardrail shorthand"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["pie:redact"]}')
+
+    def test_non_string_list_rejected(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="list of shorthand strings"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": [{"name": "pii"}]}')
+
+    def test_tool_local_rails_on_wrapped_tool(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+        from timbal.core.tool import Tool
+
+        def lookup(q: str) -> str:
+            return q
+
+        agent = Agent(
+            name="agent",
+            model="openai/gpt-4o-mini",
+            tools=[Tool(name="lookup", handler=lookup)],
+        )
+        """)
+        out = apply_operation(ws, "set_config", name="lookup", config='{"guardrails": ["secrets"]}')
+        assert 'guardrails=["secrets"]' in out

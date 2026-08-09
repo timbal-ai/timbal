@@ -172,8 +172,10 @@ python -m timbal.codegen add-guardrail --spec "moderation:warn" --step agent_a
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--spec` | yes | `"default"`, or `<name>[:action]` — names: `pii`, `secrets`, `injection`, `keywords`, `moderation`, `length`, `topic`, `judge`; actions: `block`, `redact`, `warn`, `retry`, `escalate` |
+| `--spec` | yes | `"default"`, or `<name>[:action]` — names: `pii`, `secrets`, `injection`, `moderation`; actions: `block`, `redact`, `warn`, `retry`, `escalate` |
 | `--step` | no | Target step name within a Workflow |
+
+`keywords`, `length`, `topic`, and `judge` are valid rails but have required parameters (banned terms, char bounds, topic lists, criteria) that shorthand syntax cannot express — the CLI rejects them with a pointer to configure them in code (`Agent(guardrails=[TopicGuard(allow=[...])])`).
 
 **Requires**: Agent entry point, or Workflow entry point when using `--step`.
 
@@ -206,7 +208,17 @@ python -m timbal.codegen set-config \
   --config '{"model": "openai/gpt-4o", "system_prompt": "You are helpful.", "max_iter": 5}'
 ```
 
-Valid Agent fields: `name`, `description`, `model`, `system_prompt`, `max_iter`, `max_tokens`, `temperature`, `base_url`, `api_key`, `model_params`, `skills_path`.
+Valid Agent fields: `name`, `description`, `model`, `system_prompt`, `max_iter`, `max_tokens`, `temperature`, `base_url`, `api_key`, `model_params`, `skills_path`, `guardrails`, `guardrail_mode`, `max_guardrail_retries`.
+
+Guardrail fields are validated at the CLI: `guardrail_mode` must be `"enforce"` or `"shadow"`, and `guardrails` must be a JSON list of shorthand strings (or `"default"`) — use it to set the whole list at once, and `add-guardrail`/`remove-guardrail` for incremental edits:
+
+```bash
+python -m timbal.codegen set-config \
+  --config '{"guardrails": ["pii:redact", "injection:block"], "guardrail_mode": "shadow"}'
+
+# Tool-local rails (the tool must be a Tool(...) in the tools list, not a bare function)
+python -m timbal.codegen set-config --name lookup --config '{"guardrails": ["secrets"]}'
+```
 
 Set a field to `null` to remove it:
 

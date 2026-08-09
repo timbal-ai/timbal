@@ -29,7 +29,38 @@ AGENT_FIELDS = {
     "model_params",  # Deprecated, kept for backward compatibility
     "skills_path",
     "voice_config",  # dict consumed by the voice server (merge_voice_config)
+    "guardrails",  # literal shorthand list; incremental edits via add-/remove-guardrail
+    "guardrail_mode",
+    "max_guardrail_retries",
 }
+
+
+def _validate_agent_config(config: dict) -> None:
+    """Field-specific validation beyond the AGENT_FIELDS allowlist — catches typos at
+    the CLI instead of at agent construction."""
+    unknown = set(config.keys()) - AGENT_FIELDS
+    if unknown:
+        raise ValueError(
+            f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
+            f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
+        )
+    mode = config.get("guardrail_mode")
+    if mode is not None and mode not in ("enforce", "shadow"):
+        raise ValueError(f"Invalid guardrail_mode {mode!r}. Must be 'enforce' or 'shadow'.")
+    rails = config.get("guardrails")
+    if rails is not None:
+        from timbal.guardrails.presets import coerce_rail
+
+        if isinstance(rails, str):
+            rails = [rails]
+        if not isinstance(rails, list) or not all(isinstance(s, str) for s in rails):
+            raise ValueError(
+                'guardrails must be a JSON list of shorthand strings (e.g. ["pii:redact", "injection:block"]) '
+                'or the string "default".'
+            )
+        for spec in rails:
+            if spec.strip().lower() != "default":
+                coerce_rail(spec)  # raises with the valid names/actions
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -76,12 +107,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
         step_class = _resolve_step_class(args.name, assignments)
         if step_class == "Agent":
-            unknown = set(config.keys()) - AGENT_FIELDS
-            if unknown:
-                raise ValueError(
-                    f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
-                    f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
-                )
+            _validate_agent_config(config)
         transformer = StepConstructorConfigSetter(entry_point, args.name, config, assignments)
         if wrapped_tree is not None:
             return transformer, wrapped_tree
@@ -103,12 +129,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if not config:
         raise ValueError("--config is required for set-config.")
 
-    unknown = set(config.keys()) - AGENT_FIELDS
-    if unknown:
-        raise ValueError(
-            f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
-            f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
-        )
+    _validate_agent_config(config)
 
     # ``ep_type is None`` with a call on the RHS: the entry point may be a
     # factory call like ``agent = build()`` (local or imported) — appending
