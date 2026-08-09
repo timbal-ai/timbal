@@ -144,6 +144,32 @@ class RunCancelled(TimbalError):
         self.message = message or "Run cancelled."
 
 
+class GuardrailBlocked(TimbalError):
+    """Control-flow signal: a guardrail blocked the run.
+
+    Raised from the agent loop when an input or model_output rail returns a ``block``
+    verdict (or a ``retry`` verdict exhausts its budget). ``Runnable._stream`` turns it
+    into a normal ``OutputEvent`` with ``status.code="blocked"``,
+    ``status.reason="guardrail:{rail}:{stage}"``, and ``output`` set to the user-safe
+    blocked message — no exception reaches the caller on the happy path.
+    """
+
+    def __init__(
+        self,
+        rail: str,
+        stage: str,
+        *,
+        reason: str | None = None,
+        output: Any = None,
+    ) -> None:
+        super().__init__(reason or f"Blocked by guardrail '{rail}' at {stage}.")
+        self.rail = rail
+        self.stage = stage
+        self.reason = reason
+        self.output = output
+        """User-safe output (typically an assistant Message carrying the blocked_message)."""
+
+
 class ApprovalPolicyError(TimbalError):
     """Error raised when an approval policy callable (requires_approval or
     approval_prompt) raises an exception. Surfaces as a span with status

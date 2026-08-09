@@ -14,6 +14,7 @@ from ..cst_utils import (
     resolve_runnable_name,
     wrap_bare_function_step,
 )
+from ..guardrail_specs import validate_guardrails_value
 from ..tool_discovery import get_framework_tool_names, validate_tool_config
 
 AGENT_FIELDS = {
@@ -29,7 +30,26 @@ AGENT_FIELDS = {
     "model_params",  # Deprecated, kept for backward compatibility
     "skills_path",
     "voice_config",  # dict consumed by the voice server (merge_voice_config)
+    "guardrails",  # literal shorthand list; incremental edits via add-/remove-guardrail
+    "guardrail_mode",
+    "max_guardrail_retries",
 }
+
+
+def _validate_agent_config(config: dict) -> None:
+    """Field-specific validation beyond the AGENT_FIELDS allowlist — catches typos at
+    the CLI instead of at agent construction."""
+    unknown = set(config.keys()) - AGENT_FIELDS
+    if unknown:
+        raise ValueError(
+            f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
+            f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
+        )
+    mode = config.get("guardrail_mode")
+    if mode is not None and mode not in ("enforce", "shadow"):
+        raise ValueError(f"Invalid guardrail_mode {mode!r}. Must be 'enforce' or 'shadow'.")
+    if config.get("guardrails") is not None:
+        validate_guardrails_value(config["guardrails"])
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -76,12 +96,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
         step_class = _resolve_step_class(args.name, assignments)
         if step_class == "Agent":
-            unknown = set(config.keys()) - AGENT_FIELDS
-            if unknown:
-                raise ValueError(
-                    f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
-                    f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
-                )
+            _validate_agent_config(config)
         transformer = StepConstructorConfigSetter(entry_point, args.name, config, assignments)
         if wrapped_tree is not None:
             return transformer, wrapped_tree
@@ -97,18 +112,17 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if tool_class is None:
             raise ValueError(f"Tool '{args.name}' not found in agent tools list.")
         validate_tool_config(tool_class, config)
+        # validate_tool_config only checks field NAMES — tool-local rails deserve the
+        # same shorthand validation the agent path gets, so typos fail here, not at run.
+        if config.get("guardrails") is not None:
+            validate_guardrails_value(config["guardrails"])
         var_name = get_framework_tool_names().get(tool_class, args.name)
         return ToolConfigSetter(entry_point, args.name, config, assignments, tool_class, var_name)
 
     if not config:
         raise ValueError("--config is required for set-config.")
 
-    unknown = set(config.keys()) - AGENT_FIELDS
-    if unknown:
-        raise ValueError(
-            f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
-            f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
-        )
+    _validate_agent_config(config)
 
     # ``ep_type is None`` with a call on the RHS: the entry point may be a
     # factory call like ``agent = build()`` (local or imported) — appending

@@ -1,10 +1,64 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from ..span import Span
 from ..trace import Trace
 
 if TYPE_CHECKING:
     from ...context import RunContext
+
+
+class _RedactedRunContextView:
+    """Read-only view of a RunContext with a redacted trace swapped in.
+
+    Providers and exporters read ``_trace``/``id``/``parent_id`` — everything else
+    delegates to the original context. The live run's spans are never mutated: the
+    redaction operates on span copies, so agent memory, dumps, and outputs keep their
+    raw content in-process while storage and export see the redacted view.
+    """
+
+    def __init__(self, original: "RunContext", trace: Trace) -> None:
+        self._original = original
+        self._trace = trace
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
+
+
+_SPAN_DUMP_ATTRS = ("_input_dump", "_output_dump", "_memory_dump", "_prev_memory_dump", "_session_dump")
+
+
+def _redacted_trace(trace: Trace, redact: Callable[[Any], Any]) -> Trace:
+    """Copy every span with its serialized surfaces passed through ``redact``."""
+    out = Trace()
+    for call_id, span in trace.data.items():
+        copied = Span(
+            path=span.path,
+            call_id=span.call_id,
+            parent_call_id=span.parent_call_id,
+            t0=span.t0,
+            t1=span.t1,
+            # Raw input/output may hold live objects (Messages); the walker rebuilds
+            # dict/list/str values and passes everything else through untouched.
+            input=redact(span.input),
+            status=span.status,
+            output=redact(span.output),
+            error=redact(span.error),
+            usage=span.usage,
+            metadata=redact(span.metadata),
+            **(span._extra or {}),
+        )
+        for attr in _SPAN_DUMP_ATTRS:
+            if hasattr(span, attr):
+                setattr(copied, attr, redact(getattr(span, attr)))
+        # Session chaining reads ``span.memory`` from stored traces (see
+        # Agent.resolve_memory). Point it at the redacted dump so in-memory and
+        # durable providers resume with the same (redacted) history.
+        if hasattr(copied, "_memory_dump"):
+            copied.memory = copied._memory_dump
+        out[call_id] = copied
+    return out
 
 
 class Exporter(ABC):
@@ -135,6 +189,13 @@ class TracingProvider(ABC):
 
     _exporters: list[Exporter] = []
 
+    _trace_redactor: Callable[[Any], Any] | None = None
+    """Optional redactor applied to every span's serialized surfaces (input/output/
+    memory dumps, error, metadata) before ``_store()`` and before exporters fire.
+    Attach via ``configured(_trace_redactor=timbal.guardrails.trace_redactor(...))``.
+    Runs on span copies — the live run is never mutated. Note that resumed sessions
+    load memory from stored traces, so chained turns see the redacted history."""
+
     @classmethod
     def configured(cls, **kwargs) -> type["TracingProvider"]:
         """Return a configured subclass with the given class-level attributes.
@@ -184,6 +245,10 @@ class TracingProvider(ABC):
             run_context: The current run context. Persist ``run_context._trace``
                          keyed by ``run_context.id``.
         """
+        if cls._trace_redactor is not None:
+            run_context = _RedactedRunContextView(
+                run_context, _redacted_trace(run_context._trace, cls._trace_redactor)
+            )
         await cls._store(run_context)
         for exporter in cls._exporters:
             try:

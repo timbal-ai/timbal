@@ -8,6 +8,7 @@ get-models, test, evals) dispatch without importing the transformer modules
 import subprocess
 import sys
 
+import pytest
 from timbal.codegen.__main__ import _TRANSFORMER_OPS, _requested_operation
 
 
@@ -24,6 +25,56 @@ class TestOpTableSync:
         for cli_name, (module_name, help_line) in _TRANSFORMER_OPS.items():
             assert cli_name.replace("-", "_") == module_name
             assert help_line
+
+
+class TestOperationIsolation:
+    """Running one operation must not import the others.
+
+    Dispatch used to import every transformer module, so a single broken one took down
+    the whole CLI: an unrelated `set-config` run died on an ImportError raised inside
+    `remove_guardrail`. Each operation now loads only the module it needs.
+    """
+
+    def test_running_one_operation_does_not_import_the_others(self, tmp_path):
+        (tmp_path / "timbal.yaml").write_text("fqn: app.py::agent\n")
+        (tmp_path / "app.py").write_text(
+            "from timbal import Agent\n\nagent = Agent(name='a', model='openai/gpt-4o-mini')\n"
+        )
+        code = (
+            "import sys\n"
+            "from timbal.codegen.transformers import apply_operation\n"
+            f"apply_operation({str(tmp_path)!r}, 'add_guardrail', spec='pii:redact', step=None)\n"
+            "loaded = [m for m in sys.modules if m.startswith('timbal.codegen.transformers.')]\n"
+            "print('LOADED', sorted(m.rsplit('.', 1)[-1] for m in loaded))\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr
+        line = next(x for x in result.stdout.splitlines() if x.startswith("LOADED"))
+        assert "add_guardrail" in line
+        assert "set_config" not in line, "dispatch must not import unrelated transformers"
+        assert "remove_guardrail" not in line
+
+    def test_unknown_operation_still_reported(self, tmp_path):
+        from timbal.codegen.transformers import apply_operation
+
+        (tmp_path / "timbal.yaml").write_text("fqn: app.py::agent\n")
+        (tmp_path / "app.py").write_text("agent = 1\n")
+        with pytest.raises(ValueError, match="unknown operation"):
+            apply_operation(tmp_path, "no_such_operation")
+
+    def test_broken_module_reports_itself_not_a_missing_operation(self, tmp_path, monkeypatch):
+        """A transformer that fails to import must name itself in the error, rather than
+        masquerading as an unknown operation."""
+        import timbal.codegen.transformers as transformers
+
+        def boom(name):
+            raise ImportError(f"cannot import name '_helper' from a sibling ({name})")
+
+        monkeypatch.setattr(transformers.importlib, "import_module", boom)
+        (tmp_path / "timbal.yaml").write_text("fqn: app.py::agent\n")
+        (tmp_path / "app.py").write_text("agent = 1\n")
+        with pytest.raises(ValueError, match="'add-guardrail' failed to load: ImportError"):
+            transformers.apply_operation(tmp_path, "add_guardrail")
 
 
 class TestRequestedOperation:

@@ -1,0 +1,265 @@
+"""Codegen ops: add-guardrail / remove-guardrail."""
+
+import textwrap
+from pathlib import Path
+
+import pytest
+from timbal.codegen.transformers import apply_operation
+
+AGENT_YAML = 'fqn: "agent.py::agent"\n'
+WORKFLOW_YAML = 'fqn: "workflow.py::workflow"\n'
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    def _write(source: str, *, filename: str = "agent.py", yaml: str = AGENT_YAML) -> Path:
+        (tmp_path / filename).write_text(textwrap.dedent(source))
+        (tmp_path / "timbal.yaml").write_text(yaml)
+        return tmp_path
+
+    return _write
+
+
+BARE_AGENT = """\
+from timbal import Agent
+
+agent = Agent(name="agent", model="openai/gpt-4o-mini", tools=[])
+"""
+
+
+class TestAddGuardrail:
+    def test_adds_list_when_absent(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(ws, "add_guardrail", spec="pii:redact", step=None)
+        assert 'guardrails=["pii:redact"]' in out
+
+    def test_sets_default_preset(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(ws, "add_guardrail", spec="default", step=None)
+        assert 'guardrails="default"' in out
+
+    def test_appends_to_existing_list(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails=["pii:redact"])
+        """)
+        out = apply_operation(ws, "add_guardrail", spec="injection:block", step=None)
+        assert '"pii:redact"' in out and '"injection:block"' in out
+
+    def test_same_rail_name_replaces_entry(self, workspace):
+        """Duplicate rail names are invalid at runtime — changing the action replaces."""
+        ws = workspace("""\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails=["pii:redact"])
+        """)
+        out = apply_operation(ws, "add_guardrail", spec="pii:block", step=None)
+        assert '"pii:block"' in out and '"pii:redact"' not in out
+
+    def test_idempotent_re_add(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails=["pii:redact"])
+        """)
+        out = apply_operation(ws, "add_guardrail", spec="pii:redact", step=None)
+        assert out.count("pii:redact") == 1
+
+    def test_default_string_expands_before_append(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails="default")
+        """)
+        out = apply_operation(ws, "add_guardrail", spec="moderation:warn", step=None)
+        assert '"pii:redact"' in out and '"secrets"' in out and '"injection:block"' in out
+        assert '"moderation:warn"' in out
+
+    def test_unknown_shorthand_rejected(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="Unknown guardrail shorthand"):
+            apply_operation(ws, "add_guardrail", spec="pie:redact", step=None)
+
+    @pytest.mark.parametrize("spec", ["topic", "judge", "keywords", "length"])
+    def test_config_required_rails_get_a_pointer_to_code(self, workspace, spec):
+        """These rails are valid but have required params a shorthand can't carry —
+        the error must say so instead of dumping a pydantic validation error."""
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="needs configuration that a shorthand cannot express"):
+            apply_operation(ws, "add_guardrail", spec=spec, step=None)
+
+    def test_non_literal_value_rejected(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+
+        my_rails = ["pii:redact"]
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails=my_rails)
+        """)
+        with pytest.raises(ValueError, match="not a literal"):
+            apply_operation(ws, "add_guardrail", spec="secrets", step=None)
+
+    def test_workflow_step_target(self, workspace):
+        ws = workspace(
+            """\
+            from timbal import Agent, Workflow
+
+            agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+            workflow = Workflow(name="workflow").step(agent_a)
+            """,
+            filename="workflow.py",
+            yaml=WORKFLOW_YAML,
+        )
+        out = apply_operation(ws, "add_guardrail", spec="pii:redact", step="agent_a")
+        # the guardrail lands on the step's Agent constructor (formatter may wrap lines)
+        agent_a_src = out.split("workflow =")[0]
+        assert 'guardrails=["pii:redact"]' in agent_a_src
+
+    def test_step_on_agent_entry_point_rejected(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="--step requires a Workflow"):
+            apply_operation(ws, "add_guardrail", spec="pii:redact", step="agent_a")
+
+
+class TestRemoveGuardrail:
+    def test_removes_by_rail_name(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails=["pii:redact", "secrets"])
+        """)
+        out = apply_operation(ws, "remove_guardrail", name="pii", step=None)
+        assert '"pii:redact"' not in out and '"secrets"' in out
+
+    def test_removing_last_rail_drops_kwarg(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails=["pii:redact"])
+        """)
+        out = apply_operation(ws, "remove_guardrail", name="pii", step=None)
+        assert "guardrails" not in out
+
+    def test_default_string_expands_on_removal(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails="default")
+        """)
+        out = apply_operation(ws, "remove_guardrail", name="injection", step=None)
+        assert '"pii:redact"' in out and '"secrets"' in out
+        assert "injection" not in out
+
+    def test_removing_absent_rail_is_idempotent(self, workspace):
+        source = """\
+        from timbal import Agent
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", guardrails=["secrets"])
+        """
+        ws = workspace(source)
+        out = apply_operation(ws, "remove_guardrail", name="pii", step=None)
+        assert '"secrets"' in out
+
+    def test_no_kwarg_is_idempotent(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(ws, "remove_guardrail", name="pii", step=None)
+        assert "guardrails" not in out
+
+
+class TestGuardrailsViaSetConfig:
+    """set-config owns the agent-level guardrail knobs and whole-list assignment."""
+
+    def test_agent_knobs(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(
+            ws, "set_config", name=None, config='{"guardrail_mode": "shadow", "max_guardrail_retries": 3}'
+        )
+        assert 'guardrail_mode="shadow"' in out
+        assert "max_guardrail_retries=3" in out
+
+    def test_whole_guardrails_list(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(ws, "set_config", name=None, config='{"guardrails": ["pii:redact", "secrets"]}')
+        assert 'guardrails=["pii:redact", "secrets"]' in out
+
+    def test_invalid_mode_rejected_at_the_cli(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="Invalid guardrail_mode"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrail_mode": "audit"}')
+
+    def test_shorthand_typo_in_list_rejected_at_the_cli(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="Unknown guardrail shorthand"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["pie:redact"]}')
+
+    def test_non_string_list_rejected(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="list of shorthand strings"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": [{"name": "pii"}]}')
+
+    def test_default_as_whole_string_value(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(ws, "set_config", name=None, config='{"guardrails": "default"}')
+        assert 'guardrails="default"' in out
+
+    def test_default_inside_a_list_rejected(self, workspace):
+        """Runtime only recognizes "default" as the whole value; emitting it as a list
+        entry would fail at agent construction with 'Unknown guardrail shorthand'."""
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="whole-value preset, not a list entry"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["default"]}')
+        with pytest.raises(ValueError, match="whole-value preset, not a list entry"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["default", "moderation:warn"]}')
+
+    def test_config_required_rail_rejected_with_pointer(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="needs configuration that a shorthand cannot express"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["topic"]}')
+
+    def test_tool_local_rails_on_wrapped_tool(self, workspace):
+        ws = workspace("""\
+        from timbal import Agent
+        from timbal.core.tool import Tool
+
+        def lookup(q: str) -> str:
+            return q
+
+        agent = Agent(
+            name="agent",
+            model="openai/gpt-4o-mini",
+            tools=[Tool(name="lookup", handler=lookup)],
+        )
+        """)
+        out = apply_operation(ws, "set_config", name="lookup", config='{"guardrails": ["secrets"]}')
+        assert 'guardrails=["secrets"]' in out
+
+    TOOL_SOURCE = """\
+    from timbal import Agent
+    from timbal.core.tool import Tool
+
+    def lookup(q: str) -> str:
+        return q
+
+    agent = Agent(
+        name="agent",
+        model="openai/gpt-4o-mini",
+        tools=[Tool(name="lookup", handler=lookup)],
+    )
+    """
+
+    def test_tool_rails_typo_rejected_at_the_cli(self, workspace):
+        """The tool path used to check only field names — a shorthand typo was written
+        onto Tool(...) and only failed at runtime."""
+        ws = workspace(self.TOOL_SOURCE)
+        with pytest.raises(ValueError, match="Unknown guardrail shorthand"):
+            apply_operation(ws, "set_config", name="lookup", config='{"guardrails": ["pie:redact"]}')
+
+    def test_tool_rails_default_in_list_rejected(self, workspace):
+        ws = workspace(self.TOOL_SOURCE)
+        with pytest.raises(ValueError, match="whole-value preset"):
+            apply_operation(ws, "set_config", name="lookup", config='{"guardrails": ["default"]}')
+
+    def test_tool_rails_default_string_accepted(self, workspace):
+        ws = workspace(self.TOOL_SOURCE)
+        out = apply_operation(ws, "set_config", name="lookup", config='{"guardrails": "default"}')
+        assert 'guardrails="default"' in out
