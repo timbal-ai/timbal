@@ -28,7 +28,7 @@ from pydantic import ValidationError
 from .. import __version__ as timbal_version
 from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
-from ..voice.config import FillerConfig, RecordingConfig, VoiceConfig
+from ..voice.config import DEFAULT_VOICE_ID, FillerConfig, RecordingConfig, VoiceConfig
 
 logger = structlog.get_logger("timbal.server.voice")
 
@@ -492,11 +492,19 @@ def build_voice_session(
     stt_provider = stt_provider_id(stt)
     stt_model = effective_stt_model(stt, stt_model_requested)
 
+    tts_model_requested = merged.tts_model
+    tts_voice_requested = merged.voice
     try:
         tts = resolve_tts(merged.tts_provider)
     except ValueError as e:
         logger.warning("voice_ws_bad_tts_provider", error=str(e), requested_provider=merged.tts_provider)
+        # Same rule as the STT fallback: a Munsit/Fish model id or voice must
+        # not survive onto the ElevenLabs wire, or the socket fails on a config
+        # the session reports as ElevenLabs. The voice is a required *path*
+        # segment there, so substitute the default rather than clearing it.
         tts = resolve_tts("elevenlabs")
+        tts_model_requested = None
+        tts_voice_requested = DEFAULT_VOICE_ID
     # Config id for clients/logs (``fishaudio``), not the class name.
     tts_provider = tts.provider_id
 
@@ -516,8 +524,8 @@ def build_voice_session(
         extra=stt_extra,
     )
     audio_out = AudioOutputConfig(
-        model=merged.tts_model,
-        voice=merged.voice,
+        model=tts_model_requested,
+        voice=tts_voice_requested,
         sample_rate=merged.sample_rate,
         encoding=merged.encoding,
         extra=tts_extra,
