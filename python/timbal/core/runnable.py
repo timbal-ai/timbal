@@ -29,6 +29,7 @@ from ..collectors import get_collector_registry
 from ..errors import (
     ApprovalPolicyError,
     EarlyExit,
+    GuardrailBlocked,
     InterruptError,
     PauseRequired,
     RunCancelled,
@@ -301,6 +302,13 @@ class Runnable(ABC, BaseModel):
     Use get_run_context() to access execution state and output data.
     """
 
+    guardrails: Any = Field(default=None, exclude=True)
+    """Tool-local guardrails: rails that run only for this runnable's invocations, on top
+    of any agent-level rails. Accepts the same values as ``Agent(guardrails=...)``
+    (Guardrail instances, shorthand strings, callables). tool_args checks run after
+    Pydantic validation and before the approval gate; an ``escalate`` verdict forces the
+    approval gate."""
+
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
 
@@ -490,6 +498,14 @@ class Runnable(ABC, BaseModel):
         self._default_runtime_params: dict[str, dict[str, Any]] = {}
         self._bg_tasks: dict[str, Any] = {}
         self._blocking_warned: bool = False
+        # Guardrail wiring (see timbal.guardrails). _agent_guardrails is injected by the
+        # owning Agent; _guardrails_exempt marks framework-internal runnables (the LLM
+        # wrapper, read_tool_result) whose inputs are framework-owned.
+        self._agent_guardrails: Any = None
+        self._guardrails_exempt: bool = False
+        self._own_guardrail_runner: Any = None
+        self._combined_guardrail_runner: Any = None
+        self._combined_agent_runner: Any = None
         if self.pre_hook is not None:
             pre_hook_inspect = self._inspect_callable(self.pre_hook)
             self._pre_hook_is_coroutine: bool | None = pre_hook_inspect["is_coroutine"]
@@ -1141,6 +1157,126 @@ class Runnable(ABC, BaseModel):
         # Yield a final marker with the output and collector
         yield (None, output, collector)
 
+    def _set_agent_guardrails(self, runner: Any) -> None:
+        """Inject the owning agent's guardrail runner (called at tool registration)."""
+        self._agent_guardrails = runner
+        self._combined_guardrail_runner = None
+        self._combined_agent_runner = None
+
+    def _resolve_guardrail_runner(self, agent_runner: Any = None) -> Any:
+        """The effective runner for this runnable: agent-level rails + tool-local rails.
+
+        Returns None when nothing applies (the fast path). Combined runners are cached
+        per injected agent runner.
+        """
+        if self._guardrails_exempt:
+            return None
+        if agent_runner is None:
+            agent_runner = self._agent_guardrails
+        # An orchestrator's `guardrails` config describes the four edges of ITS run
+        # (input/output/tool stages handled by its own loop) — it must not double as
+        # tool-local rails gating the orchestrator's own invocation. Only rails injected
+        # by a parent agent apply to an orchestrator used as a tool.
+        own = None if self._is_orchestrator else (self.guardrails or None)
+        if agent_runner is None and own is None:
+            return None
+        from ..guardrails.presets import build_guardrail_runner, coerce_rail, default_safety
+
+        if agent_runner is None:
+            if self._own_guardrail_runner is None:
+                self._own_guardrail_runner = build_guardrail_runner(own)
+            return self._own_guardrail_runner
+        if self._combined_guardrail_runner is None or self._combined_agent_runner is not agent_runner:
+            # "default" must mean the same thing here as in the standalone path above —
+            # build_guardrail_runner expands it, so the merge path has to as well.
+            if isinstance(own, str) and own.strip().lower() == "default":
+                own_rails = default_safety()
+            elif isinstance(own, list | tuple):
+                own_rails = [coerce_rail(r) for r in own]
+            else:
+                own_rails = [coerce_rail(own)] if own else []
+            self._combined_guardrail_runner = agent_runner.merged_with(own_rails)
+            self._combined_agent_runner = agent_runner
+        return self._combined_guardrail_runner
+
+    async def _apply_tool_args_guardrails(
+        self,
+        guardrail_runner: Any,
+        validated_input: dict[str, Any],
+        span: Any,
+        run_context: Any,
+    ) -> tuple[dict[str, Any], list[Any], "ApprovalPolicyDecision | None", bool]:
+        """Run tool_args rails on the validated input.
+
+        Returns ``(validated_input, guardrail_events, forced_approval, blocked)``:
+
+        - replace verdicts rewrite the args (re-validated through the params model);
+        - an ``escalate`` verdict returns a forced ApprovalPolicyDecision so the caller
+          routes into the existing human-approval gate;
+        - ``blocked=True`` means the span was stamped ``blocked`` and the caller must
+          return without executing the handler.
+        """
+        from ..guardrails.apply import build_guardrail_events, record_guardrails_metadata
+        from ..guardrails.types import GuardrailContext, GuardrailStage
+
+        args_text = json.dumps(validated_input, sort_keys=True, default=str)
+        ctx = GuardrailContext(
+            stage=GuardrailStage.TOOL_ARGS,
+            tool_name=self.name,
+            tool_args=validated_input,
+            payload=validated_input,
+        )
+        outcome = await guardrail_runner.run_stage(GuardrailStage.TOOL_ARGS, args_text, ctx)
+        record_guardrails_metadata(span, outcome.triggered, run_context=run_context)
+        events = build_guardrail_events(outcome.triggered, run_context=run_context, span=span)
+
+        if outcome.replaced:
+            new_args: dict[str, Any] | None = outcome.replacement_args
+            if new_args is None and outcome.text != args_text:
+                # A scrub rewrote the JSON projection of the args — parse it back.
+                # Redaction placeholders live inside string values, so the JSON shape
+                # survives; anything unparseable fails open with the original args.
+                try:
+                    parsed = json.loads(outcome.text)
+                    if isinstance(parsed, dict):
+                        new_args = parsed
+                except (json.JSONDecodeError, ValueError):
+                    _get_logger().warning(
+                        "Guardrail replacement broke the tool-args JSON; keeping original args.",
+                        runnable_path=self._path,
+                    )
+            if new_args is not None:
+                validated_input = dict(self.params_model.model_validate(new_args))
+
+        verdict, rail = outcome.verdict, outcome.rail
+        if verdict is None:
+            return validated_input, events, None, False
+
+        if verdict.action == "escalate":
+            prompt = verdict.approval_prompt or (
+                f"Guardrail '{rail.name}' flagged this call to '{self.name}'"
+                + (f": {verdict.reason}" if verdict.reason else ".")
+            )
+            forced = ApprovalPolicyDecision(
+                required=True,
+                prompt=prompt,
+                description=verdict.reason,
+                kind="guardrail_escalation",
+                metadata={"guardrail": rail.name},
+            )
+            return validated_input, events, forced, False
+
+        # block (and retry, which has no meaning before execution): stamp the span so
+        # the agent feeds a "[Blocked by guardrail]" tool result back to the LLM.
+        span.status = RunStatus(
+            code="blocked",
+            reason=f"guardrail:{rail.name}:tool_args",
+            message=verdict.reason or f"Tool call blocked by guardrail '{rail.name}'.",
+        )
+        span.output = None
+        span._output_dump = None
+        return validated_input, events, None, True
+
     async def _apply_approval_gate(
         self,
         approval_decision: ApprovalPolicyDecision,
@@ -1593,10 +1729,37 @@ class Runnable(ABC, BaseModel):
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
 
+            # tool_args guardrails: after validation, before the approval gate — so an
+            # escalate verdict can force that gate, and a block spends nothing.
+            forced_approval: ApprovalPolicyDecision | None = None
+            guardrail_runner = self._resolve_guardrail_runner()
+            if guardrail_runner is not None:
+                from ..guardrails.types import GuardrailStage as _GuardrailStage
+
+                if guardrail_runner.has_stage(_GuardrailStage.TOOL_ARGS):
+                    (
+                        validated_input,
+                        guardrail_events,
+                        forced_approval,
+                        guardrail_blocked,
+                    ) = await self._apply_tool_args_guardrails(guardrail_runner, validated_input, span, run_context)
+                    for guardrail_event in guardrail_events:
+                        if guardrail_event.type in self._log_events and _events_logging_enabled():
+                            _get_logger().info(guardrail_event.type, **guardrail_event.model_dump())
+                        yield guardrail_event
+                        _restore_context()
+                    if guardrail_blocked:
+                        return
+
             # Fast path: requires_approval=False (the default) skips the whole
             # gate — no policy resolution, no ApprovalPolicyDecision construction.
-            if self.requires_approval is not False:
-                approval_decision = await self._resolve_approval_decision(validated_input)
+            if self.requires_approval is not False or forced_approval is not None:
+                if self.requires_approval is not False:
+                    approval_decision = await self._resolve_approval_decision(validated_input)
+                    if not approval_decision.required and forced_approval is not None:
+                        approval_decision = forced_approval
+                else:
+                    approval_decision = forced_approval
                 if approval_decision.required:
                     proceed, approval_event, validated_input = await self._apply_approval_gate(
                         approval_decision, validated_input, span, run_context
@@ -1723,6 +1886,18 @@ class Runnable(ABC, BaseModel):
             span.status = RunStatus(code="cancelled", reason=reason, message=early_exit.message)
             span.output = None
             span._output_dump = None
+
+        except GuardrailBlocked as guardrail_blocked_err:
+            # A guardrail blocked the run. This is a controlled stop, not an error: the
+            # output carries the user-safe blocked message (rendered like any assistant
+            # reply) and the status names the rail so callers can branch on it.
+            span.status = RunStatus(
+                code="blocked",
+                reason=f"guardrail:{guardrail_blocked_err.rail}:{guardrail_blocked_err.stage}",
+                message=guardrail_blocked_err.reason,
+            )
+            span.output = guardrail_blocked_err.output
+            span._output_dump = await dump(span.output)
 
         except PauseRequired as pause_required:
             # A child runnable paused — either on an approval gate

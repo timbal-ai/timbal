@@ -4,13 +4,14 @@ from typing import Any
 from .approval import ApprovalEvent
 from .base import BaseEvent
 from .delta import DeltaEvent
+from .guardrail import GuardrailEvent
 from .interaction import InteractionEvent
 from .output import OutputEvent
 from .start import StartEvent
 
 # Union of all possible event types. Deserialization dispatches on the 'type'
 # field via validate_event() (events are plain classes, not pydantic models).
-Event = StartEvent | OutputEvent | DeltaEvent | ApprovalEvent | InteractionEvent
+Event = StartEvent | OutputEvent | DeltaEvent | ApprovalEvent | InteractionEvent | GuardrailEvent
 
 _EVENT_TYPES: dict[str, type[BaseEvent]] = {
     StartEvent.type: StartEvent,
@@ -18,6 +19,7 @@ _EVENT_TYPES: dict[str, type[BaseEvent]] = {
     DeltaEvent.type: DeltaEvent,
     ApprovalEvent.type: ApprovalEvent,
     InteractionEvent.type: InteractionEvent,
+    GuardrailEvent.type: GuardrailEvent,
 }
 
 

@@ -38,6 +38,7 @@
               "agents/structured-output",
               "agents/memory",
               "agents/memory-compaction",
+              "agents/guardrails",
               "agents/skills",
               "agents/dynamic",
               "agents/background-tasks",
