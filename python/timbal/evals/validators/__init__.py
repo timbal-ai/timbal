@@ -22,6 +22,7 @@ from .not_null import NotNullValidator
 from .parallel import ParallelValidator
 from .pattern import PatternValidator
 from .prompt import PromptValidator
+from .rubric import RubricValidator
 from .semantic import SemanticValidator
 from .seq import SeqValidator
 from .starts_with import StartsWithValidator
@@ -47,6 +48,7 @@ Validator = Annotated[
     | GteValidator
     | SemanticValidator
     | PromptValidator
+    | RubricValidator
     | LanguageValidator
     | JsonValidator
     | EmailValidator

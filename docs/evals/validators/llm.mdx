@@ -96,6 +96,60 @@ output:
 
 This passes only if the statement is **not** supported by the actual text.
 
+## rubric!
+
+Grades the output against a structured rubric — a list of criteria, each judged by its **own isolated LLM call** with its own context window. Per-dimension judging grades more reliably than one judge scoring everything at once, and each criterion returns `pass` / `fail` / `unknown` with a reason (`unknown` is the judge's escape hatch when the text gives no way to verify — it counts as not passing).
+
+```yaml
+output:
+  rubric!:
+    - "Includes a comparison table"
+    - "Every price is attributed to a source"
+    - "Ends with at least 3 actionable recommendations"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | list \| string \| dict | Criteria list, a markdown rubric (bullet lines become criteria), or a dict with options |
+| pass_threshold | float | Weighted fraction of criteria that must pass. Default `1.0` (all) |
+| model | string | Judge model. Default `openai/gpt-5.4-nano` |
+| context | string | Optional task description shown to every judge |
+
+When the rubric fails, the eval report lists **every failing criterion with the judge's reason** — you see exactly which requirement broke, not a single opaque fail.
+
+Full form with weighted criteria:
+
+```yaml
+output:
+  rubric!:
+    criteria:
+      - "Includes a comparison table"
+      - criterion: "Ends with at least 3 actionable recommendations"
+        name: recommendations
+        weight: 2
+    pass_threshold: 0.75
+    model: "openai/gpt-5.4-nano"
+    context: "The agent produced a price-comparison report."
+```
+
+Markdown rubrics work too — bullet and numbered lines become criteria, headings and prose are ignored:
+
+```yaml
+output:
+  rubric!: |
+    - Mentions the refund policy
+    - Confirms the order number
+    - Ends by offering further help
+```
+
+<Tip>
+Write criteria around **verifiable structure**, not facts the judge cannot check. "Prices are formatted and attributed to a source" grades reliably; "prices are accurate" does not — the judge has no way to confirm it and will answer `unknown`.
+</Tip>
+
+<Note>
+Use `rubric!` instead of several `prompt!` statements when the requirements form one quality bar: you get per-criterion verdicts, weights, a partial-credit threshold, and one aggregate score. The same rubric can also gate an agent at runtime via `timbal.guardrails.LLMJudge(rubric=...)`, which feeds failing criteria back to the agent for revision.
+</Note>
+
 ## semantic!
 
 Uses an LLM to check if the actual value semantically matches the expected description.

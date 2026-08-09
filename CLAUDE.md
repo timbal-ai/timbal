@@ -125,7 +125,7 @@ workflow = (
     )
 )
 
-result = await workflow.collect(url="https://...")
+result = await workflow(url="https://...").collect()
 ```
 
 **`.step(runnable, depends_on=None, when=None, while_=None, **kwargs)`**
@@ -432,6 +432,42 @@ agent = Agent(
 
 ---
 
+## Guardrails
+
+Content policy at the edges of a run (`python/timbal/guardrails/`): `input` (before the first LLM call — a block spends zero tokens), `model_output` (final assistant message, stream-safe), `model_step` (opt-in: every assistant message, incl. intermediate tool-calling steps; per-stage override `on_step=`), `tool_args` (after Pydantic validation, before the approval gate), `tool_result` (before offload, so rails see full text).
+
+```python
+Agent(..., guardrails="default")  # DetectPII(redact) + RedactSecrets + PromptInjection(block)
+Agent(..., guardrails=["pii:redact", "injection:block", "moderation:warn"])
+
+from timbal.guardrails import DetectPII, LLMJudge, Verdict, guardrail
+Agent(
+ ...,
+ guardrails=[
+ DetectPII(on_input="redact", on_output="block", types=["email", "ssn"]),
+ LLMJudge("Must not give medical advice", model="openai/gpt-5.4-nano", action="retry"),
+ guardrail(lambda text: Verdict.block("competitor") if "acme" in text else True, stages=["model_output"]),
+ ],
+ guardrail_mode="shadow", # record verdicts, enforce nothing (rollout); default "enforce"
+ max_guardrail_retries=2, # budget for retry (reask) verdicts per turn
+)
+Tool(handler=..., guardrails=[...]) # tool-local rails, work with or without an agent
+```
+
+- **Verdicts**: `allow | block | replace | retry | escalate | warn` (`Verdict.block/redact/retry/escalate/warn` helpers). Callable coercion: `True`/`None`→allow, `False`→block, `str`→replace.
+- **Block** → `OutputEvent` with `status.code="blocked"`, `status.reason="guardrail:{rail}:{stage}"`, output = user-safe `blocked_message` as an assistant Message (also appended to memory). Blocked tool args feed `[Blocked by guardrail]` back to the LLM.
+- **`escalate`** (tool_args) forces the existing HITL approval gate (`ApprovalEvent`, `kind="guardrail_escalation"`, resume flow unchanged).
+- **Streaming**: redact-only deterministic rails scrub text AND thinking deltas in flight (per-content-block holdback window); block/retry-capable rails buffer-until-verdict — no chunk escapes. Thinking blocks on stored messages are scrubbed too.
+- **Trace redaction**: `provider.configured(_trace_redactor=timbal.guardrails.trace_redactor(...))` scrubs every span's serialized surfaces (incl. the inner LLM span) on copies at store/export time — live run untouched; resumed sessions load the redacted history. Deterministic rails only.
+- **Built-ins** (lazy exports from `timbal.guardrails`): `DetectPII`, `RedactSecrets`, `PromptInjection` (patterns + optional `model=` classifier), `KeywordGuard`, `MaxLength`, `Moderate` (OpenAI moderation / llama-guard-style), `TopicGuard`, `LLMJudge`.
+- **Rubrics** (`timbal.guardrails.rubric`): `parse_rubric` (markdown bullets / list of str/dicts with weights) + `grade_rubric` (one isolated structured judge per criterion; verdicts pass/fail/unknown + reason; weighted score vs `pass_threshold`). Consumers: `LLMJudge(rubric=..., action="retry")` — grade → revise → re-grade loop with failing criteria as feedback, per-criterion results in verdict metadata — and the `rubric!` eval validator (`timbal/evals/validators/rubric.py`), whose failure message lists every failing criterion with the judge's reason. Write criteria around verifiable structure, not unverifiable facts.
+- **Observability**: `GuardrailEvent` per triggered rail (stream + wire), report on `OutputEvent.metadata["guardrails"]`, usage keys `guardrails:triggered` / `guardrails:shadow_triggered`, `agent.explain_guardrails()`.
+- **Testing**: `await check_guardrails(agent_or_spec, text, stage="input")` runs rails only (no LLM loop) and returns a per-rail report.
+- Rail crashes fail **open** by default (recorded as `action="error"`); `strict=True` fails closed. Orchestrators never apply their own `guardrails` config as tool-local rails on themselves — only parent-injected rails apply to a sub-agent used as a tool.
+- **Sampled monitoring**: `Guardrail(sample_rate=0.05, shadow=True)` grades ~5% of checks (online-evals pattern; sampled-out checks record nothing). Sampling an enforcing rail logs a warning — enforcement gaps + streaming still buffers every run.
+
+---
+
 ## RunContext & Context Access
 
 `RunContext` carries all execution state for a single run.
@@ -606,3 +642,9 @@ async with OTelExporter(endpoint="http://localhost:4318") as exporter:
 - Use `TestModel` to avoid API calls in unit tests
 - `tmp_path` pytest fixture for file-based provider tests
 - Test classes group related tests: `TestProviderName`, `TestFeature`
+- `python/tests/guardrails/conftest.py` provides `StreamingTestModel`, which streams real
+  `TextDelta`/`ThinkingDelta`/`ToolUse` items through the router — use it whenever a test
+  depends on delta handling rather than just the final message
+- `test_injection_corpus.py` is a regression fence for the injection pattern pack. Changes
+  to the pack must keep it green; genuinely uncatchable attacks belong in `KNOWN_GAPS`
+  (xfail) rather than being deleted

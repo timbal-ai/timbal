@@ -157,6 +157,44 @@ Removes the tool reference from the Agent's `tools=[...]` list. Unused variables
 
 ---
 
+### `add-guardrail` — Add a guardrail to an Agent
+
+```bash
+# Shorthand rail (name[:action])
+python -m timbal.codegen add-guardrail --spec "pii:redact"
+
+# The default safety preset (PII redact + secrets + injection block)
+python -m timbal.codegen add-guardrail --spec default
+
+# Add to a specific step's Agent in a Workflow
+python -m timbal.codegen add-guardrail --spec "moderation:warn" --step agent_a
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--spec` | yes | `"default"`, or `<name>[:action]` — names: `pii`, `secrets`, `injection`, `keywords`, `moderation`, `length`, `topic`, `judge`; actions: `block`, `redact`, `warn`, `retry`, `escalate` |
+| `--step` | no | Target step name within a Workflow |
+
+**Requires**: Agent entry point, or Workflow entry point when using `--step`.
+
+Edits the `guardrails=` kwarg on the Agent constructor. A `guardrails="default"` string is expanded to its shorthand list before merging; an entry with the same rail name is replaced (duplicate rail names are invalid at runtime); re-adding an existing spec is an idempotent success. Non-literal values (variables, rail instances) are rejected — edit those by hand.
+
+### `remove-guardrail` — Remove a guardrail from an Agent
+
+```bash
+python -m timbal.codegen remove-guardrail --name pii
+python -m timbal.codegen remove-guardrail --name injection --step agent_a
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--name` | yes | Rail name to remove (matches `"pii"`, `"pii:redact"`, `"pii:block"`, ...) |
+| `--step` | no | Target step name within a Workflow |
+
+Removing the last rail drops the `guardrails=` kwarg entirely; removing an absent rail is an idempotent success.
+
+---
+
 ### `set-config` — Configure an Agent, tool, or workflow step
 
 This is the unified configuration operation. Behavior depends on the entry point type and whether a target name is provided.

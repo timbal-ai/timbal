@@ -7,7 +7,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -28,10 +28,28 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import InterruptError, PauseRequired, RunCancelled, bail
+from ..errors import GuardrailBlocked, InterruptError, PauseRequired, RunCancelled, bail
+from ..guardrails.apply import (
+    build_guardrail_events,
+    message_text,
+    record_guardrails_metadata,
+    replace_message_text,
+    replace_tool_result_text,
+    tool_result_text,
+)
+from ..guardrails.presets import build_guardrail_runner, coerce_rail
+from ..guardrails.types import GuardrailContext, GuardrailStage, Verdict
 from ..state import get_run_context
-from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
-from ..types.events import BaseEvent, OutputEvent
+from ..types.content import (
+    CustomContent,
+    FileContent,
+    TextContent,
+    ThinkingContent,
+    ToolResultContent,
+    ToolUseContent,
+)
+from ..types.events import BaseEvent, DeltaEvent, OutputEvent
+from ..types.events.delta import TextDelta, ThinkingDelta
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump
@@ -209,6 +227,19 @@ class Agent(Runnable):
     read_tool_result tool so the model can page the full content back on demand. Override per
     tool with Tool(result_limit=...); pinned tools and error results are always exempt.
     See timbal.core.tool_result_offload."""
+    guardrails: SkipValidation[Any] = None
+    """Content guardrails applied at the four edges of the run (input, model output, tool
+    args, tool results). Accepts the string "default" (PII redact + secret redaction +
+    prompt-injection block), a list mixing shorthand strings ("pii:redact",
+    "injection:block", "secrets", "moderation:warn", ...), Guardrail instances, and plain
+    callables. See timbal.guardrails."""
+    guardrail_mode: Literal["enforce", "shadow"] = "enforce"
+    """"shadow" runs every rail and records verdicts in events/traces without enforcing
+    anything — zero-risk production rollout. Flip to "enforce" (default) when the trace
+    data looks right. Per-rail override: Guardrail(shadow=True)."""
+    max_guardrail_retries: int = 2
+    """Budget for guardrail "retry" verdicts per turn (the reask loop). Exhaustion blocks
+    with the last rejection reason."""
     temperature: float | None = None
     """Sampling temperature for the LLM response."""
     output_model: type[BaseModel] | None = None
@@ -331,6 +362,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             self.tools.append(read_skill_tool)
 
         self._init_tool_result_offload()
+        self._init_guardrails()
 
         self._is_orchestrator = True
         self._is_coroutine = False
@@ -376,6 +408,54 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if read_store is not None:
             self._read_tool_result = create_read_tool_result(read_store)
             self._read_tool_result.nest(self._path)
+
+    def _init_guardrails(self) -> None:
+        """Build the guardrail runner and wire it into the agent's tools.
+
+        Agent-level rails are injected into every tool so tool_args checks run inside
+        ``Runnable._stream`` (after validation, before the approval gate — where an
+        ``escalate`` verdict can force the gate). The internal LLM wrapper and
+        ``read_tool_result`` are exempt: their inputs are framework-owned.
+        """
+        self._guardrail_runner = build_guardrail_runner(
+            self.guardrails, mode=self.guardrail_mode, max_retries=self.max_guardrail_retries
+        )
+        self._llm._guardrails_exempt = True
+        if self._read_tool_result is not None:
+            self._read_tool_result._guardrails_exempt = True
+        for tool in self.tools:
+            if isinstance(tool, Runnable):
+                self._wire_tool_guardrails(tool)
+
+    def _wire_tool_guardrails(self, tool: Runnable) -> None:
+        """Normalize a tool's local rails and inject the agent-level runner."""
+        if getattr(tool, "_guardrails_exempt", False):
+            return
+        raw = getattr(tool, "guardrails", None)
+        if raw:
+            tool.guardrails = [coerce_rail(r) for r in raw]
+        if self._guardrail_runner is not None:
+            tool._set_agent_guardrails(self._guardrail_runner)
+
+    def explain_guardrails(self) -> str:
+        """Human-readable table of the configured rails: stages, actions, order.
+
+        Debugging-quality introspection: what will actually run, in which order, and
+        whether anything is shadowed.
+        """
+        if self._guardrail_runner is None:
+            return "No guardrails configured."
+        lines = [f"Guardrails ({self._guardrail_runner.mode} mode, {len(self._guardrail_runner.rails)} rails):"]
+        for i, row in enumerate(self._guardrail_runner.describe(), 1):
+            actions = ", ".join(f"{stage}={action}" for stage, action in row["actions"].items())
+            flags = []
+            if row["shadow"]:
+                flags.append("shadow")
+            if row["strict"]:
+                flags.append("strict")
+            suffix = f"  [{', '.join(flags)}]" if flags else ""
+            lines.append(f"  {i}. {row['name']} ({row['type']}): {actions}{suffix}")
+        return "\n".join(lines)
 
     def _init_skills(self) -> None:
         """Validate skill filter params and append filtered Skill instances from `skills_path` to `self.tools`."""
@@ -889,6 +969,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if isinstance(t, ToolSet):
                 for tool in await t.resolve():
                     tool.nest(self._path)
+                    self._wire_tool_guardrails(tool)
                     _register(tool)
             else:
                 _register(t)
@@ -1090,6 +1171,75 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     current_span.memory.append(cleaned)
                 break
 
+    def _trailing_user_messages(self, memory: list[Message]) -> list[Message]:
+        """The user messages of the current turn: everything after the last assistant/tool message."""
+        start = 0
+        for idx in range(len(memory) - 1, -1, -1):
+            if memory[idx].role != "user":
+                start = idx + 1
+                break
+        return [m for m in memory[start:] if m.role == "user"]
+
+    async def _run_input_guardrails(
+        self,
+        run_context: Any,
+        current_span: Any,
+        append_memory: Callable[[Message], Any],
+    ) -> AsyncGenerator[BaseEvent, None]:
+        """Run input-stage rails on the turn's user messages.
+
+        Yields GuardrailEvents for every triggered rail; applies replace/redact verdicts
+        to memory in place; raises GuardrailBlocked on a blocking verdict — after
+        appending the user-safe blocked message as the assistant reply, so the
+        conversation stays coherent for the next turn.
+        """
+        runner = self._guardrail_runner
+        blocked: tuple[Any, Verdict] | None = None
+        all_records: list[Any] = []
+        dirty = False
+        for msg in self._trailing_user_messages(current_span.memory):
+            text = message_text(msg)
+            if not text:
+                continue
+            ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._path, payload=msg)
+            outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+            all_records.extend(outcome.triggered)
+            if outcome.replaced and outcome.text != text:
+                replace_message_text(msg, outcome.text)
+                dirty = True
+            if outcome.verdict is not None and blocked is None:
+                blocked = (outcome.rail, outcome.verdict)
+
+        record_guardrails_metadata(current_span, all_records, run_context=run_context)
+        for event in build_guardrail_events(all_records, run_context=run_context, span=current_span):
+            yield event
+
+        if dirty:
+            current_span._memory_dump = await dump(current_span.memory)
+
+        if blocked is not None:
+            rail, verdict = blocked
+            # retry/escalate have no meaning before the model ran — coerce to block.
+            blocked_text = verdict.blocked_message or rail.blocked_message_for(GuardrailStage.INPUT)
+            blocked_msg = Message(role="assistant", content=[TextContent(text=blocked_text)])
+            await append_memory(blocked_msg)
+            raise GuardrailBlocked(rail.name, "input", reason=verdict.reason, output=blocked_msg)
+
+    async def _run_output_guardrails(
+        self,
+        message: Message,
+        text: str,
+        run_context: Any,
+        current_span: Any,
+        stage: GuardrailStage,
+    ) -> Any:
+        """Run one output-side stage (model_step or model_output) on an assistant message."""
+        runner = self._guardrail_runner
+        ctx = GuardrailContext(stage=stage, agent_path=self._path, payload=message)
+        outcome = await runner.run_stage(stage, text, ctx)
+        record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
+        return outcome
+
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute the autonomous agent loop."""
         run_context = get_run_context()
@@ -1126,11 +1276,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span.memory.append(message)
             current_span._memory_dump.append(await dump(message))
 
+        # Input guardrails run blocking, before the first LLM call — a blocked input
+        # spends zero tokens and executes zero tools.
+        if self._guardrail_runner is not None and self._guardrail_runner.has_stage(GuardrailStage.INPUT):
+            async for guardrail_event in self._run_input_guardrails(run_context, current_span, _append_memory):
+                yield guardrail_event
+
         # Names of tools (resolved for the current iteration) whose results must be pinned
         # against memory compaction. Updated each iteration from the resolved tool list.
         pinned_tool_names: set[str] = set()
         # Per-tool result limits resolved for the current iteration (None = exempt).
         tool_result_limits: dict[str, ToolResultLimit | None] = {}
+        # Per-tool guardrail runners (agent-level + tool-local rails) for tool_result checks.
+        tool_guardrail_runners: dict[str, Any] = {}
+        # GuardrailEvents produced inside _process_tool_event (not a generator) — drained
+        # and yielded by the loop right after each call.
+        pending_guardrail_events: list[BaseEvent] = []
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
@@ -1155,6 +1316,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
                 msg = event.status.message or "The tool exited early."
                 content = f"[Cancelled] {msg}"
+            elif event.status.code == "blocked":
+                # A tool_args guardrail blocked the call. Feed the block back so the LLM
+                # can self-correct (bounded by max_iter), mirroring tool_not_found.
+                msg = event.status.message or "The tool call was blocked by a guardrail."
+                content = f"[Blocked by guardrail] {msg}"
             elif event.error is not None:
                 content = event.error
             elif isinstance(event.output, Message):
@@ -1179,6 +1345,42 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     ],
                 }
             )
+            # tool_result guardrails run BEFORE offload so rails see the full text and the
+            # (possibly redacted) result is what gets spilled/persisted. Errors are exempt
+            # (the model needs the full error), matching the offload contract below.
+            guardrail_runner = tool_guardrail_runners.get(tool_name)
+            if (
+                guardrail_runner is not None
+                and guardrail_runner.has_stage(GuardrailStage.TOOL_RESULT)
+                and event.status.code == "success"
+            ):
+                for c in tool_result.content:
+                    if not isinstance(c, ToolResultContent):
+                        continue
+                    text = tool_result_text(c)
+                    if not text:
+                        continue
+                    ctx = GuardrailContext(
+                        stage=GuardrailStage.TOOL_RESULT,
+                        agent_path=self._path,
+                        tool_name=tool_name,
+                        payload=c,
+                    )
+                    outcome = await guardrail_runner.run_stage(GuardrailStage.TOOL_RESULT, text, ctx)
+                    record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
+                    pending_guardrail_events.extend(
+                        build_guardrail_events(outcome.triggered, run_context=run_context, span=current_span)
+                    )
+                    if outcome.verdict is not None:
+                        # block (and retry/escalate, which have no meaning post-execution)
+                        # replace the result with a notice — the tool_use must still get a
+                        # paired result, and the model should know why it can't see it.
+                        reason = outcome.verdict.reason or "content policy"
+                        replace_tool_result_text(
+                            c, f"[Blocked by guardrail '{outcome.rail.name}'] {reason}"
+                        )
+                    elif outcome.replaced:
+                        replace_tool_result_text(c, outcome.text)
             # Production-time offload: reduce an oversized result once, before it enters
             # memory or the dump, so history stays append-only (prompt-cache friendly) and
             # the reduction persists into traces. Errors are never reduced — the model needs
@@ -1205,6 +1407,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         i = 0
         need_retry = False
         _llm_memory_saved = False
+        # Guardrail "retry" verdicts consumed this turn (bounded by max_guardrail_retries).
+        guardrail_retry_count = 0
         # Token usage reported by the previous LLM call this turn — the live signal for
         # mid-loop compaction. None until the first LLM call completes.
         last_llm_usage: dict | None = None
@@ -1216,6 +1420,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tools, commands = await self._resolve_tools(i)
                 pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
                 tool_result_limits = {}
+                tool_guardrail_runners = {}
                 for t in tools:
                     resolved_limit = getattr(t, "result_limit", "inherit")
                     if resolved_limit == "inherit":
@@ -1224,6 +1429,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Dynamic (ToolSet-resolved) tools may still carry the int shorthand.
                         resolved_limit = ToolResultLimit(threshold=resolved_limit)
                     tool_result_limits[t.name] = resolved_limit
+                    if not getattr(t, "_guardrails_exempt", False):
+                        tool_guardrail_runners[t.name] = t._resolve_guardrail_runner(self._guardrail_runner)
                 if commands:
                     # Commands will only be user messages with a single text content
                     if len(current_span.memory[-1].content) == 1:
@@ -1268,6 +1475,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     if _cmd_task is not None and _cmd_task.cancelling():
                                         raise asyncio.CancelledError
                                     await _process_tool_event(event, tool_use_id, append_to_messages=False)
+                                    for pending_event in pending_guardrail_events:
+                                        yield pending_event
+                                    pending_guardrail_events.clear()
                                     if isinstance(event, OutputEvent) and event.output is not None:
                                         if (
                                             event.status.code == "cancelled"
@@ -1305,6 +1515,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     first_pending: OutputEvent | None = None
                     async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
+                        for pending_event in pending_guardrail_events:
+                            yield pending_event
+                        pending_guardrail_events.clear()
                         yield event
                         if (
                             isinstance(event, OutputEvent)
@@ -1340,6 +1553,29 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Compaction rewrote memory out of lockstep with the dump; rebuild it.
                         current_span._memory_dump = await dump(current_span.memory)
 
+                # Output-side guardrails: model_output rails run on the final assistant
+                # message; model_step rails run on EVERY assistant message (including
+                # intermediate tool-calling steps). Rails that need a full-text verdict
+                # force buffer-until-verdict — no chunk escapes before they allow it.
+                # Deterministic redact-only rails transform the stream in flight instead
+                # (holdback window catches patterns spanning chunk boundaries).
+                _runner = self._guardrail_runner
+                guard_output = _runner is not None and _runner.has_stage(GuardrailStage.MODEL_OUTPUT)
+                guard_step = _runner is not None and _runner.has_stage(GuardrailStage.MODEL_STEP)
+                _out_stages = (GuardrailStage.MODEL_OUTPUT, GuardrailStage.MODEL_STEP)
+                buffer_stream = (guard_output or guard_step) and _runner.needs_buffering(*_out_stages)
+                stream_scrub = (
+                    not buffer_stream
+                    and _runner is not None
+                    and bool(_runner.scrub_rails(*_out_stages))
+                )
+                # One scrubber per content block id: text and thinking deltas interleave,
+                # so a shared holdback buffer would stitch unrelated content together.
+                delta_scrubbers: dict[str, Any] = {}
+                last_delta_events: dict[str, DeltaEvent] = {}
+                buffered_events: list[BaseEvent] = []
+                guardrail_retry = False
+
                 async for event in self._llm._stream(
                     model=model,
                     messages=current_span.memory,
@@ -1362,6 +1598,115 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         assert isinstance(event.output, Message), (
                             f"Expected event.output to be a Message, got {type(event.output)}"
                         )
+
+                        # Release each scrubber's holdback tail as one last delta so
+                        # streaming consumers receive the complete (scrubbed) content.
+                        for _block_id, _block_scrubber in delta_scrubbers.items():
+                            _tail = _block_scrubber.flush()
+                            _last = last_delta_events.get(_block_id)
+                            if _tail and _last is not None:
+                                _kind = _last.item.type  # text_delta | thinking_delta
+                                yield DeltaEvent(
+                                    run_id=_last.run_id,
+                                    parent_run_id=_last.parent_run_id,
+                                    path=_last.path,
+                                    call_id=_last.call_id,
+                                    parent_call_id=_last.parent_call_id,
+                                    item={"type": _kind, "id": _block_id, _kind: _tail},
+                                )
+                        delta_scrubbers.clear()
+                        last_delta_events.clear()
+
+                        # model_step rails run on every assistant message; model_output
+                        # rails on the final one (no tool calls). Both run BEFORE the
+                        # message enters memory, so replace/redact verdicts persist and a
+                        # blocked response never poisons history.
+                        is_final = not interrupted and not any(
+                            isinstance(c, ToolUseContent) and not c.is_server_tool_use
+                            for c in event.output.content
+                        )
+                        stages_to_run: list[GuardrailStage] = []
+                        if guard_step and not interrupted:
+                            stages_to_run.append(GuardrailStage.MODEL_STEP)
+                        if guard_output and is_final:
+                            stages_to_run.append(GuardrailStage.MODEL_OUTPUT)
+                        if stages_to_run:
+                            current_text = message_text(event.output)
+                            replaced_any = False
+                            g_verdict, g_rail, g_stage = None, None, None
+                            for out_stage in stages_to_run:
+                                outcome = await self._run_output_guardrails(
+                                    event.output, current_text, run_context, current_span, out_stage
+                                )
+                                for g_event in build_guardrail_events(
+                                    outcome.triggered, run_context=run_context, span=current_span
+                                ):
+                                    yield g_event
+                                if outcome.replaced:
+                                    current_text = outcome.text
+                                    replaced_any = True
+                                if outcome.verdict is not None and g_verdict is None:
+                                    g_verdict, g_rail, g_stage = outcome.verdict, outcome.rail, out_stage
+                            if g_verdict is not None and g_verdict.action == "retry":
+                                # retry means "regenerate the response" — only meaningful on
+                                # the final message. Mid-plan (tool-calling) steps coerce to
+                                # block below rather than corrupting the tool loop.
+                                if (
+                                    is_final
+                                    and guardrail_retry_count < self.max_guardrail_retries
+                                    and i < self.max_iter - 1
+                                ):
+                                    guardrail_retry_count += 1
+                                    # Keep the rejected output + critique in memory so the
+                                    # model can correct itself (Guardrails-AI reask).
+                                    await _append_memory(event.output)
+                                    _llm_memory_saved = True
+                                    last_llm_usage = event.usage
+                                    feedback = g_verdict.feedback or (
+                                        f"Your response was rejected by guardrail '{g_rail.name}'. "
+                                        "Rewrite it to comply."
+                                    )
+                                    await _append_memory(
+                                        Message.validate(
+                                            {"role": "user", "content": [{"type": "text", "text": feedback}]}
+                                        )
+                                    )
+                                    buffered_events.clear()
+                                    guardrail_retry = True
+                                    i += 1
+                                    break
+                                # Retry budget exhausted (or mid-plan) — block with the reason.
+                                g_verdict = Verdict.block(
+                                    g_verdict.reason,
+                                    blocked_message=g_verdict.blocked_message
+                                    or g_rail.blocked_message_for(g_stage),
+                                )
+                            if g_verdict is not None and g_verdict.action in ("block", "escalate"):
+                                # escalate has no human gate at the output edge — block.
+                                blocked_text = g_verdict.blocked_message or g_rail.blocked_message_for(g_stage)
+                                blocked_msg = Message(role="assistant", content=[TextContent(text=blocked_text)])
+                                await _append_memory(blocked_msg)
+                                _llm_memory_saved = True
+                                buffered_events.clear()
+                                raise GuardrailBlocked(
+                                    g_rail.name, g_stage.value, reason=g_verdict.reason, output=blocked_msg
+                                )
+                            if replaced_any:
+                                replace_message_text(event.output, current_text)
+                        elif stream_scrub:
+                            # Unchecked message (intermediate without step rails, or
+                            # interrupted) in transform mode: keep memory consistent with
+                            # the scrubbed deltas that already went out.
+                            for c in event.output.content:
+                                if isinstance(c, TextContent) and c.text:
+                                    c.text = _runner.scrub_text(c.text, *_out_stages)
+                        # Thinking blocks are not part of the checked text — scrub them
+                        # directly with the redact rails so reasoning never carries PII
+                        # into memory (they were scrubbed/withheld on the wire already).
+                        if (guard_output or guard_step) and isinstance(event.output, Message):
+                            for c in event.output.content:
+                                if isinstance(c, ThinkingContent) and c.thinking:
+                                    c.thinking = _runner.scrub_text(c.thinking, *_out_stages)
 
                         # Add LLM response to conversation for next iteration
                         await _append_memory(event.output)
@@ -1416,9 +1761,38 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Propagate the interruption with the processed output
                         if interrupted:
                             raise InterruptError(event.call_id, output=event.output)
+
+                        # Buffer-until-verdict: the rails allowed the message — release
+                        # the withheld deltas before the OutputEvent.
+                        if buffered_events:
+                            for buffered_event in buffered_events:
+                                yield buffered_event
+                            buffered_events.clear()
+                    elif buffer_stream and isinstance(event, DeltaEvent):
+                        buffered_events.append(event)
+                        continue
+                    elif stream_scrub and isinstance(event, DeltaEvent):
+                        if isinstance(event.item, TextDelta | ThinkingDelta):
+                            block_id = event.item.id
+                            block_scrubber = delta_scrubbers.get(block_id)
+                            if block_scrubber is None:
+                                block_scrubber = _runner.stream_scrubber(*_out_stages)
+                                delta_scrubbers[block_id] = block_scrubber
+                            last_delta_events[block_id] = event
+                            attr = "text_delta" if isinstance(event.item, TextDelta) else "thinking_delta"
+                            stable = block_scrubber.feed(getattr(event.item, attr))
+                            if not stable:
+                                continue  # withheld inside the holdback window
+                            setattr(event.item, attr, stable)
                     yield event
 
-                if self.output_model is not None and not need_retry:
+                if guardrail_retry:
+                    continue  # re-generate with the guardrail critique appended
+
+                if need_retry:
+                    continue  # output_model validation failed — retry with error feedback
+
+                if self.output_model is not None:
                     break
 
                 tool_calls = [
@@ -1433,6 +1807,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 first_pending: OutputEvent | None = None
                 async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
+                    for pending_event in pending_guardrail_events:
+                        yield pending_event
+                    pending_guardrail_events.clear()
                     yield event
                     if (
                         isinstance(event, OutputEvent)

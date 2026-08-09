@@ -2,7 +2,7 @@ from typing import Any
 
 from .._slots import SlotModel
 
-VALID_STATUS_CODES = frozenset({"success", "error", "cancelled", "timeout"})
+VALID_STATUS_CODES = frozenset({"success", "error", "cancelled", "timeout", "blocked"})
 
 
 class RunStatus(SlotModel):

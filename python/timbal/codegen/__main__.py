@@ -10,10 +10,12 @@ from pathlib import Path
 # A test asserts this table stays in sync with the modules on disk.
 _TRANSFORMER_OPS: dict[str, tuple[str, str]] = {
     "add-edge": ("add_edge", "Add an ordering or conditional edge between two workflow steps."),
+    "add-guardrail": ("add_guardrail", "Add a guardrail shorthand to the agent's guardrails list."),
     "add-mcp": ("add_mcp", "Add an MCP server to the agent's tools list."),
     "add-step": ("add_step", "Add a step to the workflow."),
     "add-tool": ("add_tool", "Add a tool to the agent's tools list."),
     "remove-edge": ("remove_edge", "Remove an edge between two workflow steps."),
+    "remove-guardrail": ("remove_guardrail", "Remove a guardrail from the agent's guardrails list by name."),
     "remove-step": ("remove_step", "Remove a step from the workflow by name."),
     "remove-tool": ("remove_tool", "Remove a tool from the agent's tools list by name."),
     "set-config": ("set_config", "Set configuration on the agent/step or on a specific tool."),

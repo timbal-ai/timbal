@@ -16,22 +16,36 @@ from timbal.codegen import parse_fqn
 from timbal.codegen.cst_utils import collect_assignments, resolve_runnable_name
 from timbal.codegen.format import format_code
 
-_transformer_modules = None
-
 
 def load_modules() -> dict:
-    modules = {}
-    for info in pkgutil.iter_modules([str(Path(__file__).parent)]):
-        mod = importlib.import_module(f"timbal.codegen.transformers.{info.name}")
-        modules[info.name] = mod
-    return modules
+    """Import every transformer module. Used for discovery/introspection, not dispatch —
+    see :func:`_load_operation` for why running an operation must not import them all."""
+    return {
+        info.name: importlib.import_module(f"timbal.codegen.transformers.{info.name}")
+        for info in pkgutil.iter_modules([str(Path(__file__).parent)])
+    }
 
 
-def _get_transformer_modules() -> dict:
-    global _transformer_modules
-    if _transformer_modules is None:
-        _transformer_modules = load_modules()
-    return _transformer_modules
+def _module_names() -> set[str]:
+    """Available operation names, discovered without importing anything."""
+    return {info.name for info in pkgutil.iter_modules([str(Path(__file__).parent)])}
+
+
+def _load_operation(operation: str):
+    """Import the single transformer an operation needs.
+
+    Deliberately not ``load_modules()``: importing every transformer to run one means a
+    failure in any of them (a bad import, a syntax error mid-edit) breaks every unrelated
+    operation too.
+    """
+    if operation not in _module_names():
+        raise ValueError(f"unknown operation: {operation}")
+    try:
+        return importlib.import_module(f"timbal.codegen.transformers.{operation}")
+    except Exception as e:
+        raise ValueError(
+            f"operation '{operation.replace('_', '-')}' failed to load: {type(e).__name__}: {e}"
+        ) from e
 
 
 class _UsageAnalyzer(cst.CSTVisitor):
@@ -301,10 +315,7 @@ def apply_operation(workspace_path: str | Path, operation: str, **kwargs) -> str
     except cst.ParserSyntaxError as e:
         raise ValueError(f"Cannot parse {spec.path}: {e}") from e
 
-    modules = _get_transformer_modules()
-    mod = modules.get(operation)
-    if mod is None:
-        raise ValueError(f"unknown operation: {operation}")
+    mod = _load_operation(operation)
 
     args = SimpleNamespace(**kwargs)
     result = mod.run(spec.target, args, tree=tree)
