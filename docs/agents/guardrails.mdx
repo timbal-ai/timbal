@@ -276,7 +276,7 @@ Treat either as defence in depth, not a boundary: the durable mitigations are le
 tools, `tool_args` rails, and approval gates on anything destructive.
 
 <Tip>
-Order matters: rails run in list order (block-only rails are checked concurrently for latency, but the first non-allow verdict in list order wins, and mutating rails each see the previous rail's transformation). Put normalizing/redacting rails before judging rails.
+Order matters. Every rail is checked against the text as of **its position in the list**, so a rail placed after a redactor sees the redacted text — put normalizing/redacting rails before judging rails and the judges never receive the raw content. The first non-allow verdict in list order wins. Adjacent rails that cannot rewrite the text are checked concurrently for latency; a `redact`/`retry` rail is a barrier. A custom rail that returns replacement text must declare `action="redact"`, otherwise it raises (batching is decided from the action, so an undeclared rewrite would be an invisible ordering bug).
 </Tip>
 
 ## Known limitations

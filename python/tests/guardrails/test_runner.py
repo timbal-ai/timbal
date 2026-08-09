@@ -80,6 +80,120 @@ class TestRunStage:
         assert outcome.text == "<clean> stuff"
 
     @pytest.mark.asyncio
+    async def test_rail_after_a_redactor_sees_the_redacted_text(self):
+        """The documented "normalize first, judge second" ordering must actually hold.
+
+        A block rail used to be checked concurrently against the *original* text no
+        matter where it sat in the list, so it both judged pre-redaction content and
+        received the raw PII a redactor was placed in front of it to strip.
+        """
+        seen: list[str] = []
+
+        def judge(text):
+            seen.append(text)
+            return Verdict.block("saw raw text") if "bad" in text else True
+
+        runner = GuardrailRunner(
+            [
+                _WordRail(name="redactor", word="bad", action="redact"),
+                guardrail(judge, stages=["input"], name="judge", action="block"),
+            ]
+        )
+        outcome = await runner.run_stage(INPUT, "bad stuff", _ctx())
+        assert seen == ["[REDACTED_BAD] stuff"], "the judge must be handed the redacted text"
+        assert outcome.verdict is None, "nothing should block — the offending text was already scrubbed"
+
+    @pytest.mark.asyncio
+    async def test_rail_before_a_redactor_still_sees_the_original(self):
+        seen: list[str] = []
+
+        runner = GuardrailRunner(
+            [
+                guardrail(lambda t: seen.append(t) or True, stages=["input"], name="judge", action="block"),
+                _WordRail(name="redactor", word="bad", action="redact"),
+            ]
+        )
+        await runner.run_stage(INPUT, "bad stuff", _ctx())
+        assert seen == ["bad stuff"]
+
+    @pytest.mark.asyncio
+    async def test_non_mutating_rails_still_run_concurrently(self):
+        """The position fix must not serialize rails that cannot affect each other."""
+        import asyncio
+
+        running = 0
+        peak = 0
+
+        async def slow(_text):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0.02)
+            running -= 1
+            return True
+
+        runner = GuardrailRunner(
+            [guardrail(slow, stages=["input"], name=f"r{i}", action="block") for i in range(4)]
+        )
+        await runner.run_stage(INPUT, "text", _ctx())
+        assert peak == 4, f"expected all 4 rails in flight together, saw {peak}"
+
+    @pytest.mark.asyncio
+    async def test_undeclared_text_rewrite_is_a_loud_error(self):
+        """A plain callable returning a str coerces to `replace`, but `guardrail()`
+        defaults to action="block". Batching is decided from the action, so allowing
+        this would silently check later rails against pre-rewrite text — and would have
+        already handed them the un-sanitized content. Fail instead of guessing."""
+        runner = GuardrailRunner(
+            [
+                guardrail(lambda t: t.replace("bad", "ok"), stages=["input"], name="sanitize"),
+                guardrail(lambda _t: True, stages=["input"], name="judge"),
+            ]
+        )
+        with pytest.raises(ValueError, match="must declare action='redact'"):
+            await runner.run_stage(INPUT, "bad stuff", _ctx())
+
+    @pytest.mark.asyncio
+    async def test_declared_redactor_feeds_later_rails(self):
+        seen: list[str] = []
+
+        runner = GuardrailRunner(
+            [
+                guardrail(
+                    lambda t: t.replace("bad", "ok"), stages=["input"], name="sanitize", action="redact"
+                ),
+                guardrail(lambda t: seen.append(t) or True, stages=["input"], name="judge"),
+            ]
+        )
+        outcome = await runner.run_stage(INPUT, "bad stuff", _ctx())
+        assert outcome.text == "ok stuff"
+        assert seen == ["ok stuff"]
+
+    @pytest.mark.asyncio
+    async def test_dict_replacement_needs_no_redact_action(self):
+        """Tool-arg replacement does not touch the text, so it is not an ordering hazard
+        and keeps working with the default action."""
+        runner = GuardrailRunner(
+            [guardrail(lambda _t: Verdict.replace({"env": "staging"}), stages=["tool_args"], name="downgrade")]
+        )
+        outcome = await runner.run_stage(GuardrailStage.TOOL_ARGS, '{"env": "prod"}', _ctx(GuardrailStage.TOOL_ARGS))
+        assert outcome.replacement_args == {"env": "staging"}
+        assert outcome.text == '{"env": "prod"}'
+
+    @pytest.mark.asyncio
+    async def test_shadowed_redactor_does_not_change_what_later_rails_see(self):
+        seen: list[str] = []
+
+        runner = GuardrailRunner(
+            [
+                _WordRail(name="redactor", word="bad", action="redact", shadow=True),
+                guardrail(lambda t: seen.append(t) or True, stages=["input"], name="judge"),
+            ]
+        )
+        await runner.run_stage(INPUT, "bad stuff", _ctx())
+        assert seen == ["bad stuff"], "a shadowed rail must not affect the pipeline"
+
+    @pytest.mark.asyncio
     async def test_first_blocking_rail_in_list_order_controls(self):
         runner = GuardrailRunner(
             [

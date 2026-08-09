@@ -249,6 +249,7 @@ class TestStructuredToolArgs:
                     lambda _text: Verdict.replace("this is not json at all"),
                     stages=["tool_args"],
                     name="broken",
+                    action="redact",
                 )
             ],
         )

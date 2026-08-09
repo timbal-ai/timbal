@@ -1,10 +1,11 @@
 """Guardrail execution engine.
 
 The :class:`GuardrailRunner` owns an ordered list of rails and executes the ones
-registered for a given stage. Non-mutating rails (block/warn/escalate) run concurrently;
-mutating rails (redact/retry) run sequentially in list order, each seeing the previous
-rail's transformed text. The first non-allow verdict in list order decides the stage
-outcome; ``replace`` verdicts chain (each rewrites the text for the next rail).
+registered for a given stage. Rails are checked against the text as of their position in
+the list, so ``replace`` verdicts chain and everything after a redactor sees the redacted
+text. Adjacent rails that cannot rewrite the text observe the same input and are checked
+concurrently; a mutating rail is a barrier. The first non-allow verdict in list order
+decides the stage outcome.
 """
 
 import asyncio
@@ -236,9 +237,21 @@ class GuardrailRunner:
     async def run_stage(self, stage: GuardrailStage, text: str, ctx: GuardrailContext) -> StageOutcome:
         """Run every rail registered for ``stage`` against ``text``.
 
-        Non-mutating rails run concurrently first; mutating rails run sequentially in
-        list order, each seeing the previous transformation. Shadowed rails are always
-        evaluated (their verdicts are recorded) but never enforced.
+        Every rail sees the text as of **its own position in the list**: a rail placed
+        after a redactor is checked against the redacted text, never the raw original.
+        That is what makes the documented "normalize first, judge second" ordering mean
+        what it says — and it keeps raw PII out of the LLM judges and moderation APIs
+        that a redactor was put in front of to protect.
+
+        Concurrency is preserved where it is safe: a run of adjacent rails that cannot
+        rewrite the text all observe the same input, so they are checked together. A
+        mutating rail is a barrier that must resolve before the rails behind it run.
+        Batching is decided from each rail's configured action, so a rail that returns
+        replacement text without declaring ``action="redact"`` is a loud error rather
+        than a silent ordering bug.
+
+        Shadowed rails are always evaluated (their verdicts are recorded) but never
+        enforced, so a shadowed redactor does not alter what later rails see.
         """
         outcome = StageOutcome(text=text)
         rails = [
@@ -249,38 +262,60 @@ class GuardrailRunner:
         if not rails:
             return outcome
 
-        pure = [r for r in rails if r.action_for(stage) not in _MUTATING_ACTIONS]
-
-        results: dict[str, tuple[Verdict, TriggerRecord | None]] = {}
-        if pure:
-            checked = await asyncio.gather(*(self._check_one(r, text, ctx) for r in pure))
-            for rail, res in zip(pure, checked, strict=True):
-                results[rail.name] = res
-
         controlling: tuple[Guardrail, Verdict] | None = None
         current = text
-        for rail in rails:
-            if rail.name in results:
-                verdict, record = results[rail.name]
-            else:
-                verdict, record = await self._check_one(rail, current, ctx)
+
+        def apply(rail: Guardrail, verdict: Verdict, record: TriggerRecord | None) -> None:
+            nonlocal controlling, current
             if record is not None:
                 outcome.triggered.append(record)
             if not verdict.triggered or self._is_shadowed(rail):
-                continue
+                return
             if verdict.action == "replace":
                 if isinstance(verdict.replacement, dict):
+                    # Rewrites tool args, not the text — no effect on what later rails see.
                     outcome.replacement_args = verdict.replacement
                     outcome.replaced = True
                 elif isinstance(verdict.replacement, str):
+                    if rail.action_for(stage) not in _MUTATING_ACTIONS:
+                        # Batching is decided from the configured action, so a rail that
+                        # rewrites the text without declaring it would be checked
+                        # alongside rails that should have seen its output.
+                        raise ValueError(
+                            f"Guardrail '{rail.name}' rewrote the text at stage '{stage.value}' but is "
+                            f"configured with action={rail.action_for(stage)!r}. A rail that returns "
+                            "replacement text must declare action='redact' so rails after it are "
+                            "checked against the rewritten text."
+                        )
                     current = verdict.replacement
                     outcome.replaced = True
-                continue
+                return
             if verdict.action == "warn":
-                continue
+                return
             # block / retry / escalate: first one in list order controls the stage.
             if controlling is None:
                 controlling = (rail, verdict)
+
+        i = 0
+        while i < len(rails):
+            # Widest run of rails from i that cannot rewrite the text — they all see
+            # `current`, so one gather covers them.
+            j = i
+            while j < len(rails) and rails[j].action_for(stage) not in _MUTATING_ACTIONS:
+                j += 1
+
+            if j > i:
+                batch = rails[i:j]
+                checked = await asyncio.gather(*(self._check_one(r, current, ctx) for r in batch))
+                for rail, (verdict, record) in zip(batch, checked, strict=True):
+                    apply(rail, verdict, record)
+                i = j
+
+            if i < len(rails):
+                rail = rails[i]
+                verdict, record = await self._check_one(rail, current, ctx)
+                apply(rail, verdict, record)
+                i += 1
 
         outcome.text = current
         if controlling is not None:
