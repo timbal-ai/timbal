@@ -427,6 +427,50 @@ class TestNestedAgents:
         assert child_event.status.code == "success"
 
 
+class TestToolDefaultPreset:
+    async def test_tool_default_preset_works_under_an_agent_with_its_own_rails(self):
+        """Tool(guardrails="default") is valid standalone (build_guardrail_runner expands
+        it) — the merge path with agent-level rails used to hit coerce_rail("default")
+        and crash with 'Unknown guardrail shorthand'."""
+        calls: list[list] = []
+
+        def handler(messages):
+            calls.append(messages)
+            if len(calls) == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="lookup", input={"q": "x"})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        def lookup(q: str) -> str:  # noqa: ARG001
+            return "record: ssn 123-45-6789"
+
+        agent = Agent(
+            name="a",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="lookup", handler=lookup, guardrails="default")],
+            guardrails=["moderation:warn"],  # forces the combined (merge) path; no name overlap with default
+        )
+        result = await agent(prompt="look it up").collect()
+        assert result.status.code == "success", result.error
+        seen = _tool_result_texts(calls[1])
+        assert seen and "123-45-6789" not in seen[0], "the tool's default preset must redact its result"
+        assert "[REDACTED_SSN]" in seen[0]
+
+
+    async def test_tool_single_string_shorthand_is_one_rail_not_characters(self):
+        """guardrails="pii:redact" on a tool used to be iterated char by char at wiring."""
+        from timbal.guardrails import Guardrail
+
+        tool = Tool(name="lookup", handler=lambda q: q, guardrails="pii:redact")
+        Agent(name="a", model=TestModel(responses=["ok"]), tools=[tool])
+        assert len(tool.guardrails) == 1
+        assert isinstance(tool.guardrails[0], Guardrail)
+        assert tool.guardrails[0].name == "detect_pii"
+
+
 class TestWorkflowComposition:
     async def test_guardrails_apply_to_an_agent_inside_a_workflow(self):
         model = TestModel(responses=["never runs"])

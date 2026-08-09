@@ -86,7 +86,7 @@ class TestAddGuardrail:
         """These rails are valid but have required params a shorthand can't carry —
         the error must say so instead of dumping a pydantic validation error."""
         ws = workspace(BARE_AGENT)
-        with pytest.raises(ValueError, match="needs configuration that --spec cannot express"):
+        with pytest.raises(ValueError, match="needs configuration that a shorthand cannot express"):
             apply_operation(ws, "add_guardrail", spec=spec, step=None)
 
     def test_non_literal_value_rejected(self, workspace):
@@ -197,6 +197,25 @@ class TestGuardrailsViaSetConfig:
         with pytest.raises(ValueError, match="list of shorthand strings"):
             apply_operation(ws, "set_config", name=None, config='{"guardrails": [{"name": "pii"}]}')
 
+    def test_default_as_whole_string_value(self, workspace):
+        ws = workspace(BARE_AGENT)
+        out = apply_operation(ws, "set_config", name=None, config='{"guardrails": "default"}')
+        assert 'guardrails="default"' in out
+
+    def test_default_inside_a_list_rejected(self, workspace):
+        """Runtime only recognizes "default" as the whole value; emitting it as a list
+        entry would fail at agent construction with 'Unknown guardrail shorthand'."""
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="whole-value preset, not a list entry"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["default"]}')
+        with pytest.raises(ValueError, match="whole-value preset, not a list entry"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["default", "moderation:warn"]}')
+
+    def test_config_required_rail_rejected_with_pointer(self, workspace):
+        ws = workspace(BARE_AGENT)
+        with pytest.raises(ValueError, match="needs configuration that a shorthand cannot express"):
+            apply_operation(ws, "set_config", name=None, config='{"guardrails": ["topic"]}')
+
     def test_tool_local_rails_on_wrapped_tool(self, workspace):
         ws = workspace("""\
         from timbal import Agent
@@ -213,3 +232,34 @@ class TestGuardrailsViaSetConfig:
         """)
         out = apply_operation(ws, "set_config", name="lookup", config='{"guardrails": ["secrets"]}')
         assert 'guardrails=["secrets"]' in out
+
+    TOOL_SOURCE = """\
+    from timbal import Agent
+    from timbal.core.tool import Tool
+
+    def lookup(q: str) -> str:
+        return q
+
+    agent = Agent(
+        name="agent",
+        model="openai/gpt-4o-mini",
+        tools=[Tool(name="lookup", handler=lookup)],
+    )
+    """
+
+    def test_tool_rails_typo_rejected_at_the_cli(self, workspace):
+        """The tool path used to check only field names — a shorthand typo was written
+        onto Tool(...) and only failed at runtime."""
+        ws = workspace(self.TOOL_SOURCE)
+        with pytest.raises(ValueError, match="Unknown guardrail shorthand"):
+            apply_operation(ws, "set_config", name="lookup", config='{"guardrails": ["pie:redact"]}')
+
+    def test_tool_rails_default_in_list_rejected(self, workspace):
+        ws = workspace(self.TOOL_SOURCE)
+        with pytest.raises(ValueError, match="whole-value preset"):
+            apply_operation(ws, "set_config", name="lookup", config='{"guardrails": ["default"]}')
+
+    def test_tool_rails_default_string_accepted(self, workspace):
+        ws = workspace(self.TOOL_SOURCE)
+        out = apply_operation(ws, "set_config", name="lookup", config='{"guardrails": "default"}')
+        assert 'guardrails="default"' in out

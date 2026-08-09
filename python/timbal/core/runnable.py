@@ -1180,14 +1180,21 @@ class Runnable(ABC, BaseModel):
         own = None if self._is_orchestrator else (self.guardrails or None)
         if agent_runner is None and own is None:
             return None
-        from ..guardrails.presets import build_guardrail_runner, coerce_rail
+        from ..guardrails.presets import build_guardrail_runner, coerce_rail, default_safety
 
         if agent_runner is None:
             if self._own_guardrail_runner is None:
                 self._own_guardrail_runner = build_guardrail_runner(own)
             return self._own_guardrail_runner
         if self._combined_guardrail_runner is None or self._combined_agent_runner is not agent_runner:
-            own_rails = [coerce_rail(r) for r in own] if isinstance(own, list | tuple) else ([coerce_rail(own)] if own else [])
+            # "default" must mean the same thing here as in the standalone path above —
+            # build_guardrail_runner expands it, so the merge path has to as well.
+            if isinstance(own, str) and own.strip().lower() == "default":
+                own_rails = default_safety()
+            elif isinstance(own, list | tuple):
+                own_rails = [coerce_rail(r) for r in own]
+            else:
+                own_rails = [coerce_rail(own)] if own else []
             self._combined_guardrail_runner = agent_runner.merged_with(own_rails)
             self._combined_agent_runner = agent_runner
         return self._combined_guardrail_runner

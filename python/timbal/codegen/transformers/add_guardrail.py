@@ -26,6 +26,7 @@ from ..guardrail_specs import (
     rail_name,
     string_element,
     validate_guardrail_target,
+    validate_shorthand,
 )
 
 
@@ -50,22 +51,7 @@ def _validate_spec(spec: str) -> None:
     """Reject unknown shorthands loudly at the CLI boundary."""
     if spec.strip().lower() == "default":
         return
-    from timbal.guardrails.presets import coerce_rail
-
-    try:
-        coerce_rail(spec)  # raises ValueError with the valid names/actions
-    except ValueError as e:
-        if "Unknown guardrail" in str(e):
-            raise  # bad name/action — the presets message already lists valid options
-        # Valid rail, but it has required constructor params (topic, judge, keywords,
-        # length) that shorthand syntax cannot express. Say so instead of dumping the
-        # pydantic validation error.
-        reason = e.errors()[0]["msg"].removeprefix("Value error, ") if hasattr(e, "errors") else str(e)
-        raise ValueError(
-            f"Guardrail {spec.partition(':')[0].strip()!r} needs configuration that --spec cannot "
-            f"express: {reason} Configure it in code instead — e.g. "
-            "Agent(guardrails=[TopicGuard(allow=[...])]) from timbal.guardrails."
-        ) from e
+    validate_shorthand(spec)
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:

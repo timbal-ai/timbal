@@ -22,7 +22,60 @@ __all__ = [
     "string_element",
     "string_value",
     "validate_guardrail_target",
+    "validate_guardrails_value",
+    "validate_shorthand",
 ]
+
+
+def validate_shorthand(spec: str) -> None:
+    """Validate one ``name[:action]`` shorthand at the CLI boundary.
+
+    Unknown names/actions re-raise the presets error (it lists the valid options).
+    Rails that are valid but have required constructor params (topic, judge, keywords,
+    length) get a pointer to configure them in code instead of a pydantic dump.
+    """
+    from timbal.guardrails.presets import coerce_rail
+
+    try:
+        coerce_rail(spec)
+    except ValueError as e:
+        if "Unknown guardrail" in str(e):
+            raise
+        reason = e.errors()[0]["msg"].removeprefix("Value error, ") if hasattr(e, "errors") else str(e)
+        raise ValueError(
+            f"Guardrail {spec.partition(':')[0].strip()!r} needs configuration that a shorthand cannot "
+            f"express: {reason} Configure it in code instead — e.g. "
+            "Agent(guardrails=[TopicGuard(allow=[...])]) from timbal.guardrails."
+        ) from e
+
+
+def validate_guardrails_value(rails: object) -> None:
+    """Validate a JSON ``guardrails`` value (agent- or tool-level) at the CLI.
+
+    Accepts the whole-value string ``"default"``, a single shorthand string, or a list
+    of shorthand strings. ``"default"`` inside a *list* is rejected: at runtime the
+    preset is only recognized as the whole value, so emitting it as a list entry would
+    fail at construction with a misleading "unknown shorthand" error.
+    """
+    from timbal.guardrails.presets import DEFAULT_SHORTHANDS
+
+    if isinstance(rails, str):
+        if rails.strip().lower() != "default":
+            validate_shorthand(rails)
+        return
+    if not isinstance(rails, list) or not all(isinstance(s, str) for s in rails):
+        raise ValueError(
+            'guardrails must be a JSON list of shorthand strings (e.g. ["pii:redact", "injection:block"]) '
+            'or the string "default".'
+        )
+    for spec in rails:
+        if spec.strip().lower() == "default":
+            raise ValueError(
+                '"default" is the whole-value preset, not a list entry. Use '
+                '{"guardrails": "default"}, or list its shorthands explicitly: '
+                f"{list(DEFAULT_SHORTHANDS)}."
+            )
+        validate_shorthand(spec)
 
 
 def validate_guardrail_target(

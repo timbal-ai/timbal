@@ -14,6 +14,7 @@ from ..cst_utils import (
     resolve_runnable_name,
     wrap_bare_function_step,
 )
+from ..guardrail_specs import validate_guardrails_value
 from ..tool_discovery import get_framework_tool_names, validate_tool_config
 
 AGENT_FIELDS = {
@@ -47,20 +48,8 @@ def _validate_agent_config(config: dict) -> None:
     mode = config.get("guardrail_mode")
     if mode is not None and mode not in ("enforce", "shadow"):
         raise ValueError(f"Invalid guardrail_mode {mode!r}. Must be 'enforce' or 'shadow'.")
-    rails = config.get("guardrails")
-    if rails is not None:
-        from timbal.guardrails.presets import coerce_rail
-
-        if isinstance(rails, str):
-            rails = [rails]
-        if not isinstance(rails, list) or not all(isinstance(s, str) for s in rails):
-            raise ValueError(
-                'guardrails must be a JSON list of shorthand strings (e.g. ["pii:redact", "injection:block"]) '
-                'or the string "default".'
-            )
-        for spec in rails:
-            if spec.strip().lower() != "default":
-                coerce_rail(spec)  # raises with the valid names/actions
+    if config.get("guardrails") is not None:
+        validate_guardrails_value(config["guardrails"])
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -123,6 +112,10 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if tool_class is None:
             raise ValueError(f"Tool '{args.name}' not found in agent tools list.")
         validate_tool_config(tool_class, config)
+        # validate_tool_config only checks field NAMES — tool-local rails deserve the
+        # same shorthand validation the agent path gets, so typos fail here, not at run.
+        if config.get("guardrails") is not None:
+            validate_guardrails_value(config["guardrails"])
         var_name = get_framework_tool_names().get(tool_class, args.name)
         return ToolConfigSetter(entry_point, args.name, config, assignments, tool_class, var_name)
 

@@ -37,7 +37,7 @@ from ..guardrails.apply import (
     replace_tool_result_text,
     tool_result_text,
 )
-from ..guardrails.presets import build_guardrail_runner, coerce_rail
+from ..guardrails.presets import build_guardrail_runner, coerce_rail, default_safety
 from ..guardrails.types import GuardrailContext, GuardrailStage, Verdict
 from ..state import get_run_context
 from ..types.content import (
@@ -433,7 +433,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
         raw = getattr(tool, "guardrails", None)
         if raw:
-            tool.guardrails = [coerce_rail(r) for r in raw]
+            # A bare string is one spec (or the "default" preset) — iterating it would
+            # coerce each character as a rail.
+            if isinstance(raw, str):
+                tool.guardrails = default_safety() if raw.strip().lower() == "default" else [coerce_rail(raw)]
+            elif isinstance(raw, list | tuple):
+                tool.guardrails = [coerce_rail(r) for r in raw]
+            else:
+                tool.guardrails = [coerce_rail(raw)]
         if self._guardrail_runner is not None:
             tool._set_agent_guardrails(self._guardrail_runner)
 
