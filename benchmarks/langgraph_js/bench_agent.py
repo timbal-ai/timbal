@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """
-Timbal vs Mastra — full agent loop benchmark (cross-language).
+Runtime calibration — LangGraph Python vs LangGraph.js (vs Timbal) agent loop.
 
-Three scenarios, identical pipelines on both frameworks:
-  1. Single tool call:   prompt → LLM → tool(add) → LLM → answer
-  2. Multi-step (3 tools): prompt → LLM → add → LLM → mul → LLM → sub → LLM → answer
-  3. Parallel tools:     prompt → LLM → [add, mul, neg] concurrent → LLM → answer
+LangGraph ships the same architecture in Python and TypeScript: a prebuilt
+react agent over a Pregel graph. Running identical scenarios on both isolates
+the language-runtime factor (CPython vs V8) that cross-framework,
+cross-language benchmarks (e.g. benchmarks/mastra) cannot separate on their
+own. The LG.js/LG.py ratio is the calibration number: apply it mentally when
+reading any Timbal-vs-TypeScript-framework table.
 
-Mastra is a TypeScript framework, so each side runs in its native runtime:
-Timbal on CPython/asyncio (in this process), Mastra on Node/V8 (spawned as a
-subprocess running bench_agent.mjs with the same methodology). Numbers compare
-the full framework+runtime stacks — the thing a user actually deploys — not
-language-neutral algorithm quality. See README.md for what is and isn't
-comparable; memory in particular uses different instruments per runtime
-(tracemalloc vs V8 heap growth) and must not be ratio'd across languages.
+Scenarios (identical to benchmarks/langchain and benchmarks/mastra):
+  1. Single tool call   2. Multi-step (3 tools)   3. Parallel tools
 
-All LLMs are faked via message-history inspection. Observability: Timbal
-built-in tracing (always on); Mastra shown both bare and with
-@mastra/observability enabled (export mocked).
+All LLMs faked via message-history inspection. All columns are bare (no
+observability) except Timbal, whose built-in tracing is always on — the
+calibration ratio itself is computed LG.py-bare vs LG.js-bare, same framework,
+same (lack of) tracing.
 
 Run:
-    uv run python benchmarks/mastra/bench_agent.py
-    uv run python benchmarks/mastra/bench_agent.py --quick
+    uv run --no-sync --with langgraph --with langchain-core python benchmarks/langgraph_js/bench_agent.py
+    uv run --no-sync --with langgraph --with langchain-core python benchmarks/langgraph_js/bench_agent.py --quick
 """
 
 from __future__ import annotations
@@ -52,8 +50,8 @@ from pathlib import Path  # noqa: E402
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("--quick", action="store_true")
-parser.add_argument("--timbal-only", action="store_true", help="Skip Mastra, measure Timbal only")
-parser.add_argument("--mastra-json", type=Path, default=None, help="Reuse a previous Mastra JSON result instead of running Node")
+parser.add_argument("--timbal-only", action="store_true", help="Skip LangGraph on both runtimes")
+parser.add_argument("--lgjs-json", type=Path, default=None, help="Reuse a previous LG.js JSON result instead of running Node")
 _args, _ = parser.parse_known_args()
 
 N_ITERS = 20 if _args.quick else 100
@@ -97,28 +95,28 @@ def pct(samples: list[float], p: float) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MASTRA — spawn the Node-side benchmark
+# LANGGRAPH.JS — spawn the Node-side benchmark
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def run_mastra_side(script: str) -> dict | None:
+def run_lgjs_side(script: str) -> dict | None:
     if _args.timbal_only:
         return None
-    if _args.mastra_json:
-        return json.loads(_args.mastra_json.read_text())
+    if _args.lgjs_json:
+        return json.loads(_args.lgjs_json.read_text())
     node = shutil.which("node")
     if node is None:
-        print(f"{DIM}  node not found on PATH — running Timbal only.{RESET}")
+        print(f"{DIM}  node not found on PATH — skipping LangGraph.js.{RESET}")
         return None
     if not (BENCH_DIR / "node_modules").exists():
-        print(f"{DIM}  benchmarks/mastra/node_modules missing — run `npm install` in benchmarks/mastra first.{RESET}")
+        print(f"{DIM}  benchmarks/langgraph_js/node_modules missing — run `npm install` there first.{RESET}")
         return None
     cmd = [node, "--expose-gc", script] + (["--quick"] if _args.quick else [])
-    print(f"{DIM}  running Mastra side: {' '.join(cmd[1:])}…{RESET}")
+    print(f"{DIM}  running LangGraph.js side: {' '.join(cmd[1:])}…{RESET}")
     sys.stdout.flush()
     proc = subprocess.run(cmd, cwd=BENCH_DIR, stdout=subprocess.PIPE, stderr=sys.stderr, text=True, timeout=3600)
     if proc.returncode != 0:
-        print(f"{DIM}  Mastra side failed (exit {proc.returncode}) — running Timbal only.{RESET}")
+        print(f"{DIM}  LangGraph.js side failed (exit {proc.returncode}).{RESET}")
         return None
     return json.loads(proc.stdout)
 
@@ -194,44 +192,125 @@ def _make_timbal_agent(scenario: int):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Timbal measurement (same procedure as the Node side)
+# LANGGRAPH PYTHON — same fake LLM pattern as benchmarks/langchain
+# ═══════════════════════════════════════════════════════════════════════════════
+
+try:
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langchain_core.tools import StructuredTool
+    from langgraph.prebuilt import create_react_agent
+
+    HAS_LANGGRAPH_PY = True
+except ImportError:
+    HAS_LANGGRAPH_PY = False
+
+if HAS_LANGGRAPH_PY:
+    class _FakeLLM(FakeMessagesListChatModel):
+        """Stateless fake LLM: counts ToolMessages to find the current step."""
+
+        def bind_tools(self, tools, **kw):
+            return self
+
+        def _step(self, messages) -> int:
+            return sum(1 for m in messages if isinstance(m, ToolMessage))
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            from langchain_core.outputs import ChatGeneration, ChatResult
+            idx = self._step(messages) % len(self.responses)
+            return ChatResult(generations=[ChatGeneration(message=self.responses[idx])])
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            from langchain_core.outputs import ChatGeneration, ChatResult
+            idx = self._step(messages) % len(self.responses)
+            return ChatResult(generations=[ChatGeneration(message=self.responses[idx])])
+
+    def _lg_responses(scenario: int) -> list:
+        if scenario == 1:
+            return [
+                AIMessage(content="", tool_calls=[{"name": "add", "args": {"a": 1, "b": 2}, "id": "c1", "type": "tool_call"}]),
+                AIMessage(content="3"),
+            ]
+        elif scenario == 2:
+            return [
+                AIMessage(content="", tool_calls=[{"name": "add", "args": {"a": 1, "b": 2}, "id": "c1", "type": "tool_call"}]),
+                AIMessage(content="", tool_calls=[{"name": "multiply", "args": {"a": 3, "b": 4}, "id": "c2", "type": "tool_call"}]),
+                AIMessage(content="", tool_calls=[{"name": "subtract", "args": {"a": 12, "b": 3}, "id": "c3", "type": "tool_call"}]),
+                AIMessage(content="9"),
+            ]
+        return [
+            AIMessage(content="", tool_calls=[
+                {"name": "add", "args": {"a": 1, "b": 2}, "id": "c1", "type": "tool_call"},
+                {"name": "multiply", "args": {"a": 3, "b": 4}, "id": "c2", "type": "tool_call"},
+                {"name": "negate", "args": {"x": 5}, "id": "c3", "type": "tool_call"},
+            ]),
+            AIMessage(content="done"),
+        ]
+
+    def _make_lg_graph(scenario: int):
+        def add(a: int, b: int) -> int:
+            """Add two numbers."""
+            return a + b
+
+        def multiply(a: int, b: int) -> int:
+            """Multiply two numbers."""
+            return a * b
+
+        def subtract(a: int, b: int) -> int:
+            """Subtract b from a."""
+            return a - b
+
+        def negate(x: int) -> int:
+            """Negate a number."""
+            return -x
+
+        td = {n.__name__: StructuredTool.from_function(n) for n in (add, multiply, subtract, negate)}
+        tools = {
+            1: [td["add"]],
+            2: [td["add"], td["multiply"], td["subtract"]],
+            3: [td["add"], td["multiply"], td["negate"]],
+        }[scenario]
+        return create_react_agent(_FakeLLM(responses=_lg_responses(scenario)), tools)
+
+    _LG_INPUT = {"messages": [HumanMessage(content="go")]}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Measurement (same procedure as the Node side)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-async def measure_timbal(scenario: int) -> dict:
-    agent = _make_timbal_agent(scenario)
+async def measure_python(run, scenario: int, clear=None) -> dict:
+    async def _noop():
+        pass
 
-    async def run():
-        await agent(prompt="go").collect()
+    clear = clear or (lambda: None)
 
-    # Latency
     for _ in range(N_WARMUP):
         await run()
-    _clear_traces()
+    clear()
     gc.collect()
     lat = []
     for _ in range(N_ITERS):
         t0 = time.perf_counter()
         await run()
         lat.append((time.perf_counter() - t0) * 1e6)
-    _clear_traces()
+    clear()
 
-    # Memory
     for _ in range(N_WARMUP):
         await run()
-    _clear_traces()
+    clear()
     gc.collect()
     tracemalloc.start()
     for _ in range(N_MEM):
         await run()
-        _clear_traces()
+        clear()
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    # Burst
     n_burst = N_BURST[scenario]
     await asyncio.gather(*[run() for _ in range(5)])
-    _clear_traces()
+    clear()
     gc.collect()
     burst: list[float] = []
 
@@ -241,9 +320,8 @@ async def measure_timbal(scenario: int) -> dict:
         burst.append((time.perf_counter() - t0) * 1e6)
 
     await asyncio.gather(*[timed() for _ in range(n_burst)])
-    _clear_traces()
+    clear()
 
-    # Throughput
     tp = {}
     for conc in CONCURRENCY_LEVELS:
         sem = asyncio.Semaphore(conc)
@@ -256,7 +334,7 @@ async def measure_timbal(scenario: int) -> dict:
         t0 = time.perf_counter()
         await asyncio.gather(*[bounded() for _ in range(THROUGHPUT_OPS)])
         tp[str(conc)] = THROUGHPUT_OPS / (time.perf_counter() - t0)
-        _clear_traces()
+        clear()
 
     return {
         "latency_us": {
@@ -286,17 +364,17 @@ SCENARIO_NAMES = {
 COL_W = 12
 
 
-def print_scenario(key: str, timbal: dict, mastra: dict | None) -> None:
+def print_scenario(key: str, timbal: dict, lgpy: dict | None, lgjs: dict | None) -> None:
     section(f"Scenario {key}: {SCENARIO_NAMES[key]}")
 
     cols = ["Timbal"]
     frames = [timbal]
-    if mastra:
-        if "aisdk" in mastra:  # absent when replaying pre-AI-SDK JSON results
-            cols.append("AI SDK")
-            frames.append(mastra["aisdk"])
-        cols += ["Mastra", "Mastra+obs"]
-        frames += [mastra["bare"], mastra["obs"]]
+    if lgpy:
+        cols.append("LG.py")
+        frames.append(lgpy)
+    if lgjs:
+        cols.append("LG.js")
+        frames.append(lgjs)
 
     hdr = f"  {'':>{COL_W}}" + "".join(f"  {c:>{COL_W}}" for c in cols)
     sep = f"  {'─' * COL_W}" + f"  {'─' * COL_W}" * len(cols)
@@ -312,11 +390,10 @@ def print_scenario(key: str, timbal: dict, mastra: dict | None) -> None:
     print(f"  {'framework':<{COL_W + 12}}  {'per run':>14}  {'method':<24}")
     print(f"  {'─' * (COL_W + 12)}  {'─' * 14}  {'─' * 24}")
     print(f"  {'Timbal':<{COL_W + 12}}  {timbal['mem_per_run_bytes']:>12,.0f} B  {'tracemalloc peak/N':<24}")
-    if mastra:
-        node_rows = [("AI SDK", mastra["aisdk"])] if "aisdk" in mastra else []
-        node_rows += [("Mastra", mastra["bare"]), ("Mastra+obs", mastra["obs"])]
-        for name, f in node_rows:
-            print(f"  {name:<{COL_W + 12}}  {f['mem_per_run_bytes']:>12,.0f} B  {'V8 heap growth/N (≈)':<24}")
+    if lgpy:
+        print(f"  {'LG.py':<{COL_W + 12}}  {lgpy['mem_per_run_bytes']:>12,.0f} B  {'tracemalloc peak/N':<24}")
+    if lgjs:
+        print(f"  {'LG.js':<{COL_W + 12}}  {lgjs['mem_per_run_bytes']:>12,.0f} B  {'V8 heap growth/N (≈)':<24}")
 
     n_burst = N_BURST[int(key)]
     subsection(f"Burst p50/p95  ({n_burst} concurrent runs)")
@@ -333,34 +410,65 @@ def print_scenario(key: str, timbal: dict, mastra: dict | None) -> None:
         vals = [f["throughput_ops_s"][str(conc)] for f in frames]
         print(f"  {conc:>{COL_W}}" + "".join(f"  {v:>10.0f}/s" for v in vals))
 
+    if lgpy and lgjs:
+        subsection("Runtime calibration  (LG.py ÷ LG.js — same framework, so ≈ CPython/V8 factor)")
+        p50 = lgpy["latency_us"]["p50"] / lgjs["latency_us"]["p50"]
+        mean = lgpy["latency_us"]["mean"] / lgjs["latency_us"]["mean"]
+        tp10 = lgjs["throughput_ops_s"]["10"] / lgpy["throughput_ops_s"]["10"]
+        print(f"  latency p50: {p50:.2f}x  ·  latency mean: {mean:.2f}x  ·  throughput c=10: {tp10:.2f}x")
+
 
 async def main() -> None:
     print()
     print(f"{BOLD}{'═' * WIDTH}{RESET}")
-    print(f"{BOLD}  Timbal vs Mastra — agent loop benchmark (cross-language){RESET}")
+    print(f"{BOLD}  Runtime calibration — LangGraph Python vs LangGraph.js (agent loop){RESET}")
     print(f"  {N_ITERS} iters · burst {N_BURST} · {N_MEM} mem · {THROUGHPUT_OPS} throughput")
-    print(f"  {DIM}Timbal: CPython {sys.version_info.major}.{sys.version_info.minor}/asyncio, built-in tracing (always on).{RESET}")
-    print(f"  {DIM}Mastra: Node/V8 subprocess, AI SDK MockLanguageModelV4, bare + observability (export mocked).{RESET}")
-    print(f"  {DIM}Same scenarios, same fake-LLM-by-message-inspection, same procedure per side.{RESET}")
-    print(f"  {DIM}Cross-runtime comparison — see README.md for what is and isn't comparable.{RESET}")
+    print(f"  {DIM}Same framework, both runtimes: the LG.py÷LG.js ratio isolates CPython vs V8.{RESET}")
+    print(f"  {DIM}Timbal shown for reference (built-in tracing always on; LG columns are bare).{RESET}")
     print(f"{BOLD}{'═' * WIDTH}{RESET}")
     print()
 
-    mastra = run_mastra_side("bench_agent.mjs")
-    if mastra:
-        m = mastra["meta"]
-        print(f"{DIM}  Mastra side: node {m['node']} · @mastra/core {m['mastra_core']} · @mastra/observability {m['mastra_observability']} · ai {m['ai_sdk']}{RESET}")
+    if not HAS_LANGGRAPH_PY and not _args.timbal_only:
+        print(f"{DIM}  langgraph (Python) not importable — run via:{RESET}")
+        print(f"{DIM}  uv run --no-sync --with langgraph --with langchain-core python {Path(__file__).relative_to(Path.cwd())}{RESET}")
 
+    lgjs = run_lgjs_side("bench_agent.mjs")
+    if lgjs:
+        m = lgjs["meta"]
+        print(f"{DIM}  LG.js side: node {m['node']} · @langchain/langgraph {m['langgraph']} · @langchain/core {m['langchain_core']}{RESET}")
+
+    ratios = []
     for key in ["1", "2", "3"]:
-        timbal = await measure_timbal(int(key))
-        print_scenario(key, timbal, mastra["scenarios"][key] if mastra else None)
+        scenario = int(key)
+        t_agent = _make_timbal_agent(scenario)
+
+        async def t_run(agent=t_agent):
+            await agent(prompt="go").collect()
+
+        timbal = await measure_python(t_run, scenario, clear=_clear_traces)
+
+        lgpy = None
+        if HAS_LANGGRAPH_PY and not _args.timbal_only:
+            graph = _make_lg_graph(scenario)
+
+            async def lg_run(g=graph):
+                await g.ainvoke(_LG_INPUT)
+
+            lgpy = await measure_python(lg_run, scenario)
+
+        lgjs_s = lgjs["scenarios"][key]["bare"] if lgjs else None
+        print_scenario(key, timbal, lgpy, lgjs_s)
+        if lgpy and lgjs_s:
+            ratios.append(lgpy["latency_us"]["p50"] / lgjs_s["latency_us"]["p50"])
 
     print()
     print(f"{DIM}{'─' * WIDTH}")
-    print("  All measurements reuse 1 pre-built agent (creation excluded).")
-    print("  LLMs faked via message inspection on both sides — no network, no API keys.")
-    print("  Each framework runs in its native runtime; numbers include runtime differences.")
-    print("  Memory uses per-runtime instruments (tracemalloc vs V8 heap) — not cross-comparable.")
+    if ratios:
+        print(f"  Calibration summary: LG.py ÷ LG.js latency p50 spans {min(ratios):.2f}-{max(ratios):.2f}x across")
+        print("  identical agent loops (>1 = V8 faster). Apply that factor when reading any")
+        print("  Timbal (Python) vs TypeScript-framework table in benchmarks/.")
+    print("  All measurements reuse pre-built agents/graphs (creation excluded).")
+    print("  LLMs faked via message inspection on all sides — no network, no API keys.")
     print(f"{'─' * WIDTH}{RESET}")
     print()
 

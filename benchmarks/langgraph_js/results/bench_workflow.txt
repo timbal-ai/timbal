@@ -1,0 +1,135 @@
+
+════════════════════════════════════════════════════════════════════════════
+  Runtime calibration — LangGraph Python vs LangGraph.js (DAG workflows)
+  200 iters · 500 burst · 200 mem runs · 1000 throughput ops
+  Same framework, both runtimes: the LG.py÷LG.js ratio isolates CPython vs V8.
+  Timbal shown for reference (built-in tracing always on; LG columns are bare).
+════════════════════════════════════════════════════════════════════════════
+
+  running LangGraph.js side: --expose-gc bench_workflow.mjs…
+  LG.js side: node v22.18.0 · @langchain/langgraph 1.4.9 · @langchain/core 1.2.5
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario: Sequential  (A → B → C → D)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×200 sequential runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+          mean      344.6 µs       1.34 ms       1.34 ms
+           p50      334.5 µs       1.29 ms       1.27 ms
+           p95      414.0 µs       1.72 ms       2.06 ms
+           p99      606.1 µs       1.93 ms       2.75 ms
+
+  Memory per run  (×200 runs) — different instruments, do not ratio across runtimes
+  framework                        per run  method                  
+  ────────────────────────  ──────────────  ────────────────────────
+  Timbal                             250 B  tracemalloc peak/N      
+  LG.py                              345 B  tracemalloc peak/N      
+  LG.js                          106,205 B  V8 heap growth/N (≈)    
+
+  Burst  (500 concurrent runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+           p50      77.64 ms     360.88 ms     529.63 ms
+           p75      83.23 ms     386.95 ms     530.63 ms
+           p95      87.73 ms     404.49 ms     531.41 ms
+           p99      88.78 ms     408.29 ms     531.57 ms
+           max      89.06 ms     409.51 ms     531.69 ms
+
+  Throughput  (1000 runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+             1        2653/s         808/s        1135/s
+            10        4238/s        1208/s        1238/s
+            50        4159/s        1225/s        1214/s
+           200        4072/s        1141/s        1098/s
+
+  Runtime calibration  (LG.py ÷ LG.js — same framework, so ≈ CPython/V8 factor)
+  latency p50: 1.01x  ·  mean: 1.00x  ·  throughput c=10: 1.02x  ·  c=200: 0.96x
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario: Fan-out/in  (A → [B, C, D] → E)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×200 sequential runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+          mean      478.8 µs       1.27 ms       1.30 ms
+           p50      462.6 µs       1.23 ms       1.17 ms
+           p95      617.0 µs       1.57 ms       2.27 ms
+           p99      781.5 µs       1.70 ms       3.92 ms
+
+  Memory per run  (×200 runs) — different instruments, do not ratio across runtimes
+  framework                        per run  method                  
+  ────────────────────────  ──────────────  ────────────────────────
+  Timbal                             335 B  tracemalloc peak/N      
+  LG.py                              506 B  tracemalloc peak/N      
+  LG.js                          110,453 B  V8 heap growth/N (≈)    
+
+  Burst  (500 concurrent runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+           p50     149.85 ms     506.82 ms     578.47 ms
+           p75     154.43 ms     533.38 ms     579.43 ms
+           p95     158.16 ms     547.84 ms     580.07 ms
+           p99     159.03 ms     552.00 ms     580.22 ms
+           max     159.29 ms     553.32 ms     580.32 ms
+
+  Throughput  (1000 runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+             1        2012/s         779/s         985/s
+            10        3230/s        1115/s        1083/s
+            50        3059/s        1049/s        1021/s
+           200        2858/s         989/s         979/s
+
+  Runtime calibration  (LG.py ÷ LG.js — same framework, so ≈ CPython/V8 factor)
+  latency p50: 1.06x  ·  mean: 0.98x  ·  throughput c=10: 0.97x  ·  c=200: 0.99x
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario: Diamond  (A → [B, C] → D)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×200 sequential runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+          mean      468.0 µs       1.14 ms      978.4 µs
+           p50      425.0 µs       1.12 ms      902.4 µs
+           p95      697.2 µs       1.33 ms       1.57 ms
+           p99      947.8 µs       1.53 ms       2.09 ms
+
+  Memory per run  (×200 runs) — different instruments, do not ratio across runtimes
+  framework                        per run  method                  
+  ────────────────────────  ──────────────  ────────────────────────
+  Timbal                             305 B  tracemalloc peak/N      
+  LG.py                              392 B  tracemalloc peak/N      
+  LG.js                          105,915 B  V8 heap growth/N (≈)    
+
+  Burst  (500 concurrent runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+           p50     131.39 ms     373.05 ms     477.41 ms
+           p75     135.86 ms     395.16 ms     478.24 ms
+           p95     140.05 ms     412.20 ms     478.87 ms
+           p99     140.81 ms     416.61 ms     479.11 ms
+           max     141.04 ms     417.84 ms     479.21 ms
+
+  Throughput  (1000 runs)
+                      Timbal         LG.py         LG.js
+  ────────────  ────────────  ────────────  ────────────
+             1        2264/s         667/s        1177/s
+            10        3747/s        1270/s        1277/s
+            50        3914/s        1261/s        1239/s
+           200        3383/s        1118/s        1152/s
+
+  Runtime calibration  (LG.py ÷ LG.js — same framework, so ≈ CPython/V8 factor)
+  latency p50: 1.24x  ·  mean: 1.16x  ·  throughput c=10: 1.01x  ·  c=200: 1.03x
+
+────────────────────────────────────────────────────────────────────────────
+  Calibration summary: LG.py ÷ LG.js latency p50 spans 1.01-1.24x across
+  identical DAGs (>1 = V8 faster). Apply that factor when reading any Timbal
+  (Python) vs TypeScript-framework workflow table in benchmarks/.
+  Graph compilation and Workflow construction excluded from timing.
+────────────────────────────────────────────────────────────────────────────
+

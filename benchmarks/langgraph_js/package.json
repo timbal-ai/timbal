@@ -1,0 +1,16 @@
+{
+  "name": "timbal-bench-langgraph-js",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "LangGraph.js side of the runtime-calibration benchmarks (same framework, CPython vs V8)",
+  "scripts": {
+    "bench:agent": "node --expose-gc bench_agent.mjs",
+    "bench:workflow": "node --expose-gc bench_workflow.mjs"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.5",
+    "@langchain/langgraph": "^1.4.9",
+    "zod": "^4.4.3"
+  }
+}

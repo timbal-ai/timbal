@@ -12,15 +12,19 @@
  * response by counting tool results in the message history — no shared counter
  * state, safe for concurrent runs on a single shared agent.
  *
- * Two variants per scenario:
- *   - bare: plain `new Agent(...)` — no tracing (Mastra's default standalone path)
- *   - obs:  agent registered in a `Mastra` instance with `@mastra/observability`
- *           enabled and the exporter mocked (spans built, export dropped) —
- *           the equivalent of LangGraph+LangSmith-with-HTTP-mocked
+ * Three variants per scenario:
+ *   - aisdk: raw Vercel AI SDK `generateText` with the same tools and mock
+ *            model — the substrate Mastra is built on. Isolates what Mastra's
+ *            agent layer adds on top of its own foundation.
+ *   - bare:  plain `new Agent(...)` — no tracing (Mastra's default standalone path)
+ *   - obs:   agent registered in a `Mastra` instance with `@mastra/observability`
+ *            enabled and the exporter mocked (spans built, export dropped) —
+ *            the equivalent of LangGraph+LangSmith-with-HTTP-mocked
  *
  * Usage: node --expose-gc bench_agent.mjs [--quick]
  */
 
+import { generateText, tool, stepCountIs } from 'ai';
 import { Mastra } from '@mastra/core';
 import { Agent } from '@mastra/core/agent';
 import { createTool } from '@mastra/core/tools';
@@ -129,6 +133,43 @@ function makeModel(scenario) {
   });
 }
 
+// ── Raw AI SDK runner (Mastra's substrate) ───────────────────────────────────
+
+const AISDK_TOOLS = {
+  add: tool({
+    description: 'Add two numbers.',
+    inputSchema: z.object({ a: num, b: num }),
+    execute: async ({ a, b }) => a + b,
+  }),
+  multiply: tool({
+    description: 'Multiply two numbers.',
+    inputSchema: z.object({ a: num, b: num }),
+    execute: async ({ a, b }) => a * b,
+  }),
+  subtract: tool({
+    description: 'Subtract b from a.',
+    inputSchema: z.object({ a: num, b: num }),
+    execute: async ({ a, b }) => a - b,
+  }),
+  negate: tool({
+    description: 'Negate a number.',
+    inputSchema: z.object({ x: num }),
+    execute: async ({ x }) => -x,
+  }),
+};
+
+const AISDK_SCENARIO_TOOLS = {
+  1: { add: AISDK_TOOLS.add },
+  2: { add: AISDK_TOOLS.add, multiply: AISDK_TOOLS.multiply, subtract: AISDK_TOOLS.subtract },
+  3: { add: AISDK_TOOLS.add, multiply: AISDK_TOOLS.multiply, negate: AISDK_TOOLS.negate },
+};
+
+function makeAiSdkRunner(scenario) {
+  const model = makeModel(scenario);
+  const tools = AISDK_SCENARIO_TOOLS[scenario];
+  return () => generateText({ model, tools, stopWhen: stepCountIs(10), prompt: 'go' });
+}
+
 // ── Agent factories ──────────────────────────────────────────────────────────
 
 function makeBareAgent(scenario) {
@@ -183,10 +224,12 @@ for (const scenario of [1, 2, 3]) {
     concurrencyLevels: CONCURRENCY_LEVELS,
   };
 
+  const aisdkRun = makeAiSdkRunner(scenario);
   const bare = makeBareAgent(scenario);
   const { agent: obs, observability } = makeObsAgent(scenario);
 
   results.scenarios[scenario] = {
+    aisdk: await measure(aisdkRun, { ...common, label: 'ai sdk raw' }),
     bare: await measure(() => bare.generate('go'), { ...common, label: 'mastra bare' }),
     obs: await measure(() => obs.generate('go'), {
       ...common,
