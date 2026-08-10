@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 class AudioInputConfig(BaseModel):
@@ -98,6 +98,10 @@ class TextToSpeech(ABC):
     Lifecycle: ``connect`` → ``synthesize`` (repeatable) → ``close``.
     """
 
+    provider_id: str = "unknown"
+    """Config-style provider id (``"elevenlabs"``, ``"munsit"``, ...) — matches
+    playground / ``voice_config.tts_provider`` values, not the class name."""
+
     @abstractmethod
     async def connect(self, config: AudioOutputConfig) -> None: ...
 
@@ -117,3 +121,34 @@ class TextToSpeech(ABC):
 
     @abstractmethod
     async def close(self) -> None: ...
+
+
+def resolve_tts(
+    provider: str | None = None,
+    *,
+    api_key: str | SecretStr | None = None,
+) -> TextToSpeech:
+    """TTS factory for the voice server — the counterpart of ``resolve_stt``.
+
+    ``provider`` is case-insensitive: ``"elevenlabs"`` (default when empty;
+    aliases ``"el"``, ``"11labs"``), ``"munsit"`` (alias ``"faseeh"``), or
+    ``"fishaudio"`` (aliases ``"fish"``, ``"fish-audio"``). Unknown ids raise
+    ``ValueError`` so the caller can log and fall back explicitly.
+
+    Provider modules import lazily — selecting Munsit never imports the
+    ElevenLabs/Fish WebSocket stacks.
+    """
+    p = (provider or "").strip().lower() or "elevenlabs"
+    if p in ("elevenlabs", "el", "11labs"):
+        from . import elevenlabs
+
+        return elevenlabs.ElevenLabsStreamTTS(api_key=api_key)
+    if p in ("munsit", "faseeh"):
+        from . import munsit
+
+        return munsit.MunsitStreamTTS(api_key=api_key)
+    if p in ("fishaudio", "fish-audio", "fish"):
+        from . import fish_audio
+
+        return fish_audio.FishAudioStreamTTS(api_key=api_key)
+    raise ValueError(f"Unknown TTS provider: {provider!r}")

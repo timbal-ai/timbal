@@ -28,7 +28,7 @@ from pydantic import ValidationError
 from .. import __version__ as timbal_version
 from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
-from ..voice.config import FillerConfig, RecordingConfig, VoiceConfig
+from ..voice.config import DEFAULT_VOICE_ID, FillerConfig, RecordingConfig, VoiceConfig
 
 logger = structlog.get_logger("timbal.server.voice")
 
@@ -147,6 +147,7 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
 CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "stt_provider",
     "stt_model",
+    "tts_provider",
     "tts_model",
     "voice",
     "language",
@@ -466,8 +467,7 @@ def build_voice_session(
         resolve_stt,
         stt_provider_id,
     )
-    from ..voice.elevenlabs import ElevenLabsStreamTTS
-    from ..voice.providers import AudioInputConfig, AudioOutputConfig
+    from ..voice.providers import AudioInputConfig, AudioOutputConfig, resolve_tts
     from ..voice.turn_detection import resolve_turn_detector
 
     merged = merge_client_voice_overrides(defaults, client_config)
@@ -491,7 +491,22 @@ def build_voice_session(
     # Config id for clients/logs (``deepgram-flux``), not the class name.
     stt_provider = stt_provider_id(stt)
     stt_model = effective_stt_model(stt, stt_model_requested)
-    tts = ElevenLabsStreamTTS()
+
+    tts_model_requested = merged.tts_model
+    tts_voice_requested = merged.voice
+    try:
+        tts = resolve_tts(merged.tts_provider)
+    except ValueError as e:
+        logger.warning("voice_ws_bad_tts_provider", error=str(e), requested_provider=merged.tts_provider)
+        # Same rule as the STT fallback: a Munsit/Fish model id or voice must
+        # not survive onto the ElevenLabs wire, or the socket fails on a config
+        # the session reports as ElevenLabs. The voice is a required *path*
+        # segment there, so substitute the default rather than clearing it.
+        tts = resolve_tts("elevenlabs")
+        tts_model_requested = None
+        tts_voice_requested = DEFAULT_VOICE_ID
+    # Config id for clients/logs (``fishaudio``), not the class name.
+    tts_provider = tts.provider_id
 
     # Client extras are unvalidated (model_copy in the merge): tolerate a
     # non-dict rather than 500-ing the socket.
@@ -509,8 +524,8 @@ def build_voice_session(
         extra=stt_extra,
     )
     audio_out = AudioOutputConfig(
-        model=merged.tts_model,
-        voice=merged.voice,
+        model=tts_model_requested,
+        voice=tts_voice_requested,
         sample_rate=merged.sample_rate,
         encoding=merged.encoding,
         extra=tts_extra,
@@ -565,6 +580,8 @@ def build_voice_session(
         stt_provider=stt_provider,
         stt_model=stt_model,
         stt_model_requested=merged.stt_model,
+        tts=type(tts).__name__,
+        tts_provider=tts_provider,
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
@@ -636,6 +653,7 @@ def build_voice_session(
         "session_id": session.session_id,
         "stt_provider": stt_provider,
         "stt_model": stt_model,
+        "tts_provider": tts_provider,
         "model": llm_model,
         "turn_detector": turn_detector_label,
         # Server config, not client-settable. Phase 1: the browser mixes this

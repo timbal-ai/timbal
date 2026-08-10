@@ -100,6 +100,22 @@ def _tts_output_format(config: AudioOutputConfig) -> str:
     return "pcm_16000"
 
 
+def effective_tts_model(config: AudioOutputConfig) -> str:
+    """Model id actually sent to ElevenLabs (foreign leftovers swapped out).
+
+    The mirror of the Munsit/Fish guards. ``tts_model`` is server-wide while
+    ``tts_provider`` is per-session and client-settable, so a session that
+    selects another provider's model — or falls back here after an unknown
+    provider — must not put ``faseeh-v1-preview`` in the stream-input query
+    string. ElevenLabs rejects the handshake, which reads as "TTS is broken"
+    rather than "the model id belongs to a different provider".
+    """
+    m = (config.model or "").strip()
+    if m.startswith("eleven"):
+        return m
+    return _DEFAULT_TTS_MODEL
+
+
 class ElevenLabsRealtimeSTT(SpeechToText):
     """ElevenLabs Scribe v2 realtime WebSocket (VAD commits by default)."""
 
@@ -271,6 +287,8 @@ class ElevenLabsStreamTTS(TextToSpeech):
     fine with ``eleven_flash_v2_5`` (the default for real-time voice).
     """
 
+    provider_id = "elevenlabs"
+
     def __init__(self, api_key: str | SecretStr | None = None) -> None:
         self._api_key_explicit = api_key
         self._api_key: str | None = None
@@ -326,7 +344,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
         assert cfg is not None
         extra = dict(cfg.extra)
         host = str(extra.pop("tts_host", "api.elevenlabs.io"))
-        model_id = cfg.model or _DEFAULT_TTS_MODEL
+        model_id = effective_tts_model(cfg)
         output_format = _tts_output_format(cfg)
         inactivity_timeout = int(extra.pop("inactivity_timeout", _DEFAULT_TTS_INACTIVITY_TIMEOUT))
         inactivity_timeout = max(20, min(inactivity_timeout, 180))
