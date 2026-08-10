@@ -39,6 +39,12 @@ nothing to do with either framework's design: V8 JIT-compiles hot loops (CPython
 Timbal's wins happen *despite* that handicap; Mastra's wins should be read with
 it in mind.
 
+**That runtime factor is now measured, not guessed:** `benchmarks/langgraph_js/`
+runs LangGraph — the same framework, same architecture — on both CPython and
+V8. Result: V8 makes identical agent loops **2.1–3.4x** faster and identical
+DAG scheduling **~1.0–1.2x** faster (a wash). Use those factors when reading
+the tables below.
+
 ### What is explicitly NOT comparable
 
 **Memory.** Python is measured with `tracemalloc` (exact peak of every traced
@@ -68,6 +74,12 @@ agents have no tracing, so Mastra gets two columns:
 
 The honest apples-to-apples column against Timbal is **Mastra+obs**; the bare
 column shows what Mastra costs with tracing off, which Timbal doesn't offer.
+
+The agent benchmark also includes an **AI SDK** column: raw Vercel AI SDK
+`generateText` with the same tools and mock model — the substrate Mastra is
+built on. It is a bare library call (no tracing, no memory, no agent
+abstractions), included to decompose Mastra's cost into "the substrate" vs
+"Mastra's layer on top", and as a best-case V8 baseline.
 
 ---
 
@@ -137,8 +149,9 @@ progress on stderr).
 
 ## Results
 
-Full-mode run, 2026-08-07: Apple Silicon M-series, CPython 3.11, Node v22.18,
-`@mastra/core` 1.57.0, `@mastra/observability` 1.16.5, `ai` 7.0.56.
+Full-mode runs, 2026-08-07 (workflow) and 2026-08-10 (agent, adding the AI SDK
+column): Apple Silicon M-series, CPython 3.11, Node v22.18, `@mastra/core`
+1.57.0, `@mastra/observability` 1.16.5, `ai` 7.0.56.
 Raw outputs:
 
 - `results/bench_agent.txt`
@@ -149,23 +162,32 @@ Raw outputs:
 Full loop: prompt -> fake LLM -> tool call(s) -> fake LLM -> answer. Timbal has
 tracing built in and always on; compare against Mastra+obs for parity.
 
-| Scenario | Timbal p50 | Mastra p50 | Mastra+obs p50 |
-|----------|-----------:|-----------:|---------------:|
-| Single tool | 265.2 µs | 2.63 ms | 4.09 ms |
-| 3-step chain | 274.8 µs | 3.74 ms | 6.64 ms |
-| Parallel tools | 278.2 µs | 2.60 ms | 4.65 ms |
+| Scenario | Timbal p50 | AI SDK p50 | Mastra p50 | Mastra+obs p50 |
+|----------|-----------:|-----------:|-----------:|---------------:|
+| Single tool | 265.3 µs | 156.1 µs | 2.33 ms | 4.20 ms |
+| 3-step chain | 296.3 µs | 340.6 µs | 3.99 ms | 6.92 ms |
+| Parallel tools | 285.9 µs | 219.8 µs | 2.55 ms | 4.33 ms |
 
-| Scenario | Timbal c=10 | Mastra c=10 | Mastra+obs c=10 |
-|----------|------------:|------------:|----------------:|
-| Single tool | 4,172/s | 512/s | 264/s |
-| 3-step chain | 1,854/s | 284/s | 144/s |
-| Parallel tools | 2,244/s | 374/s | 239/s |
+| Scenario | Timbal c=10 | AI SDK c=10 | Mastra c=10 | Mastra+obs c=10 |
+|----------|------------:|------------:|------------:|----------------:|
+| Single tool | 3,982/s | 7,996/s | 555/s | 278/s |
+| 3-step chain | 1,916/s | 3,215/s | 288/s | 159/s |
+| Parallel tools | 2,094/s | 5,497/s | 418/s | 233/s |
 
-Timbal's agent loop is roughly an order of magnitude faster per run and in
-throughput — despite the V8-vs-CPython runtime handicap running the other way.
+Timbal's agent loop is roughly an order of magnitude faster than Mastra per
+run and in throughput — despite the V8-vs-CPython runtime handicap running the
+other way (measured at 2.1–3.4x for agent loops in `benchmarks/langgraph_js/`).
 Mastra's `generate()` path does substantially more per call (message-list
 management, schema conversion, processor pipeline), and enabling observability
 roughly doubles its cost, while Timbal's numbers already include tracing.
+
+The AI SDK column decomposes Mastra's cost: raw `generateText` runs the
+single-tool loop in ~156 µs, so **Mastra adds roughly 15x on top of its own
+substrate**. It also shows the runtime effect honestly — a bare V8 library
+call edges Timbal on single-round scenarios and loses on the 3-step chain,
+while carrying none of Timbal's agent semantics (tracing, memory, structured
+events, multi-turn state). A full traced agent runtime landing within ~2x of a
+bare substrate call is the context for every other column.
 
 ### Workflow DAG
 
@@ -184,16 +206,20 @@ Trivial handlers, no LLM — pure scheduling overhead.
 | Diamond | 4,039/s | 11,265/s | 4,014/s |
 
 This one cuts the other way and we report it as-is: Mastra's bare workflow
-engine on V8 is ~3x faster than Timbal on trivial DAGs. That advantage is a mix
-of a lean run path and V8 JIT-compiling the hot loop — the benchmark cannot and
-does not separate the two. With observability enabled (the production-parity
-column), Mastra lands at rough parity with Timbal on latency and throughput,
-with Timbal keeping tracing on for every number.
+engine on V8 is ~3x faster than Timbal on trivial DAGs. The calibration suite
+(`benchmarks/langgraph_js/`) settles what we previously couldn't separate:
+identical DAGs run at ~1.0–1.2x across CPython and V8, so this win is
+**Mastra's lean engine, not the runtime**. Credit where due. With
+observability enabled (the production-parity column), the advantage disappears
+— rough parity with Timbal on latency and throughput, with Timbal keeping
+tracing on for every number.
 
 ### Takeaway
 
 For agent workloads — the workload both frameworks exist for — Timbal's loop is
-~9-24x faster with tracing on both sides. For raw DAG scheduling of trivial
-steps, Mastra without tracing is faster; with tracing it's a wash. As always,
-framework overhead vanishes behind real LLM latency; these numbers measure the
-floor each framework sets, not the ceiling of your app.
+~9-23x faster with tracing on both sides, and the runtime calibration says
+that gap is architectural, not linguistic. For raw DAG scheduling of trivial
+steps, Mastra without tracing is genuinely faster (engine design, not V8);
+with tracing it's a wash. As always, framework overhead vanishes behind real
+LLM latency; these numbers measure the floor each framework sets, not the
+ceiling of your app.

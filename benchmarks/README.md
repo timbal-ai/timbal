@@ -50,6 +50,11 @@ uv run --with google-adk python benchmarks/google_adk/bench_callbacks.py --quick
 cd benchmarks/mastra && npm install && cd ../..
 uv run python benchmarks/mastra/bench_agent.py --quick
 uv run python benchmarks/mastra/bench_workflow.py --quick
+
+# Runtime calibration: LangGraph Python vs LangGraph.js (needs Node >= 20)
+cd benchmarks/langgraph_js && npm install && cd ../..
+uv run --no-sync --with langgraph --with langchain-core python benchmarks/langgraph_js/bench_agent.py --quick
+uv run --no-sync --with langgraph --with langchain-core python benchmarks/langgraph_js/bench_workflow.py --quick
 ```
 
 No API keys required. All LLM calls are faked by inspecting message history.
@@ -174,7 +179,8 @@ zero provider-specific code in user land.
 | `pydantic/` | Timbal vs PydanticAI/Pydantic Graph + Logfire — agents, graph-style workflows, control flow | WIP |
 | `openai_agents/` | Timbal vs OpenAI Agents SDK - agents, handoffs, agent-as-tool | WIP |
 | `google_adk/` | Timbal vs Google ADK - agents, sub-agent transfer, callbacks | WIP |
-| `mastra/` | Timbal vs Mastra (TypeScript) — cross-language: agents and DAG workflows, each in its native runtime | WIP |
+| `mastra/` | Timbal vs Mastra (TypeScript) — cross-language: agents and DAG workflows, each in its native runtime; includes a raw Vercel AI SDK baseline | WIP |
+| `langgraph_js/` | Runtime calibration: LangGraph Python vs LangGraph.js — same framework on CPython and V8, isolating the runtime factor for all cross-language tables | WIP |
 | `rust/` | Timbal (Python) vs timbal-rs (Rust) — same agent loop, native runtimes | WIP |
 
 **Coming next:** deeper Google ADK orchestration benchmarks.
