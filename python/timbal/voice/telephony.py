@@ -150,6 +150,10 @@ class TelephonyPlaybackTracker(BufferedPlaybackTracker):
     ack. On barge-in the session calls :meth:`on_interrupted` — beyond
     freezing the played axis, the provider must also drop its buffered audio,
     so the bridge's ``clear``-sender fires here.
+
+    :attr:`ack_received` is always true: marks are the native playback clock
+    (same posture as WebRTC / LiveKit paced trackers), not an optional
+    browser ack. Position is still estimate-only until the first echo.
     """
 
     def __init__(self, bytes_per_second: int, on_clear: Callable[[], None]) -> None:
@@ -159,3 +163,15 @@ class TelephonyPlaybackTracker(BufferedPlaybackTracker):
     def on_interrupted(self) -> None:
         super().on_interrupted()
         self._on_clear()
+
+    @property
+    def ack_received(self) -> bool:
+        # Marks are the native playback clock (same posture as WebRTC's paced
+        # tracker). The first echo cannot arrive before the carrier has played
+        # the first media frame — typically after TTS has already finished
+        # generating — so inheriting BufferedPlaybackTracker's "False until
+        # first ack" made every telephony turn-1 metrics line look like marks
+        # were broken. Position is still estimate-only until the first echo;
+        # this flag means the transport *has* an ack path, not that one has
+        # landed yet.
+        return True

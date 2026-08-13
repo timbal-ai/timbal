@@ -785,7 +785,7 @@
           </label>
           <label class="field">
             <span class="field-label">Transport</span>
-            <select id="transport-select" aria-label="Transport" title="How audio moves — applied on the next Start. WebRTC uses Opus tracks (server needs timbal[voice]); LiveKit is local-only (playground mints a room; agent needs timbal[voice-livekit]). Noise suppression runs in the browser's own pipeline on WebRTC/LiveKit, so the RNNoise option applies to WebSocket only.">
+            <select id="transport-select" aria-label="Transport" title="How audio moves — applied on the next Start. WebRTC uses Opus tracks (server needs timbal[voice]). LiveKit joins an SFU room: local target mints via the playground launcher, platform target mints via the monolith (project must be flagged, or use the preview endpoint); the agent needs timbal[voice-livekit]. Noise suppression runs in the browser's own pipeline on WebRTC/LiveKit, so the RNNoise option applies to WebSocket only.">
               <option value="ws">WebSocket (PCM)</option>
               <option value="webrtc">WebRTC (Opus)</option>
               <option value="livekit">LiveKit (SFU)</option>
@@ -2026,13 +2026,8 @@ async function start() {
   const gen = startGen;
   // Fail on incomplete platform config before prompting for the microphone.
   if (targetMode() === 'platform') validatePlatform(platformValues());
-  if (transportSelect.value === 'livekit') {
-    if (targetMode() === 'platform') {
-      throw new Error('LiveKit is local-only for now — pick Local server.');
-    }
-    if (!launcherAvailable) {
-      throw new Error('LiveKit needs the playground launcher (`python -m timbal.server.playground`) so it can mint room tokens.');
-    }
+  if (transportSelect.value === 'livekit' && targetMode() === 'local' && !launcherAvailable) {
+    throw new Error('LiveKit on the local target needs the playground launcher (`python -m timbal.server.playground`) so it can mint room tokens.');
   }
   // Local target behind the launcher: spawn (or reuse) the agent server first,
   // so the WS/RTC dial below lands on a healthy process.
@@ -2057,9 +2052,15 @@ async function start() {
   }
 
   if (transportSelect.value === 'livekit') {
-    const dial = spawned?.livekit;
-    if (!dial?.url || !dial?.token) {
-      throw new Error('Launcher did not return a LiveKit dial (url/token). Put LIVEKIT_API_KEY / LIVEKIT_API_SECRET / TIMBAL_LIVEKIT_URL in the agent .env.');
+    let dial;
+    if (targetMode() === 'platform') {
+      dial = await mintPlatformLivekitDial();
+      if (gen !== startGen) return;
+    } else {
+      dial = spawned?.livekit;
+      if (!dial?.url || !dial?.token) {
+        throw new Error('Launcher did not return a LiveKit dial (url/token). Put LIVEKIT_API_KEY / LIVEKIT_API_SECRET / TIMBAL_LIVEKIT_URL in the agent .env.');
+      }
     }
     await startLivekit(gen, dial);
     return;
@@ -2313,6 +2314,41 @@ function handleServerMessage(msg) {
 const LIVEKIT_CLIENT_ESM = 'https://cdn.jsdelivr.net/npm/livekit-client@2.15.16/+esm';
 const LIVEKIT_EVENTS_TOPIC = 'timbal.events';
 
+/**
+ * Platform target: ask the monolith for a LiveKit room. Deployed endpoint is
+ * the body-discriminated `POST voice/rtc`; preview is `POST voice/preview` —
+ * both answer `{transport, url, token, room, identity}` after the box joined.
+ */
+async function mintPlatformLivekitDial() {
+  const pv = platformValues();
+  validatePlatform(pv);
+  const isPreview = pv.endpoint === 'preview';
+  setConn('connecting', 'Connecting', isPreview
+    ? 'Minting a LiveKit room against the branch worktree (first call after a source edit pays a uv sync — up to ~2 min)…'
+    : 'Minting a LiveKit room through the platform (box spawn can take up to ~30 s)…');
+  const pathTail = isPreview ? 'voice/preview' : 'voice/rtc';
+  const resp = await fetch(`${platformBase(pv)}/${pathTail}?rev=${encodeURIComponent(pv.rev)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pv.token}` },
+    body: JSON.stringify({ transport: 'livekit', config: sessionConfigPayload() }),
+  });
+  if (!resp.ok) {
+    let detail = `Server answered ${resp.status}.`;
+    try { detail = (await resp.json()).error || detail; } catch (_) {}
+    if (resp.status === 409) {
+      detail += isPreview
+        ? ' LiveKit is not enabled on this platform (TIMBAL_LIVEKIT_* config / kill switch).'
+        : ' Flag the project (Projects.voice_transport = livekit) or switch the transport to WebRTC.';
+    }
+    throw new Error(detail);
+  }
+  const dial = await resp.json();
+  if (dial.transport !== 'livekit' || !dial.url || !dial.token) {
+    throw new Error('Platform did not return a LiveKit dial — is the monolith older than the voice/rtc transport fork?');
+  }
+  return dial;
+}
+
 async function startLivekit(gen, dial) {
   setConn('connecting', 'Connecting', `Joining LiveKit room ${dial.room}…`);
   const { Room, RoomEvent, Track } = await import(LIVEKIT_CLIENT_ESM);
@@ -2531,14 +2567,10 @@ async function startRtc(gen) {
 // --- Standalone bootstrap --------------------------------------------------
 
 function syncTransportForTarget() {
-  const platform = targetMode() === 'platform';
-  const lkOpt = [...transportSelect.options].find((o) => o.value === 'livekit');
-  if (lkOpt) {
-    lkOpt.disabled = platform;
-    if (platform && transportSelect.value === 'livekit') transportSelect.value = 'webrtc';
-  }
-  const rtcOpt = [...transportSelect.options].find((o) => o.value === 'webrtc');
-  if (rtcOpt) rtcOpt.disabled = false;
+  // Every transport works on every target now: LiveKit mints locally via the
+  // launcher and on platform via the monolith's voice/rtc / voice/preview
+  // fork (a 409 surfaces when the platform/project isn't flagged for it).
+  for (const opt of transportSelect.options) opt.disabled = false;
   syncNsForTransport();
 }
 
