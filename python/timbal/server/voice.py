@@ -268,6 +268,10 @@ def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:
     (:func:`select_turn_detector_spec`). Flux forces the provider turn
     detector, so those ONNX models never run — loading them anyway races
     the first turn with HuggingFace downloads on a cold box.
+
+    Can be *heavy*: with ``turn_detector=None`` the spec resolution builds the
+    default detector, importing onnxruntime/transformers. Call it off the
+    event loop (``warmup_voice_stack`` runs it in the import executor).
     """
     from ..voice.deepgram import DeepgramFluxSTT, resolve_stt
     from ..voice.turn_detection import LocalAudioTurnDetector
@@ -301,24 +305,27 @@ async def warmup_voice_stack(voice_config: VoiceConfig) -> None:
       :func:`voice_onnx_warmup_intended`.
     """
     loop = asyncio.get_running_loop()
-    load_onnx = voice_onnx_warmup_intended(voice_config)
 
-    def _import_stack() -> None:
+    def _import_stack() -> bool:
         import importlib
 
         importlib.import_module("timbal.voice.elevenlabs")
         importlib.import_module("timbal.voice.deepgram")
-        if not load_onnx:
-            return
+        # The detector-choice probe can itself import onnxruntime/transformers
+        # (default turn_detector resolution) — must stay in this executor, off
+        # the event loop and under the caller's except.
+        if not voice_onnx_warmup_intended(voice_config):
+            return False
         try:
             importlib.import_module("timbal.voice.smart_turn")
             importlib.import_module("timbal.voice.namo")
             importlib.import_module("timbal.voice.vad")
         except ImportError:
             pass  # timbal[voice] extra not installed — heuristics only
+        return True
 
     try:
-        await loop.run_in_executor(None, _import_stack)
+        load_onnx = await loop.run_in_executor(None, _import_stack)
     except Exception as e:
         logger.debug("voice_warmup_import_failed", error=str(e))
         return
