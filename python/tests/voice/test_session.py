@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from pathlib import Path
 
 import pytest
 from timbal import Agent
@@ -1914,6 +1915,32 @@ class TestStreamingTTS:
         assert session._turn_tts_stream is None
         assert session._turn_tts_pump is None
         assert any(isinstance(e, SessionInterrupted) for e in events)
+
+    async def test_streaming_tts_feeds_call_recorder(self, tmp_path: Path) -> None:
+        """Streaming TTS must call CallRecorder.add_agent.
+
+        ElevenLabs (and any ``open_stream`` provider) goes through
+        ``_pump_tts_stream``, not ``_speak``. Skipping add_agent there left
+        split recordings as caller-left / silence-right.
+        """
+        from timbal.voice.recording import CallRecorder
+
+        tts = StreamingMockTTS(bytes_per_char=10)
+        recorder = CallRecorder(tmp_path / "call.mp3", sample_rate=16_000, layout="split")
+        session = VoiceSession(
+            agent=Agent(
+                name="t",
+                model=TestModel(responses=[self.RESPONSE]),
+                tools=[],
+            ),
+            stt=MockSTT(script=[TranscriptEvent(type="committed", text="hi")]),
+            tts=tts,
+            recorder=recorder,
+            turn_detector="heuristic",
+        )
+        await _collect_events(session)
+        assert recorder._agent_bytes > 0
+        assert recorder._closed
 
 
 # ---------------------------------------------------------------------------
