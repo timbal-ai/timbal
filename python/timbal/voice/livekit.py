@@ -131,6 +131,19 @@ class LkPacedSource:
         by_clock = int(round(elapsed * self._sr)) * 2
         return min(self._emitted_bytes, self._played_frozen + by_clock)
 
+    def _freeze_if_drained(self) -> None:
+        """On underrun, once the clock catches everything emitted: freeze + re-anchor.
+
+        Without this the wall-clock term keeps running through the pause, so
+        the next burst's frames count as played the instant they are queued —
+        the ``_LEAD_SECS`` subtraction would only ever apply to the first
+        burst, inflating barge-in ``heard_text`` and the recorded agent tail
+        on later turns by audio still sitting in the lead buffer.
+        """
+        if self._started_at is not None and self._played_bytes_now() >= self._emitted_bytes:
+            self._played_frozen = self._emitted_bytes
+            self._started_at = None
+
     def _make_frame(self, pcm: bytes) -> object:
         if self._frame_factory is not None:
             return self._frame_factory(pcm)
@@ -171,6 +184,8 @@ class LkPacedSource:
                 if self._started_at is None:
                     self._started_at = self._clock()
                 self._emitted_bytes += real_bytes
+            else:
+                self._freeze_if_drained()
             next_at += _FRAME_SECS
             sleep_for = next_at - self._clock() - _LEAD_SECS
             if sleep_for > 0:

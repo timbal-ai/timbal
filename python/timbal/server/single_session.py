@@ -40,6 +40,11 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 _DEFAULT_IDLE_EXIT_SECS = 60.0
 
+# After the abandon window closes and ``on_abandon`` (session.close) has run,
+# how long to wait for the transport driver's own teardown — recording
+# finalization, transcript flush, ``finish()`` — before force-exiting anyway.
+_ABANDON_TEARDOWN_GRACE_SECS = 30.0
+
 
 def _exit_process(code: int) -> None:
     """Hard process exit.
@@ -70,9 +75,15 @@ class SingleSessionGuard:
         self._claimed = False
         self._connected = False
         self._finished = False
+        self._finished_evt = asyncio.Event()
         self._idle_task: asyncio.Task | None = None
         self._abandon_task: asyncio.Task | None = None
         self._on_abandon: Any = None
+
+    def _mark_finished(self) -> None:
+        self._finished = True
+        self._claimed = True
+        self._finished_evt.set()
 
     def start(self) -> None:
         """Arm the idle-exit timer. Requires a running event loop (lifespan)."""
@@ -119,8 +130,7 @@ class SingleSessionGuard:
             # Connected (or the session already finished) while draining —
             # session teardown owns the process lifetime from here.
             return
-        self._finished = True
-        self._claimed = True
+        self._mark_finished()
         logger.info("voice_single_session_exit")
         _exit_process(0)
 
@@ -186,6 +196,22 @@ class SingleSessionGuard:
                     await result
             except Exception as e:
                 logger.error("voice_single_session_abandon_close_failed", error=str(e))
+            # ``session.close`` only queues the session's stop sentinel — the
+            # recording finalization, transcript flush and upload enqueue all
+            # happen in the transport driver's drain of ``session.run``, which
+            # ends in ``finish()``. Hand the exit to that teardown; the forced
+            # drain+exit below is only the backstop for a hung driver (without
+            # it, ``drain_upload_tasks`` sees no upload yet, returns instantly,
+            # and ``_exit_process`` loses the recording).
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._finished_evt.wait(), timeout=_ABANDON_TEARDOWN_GRACE_SECS
+                )
+            if not self._finished:
+                logger.warning(
+                    "voice_single_session_abandon_teardown_timeout",
+                    grace_secs=_ABANDON_TEARDOWN_GRACE_SECS,
+                )
         if self._finished:
             return
         from .recording_upload import drain_upload_tasks
@@ -196,8 +222,7 @@ class SingleSessionGuard:
             logger.error("voice_single_session_drain_failed", error=str(e))
         if self._finished:
             return
-        self._finished = True
-        self._claimed = True
+        self._mark_finished()
         logger.info("voice_single_session_exit")
         _exit_process(0)
 
@@ -210,8 +235,7 @@ class SingleSessionGuard:
         """
         if self._finished:
             return
-        self._finished = True
-        self._claimed = True
+        self._mark_finished()
         self.shutdown()
         from .recording_upload import drain_upload_tasks
 

@@ -161,7 +161,12 @@ class TestSingleSessionGuard:
 
 
 class TestAbandonWindow:
-    async def test_mark_disconnected_exits_after_the_window(self, exits: list[int]) -> None:
+    async def test_mark_disconnected_exits_after_the_window(
+        self, exits: list[int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "timbal.server.single_session._ABANDON_TEARDOWN_GRACE_SECS", 0.05
+        )
         guard = SingleSessionGuard(idle_exit_secs=60.0, abandon_exit_secs=0.05)
         assert guard.claim()
         guard.mark_connected()
@@ -173,6 +178,47 @@ class TestAbandonWindow:
         guard.mark_disconnected(on_abandon=_close)
         await asyncio.sleep(0.3)
         assert closed == [True]
+        assert exits == [0]
+
+    async def test_abandon_waits_for_the_driver_teardown(self, exits: list[int]) -> None:
+        """close() only queues the session's stop sentinel — the recording
+        finalizes in the driver's drain, which ends in finish(). The abandon
+        path must not exit before that teardown lands."""
+        guard = SingleSessionGuard(idle_exit_secs=60.0, abandon_exit_secs=0.05)
+        assert guard.claim()
+        guard.mark_connected()
+        exited_before_teardown = []
+
+        async def _close() -> None:
+            # Simulate the driver: teardown lands shortly *after* close() returns.
+            async def _teardown() -> None:
+                await asyncio.sleep(0.05)
+                exited_before_teardown.append(bool(exits))
+                await guard.finish()
+
+            asyncio.get_running_loop().create_task(_teardown())
+
+        guard.mark_disconnected(on_abandon=_close)
+        await asyncio.sleep(0.3)
+        assert exited_before_teardown == [False]
+        assert exits == [0]
+
+    async def test_abandon_forces_exit_when_teardown_never_lands(
+        self, exits: list[int], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hung driver must not keep the box alive forever after abandon."""
+        monkeypatch.setattr(
+            "timbal.server.single_session._ABANDON_TEARDOWN_GRACE_SECS", 0.05
+        )
+        guard = SingleSessionGuard(idle_exit_secs=60.0, abandon_exit_secs=0.05)
+        assert guard.claim()
+        guard.mark_connected()
+
+        async def _close() -> None:
+            pass  # finish() never comes
+
+        guard.mark_disconnected(on_abandon=_close)
+        await asyncio.sleep(0.3)
         assert exits == [0]
 
     async def test_mark_reconnected_cancels_abandon(self, exits: list[int]) -> None:

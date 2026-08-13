@@ -65,6 +65,33 @@ class TestLkPacedSourceClock:
         t[0] = _LEAD_SECS + 10.0
         assert src.played_bytes == 3 * _FRAME_BYTES  # cap at emitted
 
+    def test_underrun_freezes_and_reanchors_the_clock(self) -> None:
+        """After a pause the next burst must get its own lead subtraction —
+        without the re-anchor, wall clock keeps running through the pause and
+        newly queued frames count as played instantly."""
+        t = [0.0]
+        src, _ = _source(clock=lambda: t[0])
+        src._started_at = 0.0
+        src._emitted_bytes = 2 * _FRAME_BYTES
+        # Mid-drain: emitted audio still playing out — no freeze yet.
+        t[0] = _LEAD_SECS + 0.02
+        src._freeze_if_drained()
+        assert src._started_at == 0.0
+        # Clock caught everything emitted: freeze and drop the anchor.
+        t[0] = _LEAD_SECS + 0.04
+        src._freeze_if_drained()
+        assert src._started_at is None
+        assert src.played_bytes == 2 * _FRAME_BYTES
+        # Long pause: frozen, not running ahead.
+        t[0] = 100.0
+        assert src.played_bytes == 2 * _FRAME_BYTES
+        # New burst re-anchors: nothing counts as played inside the new lead window.
+        src._started_at = t[0]
+        src._emitted_bytes += 3 * _FRAME_BYTES
+        assert src.played_bytes == 2 * _FRAME_BYTES
+        t[0] = 100.0 + _LEAD_SECS + 0.02
+        assert src.played_bytes == 3 * _FRAME_BYTES
+
     def test_flush_freezes_played_axis_and_clears_libwebrtc(self) -> None:
         t = [0.0]
         src, fake = _source(clock=lambda: t[0])
@@ -102,6 +129,21 @@ class TestLkPacedSourcePusher:
         await src.aclose()
         assert src.played_bytes == _FRAME_BYTES
         assert fake.captured[0] == b"\x01\x02" * (_FRAME_BYTES // 2)
+
+    async def test_anchor_drops_after_the_burst_plays_out(self) -> None:
+        src, _ = _source()
+        src.write(b"\x01\x02" * (_FRAME_BYTES // 2))  # one frame
+        await src.start()
+        deadline = time.monotonic() + 1.0
+        # None → burst starts (anchor set) → drains (anchor dropped, frozen).
+        while (
+            not (src._emitted_bytes >= _FRAME_BYTES and src._started_at is None)
+            and time.monotonic() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        await src.aclose()
+        assert src._started_at is None
+        assert src.played_bytes == _FRAME_BYTES
 
     async def test_flush_during_capture_does_not_count_the_frame(self) -> None:
         src, fake = _source()
