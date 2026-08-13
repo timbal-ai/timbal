@@ -2117,6 +2117,8 @@ class VoiceSession:
                 self._turn_audio_bytes += len(chunk)
                 if self._record_audio:
                     self._output_audio_chunks.append(chunk)
+                if self._recorder is not None:
+                    self._recorder.add_agent(chunk)
                 record[1] += len(chunk)
                 await self._emit(AudioOutput(data=chunk))
                 self.playback.on_audio_emitted(len(chunk))
