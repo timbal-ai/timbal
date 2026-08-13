@@ -12,7 +12,9 @@ from types import SimpleNamespace
 from timbal.server.livekit_session import (
     _is_caller,
     chunk_data_payloads,
+    is_config_hello,
     maybe_start_livekit_session,
+    merge_client_config,
 )
 
 
@@ -67,3 +69,33 @@ class TestChunkDataPayloads:
     def test_non_transcript_oversized_is_left_intact(self) -> None:
         payload = {"type": "agent_text_done", "text": "y" * 20_000}
         assert chunk_data_payloads([payload]) == [payload]
+
+
+class TestMergeClientConfig:
+    def test_hello_overlays_env(self) -> None:
+        merged = merge_client_config(
+            '{"stt_provider": "elevenlabs", "model": "env/model"}',
+            {"stt_provider": "deepgram-flux", "turn_detector": "provider"},
+        )
+        assert merged["stt_provider"] == "deepgram-flux"
+        assert merged["turn_detector"] == "provider"
+        assert merged["model"] == "env/model"
+
+    def test_bad_env_json_is_empty_base(self) -> None:
+        assert merge_client_config("not-json", {"tts_provider": "elevenlabs"}) == {
+            "tts_provider": "elevenlabs"
+        }
+
+    def test_no_hello_keeps_env(self) -> None:
+        assert merge_client_config('{"voice": "abc"}', None) == {"voice": "abc"}
+
+
+class TestConfigHello:
+    def test_untyped_object_is_hello(self) -> None:
+        assert is_config_hello({"sample_rate": 16000, "stt_provider": "elevenlabs"})
+
+    def test_typed_frame_is_not_hello(self) -> None:
+        assert not is_config_hello({"type": "playback", "played_ms": 12})
+
+    def test_null_type_is_hello(self) -> None:
+        assert is_config_hello({"type": None, "sample_rate": 16000})

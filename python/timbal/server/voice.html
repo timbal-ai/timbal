@@ -785,9 +785,10 @@
           </label>
           <label class="field">
             <span class="field-label">Transport</span>
-            <select id="transport-select" aria-label="Transport" title="How audio moves — applied on the next Start. WebRTC uses Opus tracks (server needs timbal[voice]); noise suppression runs in the browser's own pipeline there, so the RNNoise option applies to WebSocket only.">
+            <select id="transport-select" aria-label="Transport" title="How audio moves — applied on the next Start. WebRTC uses Opus tracks (server needs timbal[voice]); LiveKit is local-only (playground mints a room; agent needs timbal[voice-livekit]). Noise suppression runs in the browser's own pipeline on WebRTC/LiveKit, so the RNNoise option applies to WebSocket only.">
               <option value="ws">WebSocket (PCM)</option>
               <option value="webrtc">WebRTC (Opus)</option>
+              <option value="livekit">LiveKit (SFU)</option>
             </select>
           </label>
           <label class="field">
@@ -949,14 +950,17 @@ if (![...transportSelect.options].some((o) => o.value === transportSelect.value 
 // Only the *default* WebRTC silently falls back to WS when the server lacks
 // the voice extra (501) — an explicit user/URL choice surfaces the error.
 let transportExplicit = !!(transportFromUrl || localStorage.getItem(TRANSPORT_STORAGE_KEY));
+function isRtcLikeTransport() {
+  return transportSelect.value === 'webrtc' || transportSelect.value === 'livekit';
+}
 function syncNsForTransport() {
-  // WebRTC sends the raw mic track, so the worklet's RNNoise output never
+  // WebRTC/LiveKit send the raw mic track, so the worklet's RNNoise output never
   // reaches the wire — the transport forces browser noise suppression
   // (startMic mirrors this). Gray the control out instead of lying with it.
-  const rtc = transportSelect.value === 'webrtc';
+  const rtc = isRtcLikeTransport();
   nsSelect.disabled = rtc;
   nsSelect.title = rtc
-    ? 'Not configurable over WebRTC — the browser applies its own noise suppression to the mic track.'
+    ? 'Not configurable over WebRTC/LiveKit — the browser applies its own noise suppression to the mic track.'
     : "Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.";
 }
 transportSelect.onchange = () => {
@@ -1472,7 +1476,8 @@ function applyMeta(meta) {
 
 let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
 /** WebRTC transport state: the peer connection and the element playing the server's TTS track. */
-let pc = null, remoteAudioEl = null;
+let pc = null, remoteAudioEl = null, lkRoom = null;
+let lkTranscriptChunks = null;
 /** False until WS is open, config frame sent, and AudioContext is running (worklet processes mic). */
 let micAudioToWs = false;
 let nextPlayTime = 0;
@@ -1751,7 +1756,7 @@ async function startMic(deviceId) {
 
   // WebRTC ships the raw getUserMedia track; RNNoise lives in the worklet
   // and would be silently bypassed — force the browser suppressor instead.
-  const nsMode = transportSelect.value === 'webrtc' ? 'browser' : nsSelect.value;
+  const nsMode = isRtcLikeTransport() ? 'browser' : nsSelect.value;
   let useRnnoise = nsMode === 'rnnoise';
   if (useRnnoise && rnnoiseAssets === null) {
     try {
@@ -1919,6 +1924,12 @@ async function endSession({ userInitiated = false, silent = false } = {}) {
     conn.ontrack = null;
     try { conn.close(); } catch (_) {}
   }
+  if (lkRoom) {
+    const room = lkRoom;
+    lkRoom = null;
+    try { await room.disconnect(); } catch (_) {}
+  }
+  lkTranscriptChunks = null;
   if (remoteAudioEl) {
     try { remoteAudioEl.pause(); remoteAudioEl.srcObject = null; } catch (_) {}
     remoteAudioEl = null;
@@ -2015,10 +2026,19 @@ async function start() {
   const gen = startGen;
   // Fail on incomplete platform config before prompting for the microphone.
   if (targetMode() === 'platform') validatePlatform(platformValues());
+  if (transportSelect.value === 'livekit') {
+    if (targetMode() === 'platform') {
+      throw new Error('LiveKit is local-only for now — pick Local server.');
+    }
+    if (!launcherAvailable) {
+      throw new Error('LiveKit needs the playground launcher (`python -m timbal.server.playground`) so it can mint room tokens.');
+    }
+  }
   // Local target behind the launcher: spawn (or reuse) the agent server first,
   // so the WS/RTC dial below lands on a healthy process.
+  let spawned = null;
   if (targetMode() === 'local' && launcherAvailable) {
-    await ensureLocalServer();
+    spawned = await ensureLocalServer();
     if (gen !== startGen) return;
   }
   setConn('connecting', 'Getting ready', 'Microphone and server connection…');
@@ -2034,6 +2054,15 @@ async function start() {
     await startMic(preferred);
     if (gen !== startGen) return;
     await populateDevices();
+  }
+
+  if (transportSelect.value === 'livekit') {
+    const dial = spawned?.livekit;
+    if (!dial?.url || !dial?.token) {
+      throw new Error('Launcher did not return a LiveKit dial (url/token). Put LIVEKIT_API_KEY / LIVEKIT_API_SECRET / TIMBAL_LIVEKIT_URL in the agent .env.');
+    }
+    await startLivekit(gen, dial);
+    return;
   }
 
   if (transportSelect.value === 'webrtc') {
@@ -2281,6 +2310,86 @@ function handleServerMessage(msg) {
   }
 }
 
+const LIVEKIT_CLIENT_ESM = 'https://cdn.jsdelivr.net/npm/livekit-client@2.15.16/+esm';
+const LIVEKIT_EVENTS_TOPIC = 'timbal.events';
+
+async function startLivekit(gen, dial) {
+  setConn('connecting', 'Connecting', `Joining LiveKit room ${dial.room}…`);
+  const { Room, RoomEvent, Track } = await import(LIVEKIT_CLIENT_ESM);
+  if (gen !== startGen) return;
+  const room = new Room();
+  lkRoom = room;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  function handleLkPayload(bytes) {
+    let msg;
+    try { msg = JSON.parse(decoder.decode(bytes)); } catch (err) {
+      console.error('voice livekit: bad json', err);
+      return;
+    }
+    if (msg?.type === 'session_transcript' && Number.isFinite(msg.seq) && Number.isFinite(msg.total) && msg.total > 1) {
+      lkTranscriptChunks = lkTranscriptChunks || [];
+      lkTranscriptChunks[msg.seq] = msg;
+      if (lkTranscriptChunks.filter(Boolean).length === msg.total) {
+        const entries = lkTranscriptChunks.flatMap((c) => c.entries || []);
+        const startedAt = lkTranscriptChunks[0]?.started_at;
+        lkTranscriptChunks = null;
+        handleServerMessage({ type: 'session_transcript', entries, ...(startedAt != null ? { started_at: startedAt } : {}) });
+      }
+      return;
+    }
+    handleServerMessage(msg);
+  }
+
+  room.on(RoomEvent.DataReceived, (payload, _p, _k, topic) => {
+    if (gen !== startGen) return;
+    if (topic && topic !== LIVEKIT_EVENTS_TOPIC) return;
+    handleLkPayload(payload);
+  });
+
+  room.on(RoomEvent.TrackSubscribed, (track) => {
+    if (gen !== startGen) return;
+    if (track.kind !== Track.Kind.Audio) return;
+    remoteAudioEl = remoteAudioEl || new Audio();
+    remoteAudioEl.autoplay = true;
+    remoteAudioEl.srcObject = new MediaStream([track.mediaStreamTrack]);
+    remoteAudioEl.play?.().catch(() => { /* autoplay policy — resumes on gesture */ });
+  });
+
+  room.on(RoomEvent.Disconnected, () => {
+    if (gen !== startGen || lkRoom !== room) return;
+    sessionReady = false;
+    micViz.classList.remove('active');
+    if (connVisual === 'ended' || connVisual === 'error') { updateEmptyState(); return; }
+    if (userEndedSession) {
+      setConn('ended', 'Session ended', 'Click Start for a new session.');
+    } else {
+      setConn('ended', 'Disconnected', 'LiveKit room closed. Click Start for a new session.');
+    }
+    updateEmptyState();
+  });
+
+  await room.connect(dial.url, dial.token);
+  if (gen !== startGen) {
+    try { await room.disconnect(); } catch (_) {}
+    if (lkRoom === room) lkRoom = null;
+    return;
+  }
+  await room.localParticipant.publishTrack(micStream.getAudioTracks()[0]);
+  if (gen !== startGen) return;
+  const ctxRate = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+  const sr = rnnoiseCtxActive ? Math.round(ctxRate / 3) : ctxRate;
+  sessionSampleRate = sr;
+  await room.localParticipant.publishData(
+    encoder.encode(JSON.stringify({ sample_rate: sr, ...sessionConfigPayload() })),
+    { reliable: true, topic: LIVEKIT_EVENTS_TOPIC },
+  );
+  resetSessionUi();
+  setConn('live', 'Starting…', 'Loading STT / turn models (first session can take a few seconds)…');
+  updateEmptyState();
+}
+
 async function startRtc(gen) {
   const isPlatform = targetMode() === 'platform';
   // One snapshot for the whole dial: the ICE-gathering wait below yields for
@@ -2412,8 +2521,12 @@ async function startRtc(gen) {
 // --- Standalone bootstrap --------------------------------------------------
 
 function syncTransportForTarget() {
-  // Both transports work on every target now (preview gained RTC signaling:
-  // POST + SDP offer on the same voice/preview URL) — nothing to disable.
+  const platform = targetMode() === 'platform';
+  const lkOpt = [...transportSelect.options].find((o) => o.value === 'livekit');
+  if (lkOpt) {
+    lkOpt.disabled = platform;
+    if (platform && transportSelect.value === 'livekit') transportSelect.value = 'webrtc';
+  }
   const rtcOpt = [...transportSelect.options].find((o) => o.value === 'webrtc');
   if (rtcOpt) rtcOpt.disabled = false;
   syncNsForTransport();
@@ -2557,15 +2670,20 @@ async function ensureLocalServer() {
   if (!st) throw new Error('Playground launcher is not reachable — restart `python -m timbal.server.playground`.');
   let child = st.child;
   const alive = child && (child.state === 'running' || child.state === 'starting');
-  // The launcher echoes the raw spec the child was spawned from — compare
-  // against that, not client-side state: a survivor from a previous page load
-  // may be running a different agent than the (persisted) form says.
-  if (!alive || child.requested_import_spec !== spec || (port !== null && child.port !== port)) {
+  const transport = transportSelect.value;
+  // LiveKit driver is one-shot (TIMBAL_VOICE_SINGLE_SESSION=1) — always respawn
+  // so Start after Stop gets a fresh room/token. Also respawn on spec/port/transport mismatch.
+  const mustRespawn = transport === 'livekit'
+    || !alive
+    || child.requested_import_spec !== spec
+    || (port !== null && child.port !== port)
+    || (child.transport && child.transport !== transport);
+  if (mustRespawn) {
     setConn('connecting', 'Spawning server', `uv run timbal.server — ${spec}`);
     const r = await fetch('/launcher/spawn', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ import_spec: spec, ...(port !== null ? { port } : {}) }),
+      body: JSON.stringify({ import_spec: spec, transport, ...(port !== null ? { port } : {}) }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `Spawn failed (${r.status}).`);
@@ -2589,6 +2707,7 @@ async function ensureLocalServer() {
   lastChildState = 'running';
   adoptSpawnedChild(child);
   void probeLocal();
+  return child;
 }
 
 function onTargetChanged() {

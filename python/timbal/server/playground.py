@@ -9,7 +9,13 @@ where you pick a target:
   timbal.server --import_spec … --port …`` from the agent file's directory (so
   ``uv`` resolves that project's environment and ``.env``), waits for the
   healthcheck, and dials it. The port is picked automatically unless fixed in
-  the form. Changing the agent or port respawns on the next Start.
+  the form. Changing the agent or port respawns on the next Start. Transport
+  **LiveKit** is local-only: the launcher mints a room + caller JWT (stdlib
+  HMAC, no PyJWT) from ``LIVEKIT_API_KEY`` / ``LIVEKIT_API_SECRET`` /
+  ``TIMBAL_LIVEKIT_URL`` (or ``LIVEKIT_URL``) in the env or the agent's
+  ``.env``. Use ``wss://lk.timbal.ai`` — port 7880 is VPC-only. The child
+  gets ``TIMBAL_VOICE_SINGLE_SESSION=1`` so Stop/Start respawns a fresh
+  driver. Agent extra: ``timbal[voice-livekit]``.
 * **Platform** — a deployed workforce through ``api.timbal.ai`` /
   ``api.dev.timbal.ai``. The page talks to the platform directly (ticket mint
   for WS, bearer-authenticated POST for RTC); the launcher is not involved.
@@ -21,12 +27,17 @@ Deliberately stdlib-only: the launcher must work even when no agent project
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import shutil
 import socket
 import subprocess
 import threading
+import time
+import uuid
 import webbrowser
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +50,102 @@ _HTML_PATH = Path(__file__).parent / "voice.html"
 
 _LOG_LINES = 400
 _STOP_GRACE_SECS = 5.0
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
+def _read_dotenv(path: Path) -> dict[str, str]:
+    """Minimal KEY=VALUE reader — launcher stays stdlib-only."""
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = _unquote(value.strip())
+    return out
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def mint_livekit_jwt(
+    *,
+    api_key: str,
+    api_secret: str,
+    identity: str,
+    room: str,
+    ttl_secs: int = 3600,
+    name: str | None = None,
+) -> str:
+    """HS256 LiveKit access token. Grant keys are camelCase, matching livekit-server."""
+    now = int(time.time())
+    header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    payload = _b64url(
+        json.dumps(
+            {
+                "iss": api_key,
+                "sub": identity,
+                "name": name or identity,
+                "nbf": now,
+                "iat": now,
+                "exp": now + ttl_secs,
+                "jti": uuid.uuid4().hex,
+                "video": {
+                    "roomJoin": True,
+                    "room": room,
+                    "canPublish": True,
+                    "canSubscribe": True,
+                    "canPublishData": True,
+                },
+            },
+            separators=(",", ":"),
+        ).encode()
+    )
+    sig = hmac.new(api_secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    return f"{header}.{payload}.{_b64url(sig)}"
+
+
+def livekit_creds(project_dir: Path) -> tuple[str, str, str]:
+    """``(url, api_key, api_secret)``. Process env wins over the agent's ``.env``."""
+    file_env = _read_dotenv(project_dir / ".env")
+
+    def pick(*names: str) -> str:
+        for n in names:
+            v = os.environ.get(n)
+            if v:
+                return v
+        for n in names:
+            v = file_env.get(n)
+            if v:
+                return v
+        return ""
+
+    return (
+        pick("TIMBAL_LIVEKIT_URL", "LIVEKIT_URL"),
+        pick("LIVEKIT_API_KEY", "TIMBAL_LIVEKIT_API_KEY"),
+        pick("LIVEKIT_API_SECRET", "TIMBAL_LIVEKIT_API_SECRET"),
+    )
+
+
+_LIVEKIT_CHILD_ENV_KEYS = (
+    "TIMBAL_VOICE_TRANSPORT",
+    "TIMBAL_LIVEKIT_URL",
+    "TIMBAL_LIVEKIT_TOKEN",
+    "TIMBAL_LIVEKIT_ROOM",
+    "TIMBAL_LIVEKIT_CALLER_IDENTITY",
+    "TIMBAL_VOICE_SINGLE_SESSION",
+)
 
 
 def _free_port() -> int:
@@ -68,13 +175,15 @@ class ChildServer:
         can tell whether the running child matches its form without having to
         replicate the launcher's path resolution."""
         self._logs: deque[str] = deque(maxlen=_LOG_LINES)
+        self._transport: str | None = None
+        self._livekit: dict[str, str] | None = None
 
     def _reader(self, proc: subprocess.Popen) -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
             self._logs.append(line.rstrip("\n"))
 
-    def spawn(self, import_spec: str, port: int | None = None) -> dict:
+    def spawn(self, import_spec: str, port: int | None = None, transport: str = "ws") -> dict:
         spec = import_spec.strip()
         parts = spec.split("::")
         if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -88,6 +197,17 @@ class ChildServer:
         if shutil.which("uv") is None:
             raise ValueError("'uv' was not found on PATH — install uv or start the server manually.")
         resolved_spec = f"{spec_path}::{parts[1]}"
+        kind = (transport or "ws").strip().lower()
+        livekit_plan: tuple[str, str, str] | None = None
+        if kind == "livekit":
+            livekit_plan = livekit_creds(spec_path.parent)
+            if not all(livekit_plan):
+                raise ValueError(
+                    "LiveKit needs TIMBAL_LIVEKIT_URL (or LIVEKIT_URL) plus "
+                    "LIVEKIT_API_KEY and LIVEKIT_API_SECRET in the environment "
+                    "or the agent's .env. Browser clients must use wss://… "
+                    "(port 7880 is VPC-only)."
+                )
 
         with self._lock:
             self._stop_locked()
@@ -114,10 +234,46 @@ class ChildServer:
             # stack so picking "Smart Turn" on first Start doesn't eat the
             # ONNX/HuggingFace cold path; production servers gate warmup on
             # actual voice intent (see server.voice.voice_warmup_intended).
+            env = {**os.environ, "TIMBAL_VOICE_WARMUP": "1"}
+            for k in _LIVEKIT_CHILD_ENV_KEYS:
+                env.pop(k, None)
+            livekit: dict[str, str] | None = None
+            if livekit_plan is not None:
+                url, api_key, api_secret = livekit_plan
+                room = f"pg-{uuid.uuid4().hex[:12]}"
+                agent_id = "agent"
+                caller_id = "playground"
+                env.update(
+                    {
+                        "TIMBAL_VOICE_TRANSPORT": "livekit",
+                        "TIMBAL_LIVEKIT_URL": url,
+                        "TIMBAL_LIVEKIT_TOKEN": mint_livekit_jwt(
+                            api_key=api_key,
+                            api_secret=api_secret,
+                            identity=agent_id,
+                            room=room,
+                        ),
+                        "TIMBAL_LIVEKIT_ROOM": room,
+                        "TIMBAL_LIVEKIT_CALLER_IDENTITY": caller_id,
+                        "TIMBAL_VOICE_SINGLE_SESSION": "1",
+                    }
+                )
+                livekit = {
+                    "url": url,
+                    "token": mint_livekit_jwt(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        identity=caller_id,
+                        room=room,
+                    ),
+                    "identity": caller_id,
+                    "room": room,
+                }
+                self._logs.append(f"livekit room {room} @ {url}")
             proc = subprocess.Popen(  # noqa: S603
                 cmd,
                 cwd=spec_path.parent,
-                env={**os.environ, "TIMBAL_VOICE_WARMUP": "1"},
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -126,6 +282,8 @@ class ChildServer:
             self._port = child_port
             self._import_spec = resolved_spec
             self._requested_spec = spec
+            self._transport = kind
+            self._livekit = livekit
             threading.Thread(target=self._reader, args=(proc,), daemon=True).start()
             return self.status_locked()
 
@@ -149,6 +307,8 @@ class ChildServer:
         self._port = None
         self._import_spec = None
         self._requested_spec = None
+        self._transport = None
+        self._livekit = None
 
     def status(self) -> dict:
         with self._lock:
@@ -159,6 +319,11 @@ class ChildServer:
         if proc is None:
             # Keep the last logs around so a crash is inspectable after stop.
             return {"state": "stopped", "logs": list(self._logs)}
+        extra: dict = {}
+        if self._transport:
+            extra["transport"] = self._transport
+        if self._livekit:
+            extra["livekit"] = self._livekit
         exit_code = proc.poll()
         if exit_code is not None:
             return {
@@ -168,6 +333,7 @@ class ChildServer:
                 "import_spec": self._import_spec,
                 "requested_import_spec": self._requested_spec,
                 "logs": list(self._logs),
+                **extra,
             }
         state = "running" if _healthy(self._port) else "starting"
         return {
@@ -177,6 +343,7 @@ class ChildServer:
             "import_spec": self._import_spec,
             "requested_import_spec": self._requested_spec,
             "logs": list(self._logs),
+            **extra,
         }
 
 
@@ -230,8 +397,13 @@ def _make_handler(child: ChildServer, default_import_spec: str) -> type[BaseHTTP
                     self._send_json(400, {"error": "import_spec is required"})
                     return
                 port = body.get("port")
+                transport = str(body.get("transport") or "ws").strip().lower()
                 try:
-                    status = child.spawn(import_spec, port=int(port) if port else None)
+                    status = child.spawn(
+                        import_spec,
+                        port=int(port) if port else None,
+                        transport=transport,
+                    )
                 except ValueError as e:
                     self._send_json(400, {"error": str(e)})
                     return
