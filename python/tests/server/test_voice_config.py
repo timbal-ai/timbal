@@ -74,6 +74,47 @@ class TestVoiceWarmupIntended:
         assert voice_routes.voice_warmup_intended(r) is False
 
 
+class TestVoiceOnnxWarmupIntended:
+    """Flux / provider EOU must not pull Smart Turn + Namo + Silero at boot."""
+
+    def test_flux_skips_onnx(self) -> None:
+        cfg = VoiceConfig(stt_provider="deepgram", stt_model="flux-general-multi")
+        assert voice_routes.voice_onnx_warmup_intended(cfg) is False
+
+    def test_elevenlabs_loads_onnx(self) -> None:
+        cfg = VoiceConfig(
+            stt_provider="elevenlabs",
+            stt_model="scribe_v2_realtime",
+            turn_detector="local",
+        )
+        assert voice_routes.voice_onnx_warmup_intended(cfg) is True
+
+    def test_flux_with_explicit_local_still_skips(self) -> None:
+        # Session setup overrides local → provider for Flux; warmup must match.
+        cfg = VoiceConfig(
+            stt_provider="deepgram",
+            stt_model="flux-general-multi",
+            turn_detector="local",
+        )
+        assert voice_routes.voice_onnx_warmup_intended(cfg) is False
+
+    def test_explicit_heuristic_skips_onnx(self) -> None:
+        cfg = VoiceConfig(stt_provider="elevenlabs", turn_detector="heuristic")
+        assert voice_routes.voice_onnx_warmup_intended(cfg) is False
+
+    def test_nova_loads_onnx(self) -> None:
+        cfg = VoiceConfig(
+            stt_provider="deepgram-nova",
+            stt_model="nova-3",
+            turn_detector="local",
+        )
+        assert voice_routes.voice_onnx_warmup_intended(cfg) is True
+
+    def test_explicit_provider_skips_onnx(self) -> None:
+        cfg = VoiceConfig(stt_provider="elevenlabs", turn_detector="provider")
+        assert voice_routes.voice_onnx_warmup_intended(cfg) is False
+
+
 @pytest.mark.usefixtures("clear_voice_env")
 class TestDefaultVoiceConfigFromEnv:
     def test_defaults_when_unset(self) -> None:

@@ -261,39 +261,77 @@ def voice_warmup_intended(runnable: Any) -> bool:
     return any(k.startswith("TIMBAL_VOICE_") for k in os.environ)
 
 
+def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:
+    """Whether boot should pre-load Smart Turn / Namo / Silero.
+
+    Same detector choice the session will make
+    (:func:`select_turn_detector_spec`). Flux forces the provider turn
+    detector, so those ONNX models never run — loading them anyway races
+    the first turn with HuggingFace downloads on a cold box.
+
+    Can be *heavy*: with ``turn_detector=None`` the spec resolution builds the
+    default detector, importing onnxruntime/transformers. Call it off the
+    event loop (``warmup_voice_stack`` runs it in the import executor).
+    """
+    from ..voice.deepgram import DeepgramFluxSTT, resolve_stt
+    from ..voice.turn_detection import LocalAudioTurnDetector
+
+    try:
+        stt = resolve_stt(voice_config.stt_provider, model=voice_config.stt_model)
+    except ValueError:
+        stt = None
+    spec = select_turn_detector_spec(
+        voice_config.turn_detector,
+        None,
+        stt_is_flux=isinstance(stt, DeepgramFluxSTT),
+    )
+    if isinstance(spec, LocalAudioTurnDetector):
+        return True
+    if isinstance(spec, str) and spec.strip().lower() in ("local", "audio", "smart_turn"):
+        return True
+    return False
+
+
 async def warmup_voice_stack(voice_config: VoiceConfig) -> None:
     """Background warmup at server boot so the first voice session starts fast.
 
     Two tiers, both best-effort:
 
-    * **Imports** (always): voice adapters (ElevenLabs + Deepgram) and the
-      ``timbal[voice]`` extra (numpy/onnxruntime) — ~1s that otherwise lands
-      on the first WebSocket connection.
-    * **Models**: load Smart Turn + Namo + Silero when the server default
-      turn detector is local (mode string **or** a ``LocalAudioTurnDetector``
-      instance — demos often set the resolved instance on ``voice_config``).
-      Eager-loads those ONNX models whenever the voice extra is installed so
-      playground users who pick "Smart Turn" on first Start don't eat the
-      HuggingFace cold path mid-handshake.
+    * **Imports** (always): voice adapters (ElevenLabs + Deepgram). The
+      ``timbal[voice]`` extra (numpy/onnxruntime + Smart Turn/Namo/Silero)
+      is imported only when those ONNX models will actually run.
+    * **Models**: load Smart Turn + Namo + Silero when the session's turn
+      detector is local. Skipped for Flux / ``provider`` EOU — see
+      :func:`voice_onnx_warmup_intended`.
     """
     loop = asyncio.get_running_loop()
 
-    def _import_stack() -> None:
+    def _import_stack() -> bool:
         import importlib
 
         importlib.import_module("timbal.voice.elevenlabs")
         importlib.import_module("timbal.voice.deepgram")
+        # The detector-choice probe can itself import onnxruntime/transformers
+        # (default turn_detector resolution) — must stay in this executor, off
+        # the event loop and under the caller's except.
+        if not voice_onnx_warmup_intended(voice_config):
+            return False
         try:
             importlib.import_module("timbal.voice.smart_turn")
             importlib.import_module("timbal.voice.namo")
             importlib.import_module("timbal.voice.vad")
         except ImportError:
             pass  # timbal[voice] extra not installed — heuristics only
+        return True
 
     try:
-        await loop.run_in_executor(None, _import_stack)
+        load_onnx = await loop.run_in_executor(None, _import_stack)
     except Exception as e:
         logger.debug("voice_warmup_import_failed", error=str(e))
+        return
+
+    if not load_onnx:
+        logger.info("voice_warmup_skip_onnx", reason="provider_eou")
         return
 
     try:

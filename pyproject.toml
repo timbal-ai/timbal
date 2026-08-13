@@ -67,6 +67,9 @@ voice = [
   "onnxruntime>=1.20.0",
   "transformers>=4.40.0",
 ]
+"voice-livekit" = [
+  "livekit>=1.1.14",
+]
 all = [
   "timbal[codegen]",
   "timbal[documents]",

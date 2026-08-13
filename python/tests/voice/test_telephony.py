@@ -127,3 +127,11 @@ class TestTelephonyPlaybackTracker:
         tracker.on_playback_ack(100.0)
         assert tracker.played_bytes == 3_200
         assert tracker.ack_received
+
+    def test_ack_received_before_first_mark_echo(self) -> None:
+        # Marks are the native clock; the first echo cannot land before the
+        # carrier has played the first media frame, which is after TTS-end
+        # metrics snapshot on turn 1. Report the transport as ack-capable
+        # immediately so that snapshot is not a false "marks broken".
+        tracker = TelephonyPlaybackTracker(32_000, on_clear=lambda: None)
+        assert tracker.ack_received is True

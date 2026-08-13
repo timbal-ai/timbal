@@ -5,13 +5,15 @@ per voice call and reaps the box when the process exits — it cannot see the
 call itself (WebRTC media flows browser ↔ TURN relay ↔ box, with no tunneled
 socket), so the process must own its lifetime:
 
-* Serve **exactly one** voice session (WebRTC or WebSocket), then exit 0.
+* Serve **exactly one** voice session (WebRTC, WebSocket, or LiveKit), then exit 0.
   The exit waits for the recording upload (``PUT …/sessions/{session_id}``)
   to finish first — this process is the only thing holding that data.
 * Exit 0 if no media connection is established within
   ``TIMBAL_VOICE_IDLE_EXIT_SECS`` (default 60) of server start. The window
   is boot → *media established*, so a browser that POSTs an offer and never
   completes ICE also exits after the window.
+* On the LiveKit path, a caller who drops is given
+  ``TIMBAL_VOICE_ABANDON_SECS`` (default 45) to rejoin before the box exits.
 * Refuse a second session while one is live or after one has been served:
   409 on ``POST /voice/rtc``, close 1008 on ``/voice/ws``.
 
@@ -28,6 +30,7 @@ import asyncio
 import contextlib
 import os
 import sys
+from typing import Any
 
 import structlog
 
@@ -36,6 +39,11 @@ logger = structlog.get_logger("timbal.server.single_session")
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 _DEFAULT_IDLE_EXIT_SECS = 60.0
+
+# After the abandon window closes and ``on_abandon`` (session.close) has run,
+# how long to wait for the transport driver's own teardown — recording
+# finalization, transcript flush, ``finish()`` — before force-exiting anyway.
+_ABANDON_TEARDOWN_GRACE_SECS = 30.0
 
 
 def _exit_process(code: int) -> None:
@@ -61,22 +69,32 @@ class SingleSessionGuard:
     single event loop, where the plain-attribute state machine is atomic.
     """
 
-    def __init__(self, *, idle_exit_secs: float) -> None:
+    def __init__(self, *, idle_exit_secs: float, abandon_exit_secs: float = 45.0) -> None:
         self.idle_exit_secs = idle_exit_secs
+        self.abandon_exit_secs = abandon_exit_secs
         self._claimed = False
         self._connected = False
         self._finished = False
+        self._finished_evt = asyncio.Event()
         self._idle_task: asyncio.Task | None = None
+        self._abandon_task: asyncio.Task | None = None
+        self._on_abandon: Any = None
+
+    def _mark_finished(self) -> None:
+        self._finished = True
+        self._claimed = True
+        self._finished_evt.set()
 
     def start(self) -> None:
         """Arm the idle-exit timer. Requires a running event loop (lifespan)."""
         self._idle_task = asyncio.create_task(self._idle_exit(), name="voice-single-session-idle-exit")
 
     def shutdown(self) -> None:
-        """Disarm the idle-exit timer (lifespan teardown / media connected)."""
+        """Disarm idle and abandon timers (lifespan teardown / media connected)."""
         if self._idle_task is not None:
             self._idle_task.cancel()
             self._idle_task = None
+        self.mark_reconnected()
 
     async def _idle_exit(self) -> None:
         await asyncio.sleep(self.idle_exit_secs)
@@ -112,8 +130,7 @@ class SingleSessionGuard:
             # Connected (or the session already finished) while draining —
             # session teardown owns the process lifetime from here.
             return
-        self._finished = True
-        self._claimed = True
+        self._mark_finished()
         logger.info("voice_single_session_exit")
         _exit_process(0)
 
@@ -133,7 +150,81 @@ class SingleSessionGuard:
         """Media is established — disarm the idle-exit timer."""
         if not self._connected:
             self._connected = True
-            self.shutdown()
+            # Cancel idle only — do not touch an in-flight abandon timer
+            # (mark_connected is once; abandon is armed later on a blip).
+            if self._idle_task is not None:
+                self._idle_task.cancel()
+                self._idle_task = None
+
+    def mark_disconnected(self, *, on_abandon: Any = None) -> None:
+        """Media dropped but the call may resume — re-arm a bounded window.
+
+        Distinct from the boot idle-exit, which is 'no one ever showed up'.
+        Both end in ``_exit_process(0)``. ``on_abandon`` (typically
+        ``session.close``) runs before the drain so the recording finalizes.
+        """
+        if self._finished or self._abandon_task is not None:
+            return
+        self._on_abandon = on_abandon
+        self._abandon_task = asyncio.create_task(
+            self._abandon_exit(), name="voice-single-session-abandon"
+        )
+
+    def mark_reconnected(self) -> None:
+        """Caller rejoined — cancel the abandon window."""
+        if self._abandon_task is not None:
+            self._abandon_task.cancel()
+            self._abandon_task = None
+        self._on_abandon = None
+
+    async def _abandon_exit(self) -> None:
+        await asyncio.sleep(self.abandon_exit_secs)
+        await asyncio.sleep(0)
+        if self._finished:
+            return
+        logger.info(
+            "voice_single_session_abandoned",
+            abandon_exit_secs=self.abandon_exit_secs,
+        )
+        self._abandon_task = None
+        on_abandon = self._on_abandon
+        self._on_abandon = None
+        if on_abandon is not None:
+            try:
+                result = on_abandon()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error("voice_single_session_abandon_close_failed", error=str(e))
+            # ``session.close`` only queues the session's stop sentinel — the
+            # recording finalization, transcript flush and upload enqueue all
+            # happen in the transport driver's drain of ``session.run``, which
+            # ends in ``finish()``. Hand the exit to that teardown; the forced
+            # drain+exit below is only the backstop for a hung driver (without
+            # it, ``drain_upload_tasks`` sees no upload yet, returns instantly,
+            # and ``_exit_process`` loses the recording).
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._finished_evt.wait(), timeout=_ABANDON_TEARDOWN_GRACE_SECS
+                )
+            if not self._finished:
+                logger.warning(
+                    "voice_single_session_abandon_teardown_timeout",
+                    grace_secs=_ABANDON_TEARDOWN_GRACE_SECS,
+                )
+        if self._finished:
+            return
+        from .recording_upload import drain_upload_tasks
+
+        try:
+            await drain_upload_tasks()
+        except Exception as e:
+            logger.error("voice_single_session_drain_failed", error=str(e))
+        if self._finished:
+            return
+        self._mark_finished()
+        logger.info("voice_single_session_exit")
+        _exit_process(0)
 
     async def finish(self) -> None:
         """The one session ended: finalize and exit 0.
@@ -144,8 +235,7 @@ class SingleSessionGuard:
         """
         if self._finished:
             return
-        self._finished = True
-        self._claimed = True
+        self._mark_finished()
         self.shutdown()
         from .recording_upload import drain_upload_tasks
 
@@ -171,7 +261,17 @@ def init_single_session_guard() -> SingleSessionGuard | None:
     except ValueError:
         logger.warning("voice_single_session_bad_idle_exit_secs", value=raw)
         idle_exit_secs = _DEFAULT_IDLE_EXIT_SECS
-    guard = SingleSessionGuard(idle_exit_secs=idle_exit_secs)
+    raw_abandon = os.environ.get("TIMBAL_VOICE_ABANDON_SECS", "")
+    try:
+        abandon_exit_secs = float(raw_abandon) if raw_abandon.strip() else 45.0
+    except ValueError:
+        logger.warning("voice_single_session_bad_abandon_secs", value=raw_abandon)
+        abandon_exit_secs = 45.0
+    guard = SingleSessionGuard(idle_exit_secs=idle_exit_secs, abandon_exit_secs=abandon_exit_secs)
     guard.start()
-    logger.info("voice_single_session_enabled", idle_exit_secs=idle_exit_secs)
+    logger.info(
+        "voice_single_session_enabled",
+        idle_exit_secs=idle_exit_secs,
+        abandon_exit_secs=abandon_exit_secs,
+    )
     return guard
