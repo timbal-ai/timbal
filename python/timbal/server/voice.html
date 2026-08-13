@@ -2370,6 +2370,21 @@ async function startLivekit(gen, dial) {
     updateEmptyState();
   });
 
+  const ctxRate = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+  const sr = rnnoiseCtxActive ? Math.round(ctxRate / 3) : ctxRate;
+  const sendHello = () => {
+    if (gen !== startGen || lkRoom !== room) return;
+    room.localParticipant.publishData(
+      encoder.encode(JSON.stringify({ sample_rate: sr, ...sessionConfigPayload() })),
+      { reliable: true, topic: LIVEKIT_EVENTS_TOPIC },
+    ).catch(() => { /* agent not in the room yet — the resend below covers it */ });
+  };
+  // Reliable data only reaches participants already in the room. The launcher's
+  // healthcheck can pass before the agent's lifespan driver has joined, so a
+  // single hello at connect time would be dropped and the driver's wait would
+  // time out (dropdown config lost). Re-send whenever the agent shows up.
+  room.on(RoomEvent.ParticipantConnected, () => sendHello());
+
   await room.connect(dial.url, dial.token);
   if (gen !== startGen) {
     try { await room.disconnect(); } catch (_) {}
@@ -2378,13 +2393,8 @@ async function startLivekit(gen, dial) {
   }
   await room.localParticipant.publishTrack(micStream.getAudioTracks()[0]);
   if (gen !== startGen) return;
-  const ctxRate = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
-  const sr = rnnoiseCtxActive ? Math.round(ctxRate / 3) : ctxRate;
   sessionSampleRate = sr;
-  await room.localParticipant.publishData(
-    encoder.encode(JSON.stringify({ sample_rate: sr, ...sessionConfigPayload() })),
-    { reliable: true, topic: LIVEKIT_EVENTS_TOPIC },
-  );
+  sendHello();
   resetSessionUi();
   setConn('live', 'Starting…', 'Loading STT / turn models (first session can take a few seconds)…');
   updateEmptyState();

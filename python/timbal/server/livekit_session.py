@@ -231,13 +231,19 @@ async def _run_livekit_session(app: Any) -> None:
             guard.mark_reconnected()
         caller_ready.set()
 
+    def _close_session_if_any() -> Any:
+        sess = session_holder.get("s")
+        return sess.close() if sess is not None else None
+
     def _on_participant_disconnected(participant: Any) -> None:
         identity = getattr(participant, "identity", "") or ""
         if caller_identity and identity == caller_identity:
             logger.info("voice_livekit_caller_disconnected", identity=identity)
-            sess = session_holder.get("s")
-            if guard is not None and sess is not None:
-                guard.mark_disconnected(on_abandon=sess.close)
+            if guard is not None:
+                # Can fire during the hello wait / session build, before the
+                # session exists — the abandon window must arm regardless, and
+                # the closure closes whichever session exists at abandon time.
+                guard.mark_disconnected(on_abandon=_close_session_if_any)
 
     def _on_participant_connected(participant: Any) -> None:
         identity = getattr(participant, "identity", "") or ""
@@ -279,7 +285,6 @@ async def _run_livekit_session(app: Any) -> None:
 
     sender_task = asyncio.create_task(_sender(), name="voice-livekit-sender")
     downlink = None
-    session_started = False
     try:
         await room.connect(url, token)
         logger.info(
@@ -312,7 +317,6 @@ async def _run_livekit_session(app: Any) -> None:
             rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
         )
         await downlink.start()
-        session_started = True
 
         async def _mic_pcm() -> Any:
             # Stay open across caller blips: a rejoin publishes a new track and
@@ -334,7 +338,13 @@ async def _run_livekit_session(app: Any) -> None:
         except Exception as e:
             logger.error("voice_livekit_session_error", error=str(e), exc_info=True)
     except BaseException:
-        if not session_started and guard is not None:
+        # Before the caller's mic subscribed, the idle timer is still armed —
+        # release the claim and let it own the exit. After subscribe,
+        # mark_connected disarmed it, so any failure (build_voice_session,
+        # publish_track, …) must exit through finish() in the finally below;
+        # release() here would leave the box unclaimed, idle-disarmed and
+        # alive forever.
+        if guard is not None and not caller_ready.is_set():
             guard.release()
         raise
     finally:
@@ -352,6 +362,6 @@ async def _run_livekit_session(app: Any) -> None:
         with contextlib.suppress(BaseException):
             await room.disconnect()
         logger.info("voice_livekit_disconnected")
-        if session_started and guard is not None:
+        if guard is not None and caller_ready.is_set():
             with contextlib.suppress(BaseException):
                 await guard.finish()

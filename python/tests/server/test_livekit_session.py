@@ -122,9 +122,10 @@ class _FakeRoom:
         self.disconnect_gate: asyncio.Event | None = None
         self.disconnected = False
         self.local_participant = _FakeParticipant()
+        self.handlers: dict[str, object] = {}
 
     def on(self, name: str, fn: object) -> None:
-        pass
+        self.handlers[name] = fn
 
     async def connect(self, url: str, token: str) -> None:
         self.connected.set()
@@ -140,6 +141,9 @@ class _FakeGuard:
     def __init__(self) -> None:
         self.released = False
         self.finished = False
+        self.connected = False
+        self.on_abandon: object = None
+        self.disconnect_calls = 0
 
     def claim(self) -> bool:
         return True
@@ -148,13 +152,14 @@ class _FakeGuard:
         self.released = True
 
     def mark_connected(self) -> None:
-        pass
+        self.connected = True
 
     def mark_reconnected(self) -> None:
         pass
 
-    def mark_disconnected(self, **kwargs: object) -> None:
-        pass
+    def mark_disconnected(self, *, on_abandon: object = None) -> None:
+        self.disconnect_calls += 1
+        self.on_abandon = on_abandon
 
     async def finish(self) -> None:
         self.finished = True
@@ -177,6 +182,7 @@ def driver_env(monkeypatch: pytest.MonkeyPatch) -> tuple[_FakeRoom, _FakeGuard, 
     fake_rtc = SimpleNamespace(
         Room=lambda: room,
         TrackKind=SimpleNamespace(KIND_AUDIO=1),
+        AudioSource=lambda *a, **k: SimpleNamespace(clear_queue=lambda: None),
     )
     monkeypatch.setitem(sys.modules, "livekit", SimpleNamespace(rtc=fake_rtc))
     monkeypatch.setenv("TIMBAL_LIVEKIT_URL", "ws://fake:7880")
@@ -227,3 +233,112 @@ class TestCancellationCleanup:
         done, _ = await asyncio.wait({task}, timeout=1.0)
         assert task in done and task.cancelled()
         assert "voice_livekit_disconnected" in log.events  # tail still ran
+
+
+def _subscribe_caller(room: _FakeRoom) -> SimpleNamespace:
+    participant = SimpleNamespace(identity="playground")
+    track = SimpleNamespace(kind=1)
+    room.handlers["track_subscribed"](track, None, participant)
+    return participant
+
+
+def _deliver_hello(room: _FakeRoom, hello: dict) -> None:
+    import json as _json
+
+    room.handlers["data_received"](SimpleNamespace(data=_json.dumps(hello).encode()))
+
+
+class TestGuardLifetimeAroundSessionBuild:
+    async def test_build_failure_after_media_exits_via_finish(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """mark_connected (mic subscribe) disarms the idle timer before the
+        session is built — a build failure must finish(), not release(),
+        or the box is unclaimed, idle-disarmed and immortal."""
+        room, guard, _log, app = driver_env
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("recorder misconfigured")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _boom)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _deliver_hello(room, {"sample_rate": 16000})  # skip the 2s hello wait
+        _subscribe_caller(room)
+        done, _ = await asyncio.wait({task}, timeout=2.0)
+        assert task in done
+        assert isinstance(task.exception(), RuntimeError)
+        assert guard.connected
+        assert guard.finished
+        assert not guard.released
+        assert room.disconnected
+
+    async def test_failure_before_media_releases_the_claim(
+        self, driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]
+    ) -> None:
+        """Before the mic subscribe the idle timer still owns the exit."""
+        room, guard, _log, app = driver_env
+
+        async def _connect_boom(url: str, token: str) -> None:
+            raise RuntimeError("sfu unreachable")
+
+        room.connect = _connect_boom
+        task = asyncio.create_task(_run_livekit_session(app))
+        done, _ = await asyncio.wait({task}, timeout=1.0)
+        assert task in done
+        assert guard.released
+        assert not guard.finished
+
+    async def test_caller_drop_before_session_build_arms_abandon(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A drop during the hello wait / session build (session_holder still
+        empty) must arm the abandon window; the closure closes whichever
+        session exists at abandon time."""
+        room, guard, _log, app = driver_env
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("stop before session exists")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _boom)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _deliver_hello(room, {"sample_rate": 16000})
+        participant = _subscribe_caller(room)
+        # Drop before the driver has built the session (it is still parked
+        # behind caller_ready in the same loop turn).
+        room.handlers["participant_disconnected"](participant)
+        assert guard.disconnect_calls == 1
+        assert guard.on_abandon is not None
+        assert guard.on_abandon() is None  # no session yet — closure is a no-op
+        await asyncio.wait({task}, timeout=2.0)
+
+    async def test_hello_before_subscribe_is_applied_to_the_session(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The page may re-send the hello as soon as the agent joins — before
+        the mic track is subscribed. It must be buffered and merged."""
+        room, guard, _log, app = driver_env
+        seen: dict = {}
+
+        def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
+            seen["config"] = config
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _deliver_hello(room, {"sample_rate": 16000, "stt_provider": "deepgram-flux"})
+        _subscribe_caller(room)
+        await asyncio.wait({task}, timeout=2.0)
+        assert seen["config"]["stt_provider"] == "deepgram-flux"
+        assert guard.finished
