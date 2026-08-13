@@ -45,6 +45,9 @@ async def lifespan(
     from .single_session import init_single_session_guard
 
     app.state.single_session_guard = init_single_session_guard()
+    from .livekit_session import maybe_start_livekit_session
+
+    livekit_task = maybe_start_livekit_session(app)
     # Voice warmup off the boot path: pre-import the voice stack (and pre-load
     # the local turn-detection ONNX models) so the first voice session doesn't
     # pay those costs. Gated on actual voice intent — non-voice deployments
@@ -64,6 +67,8 @@ async def lifespan(
     finally:
         if warmup_task is not None and not warmup_task.done():
             warmup_task.cancel()
+        if livekit_task is not None and not livekit_task.done():
+            livekit_task.cancel()
         if app.state.single_session_guard is not None:
             app.state.single_session_guard.shutdown()
 

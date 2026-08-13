@@ -160,6 +160,53 @@ class TestSingleSessionGuard:
         assert exits == [0]
 
 
+class TestAbandonWindow:
+    async def test_mark_disconnected_exits_after_the_window(self, exits: list[int]) -> None:
+        guard = SingleSessionGuard(idle_exit_secs=60.0, abandon_exit_secs=0.05)
+        assert guard.claim()
+        guard.mark_connected()
+        closed = []
+
+        async def _close() -> None:
+            closed.append(True)
+
+        guard.mark_disconnected(on_abandon=_close)
+        await asyncio.sleep(0.3)
+        assert closed == [True]
+        assert exits == [0]
+
+    async def test_mark_reconnected_cancels_abandon(self, exits: list[int]) -> None:
+        guard = SingleSessionGuard(idle_exit_secs=60.0, abandon_exit_secs=0.05)
+        assert guard.claim()
+        guard.mark_connected()
+        guard.mark_disconnected()
+        guard.mark_reconnected()
+        await asyncio.sleep(0.2)
+        assert exits == []
+        assert not guard._finished
+
+    async def test_abandon_aborts_if_finished_during_close(
+        self, exits: list[int]
+    ) -> None:
+        guard = SingleSessionGuard(idle_exit_secs=60.0, abandon_exit_secs=0.05)
+        assert guard.claim()
+        guard.mark_connected()
+
+        async def _close_and_finish() -> None:
+            await guard.finish()
+
+        guard.mark_disconnected(on_abandon=_close_and_finish)
+        await asyncio.sleep(0.3)
+        assert exits == [0]  # finish() once, not twice from abandon
+
+    async def test_abandon_secs_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
+        monkeypatch.setenv("TIMBAL_VOICE_ABANDON_SECS", "12")
+        guard = init_single_session_guard()
+        assert guard is not None and guard.abandon_exit_secs == 12.0
+        guard.shutdown()
+
+
 class TestInitSingleSessionGuard:
     async def test_disabled_without_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("TIMBAL_VOICE_SINGLE_SESSION", raising=False)
