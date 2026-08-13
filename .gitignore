@@ -54,6 +54,10 @@ node_modules/
 # Internal planning docs
 planning/
 
+# Local rust WIP — do not ship in the Python package
+/rust/
+/benchmarks/rust/
+
 .claude/
 .cursor/
 
