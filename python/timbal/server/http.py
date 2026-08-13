@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -69,6 +70,12 @@ async def lifespan(
             warmup_task.cancel()
         if livekit_task is not None and not livekit_task.done():
             livekit_task.cancel()
+            # Await the teardown: the driver's finally finalizes the recording
+            # and disconnects the room. Cancelling without awaiting hands the
+            # still-cleaning task to the loop's shutdown mass-cancel, whose
+            # second CancelledError lands mid-finally and skips that cleanup.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await livekit_task
         if app.state.single_session_guard is not None:
             app.state.single_session_guard.shutdown()
 

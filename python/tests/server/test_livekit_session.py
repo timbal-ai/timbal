@@ -1,16 +1,22 @@
-"""LiveKit session driver: env gating and reliable-data chunking.
+"""LiveKit session driver: env gating, reliable-data chunking, cancellation.
 
-Does not talk to a real SFU — the FFI extra is not required.
+Does not talk to a real SFU — the FFI extra is not required; the cancellation
+tests inject a fake ``livekit`` module.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from types import SimpleNamespace
 
+import pytest
+from timbal import Agent
+from timbal.core.test_model import TestModel
 from timbal.server.livekit_session import (
     _is_caller,
+    _run_livekit_session,
     chunk_data_payloads,
     is_config_hello,
     maybe_start_livekit_session,
@@ -99,3 +105,125 @@ class TestConfigHello:
 
     def test_null_type_is_hello(self) -> None:
         assert is_config_hello({"type": None, "sample_rate": 16000})
+
+
+class _FakeParticipant:
+    async def publish_data(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    async def publish_track(self, *args: object, **kwargs: object) -> None:
+        pass
+
+
+class _FakeRoom:
+    def __init__(self) -> None:
+        self.connected = asyncio.Event()
+        self.disconnect_entered = asyncio.Event()
+        self.disconnect_gate: asyncio.Event | None = None
+        self.disconnected = False
+        self.local_participant = _FakeParticipant()
+
+    def on(self, name: str, fn: object) -> None:
+        pass
+
+    async def connect(self, url: str, token: str) -> None:
+        self.connected.set()
+
+    async def disconnect(self) -> None:
+        self.disconnect_entered.set()
+        if self.disconnect_gate is not None:
+            await self.disconnect_gate.wait()
+        self.disconnected = True
+
+
+class _FakeGuard:
+    def __init__(self) -> None:
+        self.released = False
+        self.finished = False
+
+    def claim(self) -> bool:
+        return True
+
+    def release(self) -> None:
+        self.released = True
+
+    def mark_connected(self) -> None:
+        pass
+
+    def mark_reconnected(self) -> None:
+        pass
+
+    def mark_disconnected(self, **kwargs: object) -> None:
+        pass
+
+    async def finish(self) -> None:
+        self.finished = True
+
+
+class _LogRecorder:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def _rec(self, event: str, **kwargs: object) -> None:
+        self.events.append(event)
+
+    info = warning = error = debug = _rec
+
+
+@pytest.fixture
+def driver_env(monkeypatch: pytest.MonkeyPatch) -> tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]:
+    """Fake livekit module + minimal app so the driver runs without the FFI."""
+    room = _FakeRoom()
+    fake_rtc = SimpleNamespace(
+        Room=lambda: room,
+        TrackKind=SimpleNamespace(KIND_AUDIO=1),
+    )
+    monkeypatch.setitem(sys.modules, "livekit", SimpleNamespace(rtc=fake_rtc))
+    monkeypatch.setenv("TIMBAL_LIVEKIT_URL", "ws://fake:7880")
+    monkeypatch.setenv("TIMBAL_LIVEKIT_TOKEN", "tok")
+    monkeypatch.delenv("TIMBAL_VOICE_CLIENT_CONFIG", raising=False)
+    log = _LogRecorder()
+    monkeypatch.setattr("timbal.server.livekit_session.logger", log)
+    guard = _FakeGuard()
+    agent = Agent(name="lk_test", model=TestModel(responses=["hi"]), tools=[])
+    app = SimpleNamespace(
+        state=SimpleNamespace(runnable=agent, single_session_guard=guard, voice_config=None)
+    )
+    return room, guard, log, app
+
+
+class TestCancellationCleanup:
+    """Lifespan teardown cancels the driver — cleanup must still complete."""
+
+    async def test_cancel_while_waiting_for_caller_disconnects_and_releases(
+        self, driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]
+    ) -> None:
+        room, guard, log, app = driver_env
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)  # let the driver reach caller_ready.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert room.disconnected
+        assert guard.released
+        assert not guard.finished  # session never started
+        assert "voice_livekit_disconnected" in log.events
+
+    async def test_second_cancel_mid_finally_does_not_skip_the_tail(
+        self, driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]
+    ) -> None:
+        """Emulates the loop-shutdown mass-cancel: a CancelledError delivered
+        at an await inside the finally must not skip the steps after it."""
+        room, guard, log, app = driver_env
+        room.disconnect_gate = asyncio.Event()
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.wait_for(room.disconnect_entered.wait(), timeout=1.0)
+        task.cancel()  # second cancel lands at the await inside disconnect()
+        room.disconnect_gate.set()
+        done, _ = await asyncio.wait({task}, timeout=1.0)
+        assert task in done and task.cancelled()
+        assert "voice_livekit_disconnected" in log.events  # tail still ran

@@ -338,13 +338,20 @@ async def _run_livekit_session(app: Any) -> None:
             guard.release()
         raise
     finally:
+        # Every await below is a cancellation point: a (re-)delivered
+        # CancelledError is not an Exception, and letting it out of any step
+        # would skip the rest — room left connected, guard.finish never runs.
+        # Suppress BaseException per step so the whole tail always executes;
+        # the original unwind (if any) re-raises when the finally completes.
         if downlink is not None:
-            await downlink.aclose()
-        await send_q.put(None)
-        with contextlib.suppress(Exception):
+            with contextlib.suppress(BaseException):
+                await downlink.aclose()
+        send_q.put_nowait(None)  # unbounded queue — no cancellation point
+        with contextlib.suppress(BaseException):
             await sender_task
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(BaseException):
             await room.disconnect()
         logger.info("voice_livekit_disconnected")
         if session_started and guard is not None:
-            await guard.finish()
+            with contextlib.suppress(BaseException):
+                await guard.finish()
