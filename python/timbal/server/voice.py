@@ -28,7 +28,13 @@ from pydantic import ValidationError
 from .. import __version__ as timbal_version
 from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
-from ..voice.config import DEFAULT_VOICE_ID, FillerConfig, RecordingConfig, VoiceConfig
+from ..voice.config import (
+    DEFAULT_VOICE_ID,
+    FillerConfig,
+    GreetingConfig,
+    RecordingConfig,
+    VoiceConfig,
+)
 
 logger = structlog.get_logger("timbal.server.voice")
 
@@ -50,6 +56,11 @@ def default_voice_config_from_env() -> VoiceConfig:
         kwargs["voice"] = v
     if v := os.environ.get("TIMBAL_VOICE_LANGUAGE"):
         kwargs["language"] = v
+    # Plain text only: the env channel cannot express the rest of
+    # GreetingConfig, and a fixed opener is the path worth having here (the
+    # platform injects the line it wants a deployed number answered with).
+    if v := os.environ.get("TIMBAL_VOICE_GREETING"):
+        kwargs["greeting"] = v
     if v := os.environ.get("TIMBAL_VOICE_AMBIENT_SOURCE"):
         kwargs["ambient"] = {"source": v}
         if vol := os.environ.get("TIMBAL_VOICE_AMBIENT_VOLUME"):
@@ -112,14 +123,16 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
         vc = vc()
     if isinstance(vc, VoiceConfig):
         dumped = vc.model_dump(include=vc.model_fields_set)
-        # Top-level ``include`` dumps nested models in full; redo filler
-        # sparsely so unset fields don't clobber env values in the merge below.
+        # Top-level ``include`` dumps nested models in full; redo filler and
+        # greeting sparsely so unset fields don't clobber env values below.
         if isinstance(vc.filler, FillerConfig):
             dumped["filler"] = vc.filler.model_dump(include=vc.filler.model_fields_set)
+        if isinstance(vc.greeting, GreetingConfig):
+            dumped["greeting"] = vc.greeting.model_dump(include=vc.greeting.model_fields_set)
         vc = dumped
     if not isinstance(vc, dict):
         return base
-    skip = frozenset({"stt_extra", "tts_extra", "filler"})
+    skip = frozenset({"stt_extra", "tts_extra", "filler", "greeting"})
     data = {
         **base.model_dump(),
         **{k: v for k, v in vc.items() if v is not None and k not in skip},
@@ -136,6 +149,19 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
         data["filler"] = {**base_filler, **filler}
     elif filler is not None:
         data["filler"] = filler
+    greeting = vc.get("greeting")
+    if isinstance(greeting, GreetingConfig):
+        greeting = greeting.model_dump(include=greeting.model_fields_set)
+    if isinstance(greeting, dict):
+        # Same deep merge as filler: an agent tweaking ``delay_ms`` must not drop
+        # the text TIMBAL_VOICE_GREETING supplied (and lose the whole opener to a
+        # "needs text or instructions" boot failure).
+        base_greeting = base.greeting.model_dump(include=base.greeting.model_fields_set) if base.greeting else {}
+        data["greeting"] = {**base_greeting, **greeting}
+    elif greeting is not None:
+        # Includes ``""``, which the field validator reads as "no opener" — how
+        # an agent switches off one the environment configured.
+        data["greeting"] = greeting
     return VoiceConfig(**data)
 
 
@@ -160,6 +186,10 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "turn_timeout_secs",
     "turn_timeout_fallback",
     "filler",
+    # Per-call opener: the telephony webhook's <Parameter name="greeting"> and
+    # the LiveKit hello both arrive through this allowlist, and "what this call
+    # opens with" is per-call by nature (an outbound campaign sets it per dial).
+    "greeting",
 })
 
 
@@ -169,9 +199,10 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     Allowlist-filtered. Values are deliberately NOT re-validated here — client
     input gets per-key guards with fallbacks in :func:`build_voice_session`,
     so one bad value degrades that knob instead of closing the socket.
-    ``filler`` is the exception: it's a nested model, so it is deep-merged over
-    the server default (a client tweaking ``delay_secs`` keeps the server's
-    custom ``system_prompt``) and validated here — invalid → keep server's.
+    ``filler`` and ``greeting`` are the exceptions: they're nested models, so
+    they are deep-merged over the server default (a client tweaking
+    ``delay_secs`` keeps the server's custom ``system_prompt``) and validated
+    here — invalid → keep server's.
     """
     updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
     ignored = sorted(
@@ -191,7 +222,42 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
         except ValidationError:
             logger.info("voice_client_filler_invalid", value=repr(updates["filler"]))
             del updates["filler"]
+    if "greeting" in updates:
+        _merge_client_greeting(server_defaults, updates)
     return server_defaults.model_copy(update=updates)
+
+
+def _merge_client_greeting(server_defaults: VoiceConfig, updates: dict[str, Any]) -> None:
+    """Resolve the client's ``greeting`` override in place.
+
+    ``model_copy`` below runs no validators, so the coercion the ``VoiceConfig``
+    field does for a bare string has to happen here too — and a bare string is
+    the only spelling the telephony ``<Parameter>`` channel can send. It is
+    treated as a *text* override so the server keeps owning policy
+    (``interruptible``, ``delay_ms``); ``""`` switches the opener off for this
+    call, which is the one way a client can subtract a nested default.
+    """
+    base = server_defaults.greeting
+    base_data = base.model_dump(include=base.model_fields_set) if base is not None else {}
+    raw = updates["greeting"]
+    if isinstance(raw, str):
+        if not raw.strip():
+            updates["greeting"] = None
+            return
+        patch: Any = {"text": raw}
+    elif isinstance(raw, GreetingConfig):
+        patch = raw.model_dump(include=raw.model_fields_set)
+    else:
+        patch = raw
+    if not isinstance(patch, dict):
+        logger.info("voice_client_greeting_invalid", value=repr(raw))
+        del updates["greeting"]
+        return
+    try:
+        updates["greeting"] = GreetingConfig.model_validate({**base_data, **patch})
+    except ValidationError:
+        logger.info("voice_client_greeting_invalid", value=repr(raw))
+        del updates["greeting"]
 
 
 def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, Any]:
@@ -623,11 +689,18 @@ def build_voice_session(
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
+        greeting=(
+            None
+            if merged.greeting is None
+            else ((merged.greeting.text or "")[:80] or "<generated>")
+        ),
     )
 
     session_kwargs: dict[str, Any] = {}
     if merged.filler is not None and merged.filler.enabled:
         session_kwargs["filler"] = merged.filler
+    if merged.greeting is not None:
+        session_kwargs["greeting"] = merged.greeting
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)

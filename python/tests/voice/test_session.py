@@ -6,10 +6,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from pathlib import Path
 
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.state import get_run_context
 from timbal.voice import (
     AgentTextDelta,
     AgentTextDone,
@@ -300,6 +302,20 @@ class TestVoiceSessionLifecycle:
         await _collect_events(session)
         await session.close()
         await session.close()
+
+    async def test_call_context_seeded_into_session_bag(self) -> None:
+        """Empty-``_trace`` reuse: turn 1's callable reads the session bag."""
+        session, _, _ = _make_session(stt_script=[])
+        session.call_context = {"rep_id": "R001", "task": "eod_checkin"}
+        await session._seed_call_context()
+        ctx = get_run_context()
+        assert ctx is not None
+        data = await ctx.get_session()
+        assert data["rep_id"] == "R001"
+        assert data["task"] == "eod_checkin"
+        # Empty trace is what lets runnable.py reuse this context on turn 1
+        # instead of forking a child that would drop extra attrs.
+        assert not ctx._trace
 
 
 # ---------------------------------------------------------------------------
@@ -1914,6 +1930,33 @@ class TestStreamingTTS:
         assert session._turn_tts_stream is None
         assert session._turn_tts_pump is None
         assert any(isinstance(e, SessionInterrupted) for e in events)
+
+    async def test_streaming_tts_feeds_call_recorder(self, tmp_path: Path) -> None:
+        """Streaming TTS must call CallRecorder.add_agent.
+
+        ElevenLabs (and any ``open_stream`` provider) goes through
+        ``_pump_tts_stream``, not ``_speak``. Skipping add_agent there left
+        split recordings as caller-left / silence-right — the CRM player
+        only played David's side.
+        """
+        from timbal.voice.recording import CallRecorder
+
+        tts = StreamingMockTTS(bytes_per_char=10)
+        recorder = CallRecorder(tmp_path / "call.mp3", sample_rate=16_000, layout="split")
+        session = VoiceSession(
+            agent=Agent(
+                name="t",
+                model=TestModel(responses=[self.RESPONSE]),
+                tools=[],
+            ),
+            stt=MockSTT(script=[TranscriptEvent(type="committed", text="hi")]),
+            tts=tts,
+            recorder=recorder,
+            turn_detector="heuristic",
+        )
+        await _collect_events(session)
+        assert recorder._agent_bytes > 0
+        assert recorder._closed
 
 
 # ---------------------------------------------------------------------------

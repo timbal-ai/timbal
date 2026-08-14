@@ -356,6 +356,17 @@ class TestTwilioWebhook:
         assert '<Parameter name="from" value="+15550001111" />' in r.text
         assert '<Parameter name="call_sid" value="CA123" />' in r.text
 
+    def test_identity_query_joins_from_to_parameters(self, monkeypatch, tmp_path) -> None:
+        app = _setup_app(monkeypatch, tmp_path, _make_stt_class([]), _make_tts_class(_TTS_CHUNK))
+        with TestClient(app) as client:
+            r = client.post(
+                "/voice/twilio/incoming?rep_id=R001&task=eod_checkin",
+                data={"CallSid": "CA123", "From": "+15550001111", "To": "+15550002222"},
+            )
+        assert '<Parameter name="rep_id" value="R001" />' in r.text
+        assert '<Parameter name="task" value="eod_checkin" />' in r.text
+        assert '<Parameter name="from" value="+15550001111" />' in r.text
+
     def test_https_proxy_yields_wss_url(self, monkeypatch, tmp_path) -> None:
         app = _setup_app(monkeypatch, tmp_path, _make_stt_class([]), _make_tts_class(_TTS_CHUNK))
         with TestClient(app) as client:
@@ -390,6 +401,24 @@ class TestTelnyxWebhook:
         assert "ws://testserver/voice/telnyx/stream" in r.text
         assert 'bidirectionalMode="rtp"' in r.text
         assert 'bidirectionalCodec="PCMU"' in r.text
+
+    def test_identity_query_becomes_texml_parameters(self, monkeypatch, tmp_path) -> None:
+        """``rep_id`` / ``task`` on our webhook URL ride TeXML Parameters.
+
+        Random query keys (and ``rev``) must not — they are not identity and
+        must not become start-frame custom_parameters.
+        """
+        app = _setup_app(monkeypatch, tmp_path, _make_stt_class([]), _make_tts_class(_TTS_CHUNK))
+        with TestClient(app) as client:
+            r = client.post(
+                "/voice/telnyx/incoming?rev=main&rep_id=R001&task=eod_checkin&evil=dropme",
+                data={"CallSid": "CC123"},
+            )
+        assert r.status_code == 200
+        assert '<Parameter name="rep_id" value="R001" />' in r.text
+        assert '<Parameter name="task" value="eod_checkin" />' in r.text
+        assert "evil" not in r.text
+        assert 'name="rev"' not in r.text
 
     def test_ed25519_signature_enforced_when_key_set(self, monkeypatch, tmp_path) -> None:
         crypto = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
@@ -458,3 +487,47 @@ class TestUlawWire:
         # Resampler ramps in, but the steady-state must sit near 16000.
         steady = values[len(values) // 2 :]
         assert sum(steady) / len(steady) > 10_000
+
+
+class TestCallContext:
+    def test_leftover_custom_not_in_config_keys(self) -> None:
+        from timbal.server.telephony import _CONFIG_PARAM_KEYS, _call_context_from_start
+
+        info = {"from": "+1555", "to": "+1666", "call_id": "CA1"}
+        custom = {
+            "rep_id": "R001",
+            "task": "eod_checkin",
+            "greeting": "Hey",
+            "stt_provider": "deepgram",
+            "turn_detector": "heuristic",
+        }
+        ctx = _call_context_from_start(info, custom)
+        assert ctx["rep_id"] == "R001"
+        assert ctx["task"] == "eod_checkin"
+        assert ctx["from"] == "+1555"
+        assert ctx["to"] == "+1666"
+        assert ctx["call_id"] == "CA1"
+        for key in _CONFIG_PARAM_KEYS:
+            assert key not in ctx
+
+    def test_info_fallbacks_do_not_clobber_custom(self) -> None:
+        from timbal.server.telephony import _call_context_from_start
+
+        ctx = _call_context_from_start(
+            {"from": "+info", "to": "+info-to", "call_id": "info-id"},
+            {"from": "+custom", "rep_id": "R2"},
+        )
+        assert ctx["from"] == "+custom"
+        assert ctx["to"] == "+info-to"
+        assert ctx["call_id"] == "info-id"
+        assert ctx["rep_id"] == "R2"
+
+    def test_identity_params_allowlist(self) -> None:
+        from timbal.server.telephony import _identity_params
+
+        assert _identity_params({"rep_id": "R001", "task": "eod_checkin", "rev": "main", "evil": "x"}) == {
+            "rep_id": "R001",
+            "task": "eod_checkin",
+        }
+        assert _identity_params({"rev": "main"}) == {}
+        assert _identity_params(None) == {}

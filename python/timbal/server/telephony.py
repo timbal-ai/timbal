@@ -48,7 +48,25 @@ router = APIRouter(prefix="/voice", tags=["telephony"])
 # Custom <Parameter> names a webhook may pass through to the session config.
 # Same trust level as the browser hello, but telephony parameters are set by
 # whoever controls the TwiML/TeXML — still allowlist to names, never callables.
-_CONFIG_PARAM_KEYS = ("turn_detector", "stt_provider", "stt_model", "tts_model", "model", "language", "voice")
+# ``greeting`` is a plain string here (what the callee hears first); the
+# ``VoiceConfig`` merge coerces it into a GreetingConfig — see
+# ``_merge_client_greeting``.
+_CONFIG_PARAM_KEYS = (
+    "turn_detector",
+    "stt_provider",
+    "stt_model",
+    "tts_model",
+    "model",
+    "language",
+    "voice",
+    "greeting",
+)
+
+# First-party identity on *our* incoming URL — not Telnyx-logged PII (name,
+# phone, notes). Explicit allowlist so a random query key never becomes a
+# TeXML ``<Parameter>``. ``rev`` / ``t`` stay off the Stream; they are proxy
+# routing, not session. These must not land in ``VoiceConfig``.
+_IDENTITY_PARAM_KEYS = ("rep_id", "task")
 
 _ULAW_ENCODINGS = {"audio/x-mulaw", "pcmu"}
 
@@ -187,6 +205,40 @@ def _stream_ws_url(request: Request, path: str) -> str:
     return f"{ws_proto}://{host}{path}"
 
 
+def _identity_params(query: Any) -> dict[str, str]:
+    """Pull ``rep_id`` / ``task`` off the incoming webhook query string."""
+    if query is None:
+        return {}
+    out: dict[str, str] = {}
+    for key in _IDENTITY_PARAM_KEYS:
+        val = query.get(key)
+        if isinstance(val, str) and val:
+            out[key] = val
+    return out
+
+
+def _call_context_from_start(info: dict[str, Any], custom: dict[str, Any]) -> dict[str, str]:
+    """Leftover string custom params + from/to/call_id → session bag.
+
+    ``_CONFIG_PARAM_KEYS`` is the VoiceConfig allowlist (greeting, STT, …).
+    Everything else string-valued on the start frame is call identity and
+    rides ``session.call_context`` so a callable ``system_prompt`` can read
+    it via ``get_run_context().get_session()``. Extra RunContext attrs are
+    dropped when turn 2 forks; the session bag is not.
+    """
+    ctx: dict[str, str] = {}
+    for k, v in custom.items():
+        if k in _CONFIG_PARAM_KEYS:
+            continue
+        if isinstance(v, str) and v:
+            ctx[k] = v
+    for key in ("from", "to", "call_id"):
+        val = info.get(key)
+        if key not in ctx and isinstance(val, str) and val:
+            ctx[key] = val
+    return ctx
+
+
 def _stream_xml(ws_url: str, params: dict[str, str], *, telnyx: bool) -> str:
     """TwiML/TeXML that answers the call into the bidirectional media WS."""
     attrs = f"url={quoteattr(ws_url)}"
@@ -249,7 +301,14 @@ async def twilio_incoming(request: Request) -> Response:
     xml = _stream_xml(
         _stream_ws_url(request, "/voice/twilio/stream"),
         # Twilio's WS start frame carries no caller metadata; tunnel it.
-        {"call_sid": params.get("CallSid", ""), "from": params.get("From", ""), "to": params.get("To", "")},
+        # Identity (rep_id/task) rides the same Parameter list — Telnyx
+        # puts them on start.custom_parameters; Twilio on customParameters.
+        {
+            "call_sid": params.get("CallSid", ""),
+            "from": params.get("From", ""),
+            "to": params.get("To", ""),
+            **_identity_params(request.query_params),
+        },
         telnyx=False,
     )
     return Response(content=xml, media_type="application/xml")
@@ -269,7 +328,11 @@ async def telnyx_incoming(request: Request) -> Response:
         logger.warning("telnyx_webhook_unverified", hint="set TELNYX_PUBLIC_KEY to verify webhook signatures")
     params = dict(parse_qsl(body.decode("utf-8", "replace"), keep_blank_values=True))
     logger.info("telnyx_incoming_call", call_sid=params.get("CallSid"), from_=params.get("From"), to=params.get("To"))
-    xml = _stream_xml(_stream_ws_url(request, "/voice/telnyx/stream"), {}, telnyx=True)
+    xml = _stream_xml(
+        _stream_ws_url(request, "/voice/telnyx/stream"),
+        _identity_params(request.query_params),
+        telnyx=True,
+    )
     return Response(content=xml, media_type="application/xml")
 
 
@@ -384,6 +447,7 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
 
     custom = info.get("custom") or {}
     client_config = {k: v for k, v in custom.items() if k in _CONFIG_PARAM_KEYS and isinstance(v, str) and v}
+    call_context = _call_context_from_start(info, custom)
 
     defaults: VoiceConfig = getattr(ws.app.state, "voice_config", None) or VoiceConfig()
     session_rate = int(merge_client_voice_overrides(defaults, client_config).sample_rate)
@@ -423,6 +487,7 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
 
     tracker = TelephonyPlaybackTracker(bytes_per_second=session_rate * 2, on_clear=_on_clear)
     session, meta = build_voice_session(runnable, defaults, client_config, playback_tracker=tracker)
+    session.call_context = call_context
     meta = {
         "transport": dialect.name,
         "call_id": info.get("call_id"),
