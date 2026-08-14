@@ -37,6 +37,17 @@ if TYPE_CHECKING:
         AsanaUpdateTask,
     )
     from .bash import Bash
+    from .bizneo_hr import (
+        BizneoHRGetCandidate,
+        BizneoHRGetEmployee,
+        BizneoHRGetJob,
+        BizneoHRListCandidates,
+        BizneoHRListDepartments,
+        BizneoHRListEmployees,
+        BizneoHRListJobs,
+        BizneoHRListLocations,
+        BizneoHRRequest,
+    )
     from .cala import CalaQuery, CalaSearch
     from .cloudflare import (
         CloudflareCrawlCancel,
@@ -1302,6 +1313,15 @@ if TYPE_CHECKING:
     )
 __all__ = [
     "Bash",
+    "BizneoHRGetCandidate",
+    "BizneoHRGetEmployee",
+    "BizneoHRGetJob",
+    "BizneoHRListCandidates",
+    "BizneoHRListDepartments",
+    "BizneoHRListEmployees",
+    "BizneoHRListJobs",
+    "BizneoHRListLocations",
+    "BizneoHRRequest",
     "CalaQuery",
     "ask_user",
     "ask_user_multi",
@@ -2516,6 +2536,15 @@ __all__ = [
 
 _LAZY_IMPORTS = {
     "Bash": ".bash",
+    "BizneoHRGetCandidate": ".bizneo_hr",
+    "BizneoHRGetEmployee": ".bizneo_hr",
+    "BizneoHRGetJob": ".bizneo_hr",
+    "BizneoHRListCandidates": ".bizneo_hr",
+    "BizneoHRListDepartments": ".bizneo_hr",
+    "BizneoHRListEmployees": ".bizneo_hr",
+    "BizneoHRListJobs": ".bizneo_hr",
+    "BizneoHRListLocations": ".bizneo_hr",
+    "BizneoHRRequest": ".bizneo_hr",
     "ask_user": ".interaction",
     "ask_user_multi": ".interaction",
     "confirm": ".interaction",
