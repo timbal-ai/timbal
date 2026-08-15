@@ -531,3 +531,20 @@ class TestCallContext:
         }
         assert _identity_params({"rev": "main"}) == {}
         assert _identity_params(None) == {}
+
+    def test_identity_params_are_configurable(self, monkeypatch) -> None:
+        """The allowlist is the only thing between a query string and the
+        prompt, so it is env-owned — never widened from the wire."""
+        from timbal.server.telephony import _identity_params
+
+        monkeypatch.setenv("TIMBAL_VOICE_IDENTITY_PARAMS", "tenant, agent_id")
+        assert _identity_params({"tenant": "acme", "agent_id": "A1", "rep_id": "R001"}) == {
+            "tenant": "acme",
+            "agent_id": "A1",
+        }
+
+    def test_blank_identity_env_keeps_the_defaults(self, monkeypatch) -> None:
+        from timbal.server.telephony import _identity_params
+
+        monkeypatch.setenv("TIMBAL_VOICE_IDENTITY_PARAMS", " , ")
+        assert _identity_params({"rep_id": "R001"}) == {"rep_id": "R001"}

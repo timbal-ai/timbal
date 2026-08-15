@@ -128,6 +128,7 @@ Model = Literal[
     "groq/openai/gpt-oss-20b",
     "fireworks/accounts/fireworks/models/deepseek-v4-pro",
     "fireworks/accounts/fireworks/models/deepseek-v4-flash",
+    "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
     "fireworks/accounts/fireworks/models/qwen3p6-plus",
     "fireworks/accounts/fireworks/models/qwen3p7-plus",
     "fireworks/accounts/fireworks/models/kimi-k2p6",

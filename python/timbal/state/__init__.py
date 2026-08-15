@@ -38,7 +38,7 @@ def get_or_create_run_context() -> RunContext:
     return run_context
 
 
-def set_run_context(context: RunContext) -> None:
+def set_run_context(context: RunContext | None) -> None:
     """Sets the run context for the current async task or thread.
 
     WARNING: This function is for advanced use cases, such as creating

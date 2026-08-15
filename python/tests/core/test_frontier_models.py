@@ -15,7 +15,7 @@ NEW_MODEL_IDS = [
     "fireworks/accounts/fireworks/models/minimax-m2p7",
     "fireworks/accounts/fireworks/models/minimax-m3",
     "fireworks/accounts/fireworks/models/qwen3p7-plus",
-    "fireworks/accounts/fireworks/models/deepseek-v4-flash",
+    "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
     "fireworks/accounts/fireworks/models/kimi-k2p7-code",
     "openai/gpt-5.6-sol",
     "openai/gpt-5.6-terra",
@@ -151,7 +151,7 @@ class TestFireworksRouterDispatch:
         [
             ("fireworks/accounts/fireworks/models/minimax-m2p7", "accounts/fireworks/models/minimax-m2p7"),
             ("fireworks/accounts/fireworks/models/qwen3p7-plus", "accounts/fireworks/models/qwen3p7-plus"),
-            ("fireworks/accounts/fireworks/models/deepseek-v4-flash", "accounts/fireworks/models/deepseek-v4-flash"),
+            ("fireworks/accounts/fireworks/models/deepseek-v4-flash-0731", "accounts/fireworks/models/deepseek-v4-flash-0731"),
         ],
     )
     @pytest.mark.asyncio

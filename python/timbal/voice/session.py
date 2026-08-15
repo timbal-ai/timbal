@@ -301,9 +301,15 @@ class VoiceSession:
         self._greeting_agent: Agent | None = None
         self._greeting_task: asyncio.Task[None] | None = None
         self._greeting_text = ""
-        # Set while the opener is on the wire — gates barge-in when the config
-        # says it is not interruptible.
+        # Set while the opener is *synthesizing*. Barge-in stays gated past
+        # this — until the audio has actually drained — see
+        # _greeting_holds_interrupt.
         self._greeting_speaking = False
+        # The opener's speak task. Held separately from ``_tts_tail`` because a
+        # reply cancelled behind the opener nulls the tail in its ``finally``,
+        # and the next reply must still chain behind the opener rather than
+        # interleave with it.
+        self._greeting_speak_task: asyncio.Task[None] | None = None
         # The opener's ``_speak`` segment record (text, emitted_bytes), kept
         # live so a barge-in can map played bytes back to heard words and the
         # first turn can account for audio still queued ahead of its reply.
@@ -524,6 +530,10 @@ class VoiceSession:
                 audio_playing=self._assistant_audio_playing,
                 **_trace_debug_fields(),
             )
+            # The opener is spared, but a reply already running behind it is
+            # not: leaving it alive would let the *next* commit start a second
+            # turn on top of it.
+            await self._interrupt_turn_behind_greeting()
             return
         has_turn = self._current_turn_task is not None and not self._current_turn_task.done()
         was_active = self._assistant_active
@@ -1560,9 +1570,14 @@ class VoiceSession:
             # carries the exchange that followed the greeting. Resolving the
             # agent's own prompt here is not extra work, only earlier work — the
             # override is exactly what ``Agent.handler`` would have resolved.
-            if self._greeting_text and self._last_run_context is None:
+            #
+            # What the caller *heard*, not what was configured: an interruptible
+            # opener cut mid-sentence leaves a prefix, and one cut before a
+            # single word landed leaves nothing to not-repeat.
+            greeting_heard = self._greeting_heard_text()
+            if greeting_heard and self._last_run_context is None:
                 agent_kwargs["system_prompt"] = _dont_greet_again_prompt(
-                    await self._agent_system_prompt(), self._greeting_text
+                    await self._agent_system_prompt(), greeting_heard
                 )
             agen = self.agent(**agent_kwargs)
             # Timed ``__anext__`` so a hung LLM/tool cannot stall forever. The
@@ -1929,14 +1944,21 @@ class VoiceSession:
         through the same speaker); reconciliation and truncation keep using
         ``_turn_assistant_text``, which stays reply-only.
 
-        The greeting joins it only until the first turn starts. Echo of the
-        opener is exactly what arrives during that window, and dropping it
-        afterwards is deliberate: ``_likely_stt_echo`` suppresses any verbatim
-        substring, so a permanent entry would silently swallow a caller who
-        later says a phrase the opener happened to contain ("your appointment").
+        The greeting joins it for as long as it can still be echoing: before
+        the first turn, and afterwards while its audio is out on the wire. That
+        second half is the case that matters — a deferred barge-in starts turn
+        one *mid-opener*, and a window that closed on turn start would hand the
+        speakerphone's echo of the rest of the opener back as a user utterance.
+
+        Dropping it once the audio has drained is deliberate:
+        ``_likely_stt_echo`` suppresses any verbatim substring, so a permanent
+        entry would silently swallow a caller who later says a phrase the
+        opener happened to contain ("your appointment").
         """
         spoken = self._turn_assistant_text
-        if self._greeting_text and self._turn_index == 0:
+        if self._greeting_text and (
+            self._turn_index == 0 or self._greeting_speaking or self._greeting_pending_bytes() > 0
+        ):
             spoken = f"{self._greeting_text} {spoken}".strip()
         if self._turn_filler_text:
             return f"{self._turn_filler_text} {spoken}".strip()
@@ -2112,14 +2134,26 @@ class VoiceSession:
         self._greeting_task = asyncio.create_task(self._greeting_flow())
 
     def _greeting_holds_interrupt(self) -> bool:
-        """True while a non-interruptible opener is still on the wire.
+        """True while a non-interruptible opener still owns the client's ears.
 
-        ``interrupt()`` bails on this wholesale rather than the greeting opting
-        out of cancellation piecemeal, because the parts are not separable:
-        setting ``_cancel_turn`` is what truncates ``_speak``, and it is the same
-        call that clears the client's playback buffer and snapshots heard bytes.
-        Skipping all of it keeps the "what the user heard" accounting consistent
-        by never starting it.
+        ``interrupt()`` spares the opener wholesale rather than the greeting
+        opting out of cancellation piecemeal, because the parts are not
+        separable: the call that truncates ``_speak`` is the same one that
+        clears the client's playback buffer and snapshots heard bytes. Skipping
+        all of it keeps the "what the user heard" accounting consistent by
+        never starting it.
+
+        The window runs to the end of *playback*, not the end of synthesis.
+        TTS outruns the wire by design, so a hold that ended with ``_speak``
+        would leave the common barge-in shape — opener synthesized, audio still
+        queued — cutting the very sentence that says who is calling.
+
+        It closes early if the reply behind the opener has already put audio on
+        the wire: the two then share one client-side buffer that cannot be
+        cleared selectively, and the opener has fully drained by then anyway
+        (``_schedule_tts`` holds the reply until it has). Fillers and the
+        turn-timeout fallback reach ``_speak`` without that gate, which is why
+        this is checked rather than assumed.
 
         Barge-in is deferred, not dropped — the commit behind it still reaches
         ``_begin_user_turn``, and that turn's TTS chains behind the opener on
@@ -2130,9 +2164,64 @@ class VoiceSession:
         Never gates ``close()``: that sets ``_closed`` before interrupting, and
         a caller who hung up must not hold the box open to the last syllable.
         """
-        if not self._greeting_speaking or self._closed:
+        if self._closed or self.greeting is None or self.greeting.interruptible:
             return False
-        return self.greeting is not None and not self.greeting.interruptible
+        if not (self._greeting_speaking or self._greeting_pending_bytes() > 0):
+            return False
+        return self._turn_audio_bytes == 0
+
+    async def _interrupt_turn_behind_greeting(self) -> None:
+        """Tear down a reply queued behind a non-interruptible opener.
+
+        The opener keeps the wire: its audio, the client's playback buffer and
+        its transcript entry are all untouched. Only the reply is cancelled —
+        and by construction it has not been heard, because its TTS waits for
+        the opener to drain before emitting a byte.
+
+        Without this, a *second* commit inside the opener would find the first
+        turn still running (``interrupt()`` spared it along with the greeting)
+        and ``_begin_user_turn`` would simply overwrite the task handle,
+        leaving two turns racing on one session's turn state.
+        """
+        if self._current_turn_task is None or self._current_turn_task.done():
+            return
+        streamed = self._turn_assistant_text
+        logger.info(
+            "session_turn_cancelled_behind_greeting",
+            assistant_chars=len(streamed),
+            **_trace_debug_fields(),
+        )
+        self._cancel_turn.set()
+        # The opener is deliberately outside ``_tts_tasks`` while it is
+        # non-interruptible, so this drains the reply's segments only.
+        for t in list(self._tts_tasks):
+            if not t.done():
+                t.cancel()
+        if self._tts_tasks:
+            await asyncio.gather(*self._tts_tasks, return_exceptions=True)
+        self._tts_tasks.clear()
+        await self._abort_tts_stream()
+        self._current_turn_task.cancel()
+        try:
+            await self._current_turn_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._active_turn_user_text = ""
+        self._turn_finalized_ok = False
+        self._is_speaking = False
+        heard = self._last_interruption_heard_text
+        self._last_interruption_heard_text = None
+        # Only when the reply actually streamed text: the client rewrites its
+        # newest assistant bubble on this event, and the opener's bubble is
+        # still open. Announcing a reply that never produced a token would make
+        # the client drop the opener instead.
+        if streamed:
+            await self._emit(SessionInterrupted(heard_text=heard or ""))
+        # The cancelled turn nulled ``_tts_tail`` in its ``finally``. The opener
+        # is still speaking and still owns the chain — put it back, or the next
+        # reply will talk over it.
+        if self._greeting_speak_task is not None and not self._greeting_speak_task.done():
+            self._tts_tail = self._greeting_speak_task
 
     def _greeting_still_wanted(self) -> bool:
         """False once the caller has spoken first (or the session is closing).
@@ -2201,6 +2290,7 @@ class VoiceSession:
         )
         speak_task = asyncio.create_task(self._speak_greeting_task(text))
         self._tts_tail = speak_task
+        self._greeting_speak_task = speak_task
         if self.greeting.interruptible:
             # ``_tts_tasks`` is the pool ``interrupt()`` cancels, so an
             # interruptible opener is cut like any other speech. A
@@ -2286,6 +2376,47 @@ class VoiceSession:
         if was_newest:
             self._last_interruption_heard_text = heard
 
+    async def _await_greeting_drain(self) -> None:
+        """Hold a reply's audio until a non-interruptible opener has played out.
+
+        Emission order is playback order, so handing the reply to the transport
+        early does not make it arrive sooner — it only stacks it into the same
+        client buffer as the opener, at which point barge-in can no longer
+        clear one without the other. Waiting keeps
+        :meth:`_greeting_holds_interrupt`'s window exact.
+
+        Bounded by the audio still outstanding: a playback tracker that stalls
+        (missing acks, a transport that never drains) costs the reply a beat,
+        never the call.
+        """
+        if self.greeting is None or self.greeting.interruptible:
+            return
+        pending = self._greeting_pending_bytes()
+        if pending <= 0:
+            return
+        bytes_per_second = max(1, self.audio_output.sample_rate * 2)
+        deadline = time.monotonic() + pending / bytes_per_second + 1.0
+        while self._greeting_pending_bytes() > 0 and not self._cancel_turn.is_set():
+            if time.monotonic() >= deadline:
+                logger.info(
+                    "greeting_drain_wait_timeout",
+                    pending_bytes=self._greeting_pending_bytes(),
+                    **_trace_debug_fields(),
+                )
+                return
+            await asyncio.sleep(0.02)
+
+    def _greeting_heard_text(self) -> str:
+        """The opener as the caller received it, or ``""`` if they never did.
+
+        Tracks the transcript entry rather than ``_greeting_text`` because
+        :meth:`_truncate_greeting` rewrites that entry to the heard prefix on a
+        barge-in, and drops it entirely when nothing was played.
+        """
+        if self._greeting_entry is None:
+            return ""
+        return self._greeting_entry.text
+
     def _greeting_pending_bytes(self) -> int:
         """Opener audio the caller has not reached yet, on the played axis.
 
@@ -2320,6 +2451,13 @@ class VoiceSession:
         Its own root run (like :meth:`_generate_filler`) so it never nests into
         a turn's trace, and carrying the agent's own system prompt so the line
         knows who it is calling as.
+
+        Unlike the filler, this runs *before* any turn — on the very context
+        :meth:`_seed_call_context` planted for turn one. ``Runnable.__call__``
+        reuses a context whose trace is empty, so without clearing it first the
+        generator would claim that context as its own run: turn one would then
+        fork a child, and the call identity it was supposed to start with would
+        have to survive a round-trip through the tracing provider.
         """
         instructions = (self.greeting.instructions or "").strip()
         if not instructions:
@@ -2339,7 +2477,12 @@ class VoiceSession:
             max_tokens=128,
             tracing_provider=None,
         )
-        out = await self._greeting_agent(prompt="Say your opening line.").collect()
+        seeded_ctx = get_run_context()
+        set_run_context(None)
+        try:
+            out = await self._greeting_agent(prompt="Say your opening line.").collect()
+        finally:
+            set_run_context(seeded_ctx)
         if out.status.code != "success" or out.output is None:
             logger.warning("greeting_generation_failed", status=out.status.code, error=out.error)
             return None
@@ -2379,9 +2522,23 @@ class VoiceSession:
         async def chain() -> None:
             if prev is not None:
                 try:
-                    await prev
-                except (asyncio.CancelledError, Exception):
+                    # Shielded: ``Task.cancel()`` propagates to whatever the task
+                    # is awaiting, so an unshielded ``await prev`` would let a
+                    # segment torn down mid-chain reach back and cut the one
+                    # ahead of it — including a greeting that is explicitly not
+                    # interruptible. Everything that must die is cancelled
+                    # directly through ``_tts_tasks`` instead.
+                    await asyncio.shield(prev)
+                except asyncio.CancelledError:
+                    # The shield reports both directions. ``prev`` cancelled is
+                    # the predecessor dying, which this segment outlives;
+                    # anything else is *this* segment being torn down, and
+                    # swallowing that would let it speak after the turn is gone.
+                    if not prev.cancelled():
+                        raise
+                except Exception:
                     pass
+            await self._await_greeting_drain()
             if self._cancel_turn.is_set():
                 return
             if stream is not None:
@@ -2518,18 +2675,22 @@ class VoiceSession:
         )
         chunk_count = 0
         total_bytes = 0
-        if self._turn_tts_started_at is None:
-            self._turn_tts_started_at = time.monotonic()
-        self._turn_tts_segments += 1
+        if not greeting:
+            if self._turn_tts_started_at is None:
+                self._turn_tts_started_at = time.monotonic()
+            self._turn_tts_segments += 1
         # Filler segments record empty text: interruption truncation then counts
         # their played bytes without attributing words to the *reply*.
         segment_record: list = ["" if filler else text, 0]
-        self._turn_tts_segment_records.append(segment_record)
         if greeting:
-            # The opener predates any turn, and ``_run_turn`` rebinds the record
-            # list — keep a direct handle so its byte count stays readable once
-            # the first turn has swapped the list out from under it.
+            # The opener belongs to no turn: it is not in any turn's segment
+            # list (``_run_turn`` seeds a text-less stand-in for whatever is
+            # still draining when it starts) and it must not move that turn's
+            # TTS timings. Keep a direct handle so its byte count stays
+            # readable after the first turn rebinds the record list.
             self._greeting_record = segment_record
+        else:
+            self._turn_tts_segment_records.append(segment_record)
         try:
             async for chunk in self.tts.synthesize(text):
                 # The opener predates every turn, so the per-turn cancel flag says
@@ -2547,9 +2708,10 @@ class VoiceSession:
                     break
                 chunk_count += 1
                 total_bytes += len(chunk)
-                if self._turn_first_audio_at is None:
-                    self._turn_first_audio_at = time.monotonic()
-                self._turn_audio_bytes += len(chunk)
+                if not greeting:
+                    if self._turn_first_audio_at is None:
+                        self._turn_first_audio_at = time.monotonic()
+                    self._turn_audio_bytes += len(chunk)
                 if self._record_audio:
                     self._output_audio_chunks.append(chunk)
                 if self._recorder is not None:
@@ -2580,7 +2742,8 @@ class VoiceSession:
                 **_trace_debug_fields(),
             )
         finally:
-            self._turn_tts_ended_at = time.monotonic()
+            if not greeting:
+                self._turn_tts_ended_at = time.monotonic()
 
     # -- Internal: interruption truncation ------------------------------------
 
@@ -2856,10 +3019,12 @@ def _dont_greet_again_prompt(system_prompt: str | None, greeting: str) -> str:
     """``system_prompt`` plus one line stating the call is already open.
 
     Passed as the first turn's ``system_prompt`` override — a note, not a
-    rewrite, so a callable or skill-bearing prompt survives intact.
+    rewrite, so a callable or skill-bearing prompt survives intact. ``greeting``
+    is what the caller actually heard, which on a barge-in can be a prefix of
+    the configured line.
     """
     note = (
-        f'You already opened this call by saying: "{greeting}" '
+        f'You already opened this call by saying: "{greeting}". '
         "The caller has heard it. Do not greet them or introduce yourself again — "
         "answer what they just said."
     )

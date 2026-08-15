@@ -22,6 +22,7 @@ from timbal.core.test_model import TestModel
 from timbal.server import telephony as telephony_routes
 from timbal.server import voice as voice_routes
 from timbal.server.http import create_app
+from timbal.state import get_run_context
 from timbal.voice import (
     AgentTextDone,
     AudioInputConfig,
@@ -810,12 +811,15 @@ class TestGreetingOverWs:
         *,
         module_body: str,
         hello: dict,
+        extra_env: dict[str, str] | None = None,
     ) -> list[dict]:
         mod = tmp_path / "voice_agent.py"
         mod.write_text(module_body)
         monkeypatch.setenv("TIMBAL_RUNNABLE", f"{mod.resolve()}::agent")
         for k in VOICE_ENV_KEYS:
             monkeypatch.delenv(k, raising=False)
+        for k, v in (extra_env or {}).items():
+            monkeypatch.setenv(k, v)
 
         stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Yes, hello.")])
         monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", stt_cls)
@@ -863,3 +867,455 @@ class TestGreetingOverWs:
     ) -> None:
         messages = self._run_ws(monkeypatch, tmp_path, module_body=self._AGENT, hello={})
         assert [m["text"] for m in messages if m["type"] == "agent_text_done"] == [REPLY]
+
+
+# ---------------------------------------------------------------------------
+# The hold window
+# ---------------------------------------------------------------------------
+
+
+class TestGreetingHoldWindow:
+    """``interruptible=False`` protects the opener until it has been *heard*."""
+
+    async def test_hold_outlives_the_end_of_synthesis(self) -> None:
+        """The common barge-in shape: TTS done, audio still queued. A hold that
+        ended with ``_speak`` would cut the sentence that says who is calling."""
+        tts = _PacedTTS(num_chunks=2, every_secs=0.0)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)  # synthesis is instant here
+
+        assert session._greeting_speaking is False  # synthesis is over...
+        assert session._greeting_pending_bytes() > 0  # ...playback is not
+        assert session._greeting_holds_interrupt() is True
+
+        await session.interrupt()
+
+        assert [e.text for e in session.transcript] == [GREETING]
+        assert session._cancel_turn.is_set() is False
+
+    async def test_hold_releases_once_the_audio_has_drained(self) -> None:
+        tts = _PacedTTS(num_chunks=1, every_secs=0.0, chunk_bytes=32)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)
+        await asyncio.sleep(0.05)  # 32 bytes = 1ms of audio
+
+        assert session._greeting_pending_bytes() == 0
+        assert session._greeting_holds_interrupt() is False
+
+    async def test_hold_releases_once_the_reply_is_audible(self) -> None:
+        """Reply and opener then share one client buffer that cannot be cleared
+        selectively — and the opener has fully drained by that point anyway."""
+        tts = _PacedTTS(num_chunks=2, every_secs=0.0)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)
+        assert session._greeting_holds_interrupt() is True
+
+        session._turn_audio_bytes = 1  # a filler or fallback reached the wire
+        assert session._greeting_holds_interrupt() is False
+
+    async def test_close_releases_the_hold(self) -> None:
+        tts = _PacedTTS(num_chunks=2, every_secs=0.0)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)
+        session._closed = True
+
+        assert session._greeting_holds_interrupt() is False
+
+    async def test_reply_audio_waits_for_the_opener_to_drain(self) -> None:
+        """Handing the reply to the transport early cannot make it arrive
+        sooner — it only stacks it into the buffer barge-in has to clear."""
+        tts = _PacedTTS(num_chunks=2, every_secs=0.0)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)
+        pending = session._greeting_pending_bytes()
+        assert pending > 0
+
+        gate = asyncio.create_task(session._await_greeting_drain())
+        await asyncio.sleep(0.05)
+        assert not gate.done()  # still holding the reply back
+        await asyncio.wait_for(gate, timeout=3.0)
+
+        assert session._greeting_pending_bytes() == 0
+
+    async def test_interruptible_opener_never_gates_the_reply(self) -> None:
+        tts = _PacedTTS(num_chunks=2, every_secs=0.0)
+        session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
+        await session._claim_greeting(GREETING)
+        assert session._greeting_pending_bytes() > 0
+
+        await asyncio.wait_for(session._await_greeting_drain(), timeout=0.2)
+
+
+class TestGreetingConcurrentTurns:
+    async def test_second_commit_tears_down_the_first_turn(self) -> None:
+        """Two barge-ins inside one non-interruptible opener.
+
+        ``interrupt()`` spares the opener, so without an explicit teardown the
+        first reply survives and ``_begin_user_turn`` simply overwrites the
+        task handle — two turns then race on one session's turn state.
+        """
+        tts = _PacedTTS(num_chunks=10, every_secs=0.03, chunk_bytes=8_000)
+        session = _make_session(
+            greeting={"text": GREETING},
+            tts=tts,
+            model=TestModel(responses=[REPLY, "Still here."]),
+        )
+        session._claim_greeting(GREETING)
+        speak = session._greeting_speak_task
+        await asyncio.sleep(0.05)
+
+        await session._begin_user_turn("Yes, hello.", replace_user_entry=False)
+        first_turn = session._current_turn_task
+        await asyncio.sleep(0.05)
+        assert first_turn is not None and not first_turn.done()
+
+        await session.interrupt()  # the second barge-in
+
+        assert first_turn.done()
+        assert session._greeting_speaking is True  # the opener kept the wire
+        assert session._greeting_holds_interrupt() is True
+        # ...and kept the TTS chain, which the torn-down turn had nulled.
+        assert session._tts_tail is speak
+
+        session._cancel_turn.clear()
+        await session._begin_user_turn("Are you there?", replace_user_entry=False)
+        assert session._current_turn_task is not first_turn
+
+        speak.cancel()
+        await asyncio.gather(speak, return_exceptions=True)
+        await session.close()
+
+    async def test_a_failing_turn_cannot_cut_the_opener_through_the_chain(self) -> None:
+        """``Task.cancel()`` propagates to whatever the task is awaiting.
+
+        The reply's TTS segment waits on the opener's speak task, so tearing the
+        reply down — barge-in, error, timeout — used to reach back through that
+        ``await`` and cancel an opener the config said was not interruptible.
+        """
+        tts = _PacedTTS(num_chunks=10, every_secs=0.03, chunk_bytes=8_000)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        session._claim_greeting(GREETING)
+        speak = session._greeting_speak_task
+        await asyncio.sleep(0.05)
+
+        session._schedule_tts("A reply that is about to be abandoned.")
+        reply_segment = session._tts_tail
+        assert reply_segment is not speak
+        await asyncio.sleep(0.01)
+
+        reply_segment.cancel()
+        await asyncio.sleep(0.05)
+
+        assert reply_segment.cancelled() is True  # the reply did die...
+        assert speak.cancelled() is False  # ...without taking the opener with it
+        assert speak.done() is False
+        assert session._greeting_speaking is True
+
+        speak.cancel()
+        await asyncio.gather(speak, reply_segment, return_exceptions=True)
+
+    async def test_cancelled_reply_that_never_spoke_emits_no_interruption(self) -> None:
+        """The client rewrites its newest bubble on ``SessionInterrupted`` — and
+        while the opener is talking, its bubble is the newest one."""
+        tts = _PacedTTS(num_chunks=4, every_secs=0.02, chunk_bytes=8_000)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        session._claim_greeting(GREETING)
+        speak = session._greeting_speak_task
+        await asyncio.sleep(0.05)
+        _drain_queue(session)
+
+        session._current_turn_task = asyncio.create_task(asyncio.sleep(5))
+        await session.interrupt()
+
+        assert not [e for e in _drain_queue(session) if isinstance(e, SessionInterrupted)]
+
+        speak.cancel()
+        await asyncio.gather(speak, return_exceptions=True)
+
+
+class TestGreetingEchoWindow:
+    """Echo suppression has to cover the opener for as long as it is audible."""
+
+    async def test_echo_window_covers_the_drain(self) -> None:
+        """A deferred barge-in starts turn one mid-opener; the rest of the
+        opener still comes back through the speakerphone as "user" speech."""
+        tts = _PacedTTS(num_chunks=4, every_secs=0.0)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)
+        session._turn_index = 1  # a turn is now running behind the opener
+
+        assert session._greeting_pending_bytes() > 0
+        assert GREETING in session._spoken_assistant_text()
+
+    async def test_echo_window_closes_once_the_opener_has_drained(self) -> None:
+        """Kept narrow on purpose: ``_likely_stt_echo`` matches any verbatim
+        substring, so a permanent entry would swallow a caller who later says a
+        phrase the opener happened to contain."""
+        tts = _PacedTTS(num_chunks=1, every_secs=0.0, chunk_bytes=32)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)
+        await asyncio.sleep(0.05)
+        session._turn_index = 1
+
+        assert session._greeting_pending_bytes() == 0
+        assert GREETING not in session._spoken_assistant_text()
+
+
+class TestGreetingTurnMetrics:
+    async def test_opener_audio_stays_out_of_the_first_turn_metrics(self) -> None:
+        """Greeting bytes credited to turn one would fake its time-to-first-audio
+        and make ``drop_agent_tail`` over-trim the recording on a barge-in."""
+        tts = _PacedTTS(num_chunks=2, every_secs=0.0)
+        session = _make_session(greeting={"text": GREETING}, tts=tts)
+        await session._claim_greeting(GREETING)
+
+        assert session._turn_audio_bytes == 0
+        assert session._turn_first_audio_at is None
+        assert session._turn_tts_segments == 0
+        assert session._turn_tts_started_at is None
+        assert session._turn_tts_ended_at is None
+        assert session._turn_tts_segment_records == []
+        assert session._greeting_record[1] == 2 * 16_000  # ...but it did play
+
+
+class TestGreetingPromptNoteAfterBargeIn:
+    """The note quotes what the caller *heard*, not what was configured."""
+
+    async def test_note_quotes_only_the_heard_prefix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        prompts = _spy_on_system_prompts(monkeypatch)
+        tts = _PacedTTS(num_chunks=4, every_secs=0.05)
+        session = _make_session(
+            greeting={"text": GREETING, "interruptible": True}, tts=tts
+        )
+        speak = session._claim_greeting(GREETING)
+        await asyncio.sleep(0.12)
+        await session.interrupt()
+        await asyncio.gather(speak, return_exceptions=True)
+
+        heard = session.transcript[-1].text
+        assert heard and heard != GREETING
+
+        await session._run_turn("Sorry, who is this?")
+
+        [prompt] = prompts
+        assert heard in prompt
+        assert GREETING not in prompt  # never claim words that were cut off
+
+    async def test_no_note_when_the_opener_was_never_heard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cut before a single word landed → the agent should greet normally."""
+        prompts = _spy_on_system_prompts(monkeypatch)
+        tts = _PacedTTS(num_chunks=2, every_secs=0.0)
+        session = _make_session(
+            greeting={"text": GREETING, "interruptible": True}, tts=tts
+        )
+        await session._claim_greeting(GREETING)
+        await session.interrupt()
+        assert session.transcript == []
+
+        await session._run_turn("Hello?")
+
+        assert prompts == [None]
+
+
+# ---------------------------------------------------------------------------
+# Call context
+# ---------------------------------------------------------------------------
+
+
+class TestCallContext:
+    """Telephony identity has to be readable from a callable ``system_prompt``."""
+
+    @staticmethod
+    def _session(
+        stt: _OpenSTT,
+        seen: list[tuple[str | None, dict]],
+        *,
+        greeting: Any = None,
+        responses: list[str] | None = None,
+    ) -> VoiceSession:
+        async def system_prompt() -> str:
+            ctx = get_run_context()
+            seen.append((ctx.parent_id, dict(await ctx.get_session())))
+            return SYSTEM_PROMPT
+
+        agent = Agent(
+            name="voice_test",
+            model=TestModel(responses=responses or [REPLY]),
+            tools=[],
+            system_prompt=system_prompt,
+        )
+        return VoiceSession(
+            agent,
+            stt,
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            greeting=greeting,
+            call_context={"rep_id": "R001", "task": "eod_checkin"},
+        )
+
+    @staticmethod
+    def _turns(stt: _OpenSTT, *texts: str) -> Callable:
+        """Drive one turn per *text* on a session with no opener."""
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            done = 0
+            for text in texts:
+                await stt.inject(TranscriptEvent(type="committed", text=text))
+                done += 1
+                while sum(1 for e in events if isinstance(e, AgentTextDone)) < done:
+                    await asyncio.sleep(0.01)
+                await asyncio.sleep(0.02)
+
+        return drive
+
+    async def test_identity_reaches_turn_one_unforked(self) -> None:
+        seen: list[tuple[str | None, dict]] = []
+        stt = _OpenSTT()
+        session = self._session(stt, seen)
+
+        await _run(session, stt, drive=self._turns(stt, "Yes, hello."))
+
+        [(parent_id, session_data)] = seen
+        assert session_data["rep_id"] == "R001"
+        assert session_data["task"] == "eod_checkin"
+        # Turn one reuses the seeded context rather than forking a child.
+        assert parent_id is None
+
+    async def test_identity_survives_the_turn_two_fork(self) -> None:
+        """Extra ``RunContext`` attrs are dropped when turn two forks; the
+        session bag is what carries identity across that boundary."""
+        seen: list[tuple[str | None, dict]] = []
+        stt = _OpenSTT()
+        session = self._session(stt, seen, responses=[REPLY, "Still here."])
+
+        await _run(session, stt, drive=self._turns(stt, "Yes, hello.", "Still there?"))
+
+        assert len(seen) == 2
+        assert [data["rep_id"] for _, data in seen] == ["R001", "R001"]
+        assert seen[1][0] is not None  # turn two did fork
+
+    async def test_generated_opener_does_not_steal_the_seeded_context(self) -> None:
+        """The opener's own LLM run must not claim the context seeded for turn
+        one — turn one would fork, and its identity would then have to survive a
+        round-trip through the tracing provider to come back."""
+        seen: list[tuple[str | None, dict]] = []
+        stt = _OpenSTT()
+        session = self._session(
+            stt,
+            seen,
+            greeting={"instructions": "say hi", "model": TestModel(responses=["Hi there."])},
+        )
+
+        await _run(session, stt, drive=TestGreetingMemory._turns(stt, "Yes, hello."))
+
+        assert [e.text for e in session.transcript][0] == "Hi there."
+        # Resolved once to build the opener's prompt, once for the turn's note.
+        parent_id, session_data = seen[-1]
+        assert session_data["rep_id"] == "R001"
+        assert parent_id is None
+
+    def test_build_voice_session_plumbs_call_context(self) -> None:
+        """Telephony passes identity at build time, never through the voice
+        config — ``call_context`` is deliberately not a client-settable field."""
+        agent = Agent(name="voice_test", model=TestModel(responses=[REPLY]), tools=[])
+        session, _ = voice_routes.build_voice_session(
+            agent,
+            VoiceConfig(),
+            {"turn_detector": "heuristic"},
+            call_context={"rep_id": "R001"},
+        )
+        assert session.call_context == {"rep_id": "R001"}
+        assert "call_context" not in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
+
+
+class TestClientCallContext:
+    """The playground's identity field: shut by default, opened by env.
+
+    A browser asserting its own ``rep_id`` is a privilege-escalation shape, so
+    the default has to be "drop it silently" and the switch has to be
+    server-side.
+    """
+
+    def test_hello_call_context_is_dropped_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", raising=False)
+        assert voice_routes.client_call_context({"call_context": {"rep_id": "R001"}}) == {}
+        assert voice_routes.client_call_context_allowed() is False
+
+    def test_env_opens_the_door(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "1")
+        assert voice_routes.client_call_context({"call_context": {"rep_id": "R001"}}) == {"rep_id": "R001"}
+
+    def test_values_are_stringified_and_emptied_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "true")
+        got = voice_routes.client_call_context(
+            {"call_context": {"rep_id": 7, "task": "", "nested": {"a": 1}, "on": True}}
+        )
+        # ``bool`` is an ``int``: True stringifies rather than being dropped.
+        assert got == {"rep_id": "7", "on": "True"}
+
+    @pytest.mark.parametrize("raw", [None, {}, "R001", ["R001"]])
+    def test_non_dict_call_context_is_ignored(self, monkeypatch: pytest.MonkeyPatch, raw: Any) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "1")
+        assert voice_routes.client_call_context({"call_context": raw}) == {}
+
+    def test_meta_reports_the_switch_so_the_page_can_hide_the_field(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = Agent(name="voice_test", model=TestModel(responses=[REPLY]), tools=[])
+        monkeypatch.delenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", raising=False)
+        assert voice_routes.runnable_meta_for_voice_page(agent, "")["allow_client_call_context"] is False
+        monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "yes")
+        assert voice_routes.runnable_meta_for_voice_page(agent, "")["allow_client_call_context"] is True
+
+    def test_call_context_is_not_a_voice_config_key(self) -> None:
+        """The hello carries it, but merge must not treat it as an unknown
+        voice knob (that used to show up as ``voice_client_config_ignored``)."""
+        out = voice_routes.merge_client_voice_overrides(
+            VoiceConfig(),
+            {"call_context": {"rep_id": "R001"}, "greeting": GREETING, "turn_detector": "heuristic"},
+        )
+        assert out.greeting is not None and out.greeting.text == GREETING
+        assert not hasattr(out, "call_context") or out.model_dump().get("call_context") is None
+
+    def test_ws_hello_reaches_the_session_when_the_door_is_open(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        seen: dict[str, Any] = {}
+        real = voice_routes.build_voice_session
+
+        def spy(*args: Any, **kwargs: Any):
+            seen["call_context"] = kwargs.get("call_context")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(voice_routes, "build_voice_session", spy)
+        TestGreetingOverWs()._run_ws(
+            monkeypatch,
+            tmp_path,
+            module_body=TestGreetingOverWs._AGENT,
+            hello={"call_context": {"rep_id": "R001", "task": "reminder"}},
+            extra_env={"TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT": "1"},
+        )
+        assert seen["call_context"] == {"rep_id": "R001", "task": "reminder"}
+
+    def test_ws_hello_is_dropped_when_the_door_is_shut(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        seen: dict[str, Any] = {}
+        real = voice_routes.build_voice_session
+
+        def spy(*args: Any, **kwargs: Any):
+            seen["call_context"] = kwargs.get("call_context")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(voice_routes, "build_voice_session", spy)
+        TestGreetingOverWs()._run_ws(
+            monkeypatch,
+            tmp_path,
+            module_body=TestGreetingOverWs._AGENT,
+            hello={"call_context": {"rep_id": "R001"}},
+        )
+        assert seen["call_context"] == {}

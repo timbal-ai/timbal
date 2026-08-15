@@ -205,9 +205,12 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     here — invalid → keep server's.
     """
     updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
+    # ``turn_detector`` and ``call_context`` are read straight off the hello by
+    # the transport, not through VoiceConfig — reporting them as ignored would
+    # be a lie in both directions.
     ignored = sorted(
         k for k, v in client.items()
-        if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k != "turn_detector"
+        if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k not in ("turn_detector", "call_context")
     )
     if ignored:
         logger.info("voice_client_config_ignored", keys=ignored)
@@ -288,6 +291,9 @@ def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, A
         "import_spec": (import_spec or "").strip(),
         "model": model_s,
         "models": models,
+        # Lets the page enable its call-context field instead of offering a
+        # control the server would silently drop.
+        "allow_client_call_context": client_call_context_allowed(),
     }
 
 
@@ -296,6 +302,37 @@ _VOICE_HTML_META_TOKEN = "__TIMBAL_VOICE_RUNNABLE_META_JSON__"
 
 _TRUTHY = frozenset({"1", "true", "t", "yes", "y", "on"})
 _FALSY = frozenset({"0", "false", "f", "no", "n", "off"})
+
+
+def client_call_context_allowed() -> bool:
+    """Whether a browser may seed ``call_context`` over the hello.
+
+    Off by default, and it must stay that way anywhere real: call context is
+    caller *identity* (``rep_id``, ``from``) that a callable ``system_prompt``
+    trusts, and on telephony it is established by the webhook — not by whoever
+    is on the far end. ``TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`` opens it so
+    the playground can exercise an identity-driven prompt without placing a
+    real call.
+    """
+    return os.environ.get("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "").strip().lower() in _TRUTHY
+
+
+def client_call_context(config: dict[str, Any]) -> dict[str, str]:
+    """Read the hello's ``call_context``, or ``{}`` when the door is shut."""
+    raw = config.get("call_context")
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    if not client_call_context_allowed():
+        logger.info("voice_client_call_context_ignored", keys=sorted(map(str, raw)))
+        return {}
+    out = {str(k): str(v) for k, v in raw.items() if isinstance(v, str | int | float) and str(v)}
+    if out:
+        logger.warning(
+            "voice_client_call_context_accepted",
+            keys=sorted(out),
+            hint="TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT is a development switch — the caller is setting their own identity",
+        )
+    return out
 
 
 def voice_warmup_intended(runnable: Any) -> bool:
@@ -552,13 +589,16 @@ def build_voice_session(
     client_config: dict[str, Any],
     *,
     playback_tracker: Any = None,
+    call_context: dict[str, str] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Resolve voice config into a ``VoiceSession`` plus ``session_started`` metadata.
 
     Transport-agnostic: the WebSocket handler and the WebRTC route both call
     this with their own client config dict. ``playback_tracker`` lets a paced
     transport substitute its own position source for the default
-    client-acked estimate.
+    client-acked estimate. ``call_context`` is per-call identity (``rep_id``,
+    ``from``, …) that a callable ``system_prompt`` reads off the session bag —
+    deliberately separate from ``client_config``, which is voice knobs only.
 
     Returns ``(session, meta)`` where ``meta`` holds the resolved identity
     keys (``stt_provider``, ``stt_model``, ``model``, ``turn_detector``) that
@@ -711,6 +751,8 @@ def build_voice_session(
         session_kwargs["turn_timeout_fallback"] = str(merged.turn_timeout_fallback)
     if playback_tracker is not None:
         session_kwargs["playback_tracker"] = playback_tracker
+    if call_context:
+        session_kwargs["call_context"] = call_context
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).
@@ -931,7 +973,7 @@ async def _serve_voice_ws(ws: WebSocket, runnable: Any) -> None:
         logger.warning("voice_ws_first_frame_error", error=str(e))
 
     defaults: VoiceConfig = getattr(ws.app.state, "voice_config", None) or VoiceConfig()
-    session, meta = build_voice_session(runnable, defaults, config)
+    session, meta = build_voice_session(runnable, defaults, config, call_context=client_call_context(config))
     meta = {"playback_acks": "recommended", "transport": "websocket", **meta}
     session.recording_meta = meta
 

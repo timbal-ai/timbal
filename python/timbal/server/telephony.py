@@ -66,7 +66,21 @@ _CONFIG_PARAM_KEYS = (
 # phone, notes). Explicit allowlist so a random query key never becomes a
 # TeXML ``<Parameter>``. ``rev`` / ``t`` stay off the Stream; they are proxy
 # routing, not session. These must not land in ``VoiceConfig``.
-_IDENTITY_PARAM_KEYS = ("rep_id", "task")
+#
+# Set ``TIMBAL_VOICE_IDENTITY_PARAMS`` (comma-separated) to replace the
+# defaults with your own keys. Env rather than ``VoiceConfig`` on purpose: the
+# webhook resolves this before any session exists, and the allowlist is the
+# only thing standing between a query string and the prompt — a channel a
+# client can reach must never widen it.
+_DEFAULT_IDENTITY_PARAM_KEYS = ("rep_id", "task")
+
+
+def _identity_param_keys() -> tuple[str, ...]:
+    raw = os.environ.get("TIMBAL_VOICE_IDENTITY_PARAMS")
+    if not raw:
+        return _DEFAULT_IDENTITY_PARAM_KEYS
+    keys = tuple(k.strip() for k in raw.split(",") if k.strip())
+    return keys or _DEFAULT_IDENTITY_PARAM_KEYS
 
 _ULAW_ENCODINGS = {"audio/x-mulaw", "pcmu"}
 
@@ -206,11 +220,11 @@ def _stream_ws_url(request: Request, path: str) -> str:
 
 
 def _identity_params(query: Any) -> dict[str, str]:
-    """Pull ``rep_id`` / ``task`` off the incoming webhook query string."""
+    """Pull the allowlisted identity keys off the incoming webhook query string."""
     if query is None:
         return {}
     out: dict[str, str] = {}
-    for key in _IDENTITY_PARAM_KEYS:
+    for key in _identity_param_keys():
         val = query.get(key)
         if isinstance(val, str) and val:
             out[key] = val
@@ -486,8 +500,13 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
         task.add_done_callback(clear_tasks.discard)
 
     tracker = TelephonyPlaybackTracker(bytes_per_second=session_rate * 2, on_clear=_on_clear)
-    session, meta = build_voice_session(runnable, defaults, client_config, playback_tracker=tracker)
-    session.call_context = call_context
+    session, meta = build_voice_session(
+        runnable,
+        defaults,
+        client_config,
+        playback_tracker=tracker,
+        call_context=call_context,
+    )
     meta = {
         "transport": dialect.name,
         "call_id": info.get("call_id"),

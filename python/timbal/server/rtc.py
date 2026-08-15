@@ -33,7 +33,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..voice.config import VoiceConfig
-from .voice import build_voice_session, event_to_payloads, merge_client_voice_overrides
+from .voice import (
+    build_voice_session,
+    client_call_context,
+    event_to_payloads,
+    merge_client_voice_overrides,
+)
 
 logger = structlog.get_logger("timbal.server.rtc")
 
@@ -168,7 +173,11 @@ async def voice_rtc(request: Request) -> JSONResponse:
 
         downlink = PcmQueueTrack(sample_rate=sample_rate)
         session, meta = build_voice_session(
-            runnable, defaults, config, playback_tracker=PacedPlaybackTracker(downlink)
+            runnable,
+            defaults,
+            config,
+            playback_tracker=PacedPlaybackTracker(downlink),
+            call_context=client_call_context(config),
         )
         meta = {"playback_acks": "native", "transport": "webrtc", **meta}
         session.recording_meta = meta
