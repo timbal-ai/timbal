@@ -1936,8 +1936,7 @@ class TestStreamingTTS:
 
         ElevenLabs (and any ``open_stream`` provider) goes through
         ``_pump_tts_stream``, not ``_speak``. Skipping add_agent there left
-        split recordings as caller-left / silence-right — the CRM player
-        only played David's side.
+        split recordings as caller-left / silence-right.
         """
         from timbal.voice.recording import CallRecorder
 
