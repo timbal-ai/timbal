@@ -737,8 +737,18 @@ models:
   capabilities: [tools, reasoning]
 - id: fireworks/accounts/fireworks/models/deepseek-v4-flash
   provider: fireworks
-  display_name: DeepSeek V4 Flash (Fireworks)
-  description: 'DeepSeek V4 Flash on Fireworks serverless: fast, cost-efficient MoE with near-Pro reasoning at 1M context.'
+  display_name: DeepSeek V4 Flash (Fireworks, preview)
+  description: 'DeepSeek V4 Flash preview on Fireworks: fast, cost-efficient MoE with near-Pro reasoning at 1M context.'
+  notes: Serverless removed on Fireworks; migrate to deepseek-v4-flash-0731.
+  input_price: 0.14
+  output_price: 0.28
+  context_window: 1048576
+  capabilities: [tools, reasoning]
+- id: fireworks/accounts/fireworks/models/deepseek-v4-flash-0731
+  provider: fireworks
+  display_name: DeepSeek V4 Flash 0731 (Fireworks)
+  description: 'Official DeepSeek V4 Flash on Fireworks serverless: supersedes the April preview, same pricing, stronger agentic behavior.'
+  notes: Replacement for retired serverless deepseek-v4-flash.
   input_price: 0.14
   output_price: 0.28
   context_window: 1048576

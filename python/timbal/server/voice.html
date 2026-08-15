@@ -77,6 +77,11 @@
   }
   /* Wider than the left panel: this one lays fields out two per row. */
   .panel--session { flex-basis: 330px; }
+  .panel-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
   .panel-section {
     display: flex;
     flex-direction: column;
@@ -219,6 +224,31 @@
     .panel { flex: none; width: auto; overflow: visible; }
     .card { order: -1; min-height: 60dvh; }
     .panel-note { margin-top: 0; }
+  }
+  /* The session panel's natural height overflows a laptop screen, and a
+     settings panel you have to scroll hides the knob you are mid-experiment
+     with. Given enough width to double it and still leave the transcript a
+     usable column, lay the sections out as a 2-track grid instead. */
+  @media (min-width: 1240px) {
+    .shell { max-width: 1560px; }
+    /* Two selects and, standalone, the target fields — it does not need 250px,
+       and the width is worth more to the transcript here. */
+    .panel { flex-basis: 220px; }
+    .panel--session { flex-basis: 600px; }
+    /* Explicit 2-track grid, not CSS columns: pairing is by section (pipeline
+       next to greeting, filler next to ambience) so the tops line up instead
+       of packing by height and leaving a ragged right edge. */
+    .panel-sections {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      column-gap: 1rem;
+      row-gap: 0.85rem;
+      align-items: start;
+    }
+    .panel-sections > .panel-section { margin: 0; }
+    /* Dev-only identity field: one full-width row under the pairs, not a
+       leftover half-cell. */
+    #call-context-section { grid-column: 1 / -1; }
   }
   .top {
     display: flex;
@@ -444,6 +474,22 @@
   .msg.assistant.filler {
     opacity: 0.65;
     font-style: italic;
+  }
+  /* Agent-speaks-first opener: any assistant text before the first user
+     commit. Tagged so barge-in tests can see at a glance whether the line
+     that got truncated was the greeting or a reply. */
+  .msg.assistant.greeting {
+    border-color: var(--primary);
+    box-shadow: inset 2px 0 0 var(--primary);
+  }
+  .msg.assistant.greeting::before {
+    content: "opener";
+    display: block;
+    font-size: 0.625rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--primary);
+    margin-bottom: 0.2rem;
   }
   .field-inline {
     flex-direction: row;
@@ -751,117 +797,166 @@
         <div id="mic-viz" class="mic-viz" aria-hidden="true">
           <div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div>
         </div>
+        <label class="field">
+          <span class="field-label">Transport</span>
+          <select id="transport-select" aria-label="Transport" title="How audio moves — applied on the next Start. WebRTC uses Opus tracks (server needs timbal[voice]). LiveKit joins an SFU room: local target mints via the playground launcher, platform target mints via the monolith (project must be flagged, or use the preview endpoint); the agent needs timbal[voice-livekit]. Noise suppression runs in the browser's own pipeline on WebRTC/LiveKit, so the RNNoise option applies to WebSocket only.">
+            <option value="ws">WebSocket (PCM)</option>
+            <option value="webrtc">WebRTC (Opus)</option>
+            <option value="livekit">LiveKit (SFU)</option>
+          </select>
+        </label>
       </div>
-      <section class="panel-section" aria-label="Pipeline">
-        <h3 class="panel-section-title">Pipeline</h3>
-        <div class="panel-grid">
-          <label class="field">
-            <span class="field-label">Noise suppression</span>
-            <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.">
-              <option value="browser">Browser</option>
-              <option value="rnnoise">RNNoise</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Speech-to-text</span>
-            <select id="stt-select" aria-label="STT provider" title="Speech-to-text provider — applied on the next Start. Deepgram needs DEEPGRAM_API_KEY on the server.">
-              <option value="">Server default</option>
-              <option value="elevenlabs">ElevenLabs Scribe</option>
-              <option value="deepgram-flux">Deepgram Flux</option>
-              <option value="deepgram-nova">Deepgram Nova-3</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Turn detection</span>
-            <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking. Applied on the next Start.">
-              <option value="">Server default</option>
-              <option value="heuristic">Heuristic</option>
-              <option value="provider">Provider VAD</option>
-              <option value="local">Smart Turn + Namo</option>
-              <option value="lexical">Namo text</option>
-              <option value="raw">Raw (no filters)</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Transport</span>
-            <select id="transport-select" aria-label="Transport" title="How audio moves — applied on the next Start. WebRTC uses Opus tracks (server needs timbal[voice]). LiveKit joins an SFU room: local target mints via the playground launcher, platform target mints via the monolith (project must be flagged, or use the preview endpoint); the agent needs timbal[voice-livekit]. Noise suppression runs in the browser's own pipeline on WebRTC/LiveKit, so the RNNoise option applies to WebSocket only.">
-              <option value="ws">WebSocket (PCM)</option>
-              <option value="webrtc">WebRTC (Opus)</option>
-              <option value="livekit">LiveKit (SFU)</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">TTS provider</span>
-            <select id="tts-select" aria-label="TTS provider" title="Text-to-speech provider — applied on the next Start. Munsit (Arabic) needs MUNSIT_API_KEY, Fish Audio needs FISH_API_KEY on the server.">
-              <option value="">Server default</option>
-              <option value="elevenlabs">ElevenLabs</option>
-              <option value="fishaudio">Fish Audio</option>
-              <option value="munsit">Munsit (Arabic)</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">TTS model</span>
-            <select id="tts-model-select" aria-label="TTS model" title="Text-to-speech model — options follow the selected provider. Applied on the next Start.">
-              <option value="">Server default</option>
-            </select>
-          </label>
-        </div>
-      </section>
-      <section class="panel-section" aria-label="Filler speech">
-        <h3 class="panel-section-title">Filler speech</h3>
-        <div class="panel-grid">
-          <label class="field">
-            <span class="field-label">Enabled</span>
-            <select id="filler-select" aria-label="Tool-call filler" title="Spoken 'one sec, let me check that…' while a tool runs, generated by an LLM in the caller's language. 'Server default' uses whatever the agent's voice_config sets. Applied on the next Start.">
-              <option value="">Server default</option>
-              <option value="off">Off</option>
-              <option value="on">On</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Delay (s)</span>
-            <input type="number" id="filler-delay" min="0" max="10" step="0.1" aria-label="Filler grace delay" placeholder="1.0"
-                   title="Grace period before the filler speaks — tools that finish sooner stay silent. Only used when filler speech is On.">
-          </label>
-          <label class="field">
-            <span class="field-label">Repeat (s)</span>
-            <input type="number" id="filler-repeat" min="0" max="60" step="0.5" aria-label="Filler repeat interval" placeholder="off"
-                   title="If the agent is still working this long after the previous filler with nothing spoken, say a short follow-up ('still on it…'). Empty or 0 = one filler max. Only used when filler speech is On.">
-          </label>
-          <label class="field">
-            <span class="field-label">Max per turn</span>
-            <input type="number" id="filler-max" min="1" max="10" step="1" aria-label="Max fillers per turn" placeholder="3"
-                   title="Hard cap on fillers per turn when repeating. Only used when filler speech is On.">
-          </label>
-          <label class="field field-wide">
-            <span class="field-label">Generator prompt</span>
-            <input type="text" id="filler-prompt" aria-label="Filler generator prompt" placeholder="Built-in generator prompt"
-                   title="System prompt for the filler-generating LLM. Empty keeps the server's prompt (or the built-in one). Only used when filler speech is On.">
-          </label>
-        </div>
-      </section>
-      <section class="panel-section" aria-label="Ambience">
-        <h3 class="panel-section-title">Ambience</h3>
-        <div class="panel-grid">
-          <label class="field">
-            <span class="field-label">Track</span>
-            <select id="ambient-select" aria-label="Ambience track" title="Background sound looped locally in your browser. 'Server default' plays whatever the agent's voice_config sets (possibly nothing); presets override it. Applies immediately.">
-              <option value="">Server default</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Volume</span>
-            <input type="range" id="ambient-volume" min="0" max="100" step="1" aria-label="Ambience volume"
-                   title="Local to your browser; overrides the server's configured volume.">
-          </label>
-          <label class="field field-inline field-wide">
-            <input type="checkbox" id="thinking-sound" aria-label="Thinking sound">
-            <span class="field-label">Thinking sound while tools run</span>
-          </label>
-        </div>
-      </section>
+      <div class="panel-sections">
+        <section class="panel-section" aria-label="Pipeline">
+          <h3 class="panel-section-title">Pipeline</h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Noise suppression</span>
+              <select id="ns-select" aria-label="Noise suppression" title="Mic noise suppression — applied on the next Start. Echo cancellation stays on in every mode.">
+                <option value="browser">Browser</option>
+                <option value="rnnoise">RNNoise</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Speech-to-text</span>
+              <select id="stt-select" aria-label="STT provider" title="Speech-to-text provider — applied on the next Start. Deepgram needs DEEPGRAM_API_KEY on the server.">
+                <option value="">Server default</option>
+                <option value="elevenlabs">ElevenLabs Scribe</option>
+                <option value="deepgram-flux">Deepgram Flux</option>
+                <option value="deepgram-nova">Deepgram Nova-3</option>
+              </select>
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">Turn detection</span>
+              <select id="td-select" aria-label="Turn detector" title="Turn detector — how the agent decides you finished speaking. Applied on the next Start.">
+                <option value="">Server default</option>
+                <option value="heuristic">Heuristic</option>
+                <option value="provider">Provider VAD</option>
+                <option value="local">Smart Turn + Namo</option>
+                <option value="lexical">Namo text</option>
+                <option value="raw">Raw (no filters)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">TTS provider</span>
+              <select id="tts-select" aria-label="TTS provider" title="Text-to-speech provider — applied on the next Start. Munsit (Arabic) needs MUNSIT_API_KEY, Fish Audio needs FISH_API_KEY on the server.">
+                <option value="">Server default</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="fishaudio">Fish Audio</option>
+                <option value="munsit">Munsit (Arabic)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">TTS model</span>
+              <select id="tts-model-select" aria-label="TTS model" title="Text-to-speech model — options follow the selected provider. Applied on the next Start.">
+                <option value="">Server default</option>
+              </select>
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" aria-label="Greeting">
+          <h3 class="panel-section-title">Greeting</h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Enabled</span>
+              <select id="greeting-select" aria-label="Greeting" title="Agent speaks first, before you say anything. 'Server default' uses whatever the agent's voice_config sets; 'Off' silences the opener for this call only. Applied on the next Start.">
+                <option value="">Server default</option>
+                <option value="off">Off</option>
+                <option value="on">On</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Interruptible</span>
+              <select id="greeting-interruptible" aria-label="Greeting interruptible" title="No = talking over the opener will not cut it off; your commit still opens a turn, and its reply queues behind the opener. Yes = barge-in truncates it like any reply.">
+                <option value="">Server default</option>
+                <option value="no">No (hold)</option>
+                <option value="yes">Yes (barge-in)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Delay (ms)</span>
+              <input type="number" id="greeting-delay" min="0" max="10000" step="100" aria-label="Greeting delay" placeholder="0"
+                     title="Silence held before the opener speaks. Mimics a carrier connecting the media stream before the callee has the handset up.">
+            </label>
+            <label class="field">
+              <span class="field-label">Text</span>
+              <input type="text" id="greeting-text" aria-label="Greeting text" placeholder="Server default"
+                     title="Exact words to say — straight to TTS, no LLM turn (~300ms to first audio). Wins over Instructions when both are set.">
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">Instructions</span>
+              <input type="text" id="greeting-instructions" aria-label="Greeting instructions" placeholder="e.g. greet them by name and say why you are calling"
+                     title="Brief for an LLM-authored opener, written against the agent's own system prompt (~1.5s to first audio). Ignored when Text is set.">
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" aria-label="Filler speech">
+          <h3 class="panel-section-title">Filler speech</h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Enabled</span>
+              <select id="filler-select" aria-label="Tool-call filler" title="Spoken 'one sec, let me check that…' while a tool runs, generated by an LLM in the caller's language. 'Server default' uses whatever the agent's voice_config sets. Applied on the next Start.">
+                <option value="">Server default</option>
+                <option value="off">Off</option>
+                <option value="on">On</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Delay (s)</span>
+              <input type="number" id="filler-delay" min="0" max="10" step="0.1" aria-label="Filler grace delay" placeholder="1.0"
+                     title="Grace period before the filler speaks — tools that finish sooner stay silent. Only used when filler speech is On.">
+            </label>
+            <label class="field">
+              <span class="field-label">Repeat (s)</span>
+              <input type="number" id="filler-repeat" min="0" max="60" step="0.5" aria-label="Filler repeat interval" placeholder="off"
+                     title="If the agent is still working this long after the previous filler with nothing spoken, say a short follow-up ('still on it…'). Empty or 0 = one filler max. Only used when filler speech is On.">
+            </label>
+            <label class="field">
+              <span class="field-label">Max per turn</span>
+              <input type="number" id="filler-max" min="1" max="10" step="1" aria-label="Max fillers per turn" placeholder="3"
+                     title="Hard cap on fillers per turn when repeating. Only used when filler speech is On.">
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">Generator prompt</span>
+              <input type="text" id="filler-prompt" aria-label="Filler generator prompt" placeholder="Built-in generator prompt"
+                     title="System prompt for the filler-generating LLM. Empty keeps the server's prompt (or the built-in one). Only used when filler speech is On.">
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" aria-label="Ambience">
+          <h3 class="panel-section-title">Ambience</h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Track</span>
+              <select id="ambient-select" aria-label="Ambience track" title="Background sound looped locally in your browser. 'Server default' plays whatever the agent's voice_config sets (possibly nothing); presets override it. Applies immediately.">
+                <option value="">Server default</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Volume</span>
+              <input type="range" id="ambient-volume" min="0" max="100" step="1" aria-label="Ambience volume"
+                     title="Local to your browser; overrides the server's configured volume.">
+            </label>
+            <label class="field field-inline field-wide">
+              <input type="checkbox" id="thinking-sound" aria-label="Thinking sound">
+              <span class="field-label">Thinking sound while tools run</span>
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" aria-label="Call context" id="call-context-section" hidden>
+          <h3 class="panel-section-title">Call context</h3>
+          <div class="panel-grid">
+            <label class="field field-wide">
+              <span class="field-label">Identity (JSON)</span>
+              <input type="text" id="call-context" aria-label="Call context" placeholder='{"rep_id": "42", "task": "reminder"}'
+                     title="Per-call identity a callable system_prompt reads off the session. On telephony this is set by the webhook, never by the caller — the server only accepts it here because TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT is set.">
+            </label>
+          </div>
+          <p class="panel-note">Dev only — <code>TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT</code> is set, so this server takes caller identity from the browser.</p>
+        </section>
+      </div>
       <p class="panel-note">Echo cancellation stays on in every mode. Settings apply on the next Start.</p>
     </aside>
   </div>
@@ -939,6 +1034,80 @@ fillerPrompt.onchange = () => localStorage.setItem(FILLER_PROMPT_STORAGE_KEY, fi
 fillerDelay.onchange = () => localStorage.setItem(FILLER_DELAY_STORAGE_KEY, fillerDelay.value);
 fillerRepeat.onchange = () => localStorage.setItem(FILLER_REPEAT_STORAGE_KEY, fillerRepeat.value);
 fillerMax.onchange = () => localStorage.setItem(FILLER_MAX_STORAGE_KEY, fillerMax.value);
+
+// Greeting override — the agent-speaks-first opener. Same lifecycle as the
+// filler block: sent in the session config, applied on the next Start, ''
+// defers to the server's voice_config.
+const greetingSelect = document.getElementById('greeting-select');
+const greetingText = document.getElementById('greeting-text');
+const greetingInstructions = document.getElementById('greeting-instructions');
+const greetingInterruptible = document.getElementById('greeting-interruptible');
+const greetingDelay = document.getElementById('greeting-delay');
+const GREETING_FIELDS = [
+  [greetingSelect, 'timbal-voice-greeting-mode'],
+  [greetingText, 'timbal-voice-greeting-text'],
+  [greetingInstructions, 'timbal-voice-greeting-instructions'],
+  [greetingInterruptible, 'timbal-voice-greeting-interruptible'],
+  [greetingDelay, 'timbal-voice-greeting-delay'],
+];
+for (const [el, key] of GREETING_FIELDS) {
+  el.value = localStorage.getItem(key) || '';
+  el.onchange = () => {
+    localStorage.setItem(key, el.value);
+    syncGreetingInputs();
+  };
+}
+function syncGreetingInputs() {
+  const on = greetingSelect.value === 'on';
+  for (const el of [greetingText, greetingInstructions, greetingInterruptible, greetingDelay]) {
+    el.disabled = !on;
+  }
+  // text wins over instructions server-side — say so rather than letting a
+  // filled-in brief look like it is being used.
+  greetingInstructions.placeholder = (on && greetingText.value.trim())
+    ? 'Ignored — Text takes precedence'
+    : 'e.g. greet them by name and say why you are calling';
+}
+syncGreetingInputs();
+greetingText.oninput = syncGreetingInputs;
+
+// Per-call identity for a callable system_prompt. Hidden unless the server
+// reports TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT — otherwise it would be a
+// control whose value the server silently drops.
+const callContextInput = document.getElementById('call-context');
+const callContextSection = document.getElementById('call-context-section');
+const CALL_CONTEXT_STORAGE_KEY = 'timbal-voice-call-context';
+callContextInput.value = localStorage.getItem(CALL_CONTEXT_STORAGE_KEY) || '';
+callContextInput.onchange = () => {
+  localStorage.setItem(CALL_CONTEXT_STORAGE_KEY, callContextInput.value);
+  syncCallContext();
+};
+/** Parsed call context, or null when the field is empty/unusable. */
+function callContextPayload() {
+  const raw = callContextInput.value.trim();
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (v !== null && v !== undefined && typeof v !== 'object') out[k] = String(v);
+  }
+  return Object.keys(out).length ? out : null;
+}
+function syncCallContext() {
+  const bad = callContextInput.value.trim() && !callContextPayload();
+  callContextInput.style.borderColor = bad ? 'var(--danger)' : '';
+  callContextInput.title = bad
+    ? 'Not a flat JSON object — this will not be sent.'
+    : 'Per-call identity a callable system_prompt reads off the session. On telephony this is set by the webhook, never by the caller.';
+}
+callContextInput.oninput = syncCallContext;
+syncCallContext();
 
 const transportSelect = document.getElementById('transport-select');
 const TRANSPORT_STORAGE_KEY = 'timbal-voice-transport';
@@ -1440,6 +1609,9 @@ function applyMeta(meta) {
   const titleEl = document.getElementById('conn-runnable-title');
   const specEl = document.getElementById('conn-runnable-spec');
   if (!strip || !verEl || !wrap || !titleEl || !specEl) return;
+  // Only offer the call-context field where the server will actually honour
+  // it — an unreachable server (null meta) or an older one reports nothing.
+  callContextSection.hidden = !(meta && meta.allow_client_call_context);
   if (!meta) {
     initModelPicker([], '');
     verEl.textContent = '';
@@ -2004,6 +2176,24 @@ function sessionConfigPayload() {
     const maxPerTurn = parseInt(fillerMax.value, 10);
     if (Number.isFinite(maxPerTurn) && maxPerTurn >= 1) cfg.filler.max_per_turn = maxPerTurn;
   }
+  if (greetingSelect.value === 'off') {
+    // '' is the only spelling that subtracts a nested server default.
+    cfg.greeting = '';
+  } else if (greetingSelect.value === 'on') {
+    // Deep-merged over the server's greeting, so empty fields keep its values.
+    // A server with no greeting configured needs text or instructions here,
+    // otherwise the block fails validation and the server keeps its default.
+    cfg.greeting = {};
+    if (greetingText.value.trim()) cfg.greeting.text = greetingText.value.trim();
+    if (greetingInstructions.value.trim()) cfg.greeting.instructions = greetingInstructions.value.trim();
+    if (greetingInterruptible.value) cfg.greeting.interruptible = greetingInterruptible.value === 'yes';
+    const greetDelay = parseInt(greetingDelay.value, 10);
+    if (Number.isFinite(greetDelay) && greetDelay >= 0) cfg.greeting.delay_ms = greetDelay;
+  }
+  if (!callContextSection.hidden) {
+    const callContext = callContextPayload();
+    if (callContext) cfg.call_context = callContext;
+  }
   return cfg;
 }
 
@@ -2014,6 +2204,7 @@ function resetSessionUi() {
   window._lastAssistantEl = null;
   window._turnBubbles = [];
   window._replyDone = false;
+  window._sawUserCommit = false;
   partialEl = null;
   statusEl = null;
   resetPlaybackTracking();
@@ -2059,7 +2250,7 @@ async function start() {
     } else {
       dial = spawned?.livekit;
       if (!dial?.url || !dial?.token) {
-        throw new Error('Launcher did not return a LiveKit dial (url/token). Put LIVEKIT_API_KEY / LIVEKIT_API_SECRET / TIMBAL_LIVEKIT_URL in the agent .env.');
+        throw new Error('Launcher did not return a LiveKit dial (url/token). Put LIVEKIT_API_KEY / LIVEKIT_API_SECRET / TIMBAL_LIVEKIT_URL in the .env next to where you launched the playground (or the agent .env).');
       }
     }
     await startLivekit(gen, dial);
@@ -2227,6 +2418,7 @@ function handleServerMessage(msg) {
         window._turnBubbles = [];
         window._replyDone = true;
         window._assistantEl = null;
+        window._sawUserCommit = true;
         if (msg.replace) {
           const users = transcriptEl.querySelectorAll('.msg.user');
           const last = users[users.length - 1];
@@ -2247,7 +2439,9 @@ function handleServerMessage(msg) {
         // First delta after a finished reply starts a new turn's bubble set.
         if (window._replyDone) { window._turnBubbles = []; window._replyDone = false; }
         if (!window._assistantEl) {
-          window._assistantEl = log('assistant', '');
+          // Assistant text before the first user commit can only be the
+          // opener — the session is otherwise purely reactive.
+          window._assistantEl = log(window._sawUserCommit ? 'assistant' : 'assistant greeting', '');
           (window._turnBubbles = window._turnBubbles || []).push(window._assistantEl);
         }
         window._assistantEl.textContent += msg.text;

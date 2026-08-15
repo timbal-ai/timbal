@@ -3,6 +3,7 @@
 from .config import (
     AmbientAudioConfig,
     FillerConfig,
+    GreetingConfig,
     RecordingConfig,
     VoiceConfig,
 )
@@ -123,6 +124,7 @@ __all__ = [
     "FillerConfig",
     "FillerSpoken",
     "FishAudioStreamTTS",
+    "GreetingConfig",
     "HeuristicTurnDetector",
     "LexicalTurnDetector",
     "LocalAudioTurnDetector",

@@ -28,6 +28,10 @@ from timbal.core.tool import Tool
 from timbal.voice import resolve_turn_detector
 
 _MODE = os.environ.get("TIMBAL_VOICE_TURN_DETECTOR", "local").strip().lower()
+# Qwen3.6-27B on Groq: capable enough for phatic voice turns, fast enough
+# that TTS is not waiting on a 70B. Thinking is ON by default on this model
+# and would eat 1–2s of silence before first audio — force it off.
+_MODEL = os.environ.get("TIMBAL_VOICE_DEMO_MODEL", "groq/qwen/qwen3.6-27b")
 
 
 async def get_datetime() -> str:
@@ -38,8 +42,9 @@ async def get_datetime() -> str:
 
 agent = Agent(
     name="voice_turn_modes",
-    model=os.environ.get("TIMBAL_VOICE_DEMO_MODEL", "groq/llama-3.1-8b-instant"),
+    model=_MODEL,
     max_tokens=1024,  # required when switching to Anthropic from the playground
+    model_params={"reasoning_effort": "none"} if "qwen" in _MODEL else {},
     system_prompt=(
         "You are a concise voice assistant. Keep replies to 1–2 short sentences. "
         "When the user asks for the date and/or time, you MUST call get_datetime "

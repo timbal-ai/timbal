@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .ambience import validate_ambient_source
 
@@ -69,6 +69,77 @@ class FillerConfig(BaseModel):
     follow-up ("still on it…"). ``None`` → one filler per turn, max."""
     max_per_turn: int = Field(default=3, ge=1)
     """Hard cap on fillers per turn (first one included) when repeating."""
+
+
+DEFAULT_GREETING_SYSTEM_PROMPT = (
+    "You are about to speak first on a live call: the other person has said nothing yet and is "
+    "waiting to hear who this is. Reply with ONLY the words to say out loud — one or two short "
+    "spoken sentences, no quotes, no stage directions, no questions the caller has not been "
+    "given a chance to answer yet."
+)
+
+
+class GreetingConfig(BaseModel):
+    """Agent speaks first: the opening line, before any user speech.
+
+    A ``VoiceSession`` is otherwise purely reactive — it needs an STT commit
+    before it produces audio. On an outbound call that means the callee answers
+    to silence and pays for the first turn with a "Hello?" (measured live: the
+    agent said nothing until prompted, and that turn was then cancelled by the
+    callee's second "Hello.", wasting 2.4s).
+
+    Two ways to author the line. ``text`` goes straight to TTS — ~300ms to
+    first audio and deterministic wording, which is why it is the primary path.
+    ``instructions`` spends a full LLM round-trip (~1.5s) to write it against
+    the agent's own system prompt, for openers that must mention who is being
+    called or why. ``text`` wins when both are set.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = None
+    """Exact words to say. No LLM turn — synthesized directly."""
+    instructions: str | None = None
+    """Brief for an LLM-authored opener ("greet them by name, mention the
+    appointment"). Ignored when ``text`` is set."""
+    interruptible: bool = False
+    """``False`` (matching Vapi's ``firstMessageInterruptionsEnabled`` and
+    LiveKit's ``on_enter`` reply node) defers barge-in until the opener
+    finishes: the caller talking over "this is the clinic calling about…" must
+    not truncate the one sentence that says who is on the line. The commit that
+    barged in still opens a turn — its reply just queues behind the greeting."""
+    delay_ms: int = Field(default=0, ge=0)
+    """Silence held before speaking. Telephony connects the media stream the
+    moment the carrier answers, which can be before the callee has the handset
+    to their ear; a beat here keeps the opener from landing under their "hello?"."""
+    model: Any = None
+    """Generator LLM for ``instructions`` ("provider/model", or a TestModel in
+    tests). None → the session's LLM. Unused by the ``text`` path."""
+
+    @model_validator(mode="after")
+    def _has_something_to_say(self) -> GreetingConfig:
+        """Fail fast: an empty greeting block is a config typo, not "no greeting"
+        (that is ``greeting=None``, the default)."""
+        if not (self.text or "").strip() and not (self.instructions or "").strip():
+            raise ValueError("greeting needs 'text' or 'instructions'")
+        return self
+
+
+def coerce_greeting(value: Any) -> GreetingConfig | None:
+    """Normalize any accepted greeting spelling into a :class:`GreetingConfig`.
+
+    A bare string is the common case ("Hi, thanks for calling Acme.") and the
+    *only* thing some override channels can carry — a TeXML/TwiML
+    ``<Parameter name="greeting">`` is a string, as is an env var. ``""`` means
+    "no greeting", so a per-call override can also switch a server default off.
+    """
+    if value is None:
+        return None
+    if isinstance(value, GreetingConfig):
+        return value
+    if isinstance(value, str):
+        return GreetingConfig(text=value) if value.strip() else None
+    return GreetingConfig.model_validate(value)
 
 
 class AmbientAudioConfig(BaseModel):
@@ -142,3 +213,11 @@ class VoiceConfig(BaseModel):
     """None → no background audio."""
     filler: FillerConfig | None = None
     """None → no spoken tool-call fillers. ``{}`` enables with defaults."""
+    greeting: GreetingConfig | None = None
+    """None → the session stays reactive (waits for the user to speak first).
+    A bare string is shorthand for ``{"text": ...}``; ``""`` means no greeting."""
+
+    @field_validator("greeting", mode="before")
+    @classmethod
+    def _coerce_greeting(cls, v: Any) -> Any:
+        return coerce_greeting(v)

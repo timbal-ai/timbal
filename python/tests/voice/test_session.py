@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.state import get_run_context
 from timbal.voice import (
     AgentTextDelta,
     AgentTextDone,
@@ -301,6 +302,20 @@ class TestVoiceSessionLifecycle:
         await _collect_events(session)
         await session.close()
         await session.close()
+
+    async def test_call_context_seeded_into_session_bag(self) -> None:
+        """Empty-``_trace`` reuse: turn 1's callable reads the session bag."""
+        session, _, _ = _make_session(stt_script=[])
+        session.call_context = {"rep_id": "R001", "task": "eod_checkin"}
+        await session._seed_call_context()
+        ctx = get_run_context()
+        assert ctx is not None
+        data = await ctx.get_session()
+        assert data["rep_id"] == "R001"
+        assert data["task"] == "eod_checkin"
+        # Empty trace is what lets runnable.py reuse this context on turn 1
+        # instead of forking a child that would drop extra attrs.
+        assert not ctx._trace
 
 
 # ---------------------------------------------------------------------------

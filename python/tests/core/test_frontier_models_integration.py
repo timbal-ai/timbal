@@ -56,7 +56,7 @@ LIVE_MODELS = [
         id="fireworks-qwen3p7-plus",
     ),
     pytest.param(
-        "fireworks/accounts/fireworks/models/deepseek-v4-flash",
+        "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
         "FIREWORKS_API_KEY",
         None,
         id="fireworks-deepseek-v4-flash",

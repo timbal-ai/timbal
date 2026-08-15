@@ -12,8 +12,9 @@ where you pick a target:
   the form. Changing the agent or port respawns on the next Start. Transport
   **LiveKit** is local-only: the launcher mints a room + caller JWT (stdlib
   HMAC, no PyJWT) from ``LIVEKIT_API_KEY`` / ``LIVEKIT_API_SECRET`` /
-  ``TIMBAL_LIVEKIT_URL`` (or ``LIVEKIT_URL``) in the env or the agent's
-  ``.env``. Use ``wss://lk.timbal.ai`` — port 7880 is VPC-only. The child
+  ``TIMBAL_LIVEKIT_URL`` (or ``LIVEKIT_URL``) in the env, the playground
+  launch directory's ``.env`` (cwd of ``python -m timbal.server.playground``),
+  or the agent's ``.env``. Use ``wss://lk.timbal.ai`` — port 7880 is VPC-only. The child
   gets ``TIMBAL_VOICE_SINGLE_SESSION=1`` so Stop/Start respawns a fresh
   driver. Agent extra: ``timbal[voice-livekit]``.
 * **Platform** — a deployed workforce through ``api.timbal.ai`` /
@@ -116,9 +117,19 @@ def mint_livekit_jwt(
     return f"{header}.{payload}.{_b64url(sig)}"
 
 
-def livekit_creds(project_dir: Path) -> tuple[str, str, str]:
-    """``(url, api_key, api_secret)``. Process env wins over the agent's ``.env``."""
-    file_env = _read_dotenv(project_dir / ".env")
+def livekit_creds(project_dir: Path, launch_dir: Path | None = None) -> tuple[str, str, str]:
+    """``(url, api_key, api_secret)``.
+
+    Process env wins, then the playground launch directory's ``.env`` (cwd of
+    ``python -m timbal.server.playground``), then the agent file's ``.env``.
+    Launch-cwd is what you actually edit when iterating; the agent dir is the
+    fallback for a project that ships its own keys.
+    """
+    launch_dir = Path.cwd() if launch_dir is None else launch_dir
+    file_env = {
+        **_read_dotenv(project_dir / ".env"),
+        **_read_dotenv(launch_dir / ".env"),
+    }
 
     def pick(*names: str) -> str:
         for n in names:
@@ -204,8 +215,9 @@ class ChildServer:
             if not all(livekit_plan):
                 raise ValueError(
                     "LiveKit needs TIMBAL_LIVEKIT_URL (or LIVEKIT_URL) plus "
-                    "LIVEKIT_API_KEY and LIVEKIT_API_SECRET in the environment "
-                    "or the agent's .env. Browser clients must use wss://… "
+                    "LIVEKIT_API_KEY and LIVEKIT_API_SECRET in the environment, "
+                    "the .env next to where you launched the playground, or "
+                    "the agent's .env. Browser clients must use wss://… "
                     "(port 7880 is VPC-only)."
                 )
 
@@ -228,13 +240,18 @@ class ChildServer:
             self._logs.clear()
             self._logs.append(f"$ {' '.join(cmd)}  (cwd: {spec_path.parent})")
             # cwd = the agent file's directory: `uv run` walks up from there to
-            # find the agent project's pyproject/venv, and load_dotenv picks up
-            # that project's .env — not the launcher's.
+            # find the agent project's pyproject/venv, and the child's
+            # load_dotenv picks up *that* .env. The playground itself is often
+            # launched from a different tree (the monorepo root) whose .env
+            # holds LIVEKIT_* / provider keys — fold those in here so Play
+            # sees them without exporting anything. Process env still wins.
             # TIMBAL_VOICE_WARMUP=1: playground children pre-load the voice
             # stack so picking "Smart Turn" on first Start doesn't eat the
             # ONNX/HuggingFace cold path; production servers gate warmup on
             # actual voice intent (see server.voice.voice_warmup_intended).
             env = {**os.environ, "TIMBAL_VOICE_WARMUP": "1"}
+            for k, v in _read_dotenv(Path.cwd() / ".env").items():
+                env.setdefault(k, v)
             for k in _LIVEKIT_CHILD_ENV_KEYS:
                 env.pop(k, None)
             livekit: dict[str, str] | None = None
