@@ -5,6 +5,8 @@ description: "Execute long-running operations asynchronously"
 
 Background tasks let runnables execute asynchronously while the agent continues. When a tool runs in the background, it immediately returns a `task_id` and `status: "running"` instead of blocking until completion.
 
+Tasks belong to the **session** that started them: the agent stays talkable, can run several children at once, and can answer questions about any of them on a later turn.
+
 ## Configuring Background Mode
 
 The `background_mode` parameter controls when a runnable executes asynchronously:
@@ -43,18 +45,96 @@ result = await agent(prompt="Install project dependencies in the background").co
 Background tools return immediately with a task handle:
 
 ```python
-{"task_id": "a3k9f2", "status": "running"}
+{"task_id": "k4d9x2mq7c1a", "status": "running"}
 ```
 
-Once at least one background task is running, the agent automatically exposes a `get_background_task` tool. Call it with the `task_id` to poll status and drain queued events:
+Once this session has at least one background task, the agent automatically gains three tools — `get_background_task`, `list_background_tasks`, and `cancel_background_task` — so it can brief the user or stop a child on a follow-up turn without you wiring anything.
+
+`get_background_task` **peeks**; it does not drain. Calling it twice returns the same thing, so the agent polling a child never steals events from a frontend streaming the same child.
 
 ```python
-from timbal.state import get_run_context
+from timbal.state import get_background_task
 
-# After starting a background task...
-span = get_run_context().current_span()
-status = span.runnable.get_background_task("a3k9f2")
-# {"status": "running" | "completed" | "error" | "cancelled" | "not_found", "events": [...], ...}
+get_background_task("k4d9x2mq7c1a")
 ```
 
-Or let the agent poll for you on a follow-up turn — it will see `get_background_task` in its tool list and can call it with the `task_id` from the earlier tool result.
+```python
+{
+    "status": "running",           # running | completed | error | cancelled | not_found
+    "task_id": "k4d9x2mq7c1a",
+    "name": "build_site",
+    "title": "Build the marketing site",
+    "input": {"prompt": "Build the marketing site"},
+    "started_at": 1755385200000,   # Unix ms
+    "summary": {
+        "text": "...",             # trailing assistant text, capped at 1000 chars
+        "tools_in_flight": ["write_file", "bash"],
+        "event_count": 42,
+    },
+    "transcript_cursor": 42,       # pass as `after` to read raw events
+}
+```
+
+The summary is deliberately bounded — it's for briefing the user, not for dumping a long build into the context window. When the task finishes, the snapshot also carries `result` (or `error` on failure). Durable child ids seen on the child's events, such as its `run_id`, are lifted onto the snapshot as they arrive.
+
+## Reading the Raw Transcript
+
+For the full event stream, read from a cursor. This does not drain either — the same `after` returns the same events, so it's safe to call from more than one place.
+
+```python
+from timbal.state import read_background_transcript
+
+page = read_background_transcript("k4d9x2mq7c1a")
+# {"status": "running", "task_id": ..., "events": [...], "cursor": 42}
+
+# Later, pick up where you left off
+page = read_background_transcript("k4d9x2mq7c1a", after=page["cursor"])
+```
+
+To follow a child live instead of polling, subscribe to its log. `subscribe` replays from `after` and then yields events as they arrive, so you cannot miss one that lands mid-replay.
+
+```python
+from timbal.state.background import current_background_store
+
+record = current_background_store().get("k4d9x2mq7c1a")
+async for event in record.log.subscribe():
+    print(event)
+```
+
+## Listing and Cancelling
+
+```python
+from timbal.state import cancel_background_task, list_background_tasks
+
+list_background_tasks()
+# [{"task_id": "k4d9x2mq7c1a", "name": "build_site", "status": "running",
+#   "started_at": 1755385200000, "title": "Build the marketing site"}]
+
+cancel_background_task("k4d9x2mq7c1a")   # returns the final snapshot
+```
+
+Cancelling stops the child's in-flight work: the task is cancelled and its handler is closed, so a handler holding a subprocess or a socket runs its `finally` instead of being abandoned mid-flight.
+
+## Session Scope
+
+The task store is bound to the `RunContext` and inherited across sequential turns via `parent_id`. In practice:
+
+- A finished turn can still list, peek, and cancel the children it started, because the next turn passes the previous run as `parent_id`.
+- Two concurrent runs of the same `Agent` object — no shared `parent_id` — get isolated stores. Neither sees the other's tasks, and `get_background_task` with a foreign `task_id` returns `not_found`.
+- The store is process-local, so it does not survive a restart. Use a durable job store if a child must outlive the process.
+
+## Stopping External Work
+
+Cancelling an `asyncio.Task` can only reach work the event loop owns. If a child drives something outside the process, use `on_background_cancel` to tear it down. The hook receives the task record, whose `metadata` carries the child's ids once its events have arrived.
+
+```python
+def stop_remote_build(record):
+    remote_api.stop(record.metadata["run_id"])
+
+Tool(
+    name="build_site",
+    handler=start_remote_build,
+    background_mode="always",
+    on_background_cancel=stop_remote_build,
+)
+```
