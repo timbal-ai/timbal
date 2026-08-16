@@ -2621,7 +2621,13 @@ async function startLivekit(gen, dial) {
     if (lkRoom === room) lkRoom = null;
     return;
   }
-  await room.localParticipant.publishTrack(micStream.getAudioTracks()[0]);
+  // A MediaStreamTrack published bare is source=Unknown. Tokens that pin
+  // canPublishSources:["microphone"] (platform preview) reject that with
+  // "failed to publish track, insufficient permissions" — join already
+  // succeeded; this is not the browser mic prompt.
+  await room.localParticipant.publishTrack(micStream.getAudioTracks()[0], {
+    source: Track.Source.Microphone,
+  });
   if (gen !== startGen) return;
   sessionSampleRate = sr;
   sendHello();
