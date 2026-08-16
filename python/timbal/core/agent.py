@@ -40,6 +40,12 @@ from ..guardrails.apply import (
 from ..guardrails.presets import build_guardrail_runner, coerce_rail, default_safety
 from ..guardrails.types import GuardrailContext, GuardrailStage, Verdict
 from ..state import get_run_context
+from ..state.background import (
+    CANCEL_BACKGROUND_TASK_DESCRIPTION,
+    GET_BACKGROUND_TASK_DESCRIPTION,
+    LIST_BACKGROUND_TASKS_DESCRIPTION,
+    current_background_store,
+)
 from ..types.content import (
     CustomContent,
     FileContent,
@@ -620,15 +626,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             msg = memory[i]
             if msg.role != "assistant":
                 continue
-            tool_uses = [
-                c for c in msg.content
-                if isinstance(c, ToolUseContent) and not c.is_server_tool_use
-            ]
+            tool_uses = [c for c in msg.content if isinstance(c, ToolUseContent) and not c.is_server_tool_use]
             if not tool_uses:
                 # Most recent assistant message has no tool_uses to resume.
                 return []
             fulfilled: set[str] = set()
-            for later in memory[i + 1:]:
+            for later in memory[i + 1 :]:
                 for c in later.content:
                     if isinstance(c, ToolResultContent):
                         fulfilled.add(c.id)
@@ -984,14 +987,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if self._read_tool_result is not None:
             _register(self._read_tool_result)
 
-        if self._bg_tasks:
-            bg_tool = Tool(
-                name="get_background_task",
-                description="Get the status and events of a background task.",
-                handler=self.get_background_task,
-            )
-            bg_tool.nest(self._path)
-            _register(bg_tool)
+        store = current_background_store()
+        if store is not None and len(store) > 0:
+            for name, description, handler in (
+                ("get_background_task", GET_BACKGROUND_TASK_DESCRIPTION, self.get_background_task),
+                ("list_background_tasks", LIST_BACKGROUND_TASKS_DESCRIPTION, self.list_background_tasks),
+                ("cancel_background_task", CANCEL_BACKGROUND_TASK_DESCRIPTION, self.cancel_background_task),
+            ):
+                bg_tool = Tool(name=name, description=description, handler=handler)
+                bg_tool.nest(self._path)
+                _register(bg_tool)
 
         return tools, commands
 
@@ -1383,9 +1388,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # replace the result with a notice — the tool_use must still get a
                         # paired result, and the model should know why it can't see it.
                         reason = outcome.verdict.reason or "content policy"
-                        replace_tool_result_text(
-                            c, f"[Blocked by guardrail '{outcome.rail.name}'] {reason}"
-                        )
+                        replace_tool_result_text(c, f"[Blocked by guardrail '{outcome.rail.name}'] {reason}")
                     elif outcome.replaced:
                         replace_tool_result_text(c, outcome.text)
             # Production-time offload: reduce an oversized result once, before it enters
@@ -1486,16 +1489,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         yield pending_event
                                     pending_guardrail_events.clear()
                                     if isinstance(event, OutputEvent) and event.output is not None:
-                                        if (
-                                            event.status.code == "cancelled"
-                                            and event.status.reason in _PAUSE_REASONS
-                                        ):
+                                        if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
                                             yield event
                                             raise PauseRequired(event)
-                                        if (
-                                            event.status.code == "cancelled"
-                                            and event.status.reason == "cancelled"
-                                        ):
+                                        if event.status.code == "cancelled" and event.status.reason == "cancelled":
                                             yield event
                                             raise RunCancelled(event.status.message or "Run cancelled by user.")
                                         current_span.memory.append(
@@ -1571,11 +1568,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 guard_step = _runner is not None and _runner.has_stage(GuardrailStage.MODEL_STEP)
                 _out_stages = (GuardrailStage.MODEL_OUTPUT, GuardrailStage.MODEL_STEP)
                 buffer_stream = (guard_output or guard_step) and _runner.needs_buffering(*_out_stages)
-                stream_scrub = (
-                    not buffer_stream
-                    and _runner is not None
-                    and bool(_runner.scrub_rails(*_out_stages))
-                )
+                stream_scrub = not buffer_stream and _runner is not None and bool(_runner.scrub_rails(*_out_stages))
                 # One scrubber per content block id: text and thinking deltas interleave,
                 # so a shared holdback buffer would stitch unrelated content together.
                 delta_scrubbers: dict[str, Any] = {}
@@ -1629,8 +1622,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # message enters memory, so replace/redact verdicts persist and a
                         # blocked response never poisons history.
                         is_final = not interrupted and not any(
-                            isinstance(c, ToolUseContent) and not c.is_server_tool_use
-                            for c in event.output.content
+                            isinstance(c, ToolUseContent) and not c.is_server_tool_use for c in event.output.content
                         )
                         stages_to_run: list[GuardrailStage] = []
                         if guard_step and not interrupted:
@@ -1685,8 +1677,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 # Retry budget exhausted (or mid-plan) — block with the reason.
                                 g_verdict = Verdict.block(
                                     g_verdict.reason,
-                                    blocked_message=g_verdict.blocked_message
-                                    or g_rail.blocked_message_for(g_stage),
+                                    blocked_message=g_verdict.blocked_message or g_rail.blocked_message_for(g_stage),
                                 )
                             if g_verdict is not None and g_verdict.action in ("block", "escalate"):
                                 # escalate has no human gate at the output edge — block.

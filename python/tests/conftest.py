@@ -51,6 +51,20 @@ def reset_platform_config_cache(request):
 
 
 @pytest.fixture(autouse=True)
+def clear_background_task_stores():
+    """Drop the process-local background-task registry between tests.
+
+    Stores are keyed by run_id and inherited via parent_id. Without a reset,
+    a leftover parent_id from a previous test can leak children into the next.
+    """
+    from timbal.state.background import clear_background_stores
+
+    clear_background_stores()
+    yield
+    clear_background_stores()
+
+
+@pytest.fixture(autouse=True)
 def clear_in_memory_tracing_storage():
     """Clear InMemoryTracingProvider storage between tests.
 

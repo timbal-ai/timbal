@@ -6,7 +6,6 @@ import inspect
 import json
 import logging
 import os
-import secrets
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -144,8 +143,6 @@ _TimbalCollector = None
 """Lazily imported TimbalCollector class — avoids importing collectors at module load."""
 
 
-ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
-
 _BLOCKING_HANDLER_WARN_MS = float(os.getenv("TIMBAL_BLOCKING_WARN_MS", "100"))
 """Sync handlers running inline for longer than this (ms) get a one-time
 warning suggesting offload_blocking=True / an async handler. Set to 0 to warn
@@ -194,8 +191,7 @@ def _coerce_approval_resolution(value: Any) -> ApprovalResolution:
     if isinstance(value, dict):
         return ApprovalResolution.model_validate(value)
     raise ValueError(
-        "resume value for an approval gate must be a bool, dict, or ApprovalResolution; "
-        f"got {type(value).__name__}."
+        f"resume value for an approval gate must be a bool, dict, or ApprovalResolution; got {type(value).__name__}."
     )
 
 
@@ -312,6 +308,12 @@ class Runnable(ABC, BaseModel):
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
 
+    on_background_cancel: Callable[..., Any] | None = Field(default=None, exclude=True)
+    """Optional hook fired when ``cancel_background_task`` cancels this child.
+    Receives the ``BackgroundTask`` record (has ``task_id``, ``metadata`` with
+    child ``run_id`` / ``cursor_agent_id`` once those events have arrived).
+    Use this to stop external work the asyncio.Task cancel cannot reach."""
+
     offload_blocking: bool = False
     """If True, plain sync handlers run in the default thread pool so blocking
     code doesn't stall the event loop. Default False: sync handlers run inline
@@ -371,7 +373,7 @@ class Runnable(ABC, BaseModel):
     #   _dependencies, _default_fixed_params, _default_runtime_params,
     #   _pre_hook_is_coroutine, _pre_hook_dependencies,
     #   _post_hook_is_coroutine, _post_hook_dependencies,
-    #   _log_events, _bg_tasks
+    #   _log_events
     # Do not add class-level annotations for them — pydantic would turn any
     # annotated underscore name back into a (slow) private attribute.
 
@@ -496,7 +498,6 @@ class Runnable(ABC, BaseModel):
         self._dependencies: list[str] = []
         self._default_fixed_params: dict[str, Any] = {}
         self._default_runtime_params: dict[str, dict[str, Any]] = {}
-        self._bg_tasks: dict[str, Any] = {}
         self._blocking_warned: bool = False
         # Guardrail wiring (see timbal.guardrails). _agent_guardrails is injected by the
         # owning Agent; _guardrails_exempt marks framework-internal runnables (the LLM
@@ -833,45 +834,28 @@ class Runnable(ABC, BaseModel):
         return self.anthropic_schema
 
     def get_background_task(self, task_id: str) -> dict[str, Any]:
-        """Get the status and events of a background task."""
-        if task_id not in self._bg_tasks:
-            return {"status": "not_found", "events": []}
+        """Peek a summary of a session-scoped background task. Does not drain."""
+        from ..state.background import get_background_task as _get
 
-        task_info = self._bg_tasks[task_id]
-        task = task_info["task"]
+        return _get(task_id)
 
-        # Get all available events
-        events = []
-        queue = task_info["event_queue"]
-        while not queue.empty():
-            try:
-                events.append(queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
+    def list_background_tasks(self) -> list[dict[str, Any]]:
+        """List background tasks for the current session."""
+        from ..state.background import list_background_tasks as _list
 
-        # Determine status
-        if task.done():
-            # del self._bg_tasks[task_id] # Do not remove, to keep track of all background tasks
-            if task.cancelled():
-                return {"status": "cancelled", "events": events, "name": task_info["name"], "input": task_info["input"]}
-            elif task.exception():
-                return {
-                    "status": "error",
-                    "error": str(task.exception()),
-                    "events": events,
-                    "name": task_info["name"],
-                    "input": task_info["input"],
-                }
-            else:
-                return {
-                    "status": "completed",
-                    "result": task.result(),
-                    "events": events,
-                    "name": task_info["name"],
-                    "input": task_info["input"],
-                }
-        else:
-            return {"status": "running", "events": events, "name": task_info["name"], "input": task_info["input"]}
+        return _list()
+
+    def cancel_background_task(self, task_id: str) -> dict[str, Any]:
+        """Cancel a running background task in the current session."""
+        from ..state.background import cancel_background_task as _cancel
+
+        return _cancel(task_id)
+
+    def read_background_transcript(self, task_id: str, after: int = 0) -> dict[str, Any]:
+        """Raw events for a background task from cursor ``after``."""
+        from ..state.background import read_background_transcript as _read
+
+        return _read(task_id, after=after)
 
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
         """Execute a runtime callable handling async context automatically.
@@ -1066,7 +1050,7 @@ class Runnable(ABC, BaseModel):
                 )
 
     async def _execute_handler(
-        self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None
+        self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: Any | None = None
     ) -> AsyncGenerator[tuple[Event | None, Any, Any], None]:
         """Execute the handler with optional event streaming.
 
@@ -1104,6 +1088,8 @@ class Runnable(ABC, BaseModel):
             collector_type = get_collector_registry().get_collector_type(first_chunk)
             if collector_type:
                 collector = collector_type(async_gen=async_gen, start=handler_start)
+                if event_queue is not None and hasattr(event_queue, "_handler_aclose"):
+                    event_queue._handler_aclose = collector.aclose
 
                 # Yield collector immediately so it's available for interruption handling
                 yield (None, None, collector)
@@ -1523,24 +1509,27 @@ class Runnable(ABC, BaseModel):
     def _spawn_background_task(
         self, validated_input: dict[str, Any], input: dict[str, Any], run_context: Any, span: Any
     ) -> dict[str, Any]:
-        """Spawn the handler as a background task registered on the parent runnable.
+        """Spawn the handler as a background task on the session bag.
 
         Returns the ``{"task_id", "status"}`` placeholder output for the
-        launching span. The task streams its events into a queue polled via
-        :meth:`get_background_task` and records its real output on the span
-        when it completes.
+        launching span. Events go to an append-only log on the current
+        :class:`~timbal.state.background.BackgroundTaskStore` (inherited
+        across sequential turns via ``parent_id``). They are **not** yielded
+        back onto the parent stream after detach.
         """
+        from ..state.background import register_background_task
+
         parent_span = run_context.parent_span()
         if not parent_span:
             raise ValueError("Parent span not found. Cannot run in background.")
-        task_id = "".join(secrets.choice(ALPHABET) for _ in range(6))
-        event_queue = asyncio.Queue()
+        record_box: list[Any] = []
 
         async def _bg_handler_execution():
+            record = record_box[0]
             output = None
             try:
                 async for _, final_output, _handler_collector in self._execute_handler(
-                    validated_input, run_context, span, event_queue
+                    validated_input, run_context, span, record
                 ):
                     if final_output is not None:
                         output = final_output
@@ -1556,19 +1545,20 @@ class Runnable(ABC, BaseModel):
                     await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
             except asyncio.CancelledError:
-                # Re-raise so asyncio marks the task as cancelled
                 raise
+            finally:
+                record.log.close()
+            return output
 
         task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
-
-        # Store task with event queue in parent runnable if available
-        parent_span.runnable._bg_tasks[task_id] = {
-            "task": task,
-            "event_queue": event_queue,
-            "name": self.name,
-            "input": input,
-        }
-        return {"task_id": task_id, "status": "running"}
+        record = register_background_task(
+            name=self.name,
+            input=input,
+            task=task,
+            on_cancel=self.on_background_cancel,
+        )
+        record_box.append(record)
+        return {"task_id": record.task_id, "status": "running"}
 
     def __call__(self, **kwargs: Any) -> Any:
         """Execute the runnable, returning a TimbalCollector over its event stream.

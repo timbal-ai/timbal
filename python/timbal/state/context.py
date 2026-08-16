@@ -97,6 +97,8 @@ class RunContext(BaseModel):
     #   _trace: Trace
     #   _tracing_provider: type[TracingProvider] | None
     #   _session_data: dict | None
+    #   _bg_store: BackgroundTaskStore — session bag of detached children;
+    #       inherited across sequential turns via parent_id (see background.py)
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a
@@ -165,15 +167,17 @@ class RunContext(BaseModel):
             if code == "cancelled" and reason == "input_required":
                 suspension = (span.metadata or {}).get("suspension")
                 if suspension and suspension.get("id"):
-                    pending.append({
-                        "interaction_id": suspension["id"],
-                        "kind": suspension.get("kind", "suspend"),
-                        "path": span.path,
-                        "call_id": span.call_id,
-                        "tool_call_id": suspension.get("tool_call_id"),
-                        "payload": suspension.get("payload", {}),
-                        "response_schema": suspension.get("response_schema"),
-                    })
+                    pending.append(
+                        {
+                            "interaction_id": suspension["id"],
+                            "kind": suspension.get("kind", "suspend"),
+                            "path": span.path,
+                            "call_id": span.call_id,
+                            "tool_call_id": suspension.get("tool_call_id"),
+                            "payload": suspension.get("payload", {}),
+                            "response_schema": suspension.get("response_schema"),
+                        }
+                    )
         return pending
 
     def model_post_init(self, __context: Any) -> None:
@@ -185,6 +189,7 @@ class RunContext(BaseModel):
         If no platform_config is provided, attempts to resolve it from
         environment variables and ~/.timbal/ config files.
         """
+        from .background import bind_background_store
         from .config_loader import resolve_platform_config
 
         # Plain instance attributes (see NOTE above).
@@ -193,6 +198,10 @@ class RunContext(BaseModel):
         self._resume_values: dict[str, Any] = {}
         self._used_resume_ids: set[str] = set()
         self._trace = Trace()
+        # Inherit the parent session's background-task bag (usually None) so a
+        # finished parent turn can still list/peek/cancel running builders.
+        # Allocates nothing unless this session actually has children.
+        bind_background_store(self)
 
         # Explicit provider set on the runnable — skip auto-detection entirely.
         # None means tracing is disabled; a class means use that provider.
