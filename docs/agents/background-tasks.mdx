@@ -101,6 +101,8 @@ async for event in record.log.subscribe():
     print(event)
 ```
 
+A streaming handler can yield either form and both reach the log. Raw delta items are wrapped into `DeltaEvent`s under the parent's run. Already-formed Timbal events (`StartEvent`, `DeltaEvent`, `OutputEvent`) are logged as they are — which is how a child that runs its own agent, such as a coding harness or a remote worker, keeps its own `run_id` and metadata on the task record. Those are the ids `on_background_cancel` and resume need.
+
 ## Listing and Cancelling
 
 ```python
