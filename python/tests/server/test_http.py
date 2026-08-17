@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from timbal import __version__
 from timbal.server.http import create_app
 from timbal.server.jobs import JobStore, RunIdInUse
@@ -395,6 +396,65 @@ class TestRunEventsEndpoint:
         assert tail["expired"] is False
         assert tail["events"]
         assert tail["done"] is True
+
+
+class _Tick(BaseModel):
+    n: int
+
+
+async def _burst(**kwargs):
+    """Emits its whole run before a reader is ever scheduled.
+
+    No awaits between yields, so the producer task drains to completion in one
+    slice of the event loop — which is how a reader deterministically ends up
+    behind a small ring's floor.
+    """
+    for n in range(5):
+        yield _Tick(n=n)
+
+
+class TestTruncationIsAnnounced:
+    """A reader the log outran must not be told the run ended cleanly."""
+
+    @pytest.fixture
+    def burst_app(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_RUNNABLE", "unused.py::unused")
+        app = create_app()
+        app.state.runnable = _burst
+        # One event of headroom: whatever the reader has not taken by the time
+        # the next event lands is gone.
+        app.state.job_store = JobStore(max_events=1)
+        return app
+
+    def test_a_stream_the_log_outran_says_so(self, burst_app):
+        client = TestClient(burst_app)
+
+        body = client.post("/stream", json={"context": {"id": "outrun-stream"}}).text
+
+        assert "event: expired" in body
+        assert '"expired": true' in body
+
+    def test_a_run_the_log_outran_fails_instead_of_lying(self, burst_app):
+        """Returning the last event it happened to see would report a mid-run
+        event as the run's output."""
+        client = TestClient(burst_app)
+
+        response = client.post("/run", json={"context": {"id": "outrun-run"}})
+
+        assert response.status_code == 500
+        assert "trimmed" in response.json()["detail"]
+
+    def test_an_uncut_stream_carries_no_expired_frame(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_RUNNABLE", "unused.py::unused")
+        app = create_app()
+        app.state.runnable = _burst
+        app.state.job_store = JobStore()
+        client = TestClient(app)
+
+        body = client.post("/stream", json={"context": {"id": "intact"}}).text
+
+        assert "event: expired" not in body
+        assert body.count("data: ") == 5
 
 
 class TestServerLifecycle:

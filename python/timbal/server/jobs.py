@@ -221,9 +221,15 @@ class Job:
         )
 
     def _trim(self) -> None:
-        """Drop the oldest events until the ring fits. Never drops the tip."""
-        if not self.replayable:
-            return
+        """Drop the oldest events until the ring fits. Never drops the tip.
+
+        Applies to non-replayable logs too. Those are normally kept small by
+        `follow` forgetting each batch as it is consumed, but that only happens
+        while a reader is attached — and the run deliberately outlives its
+        reader, so a `/run` whose handler went away (shutdown, an outer
+        timeout) would otherwise append into an unbounded list for the rest of
+        the run. Forgetting stays the fast path; this is the backstop.
+        """
         drop = 0
         n = len(self.events)
         nbytes = self._nbytes

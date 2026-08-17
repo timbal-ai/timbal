@@ -390,6 +390,22 @@ class TestNonReplayable:
         assert job.last_seq == 5
 
     @pytest.mark.asyncio
+    async def test_an_unread_log_is_still_capped(self):
+        """Forgetting-on-read only happens while a reader is attached.
+
+        The run outlives its reader by design, so without the ring a `/run`
+        whose handler went away appends into an unbounded list for the rest of
+        the run.
+        """
+        job = Job(replayable=False, max_events=10, max_bytes=None)
+
+        for i in range(100):
+            job.append(f"e{i}")
+
+        assert len(job.events) == 10
+        assert job.forgotten_through == 90
+
+    @pytest.mark.asyncio
     async def test_a_finished_job_leaves_the_store_at_once(self):
         """Nothing can reconnect to it, so there is nothing to retain."""
         store = JobStore()

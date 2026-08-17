@@ -187,8 +187,22 @@ def create_app() -> FastAPI:
         _, job = _create_job(run_id, req_data, replayable=False)
 
         output_event = None
-        async for _, event in job.follow():
+        last_seen = 0
+        async for seq, event in job.follow():
+            last_seen = seq
             output_event = event
+
+        if last_seen < job.last_seq:
+            # The log was trimmed past this reader, so the last event we hold
+            # is not the run's last event. Returning it would report some
+            # mid-run event as the final output, which is worse than failing.
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "The run outpaced this request and its event log was trimmed, "
+                    "so the final output was lost. The run itself completed."
+                ),
+            )
 
         return JSONResponse(
             status_code=200,
@@ -208,7 +222,7 @@ def create_app() -> FastAPI:
             set_run_context(run_context)
             run_id = run_context.id
 
-        _, job = _create_job(run_id, req_data)
+        job_id, job = _create_job(run_id, req_data)
 
         async def event_streamer() -> AsyncGenerator[str, None]:
             # `id:` carries the seq so a client reading the stream always knows
@@ -217,8 +231,25 @@ def create_app() -> FastAPI:
             # `GET /runs/{run_id}/events?after=`: this route is a POST, so it is
             # not reachable by `EventSource` and nothing here consumes
             # `Last-Event-ID`.
+            last_seen = 0
             async for seq, event in job.follow():
+                last_seen = seq
                 yield f"id: {seq}\ndata: {json.dumps(event.model_dump(mode='json'))}\n\n"
+
+            if last_seen < job.last_seq:
+                # A reader the log outran (backpressure on a long run) has been
+                # cut off mid-stream. Ending the response here is byte-identical
+                # to a run that finished cleanly — the exact lie `expired`
+                # exists to catch — so say so before closing.
+                notice = json.dumps(
+                    {
+                        "run_id": job_id,
+                        "next_cursor": last_seen,
+                        "done": True,
+                        "expired": True,
+                    }
+                )
+                yield f"event: expired\ndata: {notice}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
 
