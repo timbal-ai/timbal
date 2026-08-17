@@ -12,7 +12,7 @@ import structlog
 
 try:
     import uvicorn
-    from fastapi import FastAPI, Request, Response
+    from fastapi import FastAPI, HTTPException, Request, Response
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse, StreamingResponse
 except ImportError as e:
@@ -25,10 +25,29 @@ from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec, is_port_in_use
-from .jobs import JOB_DONE_SENTINEL, JobStore
+from .jobs import DEFAULT_READ_LIMIT, JobStore, RunIdInUse
 from .voice import merge_voice_config
 
 logger = structlog.get_logger("timbal.server.http")
+
+# Ceiling on `/runs/{run_id}/events` long-polls, matching the platform's other
+# `/events` endpoints. Long enough to be worth holding open, short enough to
+# stay under the usual proxy idle timeouts.
+MAX_WAIT_MS = 30_000
+
+
+def _expired_events(run_id: str, after: int) -> JSONResponse:
+    """Terminal but possibly incomplete — the log is not here to replay."""
+    return JSONResponse(
+        status_code=200,
+        content={
+            "run_id": run_id,
+            "events": [],
+            "next_cursor": after,
+            "done": True,
+            "expired": True,
+        },
+    )
 
 
 @asynccontextmanager
@@ -132,6 +151,24 @@ def create_app() -> FastAPI:
             content=return_model_schema,
         )
 
+    def _create_job(run_id: str | None, req_data: dict, replayable: bool = True):
+        """Start a job, turning a colliding client-supplied run id into a 409.
+
+        `context.id` is client-controlled, so two requests can name the same
+        run. Letting the second overwrite the first would leave the first still
+        executing with nothing pointing at it — unreadable, uncancellable, and
+        never reaped.
+        """
+        try:
+            return app.state.job_store.create_job(
+                app.state.runnable, req_data, job_id=run_id, replayable=replayable
+            )
+        except RunIdInUse as e:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Run id '{e.job_id}' is already in use by a running run.",
+            ) from e
+
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
@@ -145,14 +182,27 @@ def create_app() -> FastAPI:
             set_run_context(run_context)
             run_id = run_context.id
 
-        _, job = app.state.job_store.create_job(app.state.runnable, req_data, job_id=run_id)
+        # Nothing can reconnect to a `/run`, so its events are dropped as they
+        # are consumed instead of being kept for the retention window.
+        _, job = _create_job(run_id, req_data, replayable=False)
 
         output_event = None
-        while True:
-            event = await job.queue.get()
-            if event is JOB_DONE_SENTINEL:
-                break
+        last_seen = 0
+        async for seq, event in job.follow():
+            last_seen = seq
             output_event = event
+
+        if last_seen < job.last_seq:
+            # The log was trimmed past this reader, so the last event we hold
+            # is not the run's last event. Returning it would report some
+            # mid-run event as the final output, which is worse than failing.
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "The run outpaced this request and its event log was trimmed, "
+                    "so the final output was lost. The run itself completed."
+                ),
+            )
 
         return JSONResponse(
             status_code=200,
@@ -172,16 +222,88 @@ def create_app() -> FastAPI:
             set_run_context(run_context)
             run_id = run_context.id
 
-        _, job = app.state.job_store.create_job(app.state.runnable, req_data, job_id=run_id)
+        job_id, job = _create_job(run_id, req_data)
 
         async def event_streamer() -> AsyncGenerator[str, None]:
-            while True:
-                event = await job.queue.get()
-                if event is JOB_DONE_SENTINEL:
-                    break
-                yield f"data: {json.dumps(event.model_dump())}\n\n"
+            # `id:` carries the seq so a client reading the stream always knows
+            # the cursor to reconnect with, without having to look inside the
+            # payload. Reconnection itself goes through
+            # `GET /runs/{run_id}/events?after=`: this route is a POST, so it is
+            # not reachable by `EventSource` and nothing here consumes
+            # `Last-Event-ID`.
+            last_seen = 0
+            async for seq, event in job.follow():
+                last_seen = seq
+                yield f"id: {seq}\ndata: {json.dumps(event.model_dump(mode='json'))}\n\n"
+
+            if last_seen < job.last_seq:
+                # A reader the log outran (backpressure on a long run) has been
+                # cut off mid-stream. Ending the response here is byte-identical
+                # to a run that finished cleanly — the exact lie `expired`
+                # exists to catch — so say so before closing.
+                notice = json.dumps(
+                    {
+                        "run_id": job_id,
+                        "next_cursor": last_seen,
+                        "done": True,
+                        "expired": True,
+                    }
+                )
+                yield f"event: expired\ndata: {notice}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
+
+    @app.get("/runs/{run_id}/events")
+    async def run_events(
+        run_id: str,
+        after: int = 0,
+        limit: int = DEFAULT_READ_LIMIT,
+        wait_ms: int = 0,
+    ) -> Response:
+        """Replay a run's events after a cursor — the reconnect path for `/stream`.
+
+        A dropped connection does not stop the run: the job keeps producing into
+        its log. Poll here with the last `seq` seen to collect whatever was
+        missed and to keep following (`wait_ms` long-polls instead of spinning).
+
+        `expired` is the one field a client cannot skip. When the log is
+        unavailable — reaped after retention, never held by this process,
+        belonging to a `/run` that kept no log, or trimmed past the cursor —
+        the honest answer looks exactly like a clean end-of-stream (`done:
+        true`, no events, the cursor unmoved), so a client that only reads
+        `done` stops early and silently loses the tail. `expired: true` means
+        *terminal but possibly incomplete*: reconcile from wherever runs are
+        persisted rather than trusting this response as the end.
+
+        Note that "never held by this process" covers a run that is alive and
+        well in a sibling worker: the log is process-local, so this route is
+        only meaningful when runs are pinned to one process.
+        """
+        job = app.state.job_store.get_job(run_id)
+        if job is None or not job.replayable:
+            return _expired_events(run_id, after)
+
+        events, next_cursor, done, gapped = job.read(after, limit)
+        if gapped:
+            return _expired_events(run_id, after)
+        if not events and not done and wait_ms > 0:
+            await job.wait(after, min(wait_ms, MAX_WAIT_MS) / 1000)
+            events, next_cursor, done, gapped = job.read(after, limit)
+            if gapped:
+                return _expired_events(run_id, after)
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "run_id": run_id,
+                "events": [
+                    {"seq": seq, "data": event.model_dump(mode="json")} for seq, event in events
+                ],
+                "next_cursor": next_cursor,
+                "done": done,
+                "expired": False,
+            },
+        )
 
     @app.post("/cancel/{run_id}")
     async def cancel(run_id: str) -> Response:
@@ -259,6 +381,22 @@ def run_server_cli(argv: list[str] | None = None) -> None:
     if is_port_in_use(args.port):
         print(f"Port {args.port} is already in use. Please use a different port.")  # noqa: T201
         sys.exit(1)
+
+    if args.workers > 1:
+        # The job store lives in one process's memory, and nothing routes a
+        # request to the worker that owns a given run. So `/cancel/{run_id}`
+        # 404s and `/runs/{run_id}/events` reports `expired` whenever the
+        # request lands on a sibling — for a run that is alive and fine.
+        logger.warning(
+            "multi_worker_runs_are_not_addressable_across_workers",
+            workers=args.workers,
+            detail=(
+                "Run cancellation and event replay are process-local. With more than one "
+                "worker, /cancel/{run_id} and /runs/{run_id}/events only work when the "
+                "request happens to reach the worker running that run. Use a single worker, "
+                "or pin runs to a worker at the load balancer."
+            ),
+        )
 
     os.environ["TIMBAL_RUNNABLE"] = import_spec
     uvicorn.run(

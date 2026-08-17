@@ -2,7 +2,77 @@
 
 FastAPI app factory and CLI live in `http.py` (`python -m timbal.server`, or `run_server_cli`). The runnable is selected via `TIMBAL_RUNNABLE` (same object used for `/run`).
 
-This README documents how a **custom frontend** integrates with the **voice agent** over WebSocket (not the bundled `voice.html` playground).
+Two things are documented here: [running a runnable over HTTP](#runs-run-stream-and-reconnecting) (including how a dropped stream reconnects), and how a **custom frontend** integrates with the **voice agent** over WebSocket (not the bundled `voice.html` playground).
+
+---
+
+## Runs: `/run`, `/stream`, and reconnecting
+
+| Route | Purpose |
+|---|---|
+| `POST /run` | Run to completion, return the final `OUTPUT` event as JSON. |
+| `POST /stream` | Run and stream every event as SSE. |
+| `GET /runs/{run_id}/events` | Replay a run's events after a cursor — the reconnect path. |
+| `POST /cancel/{run_id}` | Cancel a running run. `404` if unknown or already finished. |
+
+Set `context.id` on the request to choose the run id; otherwise one is generated and you can read it off the first event. Naming an id that a *running* run already holds is a `409` — the alternative is silently orphaning that run, leaving it executing with nothing able to read or cancel it.
+
+Reusing the id of a run that has *finished* but is still inside its retention window is allowed, and rebinds the id: anything still polling `/runs/{run_id}/events` for the old run starts receiving the new one's events, with seqs counting from 1 again. Use fresh ids per run unless you mean that.
+
+### A dropped connection does not stop the run
+
+Runs execute on their own task, decoupled from the HTTP response. When a client disconnects, the run keeps going and keeps appending to its **event log** — an append-only list where every event has a 1-based monotonic `seq`. Readers hold a cursor into that log rather than consuming from a queue, so a disconnect costs you nothing but your place, several readers can watch one run at once, and coming back is just asking for everything after the last `seq` you saw.
+
+Finished runs stay readable for a retention window (default 5 minutes, `JobStore(retention_secs=…)`) so a client that dropped right at the end can still collect the tail.
+
+Only `/stream` keeps a replayable log. A `/run` is read to completion by the one request that started it and nothing can reconnect to it, so its events are dropped as they are consumed rather than held — otherwise every non-streaming request would pin a whole run's deltas in memory for five minutes after answering. `/runs/{run_id}/events` reports `expired: true` for a `/run`.
+
+### Reconnecting
+
+`GET /runs/{run_id}/events`:
+
+| Query | Meaning |
+|---|---|
+| `after` | Last `seq` seen (exclusive). Default `0` = from the start. |
+| `limit` | Max events per response, clamped to 1–2000. Default `500`. |
+| `wait_ms` | Long-poll budget, clamped to 0–30000. Default `0` (return immediately). When `>0` and nothing is available past `after`, the request blocks until an event arrives, the run ends, or the timeout elapses. |
+
+```json
+{
+  "run_id": "0198f3aa…",
+  "events": [{ "seq": 1, "data": { "type": "START", … } }],
+  "next_cursor": 1,
+  "done": false,
+  "expired": false
+}
+```
+
+Feed `next_cursor` back as `after` on the next poll. It equals the last `seq` returned, or your `after` unchanged when the batch is empty.
+
+**`done` means "you have everything", not "the run finished."** A terminal run whose events don't fit in one page reports `done: false` so you keep paging.
+
+**`expired: true` is the field you cannot ignore.** It means the log is unavailable — reaped after retention, never held by this process, belonging to a `/run`, or trimmed past your cursor. The response then looks *identical* to a cleanly drained stream (`done: true`, no events, cursor unmoved), so a client that only checks `done` stops early and silently loses the tail. Treat `expired` as **terminal but possibly incomplete** and reconcile from wherever you persist runs.
+
+`POST /stream` also emits the `seq` as the SSE `id:` field, so a client following the stream always knows the cursor to reconnect with without parsing the payload. It is *not* an `EventSource` resume: `/stream` is a POST, so `EventSource` cannot reach it, and nothing here reads `Last-Event-ID`. Reconnect through `/runs/{run_id}/events?after=`.
+
+A stream the log outran — a reader stalled long enough for the ring to drop events it had not taken — is closed with a final frame rather than just ending, since ending is indistinguishable from a clean finish:
+
+```
+event: expired
+data: {"run_id":"0198f3aa…","next_cursor":41,"done":true,"expired":true}
+```
+
+Same meaning as the field: terminal, possibly incomplete. A `/run` in that position answers `500` instead — its whole response is the run's last event, and the one it holds is not it.
+
+### Limits
+
+**Single process.** The log and the job registry live in the serving process's memory, and nothing routes a request to the worker that owns a given run. Run the server with one worker, or pin runs to a worker at the load balancer. With `--workers > 1` (the CLI warns) both `/cancel/{run_id}` and `/runs/{run_id}/events` are a coin flip: a request landing on a sibling worker gets `404` and `expired: true` respectively, for a run that is alive and fine. `expired` cannot distinguish "gone" from "not mine", so a client would go reconciling against durable storage for a run still eight minutes from finishing.
+
+A run whose process dies has nothing to replay. A replayable log is a ring: default 50 000 events or 32 MiB, whichever hits first (`JobStore(max_events=…, max_bytes=…)`). Older events are dropped and a reconnect whose cursor is behind the floor reports `expired: true` rather than silently skipping to the new head. Durable, cross-process replay needs a backing store behind this same cursor contract.
+
+**No authorization.** These routes carry none of their own, and CORS is wide open, so anything that can reach the port can replay any run whose id it can name — and ids are client-chosen, so they are guessable. Deploy behind something that authenticates and scopes by run.
+
+---
 
 ### Bundled voice playground
 
