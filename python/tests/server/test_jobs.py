@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 
 import pytest
-from timbal.server.jobs import Job, JobStore
+from timbal.server.jobs import Job, JobStore, RunIdInUse
 
 
 class MockRunnable:
@@ -343,6 +343,100 @@ class TestReconnect:
 
         await asyncio.wait_for(job.wait(after=99, timeout=30), timeout=1)
 
+    @pytest.mark.asyncio
+    async def test_follow_does_not_miss_an_event_that_lands_mid_read(self):
+        """The waiter has to be registered before the read, not after.
+
+        Register after and an append landing in between resolves nothing, so the
+        wake is lost — and when that append is a run's last event, `follow`
+        waits for an event that is never coming. Patching `read` to produce the
+        event as a side effect puts the append exactly in that window.
+        """
+        job = Job()
+        real_read = job.read
+        landed = False
+
+        def read_then_produce(after=0, limit=500):
+            nonlocal landed
+            batch = real_read(after, limit)
+            if not landed:
+                landed = True
+                job.append("a")
+                job.finish()
+            return batch
+
+        job.read = read_then_produce
+
+        assert await asyncio.wait_for(drain(job), timeout=1) == ["a"]
+
+
+class TestNonReplayable:
+    """`replayable=False` — the `/run` shape: one reader, no reconnection, no log."""
+
+    @pytest.mark.asyncio
+    async def test_events_are_forgotten_as_they_are_consumed(self):
+        store = JobStore()
+        events = ["a", "b", "c", "d", "e"]
+
+        _, job = store.create_job(MockRunnable(events=events), {}, replayable=False)
+
+        assert await drain(job) == events
+        # The reader saw everything, and none of it is still held.
+        assert job.events == []
+        assert job.last_seq == 5
+
+    @pytest.mark.asyncio
+    async def test_a_finished_job_leaves_the_store_at_once(self):
+        """Nothing can reconnect to it, so there is nothing to retain."""
+        store = JobStore()
+
+        job_id, job = store.create_job(MockRunnable(events=["a"]), {}, replayable=False)
+        await drain(job)
+        await job.task
+        await asyncio.sleep(0)
+
+        assert store.get_job(job_id) is None
+
+    @pytest.mark.asyncio
+    async def test_a_replayable_job_keeps_its_log_after_being_read(self):
+        """The contrast: reading a `/stream` job must not consume it."""
+        store = JobStore()
+
+        _, job = store.create_job(MockRunnable(events=["a", "b"]), {})
+
+        assert await drain(job) == ["a", "b"]
+        assert job.events == [(1, "a"), (2, "b")]
+        assert await drain(job) == ["a", "b"]
+
+
+class TestRunIdCollision:
+    """Run ids come from the client, so collisions are reachable from outside."""
+
+    @pytest.mark.asyncio
+    async def test_a_live_run_id_is_refused(self):
+        """Overwriting would leave the first run going, with nothing pointing at it."""
+        store = JobStore()
+
+        _, job = store.create_job(MockRunnable(events=["a"], delay=0.05), {}, job_id="dup")
+
+        with pytest.raises(RunIdInUse):
+            store.create_job(MockRunnable(events=["b"]), {}, job_id="dup")
+
+        assert store.get_job("dup") is job
+        assert await drain(job) == ["a"]
+
+    @pytest.mark.asyncio
+    async def test_a_finished_run_id_can_be_reused(self):
+        store = JobStore()
+
+        _, first = store.create_job(MockRunnable(events=["a"]), {}, job_id="dup")
+        await first.task
+
+        _, second = store.create_job(MockRunnable(events=["b"]), {}, job_id="dup")
+
+        assert store.get_job("dup") is second
+        assert await drain(second) == ["b"]
+
 
 class TestRetention:
     """A run stays readable for a while after it ends, so a late reconnect works."""
@@ -378,6 +472,16 @@ class TestRetention:
         store.reap()
 
         assert store.get_job(job_id) is job
+
+    @pytest.mark.asyncio
+    async def test_the_window_holds_without_a_sweep(self):
+        """An idle server gets no `create_job` calls, so `reap` alone is not enough."""
+        store = JobStore(retention_secs=0)
+
+        job_id, job = store.create_job(MockRunnable(events=["a"]), {})
+        await job.task
+
+        assert store.get_job(job_id) is None
 
     @pytest.mark.asyncio
     async def test_reap_never_touches_a_running_job(self):

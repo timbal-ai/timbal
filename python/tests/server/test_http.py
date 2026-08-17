@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from timbal import __version__
 from timbal.server.http import create_app
-from timbal.server.jobs import JobStore
+from timbal.server.jobs import JobStore, RunIdInUse
 from timbal.utils import ImportSpec
 
 
@@ -350,6 +350,30 @@ class TestRunEventsEndpoint:
 
         assert body["done"] is True
         assert body["events"] == []
+
+    def test_a_run_keeps_no_log_to_replay(self, client):
+        """`/run` has one reader and no reconnect, so it holds nothing to replay."""
+        run_id = "not-streamed"
+        client.post("/run", json={"x": "test input", "context": {"id": run_id}})
+
+        body = client.get(f"/runs/{run_id}/events").json()
+
+        assert body["expired"] is True
+        assert body["done"] is True
+        assert body["events"] == []
+
+    def test_a_run_id_already_in_use_is_a_conflict(self, tool_app, client, monkeypatch):
+        """Silently orphaning the run that already owns the id is the alternative."""
+
+        def already_taken(*_args, **_kwargs):
+            raise RunIdInUse("dup")
+
+        monkeypatch.setattr(tool_app.state.job_store, "create_job", already_taken)
+
+        response = client.post("/stream", json={"x": "test input", "context": {"id": "dup"}})
+
+        assert response.status_code == 409
+        assert "dup" in response.json()["detail"]
 
 
 class TestServerLifecycle:
