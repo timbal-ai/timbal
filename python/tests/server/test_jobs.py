@@ -277,11 +277,12 @@ class TestReconnect:
         _, job = store.create_job(MockRunnable(events=["a", "b", "c"]), {})
         await job.task
 
-        events, next_cursor, done = job.read()
+        events, next_cursor, done, gapped = job.read()
 
         assert [seq for seq, _ in events] == [1, 2, 3]
         assert next_cursor == 3
         assert done is True
+        assert gapped is False
 
     @pytest.mark.asyncio
     async def test_an_empty_batch_leaves_the_cursor_alone(self):
@@ -290,11 +291,12 @@ class TestReconnect:
         _, job = store.create_job(MockRunnable(events=["a"]), {})
         await job.task
 
-        events, next_cursor, done = job.read(after=1)
+        events, next_cursor, done, gapped = job.read(after=1)
 
         assert events == []
         assert next_cursor == 1
         assert done is True
+        assert gapped is False
 
     @pytest.mark.asyncio
     async def test_a_truncated_page_is_not_done_even_when_the_run_is(self):
@@ -304,16 +306,18 @@ class TestReconnect:
         _, job = store.create_job(MockRunnable(events=["a", "b", "c"]), {})
         await job.task
 
-        events, next_cursor, done = job.read(limit=2)
+        events, next_cursor, done, gapped = job.read(limit=2)
 
         assert [event for _, event in events] == ["a", "b"]
         assert next_cursor == 2
         assert done is False
+        assert gapped is False
 
-        events, next_cursor, done = job.read(after=next_cursor, limit=2)
+        events, next_cursor, done, gapped = job.read(after=next_cursor, limit=2)
 
         assert [event for _, event in events] == ["c"]
         assert done is True
+        assert gapped is False
 
     @pytest.mark.asyncio
     async def test_wait_returns_once_an_event_lands(self):
@@ -407,6 +411,98 @@ class TestNonReplayable:
         assert await drain(job) == ["a", "b"]
         assert job.events == [(1, "a"), (2, "b")]
         assert await drain(job) == ["a", "b"]
+
+
+class TestBound:
+    """A replayable log is a ring — dropping the head must not look like a skip."""
+
+    @pytest.mark.asyncio
+    async def test_the_oldest_events_are_dropped_once_the_cap_is_hit(self):
+        store = JobStore(max_events=2)
+
+        _, job = store.create_job(MockRunnable(events=["a", "b", "c"]), {})
+        await job.task
+
+        assert job.forgotten_through == 1
+        assert job.events == [(2, "b"), (3, "c")]
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_behind_the_floor_is_a_gap(self):
+        """Silently starting at the new head is the lie `expired` exists to catch."""
+        store = JobStore(max_events=2)
+
+        _, job = store.create_job(MockRunnable(events=["a", "b", "c"]), {})
+        await job.task
+
+        events, next_cursor, done, gapped = job.read(after=0)
+
+        assert events == []
+        assert next_cursor == 0
+        assert done is True
+        assert gapped is True
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_on_the_floor_still_reads_the_tail(self):
+        store = JobStore(max_events=2)
+
+        _, job = store.create_job(MockRunnable(events=["a", "b", "c"]), {})
+        await job.task
+
+        events, _, done, gapped = job.read(after=job.forgotten_through)
+
+        assert [event for _, event in events] == ["b", "c"]
+        assert done is True
+        assert gapped is False
+
+    @pytest.mark.asyncio
+    async def test_byte_cap_drops_the_head_too(self):
+        store = JobStore(max_events=None, max_bytes=2)
+
+        _, job = store.create_job(MockRunnable(events=["aa", "bb", "cc"]), {})
+        await job.task
+
+        assert job.events == [(3, "cc")]
+        _, _, _, gapped = job.read(after=0)
+        assert gapped is True
+
+    @pytest.mark.asyncio
+    async def test_a_single_event_larger_than_the_byte_cap_is_kept(self):
+        """Dropping the tip would lose the live stream, not just the backlog."""
+        store = JobStore(max_events=None, max_bytes=2)
+
+        _, job = store.create_job(MockRunnable(events=["too-big"]), {})
+        await job.task
+
+        assert job.events == [(1, "too-big")]
+        _, _, _, gapped = job.read(after=0)
+        assert gapped is False
+
+    @pytest.mark.asyncio
+    async def test_follow_from_zero_on_a_trimmed_log_yields_nothing(self):
+        store = JobStore(max_events=1)
+
+        _, job = store.create_job(MockRunnable(events=["a", "b", "c"]), {})
+        await job.task
+
+        assert await drain(job) == []
+
+    @pytest.mark.asyncio
+    async def test_follow_from_the_floor_gets_the_tail(self):
+        store = JobStore(max_events=2)
+
+        _, job = store.create_job(MockRunnable(events=["a", "b", "c"]), {})
+        await job.task
+
+        assert await drain(job, after=job.forgotten_through) == ["b", "c"]
+
+    @pytest.mark.asyncio
+    async def test_wait_on_a_gapped_cursor_returns_immediately(self):
+        store = JobStore(max_events=1)
+
+        _, job = store.create_job(MockRunnable(events=["a", "b"]), {})
+        await job.task
+
+        await asyncio.wait_for(job.wait(after=0, timeout=30), timeout=1)
 
 
 class TestRunIdCollision:

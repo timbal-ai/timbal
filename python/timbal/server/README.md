@@ -49,7 +49,7 @@ Feed `next_cursor` back as `after` on the next poll. It equals the last `seq` re
 
 **`done` means "you have everything", not "the run finished."** A terminal run whose events don't fit in one page reports `done: false` so you keep paging.
 
-**`expired: true` is the field you cannot ignore.** It means the log is unavailable — reaped after retention, never held by this process, or belonging to a `/run`. The response then looks *identical* to a cleanly drained stream (`done: true`, no events, cursor unmoved), so a client that only checks `done` stops early and silently loses the tail. Treat `expired` as **terminal but possibly incomplete** and reconcile from wherever you persist runs.
+**`expired: true` is the field you cannot ignore.** It means the log is unavailable — reaped after retention, never held by this process, belonging to a `/run`, or trimmed past your cursor. The response then looks *identical* to a cleanly drained stream (`done: true`, no events, cursor unmoved), so a client that only checks `done` stops early and silently loses the tail. Treat `expired` as **terminal but possibly incomplete** and reconcile from wherever you persist runs.
 
 `POST /stream` also emits the `seq` as the SSE `id:` field, so a client following the stream always knows the cursor to reconnect with without parsing the payload. It is *not* an `EventSource` resume: `/stream` is a POST, so `EventSource` cannot reach it, and nothing here reads `Last-Event-ID`. Reconnect through `/runs/{run_id}/events?after=`.
 
@@ -57,7 +57,7 @@ Feed `next_cursor` back as `after` on the next poll. It equals the last `seq` re
 
 **Single process.** The log and the job registry live in the serving process's memory, and nothing routes a request to the worker that owns a given run. Run the server with one worker, or pin runs to a worker at the load balancer. With `--workers > 1` (the CLI warns) both `/cancel/{run_id}` and `/runs/{run_id}/events` are a coin flip: a request landing on a sibling worker gets `404` and `expired: true` respectively, for a run that is alive and fine. `expired` cannot distinguish "gone" from "not mine", so a client would go reconciling against durable storage for a run still eight minutes from finishing.
 
-A run whose process dies has nothing to replay, and the log is unbounded for the run's lifetime — a run that streams forever grows it forever. Durable, cross-process replay needs a backing store behind this same cursor contract.
+A run whose process dies has nothing to replay. A replayable log is a ring: default 50 000 events or 32 MiB, whichever hits first (`JobStore(max_events=…, max_bytes=…)`). Older events are dropped and a reconnect whose cursor is behind the floor reports `expired: true` rather than silently skipping to the new head. Durable, cross-process replay needs a backing store behind this same cursor contract.
 
 **No authorization.** These routes carry none of their own, and CORS is wide open, so anything that can reach the port can replay any run whose id it can name — and ids are client-chosen, so they are guessable. Deploy behind something that authenticates and scopes by run.
 

@@ -36,6 +36,20 @@ logger = structlog.get_logger("timbal.server.http")
 MAX_WAIT_MS = 30_000
 
 
+def _expired_events(run_id: str, after: int) -> JSONResponse:
+    """Terminal but possibly incomplete — the log is not here to replay."""
+    return JSONResponse(
+        status_code=200,
+        content={
+            "run_id": run_id,
+            "events": [],
+            "next_cursor": after,
+            "done": True,
+            "expired": True,
+        },
+    )
+
+
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
@@ -222,13 +236,13 @@ def create_app() -> FastAPI:
         missed and to keep following (`wait_ms` long-polls instead of spinning).
 
         `expired` is the one field a client cannot skip. When the log is
-        unavailable — reaped after retention, never held by this process, or
-        belonging to a `/run` that kept no log — the honest answer looks exactly
-        like a clean end-of-stream (`done: true`, no events, the cursor
-        unmoved), so a client that only reads `done` stops early and silently
-        loses the tail. `expired: true` means *terminal but possibly
-        incomplete*: reconcile from wherever runs are persisted rather than
-        trusting this response as the end.
+        unavailable — reaped after retention, never held by this process,
+        belonging to a `/run` that kept no log, or trimmed past the cursor —
+        the honest answer looks exactly like a clean end-of-stream (`done:
+        true`, no events, the cursor unmoved), so a client that only reads
+        `done` stops early and silently loses the tail. `expired: true` means
+        *terminal but possibly incomplete*: reconcile from wherever runs are
+        persisted rather than trusting this response as the end.
 
         Note that "never held by this process" covers a run that is alive and
         well in a sibling worker: the log is process-local, so this route is
@@ -236,21 +250,16 @@ def create_app() -> FastAPI:
         """
         job = app.state.job_store.get_job(run_id)
         if job is None or not job.replayable:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "run_id": run_id,
-                    "events": [],
-                    "next_cursor": after,
-                    "done": True,
-                    "expired": True,
-                },
-            )
+            return _expired_events(run_id, after)
 
-        events, next_cursor, done = job.read(after, limit)
+        events, next_cursor, done, gapped = job.read(after, limit)
+        if gapped:
+            return _expired_events(run_id, after)
         if not events and not done and wait_ms > 0:
             await job.wait(after, min(wait_ms, MAX_WAIT_MS) / 1000)
-            events, next_cursor, done = job.read(after, limit)
+            events, next_cursor, done, gapped = job.read(after, limit)
+            if gapped:
+                return _expired_events(run_id, after)
 
         return JSONResponse(
             status_code=200,

@@ -375,6 +375,27 @@ class TestRunEventsEndpoint:
         assert response.status_code == 409
         assert "dup" in response.json()["detail"]
 
+    def test_a_cursor_behind_the_floor_is_expired(self, tool_app):
+        """Trimming the head must not look like replay-from-zero succeeded."""
+        tool_app.state.job_store = JobStore(max_events=1)
+        client = TestClient(tool_app)
+        run_id = "trimmed"
+        client.post("/stream", json={"x": "test input", "context": {"id": run_id}})
+
+        from_zero = client.get(f"/runs/{run_id}/events").json()
+        assert from_zero["expired"] is True
+        assert from_zero["events"] == []
+        assert from_zero["next_cursor"] == 0
+
+        job = tool_app.state.job_store.get_job(run_id)
+        assert job is not None
+        tail = client.get(
+            f"/runs/{run_id}/events", params={"after": job.forgotten_through}
+        ).json()
+        assert tail["expired"] is False
+        assert tail["events"]
+        assert tail["done"] is True
+
 
 class TestServerLifecycle:
     @pytest.fixture

@@ -15,6 +15,12 @@ DEFAULT_RETENTION_SECS = 300.0
 DEFAULT_READ_LIMIT = 500
 MAX_READ_LIMIT = 2000
 
+# Ring-buffer cap on a replayable log. `None` (or 0) means unlimited. A single
+# event larger than `max_bytes` is kept — dropping the tip would lose the live
+# stream, not just the reconnect backlog.
+DEFAULT_MAX_EVENTS = 50_000
+DEFAULT_MAX_BYTES = 32 * 1024 * 1024
+
 
 class RunIdInUse(Exception):
     """A caller supplied a run id that a still-running job already owns.
@@ -45,15 +51,32 @@ class Job:
     to completion in one pass, discards everything but the final event, and
     nothing can reconnect to it — and it keeps that path O(unread) rather than
     holding an entire run's deltas until the retention window lapses.
+
+    A replayable log is a ring: once ``max_events`` / ``max_bytes`` is exceeded
+    the oldest entries are dropped and ``forgotten_through`` advances. Reconnect
+    from a cursor still inside the window works; ``after < forgotten_through``
+    is a gap — the same class of lie ``expired`` exists to catch — not a silent
+    skip to the new head.
     """
 
-    def __init__(self, task: asyncio.Task | None = None, *, replayable: bool = True) -> None:
+    def __init__(
+        self,
+        task: asyncio.Task | None = None,
+        *,
+        replayable: bool = True,
+        max_events: int | None = DEFAULT_MAX_EVENTS,
+        max_bytes: int | None = DEFAULT_MAX_BYTES,
+    ) -> None:
         self.task = task
         self.replayable = replayable
+        self._max_events = max_events or 0
+        self._max_bytes = max_bytes or 0
         # (seq, event) for every seq past `forgotten_through`, contiguous, so
         # seq S sits at index S - forgotten_through - 1 — which is what lets
         # `read` slice instead of scan.
         self.events: list[tuple[int, Any]] = []
+        self._sizes: list[int] = []
+        self._nbytes = 0
         self.forgotten_through = 0
         self.next_seq = 1
         self.done = False
@@ -66,8 +89,12 @@ class Job:
         return self.next_seq - 1
 
     def append(self, event: Any) -> None:
+        nbytes = _event_nbytes(event)
         self.events.append((self.next_seq, event))
+        self._sizes.append(nbytes)
+        self._nbytes += nbytes
         self.next_seq += 1
+        self._trim()
         self._wake()
 
     def finish(self) -> None:
@@ -99,28 +126,33 @@ class Job:
         self,
         after: int = 0,
         limit: int = DEFAULT_READ_LIMIT,
-    ) -> tuple[list[tuple[int, Any]], int, bool]:
-        """``(events, next_cursor, done)`` for the events after ``after``.
+    ) -> tuple[list[tuple[int, Any]], int, bool, bool]:
+        """``(events, next_cursor, done, gapped)`` for the events after ``after``.
 
         ``next_cursor`` is the last seq in the batch, or ``after`` untouched
         when the batch is empty, so it can always be fed straight back in.
         ``done`` means the run finished *and* this batch reached the end: a
         terminal run whose events don't fit in one page reports ``False`` so
         the caller keeps paging instead of stopping on the flag.
+        ``gapped`` means ``after`` is behind the retained window — the events
+        between the cursor and the floor were dropped. The caller must treat
+        that as ``expired``, not skip to the new head.
         """
+        if after < self.forgotten_through:
+            return [], after, True, True
         limit = max(1, min(limit, MAX_READ_LIMIT))
-        start = max(after, self.forgotten_through)
+        start = max(after, 0)
         offset = start - self.forgotten_through
         batch = self.events[offset : offset + limit]
-        next_cursor = batch[-1][0] if batch else start
-        return batch, next_cursor, self.done and next_cursor >= self.last_seq
+        next_cursor = batch[-1][0] if batch else after
+        return batch, next_cursor, self.done and next_cursor >= self.last_seq, False
 
     async def wait(self, after: int = 0, timeout: float = 0.0) -> None:
         """Block until something lands past ``after``, the run ends, or timeout.
 
         Returns rather than raising on timeout — the caller re-reads either way.
         """
-        if timeout <= 0:
+        if timeout <= 0 or after < self.forgotten_through:
             return
         waiter = self._waiter()
         try:
@@ -146,7 +178,10 @@ class Job:
             # second and that wake is lost — and for the last event of a run,
             # lost means this generator waits for an event that never comes.
             waiter = self._waiter()
-            batch, cursor, done = self.read(cursor, limit=MAX_READ_LIMIT)
+            batch, cursor, done, gapped = self.read(cursor, limit=MAX_READ_LIMIT)
+            if gapped:
+                self._discard(waiter)
+                return
             if not batch and not done:
                 try:
                     await waiter
@@ -175,14 +210,55 @@ class Job:
         """Drop the log up to ``seq``. Only sound with a single reader."""
         keep = seq - self.forgotten_through
         if keep > 0:
+            self._nbytes -= sum(self._sizes[:keep])
             del self.events[:keep]
+            del self._sizes[:keep]
             self.forgotten_through = seq
+
+    def _over_cap(self, n: int, nbytes: int) -> bool:
+        return (self._max_events > 0 and n > self._max_events) or (
+            self._max_bytes > 0 and nbytes > self._max_bytes
+        )
+
+    def _trim(self) -> None:
+        """Drop the oldest events until the ring fits. Never drops the tip."""
+        if not self.replayable:
+            return
+        drop = 0
+        n = len(self.events)
+        nbytes = self._nbytes
+        while n - drop > 1 and self._over_cap(n - drop, nbytes):
+            nbytes -= self._sizes[drop]
+            drop += 1
+        if drop:
+            del self.events[:drop]
+            del self._sizes[:drop]
+            self._nbytes = nbytes
+            self.forgotten_through += drop
+
+
+def _event_nbytes(event: Any) -> int:
+    dump_json = getattr(event, "model_dump_json", None)
+    if callable(dump_json):
+        return len(dump_json())
+    if isinstance(event, str):
+        return len(event)
+    if isinstance(event, (bytes, bytearray)):
+        return len(event)
+    return len(repr(event))
 
 
 class JobStore:
-    def __init__(self, retention_secs: float = DEFAULT_RETENTION_SECS) -> None:
+    def __init__(
+        self,
+        retention_secs: float = DEFAULT_RETENTION_SECS,
+        max_events: int | None = DEFAULT_MAX_EVENTS,
+        max_bytes: int | None = DEFAULT_MAX_BYTES,
+    ) -> None:
         self._jobs: dict[str, Job] = {}
         self._retention_secs = retention_secs
+        self._max_events = max_events
+        self._max_bytes = max_bytes
 
     def create_job(
         self,
@@ -205,7 +281,11 @@ class JobStore:
         if existing is not None and not existing.done:
             raise RunIdInUse(_job_id)
 
-        job = Job(replayable=replayable)
+        job = Job(
+            replayable=replayable,
+            max_events=self._max_events,
+            max_bytes=self._max_bytes,
+        )
         job.task = asyncio.create_task(self._run(runnable, params, job))
         # A job nobody can reconnect to has nothing to retain, so it goes as
         # soon as it ends instead of waiting out the window.
