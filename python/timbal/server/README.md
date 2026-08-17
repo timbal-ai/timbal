@@ -17,6 +17,8 @@ Two things are documented here: [running a runnable over HTTP](#runs-run-stream-
 
 Set `context.id` on the request to choose the run id; otherwise one is generated and you can read it off the first event. Naming an id that a *running* run already holds is a `409` — the alternative is silently orphaning that run, leaving it executing with nothing able to read or cancel it.
 
+Reusing the id of a run that has *finished* but is still inside its retention window is allowed, and rebinds the id: anything still polling `/runs/{run_id}/events` for the old run starts receiving the new one's events, with seqs counting from 1 again. Use fresh ids per run unless you mean that.
+
 ### A dropped connection does not stop the run
 
 Runs execute on their own task, decoupled from the HTTP response. When a client disconnects, the run keeps going and keeps appending to its **event log** — an append-only list where every event has a 1-based monotonic `seq`. Readers hold a cursor into that log rather than consuming from a queue, so a disconnect costs you nothing but your place, several readers can watch one run at once, and coming back is just asking for everything after the last `seq` you saw.

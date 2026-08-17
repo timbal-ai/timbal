@@ -89,7 +89,11 @@ class Job:
         return self.next_seq - 1
 
     def append(self, event: Any) -> None:
-        nbytes = _event_nbytes(event)
+        # Sizing an event means serializing it, and `/stream` serializes it
+        # again to frame it — so the byte cap costs every event a second dump.
+        # Worth it to bound memory by the thing that actually fills it, but not
+        # worth paying when the cap is off.
+        nbytes = _event_nbytes(event) if self._max_bytes > 0 else 0
         self.events.append((self.next_seq, event))
         self._sizes.append(nbytes)
         self._nbytes += nbytes
