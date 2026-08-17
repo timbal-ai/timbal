@@ -40,6 +40,7 @@ timbal/
 │   │   ├── state/
 │   │   │   ├── __init__.py   # get_run_context, get_call_id, etc.
 │   │   │   ├── context.py    # RunContext definition
+│   │   │   ├── background.py # Session-scoped background-task store
 │   │   │   └── tracing/
 │   │   │       ├── providers/
 │   │   │       │   ├── base.py       # TracingProvider ABC + Exporter ABC
@@ -393,6 +394,30 @@ class MyProvider(TracingProvider):
         # persist run_context._trace keyed by run_context.id
         ...
 ```
+
+---
+
+## Background Tasks
+
+`background_mode="auto"|"always"` detaches a child (`python/timbal/state/background.py`). The spawn returns `{"task_id", "status": "running"}` immediately; the child's events go to an append-only log, not the parent's stream.
+
+```python
+from timbal.state import (
+ cancel_background_task,
+ get_background_task, # peek a bounded summary — does NOT drain
+ list_background_tasks,
+ read_background_transcript, # raw events from a cursor: (task_id, after=)
+)
+
+Tool(name="build", handler=..., background_mode="always",
+ on_background_cancel=lambda record: remote.stop(record.metadata["run_id"]))
+```
+
+- Tasks live on a `BackgroundTaskStore` bound to the `RunContext`, inherited across sequential turns via `parent_id`. Concurrent runs of the same Agent get isolated stores (no shared `parent_id`), so a foreign `task_id` is `not_found`. Process-local — does not survive a restart.
+- Once *this session* has a task, the agent auto-gains `get_background_task` / `list_background_tasks` / `cancel_background_task`.
+- The log is peekable, not consume-once: the parent agent and a frontend can both watch one child. `record.log.subscribe(after=)` replays then streams live.
+- `get_background_task` returns `{status, task_id, name, title, input, started_at, summary: {text, tools_in_flight, event_count}, transcript_cursor}` (+ `result`/`error` when done). `summary.text` is capped — for briefing, not for dumping a build into context.
+- Cancel stops in-flight work: the Task is cancelled *and* the handler generator is closed (an async gen suspended at a yield would otherwise never run its `finally`), then `on_background_cancel` fires for work the loop can't reach.
 
 ---
 

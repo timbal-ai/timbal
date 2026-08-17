@@ -6,6 +6,8 @@ Public API:
     - RunContext: The data model for the run context.
     - get_run_context(): Retrieves the current run context.
     - get_or_create_run_context(): Retrieves the current run context, creating a new one if necessary.
+    - get_background_task / list_background_tasks / cancel_background_task /
+      read_background_transcript: session-scoped background children.
 
 The context is typically managed automatically by the framework. Advanced users
 may need to set the context manually when creating custom execution flows.
@@ -18,6 +20,18 @@ import re
 from contextvars import ContextVar
 from typing import Any
 
+from .background import (
+    cancel_background_task as cancel_background_task,
+)
+from .background import (
+    get_background_task as get_background_task,
+)
+from .background import (
+    list_background_tasks as list_background_tasks,
+)
+from .background import (
+    read_background_transcript as read_background_transcript,
+)
 from .context import RunContext
 
 # INTERNAL: This variable holds the context. Do not access directly.
