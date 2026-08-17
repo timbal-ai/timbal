@@ -1095,8 +1095,16 @@ class Runnable(ABC, BaseModel):
                 yield (None, None, collector)
 
                 def process_event(event):
-                    # If it's already a BaseEvent, it means we have already processed and logged it
+                    # Already a BaseEvent: a nested runnable (or a handler that
+                    # speaks Timbal events natively, e.g. a coding-harness
+                    # sidecar) built and logged it, so it needs no wrapping. It
+                    # still has to reach the sink — after detach the background
+                    # event log is the *only* copy of a child's stream, and
+                    # dropping these leaves the parent with an empty transcript
+                    # and no child ids to cancel or resume by.
                     if isinstance(event, BaseEvent):
+                        if event_queue:
+                            event_queue.put_nowait(event)
                         return event
                     # Wrap non-delta events in a CustomItem
                     if not isinstance(event, DeltaItem):

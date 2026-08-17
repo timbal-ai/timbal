@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import pytest
 from timbal import Agent, Tool
@@ -17,8 +18,9 @@ from timbal.state import (
     set_run_context,
 )
 from timbal.types.content import ToolUseContent
-from timbal.types.events.delta import TextDelta
+from timbal.types.events.delta import DeltaEvent, TextDelta
 from timbal.types.events.output import OutputEvent
+from timbal.types.events.start import StartEvent
 from timbal.types.message import Message
 
 from ..conftest import assert_has_output_event
@@ -51,11 +53,44 @@ def _tool_calls(*calls: tuple[str, dict, str, bool]) -> Message:
 
 
 async def _fake_streaming_builder(prompt: str) -> AsyncGenerator[TextDelta, None]:
-    """Same contract as sidecar ``build_turn``: async gen of Timbal deltas."""
+    """Async gen of raw delta *items*, which the runnable wraps for us."""
     for i in range(4):
         yield TextDelta(id="b", text_delta=f"[{prompt}] chunk {i} ")
         await asyncio.sleep(0.08)
     yield TextDelta(id="b", text_delta=f"[{prompt}] done")
+
+
+CHILD_RUN_ID = "child-run-1"
+
+
+async def _fake_event_builder(prompt: str) -> AsyncGenerator[Any, None]:
+    """Async gen of already-formed Timbal *events* — the real sidecar contract.
+
+    A harness child (composer's Cursor ``build_turn``) does not yield delta
+    items for us to wrap: it runs its own agent and emits a complete
+    START/DELTA/OUTPUT stream under its own ``run_id``, which is the handle its
+    harness is cancellable by. Those ids only survive if the events themselves
+    reach the log.
+    """
+    ids = {
+        "run_id": CHILD_RUN_ID,
+        "path": "composer.builder",
+        "call_id": "child-call-1",
+        "parent_run_id": None,
+        "parent_call_id": None,
+    }
+    yield StartEvent(**ids)
+    for i in range(4):
+        yield DeltaEvent(**ids, item=TextDelta(id="b", text_delta=f"[{prompt}] chunk {i} "))
+        await asyncio.sleep(0.08)
+    yield OutputEvent(
+        **ids,
+        status={"code": "success"},
+        t0=0,
+        t1=1,
+        output=Message.validate(f"[{prompt}] done"),
+        metadata={"harness": "cursor", "cursor_agent_id": "cursor-agent-1"},
+    )
 
 
 async def _wait_for_first_event(task_id: str, timeout: float = 5.0) -> int:
@@ -651,6 +686,51 @@ class TestBackgroundMultitask:
         assert "events" not in snap
         assert snap["summary"]["text"]
         await asyncio.sleep(0.4)
+
+    @pytest.mark.asyncio
+    async def test_handler_yielding_timbal_events_reaches_the_log(self):
+        """5.5.2 — a child that speaks Timbal events natively, not delta items.
+
+        Regression: ``process_event`` returned already-formed ``BaseEvent``s
+        without queueing them, on the grounds that they were "already logged".
+        For a foreground run that is true — the caller sees them on the stream.
+        After detach there is no stream, so the log was the only copy and the
+        parent got ``event_count: 0``: no transcript to show, no summary to
+        brief the user with, and no child ``run_id`` on the record, which is
+        what ``on_background_cancel`` needs to stop the external harness.
+        """
+        parent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "harness"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="builder", handler=_fake_event_builder, background_mode="auto")],
+        )
+
+        await parent(prompt="build").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+
+        snap = get_background_task(task_id)
+        assert snap["summary"]["event_count"] >= 1
+        assert "[harness]" in snap["summary"]["text"]
+        # The child's own ids, not the parent's — these make it cancellable.
+        assert snap["run_id"] == CHILD_RUN_ID
+
+        # The events on the log are the child's, unwrapped.
+        events = read_background_transcript(task_id)["events"]
+        assert events
+        assert {event["path"] for event in events} == {"composer.builder"}
+
+        # ...and the terminal OUTPUT's ids land too, so a later turn can resume.
+        for _ in range(100):
+            if get_background_task(task_id)["status"] == "completed":
+                break
+            await asyncio.sleep(0.02)
+        assert get_background_task(task_id)["cursor_agent_id"] == "cursor-agent-1"
 
     @pytest.mark.asyncio
     async def test_agent_as_tool_background(self):
