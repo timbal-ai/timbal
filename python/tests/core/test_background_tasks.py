@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
-from timbal.server.jobs import JOB_DONE_SENTINEL, JobStore
+from timbal.server.jobs import JobStore
 from timbal.state import (
     cancel_background_task,
     get_background_task,
@@ -887,10 +887,7 @@ class TestBackgroundMultitask:
         job_id, job = jobs.create_job(parent, {"prompt": "go"})
 
         run_id = None
-        while True:
-            event = await job.queue.get()
-            if event is JOB_DONE_SENTINEL:
-                break
+        async for _, event in job.follow():
             if isinstance(event, OutputEvent) and str(event.path).endswith(".builder"):
                 run_id = event.run_id
                 break

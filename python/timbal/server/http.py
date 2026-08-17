@@ -25,10 +25,21 @@ from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec, is_port_in_use
-from .jobs import JOB_DONE_SENTINEL, JobStore
+from .jobs import DEFAULT_READ_LIMIT, JobStore
 from .voice import merge_voice_config
 
 logger = structlog.get_logger("timbal.server.http")
+
+# Ceiling on `/runs/{run_id}/events` long-polls, matching the platform's other
+# `/events` endpoints. Long enough to be worth holding open, short enough to
+# stay under the usual proxy idle timeouts.
+MAX_WAIT_MS = 30_000
+
+
+def _dump(event):
+    """JSON-ready view of an event (events are Timbal models; tests use plain values)."""
+    model_dump = getattr(event, "model_dump", None)
+    return model_dump() if callable(model_dump) else event
 
 
 @asynccontextmanager
@@ -148,10 +159,7 @@ def create_app() -> FastAPI:
         _, job = app.state.job_store.create_job(app.state.runnable, req_data, job_id=run_id)
 
         output_event = None
-        while True:
-            event = await job.queue.get()
-            if event is JOB_DONE_SENTINEL:
-                break
+        async for _, event in job.follow():
             output_event = event
 
         return JSONResponse(
@@ -175,13 +183,63 @@ def create_app() -> FastAPI:
         _, job = app.state.job_store.create_job(app.state.runnable, req_data, job_id=run_id)
 
         async def event_streamer() -> AsyncGenerator[str, None]:
-            while True:
-                event = await job.queue.get()
-                if event is JOB_DONE_SENTINEL:
-                    break
-                yield f"data: {json.dumps(event.model_dump())}\n\n"
+            # `id:` carries the seq so a browser's EventSource echoes it back as
+            # `Last-Event-ID` and resumes itself; anything else reconnects
+            # through `/runs/{run_id}/events?after=`.
+            async for seq, event in job.follow():
+                yield f"id: {seq}\ndata: {json.dumps(_dump(event))}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
+
+    @app.get("/runs/{run_id}/events")
+    async def run_events(
+        run_id: str,
+        after: int = 0,
+        limit: int = DEFAULT_READ_LIMIT,
+        wait_ms: int = 0,
+    ) -> Response:
+        """Replay a run's events after a cursor — the reconnect path for `/stream`.
+
+        A dropped connection does not stop the run: the job keeps producing into
+        its log. Poll here with the last `seq` seen to collect whatever was
+        missed and to keep following (`wait_ms` long-polls instead of spinning).
+
+        `expired` is the one field a client cannot skip. When the log is gone —
+        reaped after retention, or owned by a different process — the honest
+        answer looks exactly like a clean end-of-stream (`done: true`, no
+        events, the cursor unmoved), so a client that only reads `done` stops
+        early and silently loses the tail. `expired: true` means *terminal but
+        possibly incomplete*: reconcile from wherever runs are persisted rather
+        than trusting this response as the end.
+        """
+        job = app.state.job_store.get_job(run_id)
+        if job is None:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "run_id": run_id,
+                    "events": [],
+                    "next_cursor": after,
+                    "done": True,
+                    "expired": True,
+                },
+            )
+
+        events, next_cursor, done = job.read(after, limit)
+        if not events and not done and wait_ms > 0:
+            await job.wait(after, min(wait_ms, MAX_WAIT_MS) / 1000)
+            events, next_cursor, done = job.read(after, limit)
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "run_id": run_id,
+                "events": [{"seq": seq, "data": _dump(event)} for seq, event in events],
+                "next_cursor": next_cursor,
+                "done": done,
+                "expired": False,
+            },
+        )
 
     @app.post("/cancel/{run_id}")
     async def cancel(run_id: str) -> Response:

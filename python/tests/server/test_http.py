@@ -235,7 +235,8 @@ class TestFastAPIApp:
         response = client.post("/run", json=test_data)
         assert response.status_code == 200
 
-        # Job should be removed after completion, so cancel returns 404
+        # A finished job is still addressable (it is retained so a late reader
+        # can replay it), but it is no longer cancellable.
         cancel_response = client.post(f"/cancel/{run_id}")
         assert cancel_response.status_code == 404
 
@@ -251,9 +252,104 @@ class TestFastAPIApp:
         response = client.post("/stream", json=test_data)
         assert response.status_code == 200
 
-        # Job should be removed after completion, so cancel returns 404
+        # A finished job is still addressable (it is retained so a late reader
+        # can replay it), but it is no longer cancellable.
         cancel_response = client.post(f"/cancel/{run_id}")
         assert cancel_response.status_code == 404
+
+
+class TestRunEventsEndpoint:
+    """`GET /runs/{run_id}/events` — the reconnect path for a dropped stream."""
+
+    @pytest.fixture
+    def tool_fixture_file(self):
+        return Path(__file__).parent / "fixtures" / "tool_fixture.py"
+
+    @pytest.fixture
+    def tool_app(self, tool_fixture_file, monkeypatch):
+        import_spec = ImportSpec(path=tool_fixture_file, target="tool_fixture")
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{import_spec.path}::{import_spec.target}")
+        app = create_app()
+        app.state.runnable = import_spec.load()
+        app.state.job_store = JobStore()
+        return app
+
+    @pytest.fixture
+    def client(self, tool_app):
+        return TestClient(tool_app)
+
+    def test_a_finished_run_replays_from_the_start(self, client):
+        run_id = "replay-me"
+        client.post("/stream", json={"x": "test input", "context": {"id": run_id}})
+
+        body = client.get(f"/runs/{run_id}/events").json()
+
+        assert body["run_id"] == run_id
+        assert body["expired"] is False
+        assert body["done"] is True
+        assert [event["seq"] for event in body["events"]] == list(
+            range(1, len(body["events"]) + 1)
+        )
+        assert body["next_cursor"] == body["events"][-1]["seq"]
+
+    def test_a_cursor_returns_only_what_came_after_it(self, client):
+        run_id = "resume-me"
+        client.post("/stream", json={"x": "test input", "context": {"id": run_id}})
+
+        everything = client.get(f"/runs/{run_id}/events").json()["events"]
+        tail = client.get(f"/runs/{run_id}/events", params={"after": 1}).json()["events"]
+
+        assert [event["seq"] for event in tail] == [
+            event["seq"] for event in everything if event["seq"] > 1
+        ]
+
+    def test_paging_stops_short_of_done(self, client):
+        run_id = "page-me"
+        client.post("/stream", json={"x": "test input", "context": {"id": run_id}})
+
+        first = client.get(f"/runs/{run_id}/events", params={"limit": 1}).json()
+
+        assert len(first["events"]) == 1
+        assert first["next_cursor"] == 1
+        # More events are buffered, so the run being over must not read as done.
+        assert first["done"] is False
+
+        rest = client.get(
+            f"/runs/{run_id}/events", params={"after": first["next_cursor"]}
+        ).json()
+
+        assert rest["done"] is True
+
+    def test_an_unknown_run_is_expired_not_a_clean_ending(self, client):
+        """The whole point of the flag: this must not look like a drained stream."""
+        body = client.get("/runs/never-existed/events", params={"after": 7}).json()
+
+        assert body["expired"] is True
+        assert body["done"] is True
+        assert body["events"] == []
+        assert body["next_cursor"] == 7
+
+    def test_a_reaped_run_is_expired_too(self, tool_app):
+        tool_app.state.job_store = JobStore(retention_secs=0)
+        client = TestClient(tool_app)
+        run_id = "reap-me"
+        client.post("/stream", json={"x": "test input", "context": {"id": run_id}})
+
+        tool_app.state.job_store.reap()
+
+        assert client.get(f"/runs/{run_id}/events").json()["expired"] is True
+
+    def test_waiting_on_a_finished_run_returns_immediately(self, client):
+        run_id = "no-wait"
+        client.post("/stream", json={"x": "test input", "context": {"id": run_id}})
+
+        body = client.get(
+            f"/runs/{run_id}/events",
+            params={"after": 9999, "wait_ms": 30000},
+        ).json()
+
+        assert body["done"] is True
+        assert body["events"] == []
 
 
 class TestServerLifecycle:
