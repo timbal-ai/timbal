@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -55,6 +56,22 @@ async def _fake_streaming_builder(prompt: str) -> AsyncGenerator[TextDelta, None
         yield TextDelta(id="b", text_delta=f"[{prompt}] chunk {i} ")
         await asyncio.sleep(0.08)
     yield TextDelta(id="b", text_delta=f"[{prompt}] done")
+
+
+async def _wait_for_first_event(task_id: str, timeout: float = 5.0) -> int:
+    """Wait until a background child has actually emitted, and return its cursor.
+
+    Spawning only *schedules* the child: nothing orders its first event against
+    the parent's turn ending, and the interleaving differs by Python version and
+    OS. Poll for the event rather than sleeping a guessed interval.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        cursor = read_background_transcript(task_id)["cursor"]
+        if cursor > 0:
+            return cursor
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"background task {task_id} never emitted an event")
 
 
 class TestBackgroundTasks:
@@ -582,6 +599,7 @@ class TestBackgroundMultitask:
         ids = list_background_tasks()
         assert len(ids) == 2
         first_id = ids[0]["task_id"]
+        await _wait_for_first_event(first_id)
         mid = get_background_task(first_id)
         assert mid["status"] == "running"
         assert mid["summary"]["event_count"] >= 1
@@ -622,7 +640,7 @@ class TestBackgroundMultitask:
 
         await parent(prompt="build").collect()
         task_id = list_background_tasks()[0]["task_id"]
-        await asyncio.sleep(0.12)
+        await _wait_for_first_event(task_id)
         a = read_background_transcript(task_id, after=0)
         assert a["status"] == "running"
         assert a["cursor"] >= 1
@@ -704,15 +722,9 @@ class TestBackgroundMultitask:
         assert get_background_task(task_id)["status"] == "running"
         from timbal.state.background import current_background_store
 
-        # collect() only *schedules* the child; with TestModel there are no real
-        # awaits, so wait until it has actually emitted. Cancelling a child that
-        # never started proves nothing about stopping in-flight work.
-        for _ in range(100):
-            if read_background_transcript(task_id)["cursor"] > 0:
-                break
-            await asyncio.sleep(0.01)
-        before = read_background_transcript(task_id)["cursor"]
-        assert before > 0, "child never started; nothing in flight to cancel"
+        # Cancelling a child that never started proves nothing about stopping
+        # in-flight work, so make sure there is something in flight first.
+        await _wait_for_first_event(task_id)
 
         record = current_background_store().get(task_id)
         result = cancel_background_task(task_id)
