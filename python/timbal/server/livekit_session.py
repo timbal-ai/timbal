@@ -25,6 +25,11 @@ Env contract for the boot-env path (all platform-owned):
   untyped data-message hello (playground dropdowns) and merges it on top.
 * ``TIMBAL_VOICE_ABANDON_SECS`` — default 45; see ``SingleSessionGuard``
 
+On the per-request path the process may hold several rooms at once. That is
+unbounded unless ``TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS`` is set (see
+:mod:`timbal.server.capacity`), in which case a full process answers 503
+rather than degrading the calls it already has.
+
 ``TIMBAL_VOICE_SINGLE_SESSION=1`` still applies where it is set (serverless).
 ``claim()`` happens at room-join rather than offer-receipt; ``mark_connected()``
 fires on the caller's mic track being subscribed. Session + TTS track are built
@@ -46,6 +51,7 @@ from typing import Any
 import structlog
 
 from ..voice.config import VoiceConfig
+from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
 from .voice import build_voice_session, event_to_payloads, merge_client_voice_overrides
 
 logger = structlog.get_logger("timbal.server.livekit_session")
@@ -166,6 +172,13 @@ async def start_livekit_session(
     if live is not None and not live.done():
         return 409, {"error": f"a voice session is already live for room {dial.room}"}
 
+    # Rejecting here beats degrading the calls already on this process.
+    if not acquire_session_slot():
+        return 503, {
+            "error": f"server is at its voice session capacity "
+            f"({max_concurrent_sessions()} concurrent)"
+        }
+
     join = _Join()
     task = asyncio.create_task(
         _run_livekit_session(app, dial, join),
@@ -174,6 +187,10 @@ async def start_livekit_session(
     sessions[key] = task
 
     def _forget(finished: asyncio.Task) -> None:
+        # The slot belongs to the *session*, not to this request: it is held
+        # until the driver task ends, however it ends (call over, join
+        # failed, cancelled by the timeout below).
+        release_session_slot()
         # Only clear our own entry: a later join for the same room may have
         # already replaced it.
         if sessions.get(key) is finished:

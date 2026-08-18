@@ -39,6 +39,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..voice.config import VoiceConfig
+from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
 from .voice import (
     build_voice_session,
     client_call_context,
@@ -188,6 +189,20 @@ async def voice_rtc(request: Request) -> JSONResponse:
             content={"error": "Single-session server: a voice session was already served."},
         )
 
+    # Held for exactly as long as the guard's claim, so every release below
+    # sits next to an existing one. On a single-session box the guard is the
+    # real limit and this never rejects.
+    if not acquire_session_slot():
+        if guard is not None:
+            guard.release()
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": f"Server is at its voice session capacity "
+                f"({max_concurrent_sessions()} concurrent)."
+            },
+        )
+
     pc: Any = None
     try:
         defaults = getattr(request.app.state, "voice_config", None) or VoiceConfig()
@@ -264,6 +279,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         except Exception as e:
             _pcs.discard(pc)
+            release_session_slot()
             if guard is not None:
                 guard.release()
             logger.warning("voice_rtc_bad_offer", error=str(e))
@@ -273,6 +289,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             _pcs.discard(pc)
             with contextlib.suppress(Exception):
                 await pc.close()
+            release_session_slot()
             if guard is not None:
                 guard.release()
             return JSONResponse(status_code=400, content={"error": "Offer must contain an audio track."})
@@ -292,6 +309,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             _pcs.discard(pc)
             with contextlib.suppress(Exception):
                 await pc.close()
+        release_session_slot()
         if guard is not None:
             guard.release()
         raise
@@ -330,6 +348,9 @@ async def voice_rtc(request: Request) -> JSONResponse:
                 _pcs.discard(pc)
                 logger.info("voice_rtc_disconnected")
         finally:
+            # From here the driver owns the slot: the answer went out, so the
+            # session's end is the only thing that frees it.
+            release_session_slot()
             # Single-session box: this offer was the one session, however it
             # ended (call finished, ICE never completed, no data channel) —
             # finalize (recording already pushed by session cleanup above)

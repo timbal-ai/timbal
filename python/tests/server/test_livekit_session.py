@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
+from timbal.server import capacity
 from timbal.server.livekit_session import (
     _is_caller,
     _run_livekit_session,
@@ -491,6 +492,66 @@ class TestStartLivekitSession:
         status, body = await start_livekit_session(app, dial_from_body(_dial()))
         assert status == 501
         assert "voice-livekit" in body["error"]
+
+    async def test_at_capacity_the_next_dial_is_refused(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full process rejects instead of degrading the calls it is already
+        carrying."""
+        _room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        capacity.reset_for_tests()
+
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        status, body = await start_livekit_session(
+            app, dial_from_body(_dial(room="v1_1_2_3_other"))
+        )
+        assert status == 503
+        assert "capacity" in body["error"]
+
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        live.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await live
+
+    async def test_the_slot_comes_back_when_the_session_ends(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The slot tracks the session, not the request — and a leak here
+        would silently shrink the box one call at a time."""
+        _room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        capacity.reset_for_tests()
+
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        assert capacity.active_sessions() == 1
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        live.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await live
+        assert capacity.active_sessions() == 0
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        again = app.state.livekit_sessions["v1_1_2_3_abc"]
+        again.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await again
+
+    async def test_a_rejected_dial_does_not_hold_a_slot(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """400/409 happen before the acquire; a failed join releases on the
+        task's done callback."""
+        _room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "2")
+        capacity.reset_for_tests()
+
+        assert (await start_livekit_session(app, dial_from_body(_dial(token=""))))[0] == 400
+        assert capacity.active_sessions() == 0
+
+        monkeypatch.setitem(sys.modules, "livekit", None)
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 501
+        await asyncio.sleep(0)
+        assert capacity.active_sessions() == 0
 
     async def test_body_config_reaches_the_session(
         self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
