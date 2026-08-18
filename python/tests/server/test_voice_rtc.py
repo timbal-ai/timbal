@@ -350,3 +350,86 @@ class TestVoiceRtcSignalingErrors:
             resp = client.post("/voice/rtc", json={"sdp": "v=0", "type": "offer"})
         assert resp.status_code == 501
         assert "timbal[voice]" in resp.json()["error"]
+
+
+class TestVoiceRtcLivekitFork:
+    """The same route also takes a LiveKit dial — how a long-lived deployment
+    (ECS / on-premise) serves LiveKit calls without a per-call process."""
+
+    def test_livekit_dial_joins_without_aiortc(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The dial is sniffed before the aiortc import: a deployment pinned to
+        timbal[voice-livekit] only must not be told the transport is missing."""
+        import sys
+        from types import SimpleNamespace
+
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setitem(sys.modules, "aiortc", None)
+
+        class _FakeRoom:
+            def __init__(self) -> None:
+                self.local_participant = SimpleNamespace()
+
+            def on(self, name: str, fn: object) -> None:
+                pass
+
+            async def connect(self, url: str, token: str) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+        monkeypatch.setitem(
+            sys.modules,
+            "livekit",
+            SimpleNamespace(rtc=SimpleNamespace(Room=_FakeRoom, TrackKind=SimpleNamespace(KIND_AUDIO=1))),
+        )
+
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/voice/rtc",
+                json={
+                    "transport": "livekit",
+                    "url": "ws://sfu:7880",
+                    "token": "agent-jwt",
+                    "room": "v1_1_2_3_abc",
+                    "caller_identity": "caller-abc",
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json() == {
+                "transport": "livekit",
+                "room": "v1_1_2_3_abc",
+                "status": "joined",
+            }
+            # The call outlives the request; don't leak it into loop teardown.
+            live = app.state.livekit_sessions["v1_1_2_3_abc"]
+            live.get_loop().call_soon_threadsafe(live.cancel)
+
+    def test_livekit_dial_without_credentials_is_a_400(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _setup_env(monkeypatch, tmp_path)
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post("/voice/rtc", json={"transport": "livekit", "room": "r"})
+        assert resp.status_code == 400
+        assert "token" in resp.json()["error"]
+
+    def test_livekit_extra_missing_is_a_501(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setitem(sys.modules, "livekit", None)
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/voice/rtc",
+                json={"transport": "livekit", "url": "ws://sfu:7880", "token": "t", "room": "r"},
+            )
+        assert resp.status_code == 501
+        assert "voice-livekit" in resp.json()["error"]

@@ -5,6 +5,12 @@
 answer — WHIP-style, one round trip, no trickle ICE (aiortc finishes
 gathering before answering).
 
+The same route also accepts a LiveKit dial (``{"transport": "livekit", …}``),
+which joins a platform-created room instead of answering an offer and is
+handled by :mod:`timbal.server.livekit_session`. That fork is what lets a
+long-lived server (ECS / on-premise) serve LiveKit calls without the
+one-process-per-call boot env the serverless path uses.
+
 Protocol expectations for clients:
 
 * The offer must contain one audio track (the mic) **and** a data channel —
@@ -132,6 +138,22 @@ def _strip_non_relay_candidates(sdp: str) -> str:
 
 @router.post("/rtc")
 async def voice_rtc(request: Request) -> JSONResponse:
+    # Body-discriminated fork. `{"transport": "livekit", "url", "token", …}`
+    # joins a room the platform already created; anything else is an SDP offer
+    # and keeps the aiortc path byte-for-byte. Sniffed *before* the aiortc
+    # import so a deployment pinned to timbal[voice-livekit] without
+    # timbal[voice] isn't 501'd on a transport it does support.
+    from .livekit_session import dial_from_body, is_livekit_dial, start_livekit_session
+
+    raw = await request.body()
+    try:
+        sniffed = json.loads(raw)
+    except ValueError:
+        sniffed = None
+    if is_livekit_dial(sniffed):
+        status, payload = await start_livekit_session(request.app, dial_from_body(sniffed))
+        return JSONResponse(status_code=status, content=payload)
+
     try:
         from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 

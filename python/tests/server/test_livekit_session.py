@@ -18,9 +18,12 @@ from timbal.server.livekit_session import (
     _is_caller,
     _run_livekit_session,
     chunk_data_payloads,
+    dial_from_body,
     is_config_hello,
+    is_livekit_dial,
     maybe_start_livekit_session,
     merge_client_config,
+    start_livekit_session,
 )
 
 
@@ -342,3 +345,171 @@ class TestGuardLifetimeAroundSessionBuild:
         await asyncio.wait({task}, timeout=2.0)
         assert seen["config"]["stt_provider"] == "deepgram-flux"
         assert guard.finished
+
+
+class TestDialParsing:
+    def test_transport_discriminates_the_body(self) -> None:
+        assert is_livekit_dial({"transport": "livekit"})
+        assert not is_livekit_dial({"sdp": "v=0...", "type": "offer"})
+        assert not is_livekit_dial({"transport": "webrtc"})
+        assert not is_livekit_dial(None)
+
+    def test_body_dial_carries_config_as_json(self) -> None:
+        dial = dial_from_body(
+            {
+                "transport": "livekit",
+                "url": "ws://sfu:7880",
+                "token": "tok",
+                "room": "v1_1_2_3_abc",
+                "caller_identity": "caller-abc",
+                "config": {"stt_provider": "deepgram-flux"},
+            }
+        )
+        assert (dial.url, dial.token, dial.room) == ("ws://sfu:7880", "tok", "v1_1_2_3_abc")
+        assert dial.caller_identity == "caller-abc"
+        assert merge_client_config(dial.client_config, None) == {"stt_provider": "deepgram-flux"}
+
+    def test_non_object_config_is_dropped(self) -> None:
+        dial = dial_from_body({"transport": "livekit", "url": "u", "token": "t", "config": "x"})
+        assert dial.client_config == "{}"
+
+
+@pytest.fixture
+def ecs_app(driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]) -> tuple[_FakeRoom, object]:
+    """A long-lived server: no single-session guard, no LiveKit boot env."""
+    room, _guard, _log, app = driver_env
+    app.state.single_session_guard = None
+    return room, app
+
+
+def _dial(**over: object) -> dict:
+    body = {
+        "transport": "livekit",
+        "url": "ws://fake:7880",
+        "token": "tok",
+        "room": "v1_1_2_3_abc",
+        # Matches `_subscribe_caller`'s participant so the mic is treated as
+        # the human's.
+        "caller_identity": "playground",
+    }
+    body.update(over)
+    return body
+
+
+class TestStartLivekitSession:
+    """Per-request join (ECS / on-premise): the process serves room after room."""
+
+    async def test_join_answers_200_and_leaves_the_session_running(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        room, app = ecs_app
+        status, body = await start_livekit_session(app, dial_from_body(_dial()))
+        assert status == 200
+        assert body == {"transport": "livekit", "room": "v1_1_2_3_abc", "status": "joined"}
+        # 200 means "the agent is in the room", not "the call is over".
+        assert room.connected.is_set()
+        assert not room.disconnected
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        assert not live.done()
+        live.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await live
+
+    async def test_second_join_for_the_same_room_conflicts(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        _room, app = ecs_app
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        status, body = await start_livekit_session(app, dial_from_body(_dial()))
+        assert status == 409
+        assert "already live" in body["error"]
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        live.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await live
+
+    async def test_a_finished_room_frees_its_key_for_the_next_call(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        """The point of the per-request path: one call ending must not retire
+        the process (nor its room key)."""
+        _room, app = ecs_app
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        live.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await live
+        assert "v1_1_2_3_abc" not in app.state.livekit_sessions
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        again = app.state.livekit_sessions["v1_1_2_3_abc"]
+        again.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await again
+
+    async def test_missing_credentials_is_a_400(self, ecs_app: tuple[_FakeRoom, object]) -> None:
+        _room, app = ecs_app
+        status, body = await start_livekit_session(app, dial_from_body(_dial(token="")))
+        assert status == 400
+        assert "url" in body["error"]
+
+    async def test_unreachable_sfu_surfaces_the_join_failure(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        room, app = ecs_app
+
+        async def _connect_boom(url: str, token: str) -> None:
+            raise RuntimeError("sfu unreachable")
+
+        room.connect = _connect_boom
+        status, body = await start_livekit_session(app, dial_from_body(_dial()))
+        assert status == 502
+        assert "sfu unreachable" in body["error"]
+
+    async def test_a_hung_join_times_out_and_cancels_the_task(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        room, app = ecs_app
+
+        async def _connect_hang(url: str, token: str) -> None:
+            await asyncio.Event().wait()
+
+        room.connect = _connect_hang
+        status, body = await start_livekit_session(app, dial_from_body(_dial()), timeout=0.05)
+        assert status == 504
+        assert "did not join" in body["error"]
+        live = app.state.livekit_sessions.get("v1_1_2_3_abc")
+        assert live is not None and live.cancelled() or live.cancelling()
+        with contextlib.suppress(asyncio.CancelledError):
+            await live
+        assert "v1_1_2_3_abc" not in app.state.livekit_sessions
+
+    async def test_missing_extra_is_a_501(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _room, app = ecs_app
+        monkeypatch.setitem(sys.modules, "livekit", None)
+        status, body = await start_livekit_session(app, dial_from_body(_dial()))
+        assert status == 501
+        assert "voice-livekit" in body["error"]
+
+    async def test_body_config_reaches_the_session(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No TIMBAL_VOICE_CLIENT_CONFIG on this path — the config rides the POST."""
+        room, app = ecs_app
+        seen: dict = {}
+
+        def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
+            seen["config"] = config
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        status, _body = await start_livekit_session(
+            app, dial_from_body(_dial(config={"stt_provider": "deepgram-flux"}))
+        )
+        assert status == 200
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        _deliver_hello(room, {"sample_rate": 16000})
+        _subscribe_caller(room)
+        await asyncio.wait({live}, timeout=2.0)
+        assert seen["config"]["stt_provider"] == "deepgram-flux"
