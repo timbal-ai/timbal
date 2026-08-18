@@ -25,10 +25,22 @@ Env contract for the boot-env path (all platform-owned):
   untyped data-message hello (playground dropdowns) and merges it on top.
 * ``TIMBAL_VOICE_ABANDON_SECS`` — default 45; see ``SingleSessionGuard``
 
-On the per-request path the process may hold several rooms at once. That is
-unbounded unless ``TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS`` is set (see
-:mod:`timbal.server.capacity`), in which case a full process answers 503
-rather than degrading the calls it already has.
+Env contract for the per-request path (both optional, both recommended on
+anything long-lived — the dial tells the process where to connect and what to
+spend, so an open ``POST /voice/rtc`` is a way to make someone else's box
+place calls for you):
+
+* ``TIMBAL_LIVEKIT_URL`` — when set, a dial to any *other* url is 403'd. On
+  the boot-env path this is already the dial's url, so pinning it costs
+  nothing there.
+* ``TIMBAL_VOICE_DIAL_SECRET`` — when set, a dial must present it in
+  ``X-Timbal-Dial-Secret``. See :mod:`timbal.server.rtc`.
+
+On the per-request path the process may hold several rooms at once. Session
+count is bounded by :mod:`timbal.server.capacity` — and on *this* path the
+``auto`` ceiling applies even when nothing is configured, because no
+deployment can regress to a cap on a path that did not exist. A full process
+answers 503 rather than degrading the calls it already has.
 
 ``TIMBAL_VOICE_SINGLE_SESSION=1`` still applies where it is set (serverless).
 ``claim()`` happens at room-join rather than offer-receipt; ``mark_connected()``
@@ -41,6 +53,7 @@ one room ends, the next request starts another.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -96,6 +109,32 @@ def dial_from_env() -> LivekitDial:
 def is_livekit_dial(body: Any) -> bool:
     """Body discriminator for ``POST /voice/rtc``. Anything else is an SDP offer."""
     return isinstance(body, dict) and body.get("transport") == "livekit"
+
+
+def room_from_token(token: str) -> str:
+    """The room the token actually pins, from its ``video.room`` grant.
+
+    Parsed, not verified: the SFU is what validates the signature, and a
+    forged claim only ever keys a session that the SFU will then refuse. The
+    point is that the *token* pins the room while the body's ``room`` field is
+    just a label — keying on the label lets one token join the same real room
+    twice under two names, putting two agents in it talking over each other.
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        return ""
+    # Real JWT segments are unpadded base64url.
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        # binascii.Error subclasses ValueError, so one except covers both the
+        # decode and the parse.
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except ValueError:
+        return ""
+    if not isinstance(claims, dict):
+        return ""
+    video = claims.get("video")
+    return str(video.get("room") or "") if isinstance(video, dict) else ""
 
 
 def dial_from_body(body: dict[str, Any]) -> LivekitDial:
@@ -166,17 +205,25 @@ async def start_livekit_session(
     if not dial.url or not dial.token:
         return 400, {"error": "livekit dial requires 'url' and 'token'"}
 
+    pinned = os.environ.get("TIMBAL_LIVEKIT_URL", "").strip()
+    if pinned and dial.url != pinned:
+        logger.warning("voice_livekit_url_not_pinned", url=dial.url)
+        return 403, {"error": "livekit url is not the one this deployment is pinned to"}
+
     sessions = _sessions(app)
-    key = dial.room or dial.token
+    # The token's grant, not the body's label — see `room_from_token`.
+    key = room_from_token(dial.token) or dial.room or dial.token
     live = sessions.get(key)
     if live is not None and not live.done():
-        return 409, {"error": f"a voice session is already live for room {dial.room}"}
+        return 409, {"error": f"a voice session is already live for room {dial.room or key}"}
 
-    # Rejecting here beats degrading the calls already on this process.
-    if not acquire_session_slot():
+    # Rejecting here beats degrading the calls already on this process. This is
+    # the one path that defaults to a ceiling: nothing predates it, so nothing
+    # regresses, and a request-driven join is otherwise unbounded.
+    if not acquire_session_slot(default_auto=True):
         return 503, {
             "error": f"server is at its voice session capacity "
-            f"({max_concurrent_sessions()} concurrent)"
+            f"({max_concurrent_sessions(default_auto=True)} concurrent)"
         }
 
     join = _Join()
@@ -202,6 +249,13 @@ async def start_livekit_session(
         await asyncio.wait_for(join.done.wait(), timeout=timeout)
     except TimeoutError:
         task.cancel()
+        # This session is abandoned, but its teardown still has awaits to get
+        # through (sender, room.disconnect, guard.finish), so the task is not
+        # done yet. Free the key now or the caller's retry — the obvious
+        # response to a 504 — is answered 409 for a room nobody is serving.
+        # `_forget` only clears its own entry, so the replacement survives.
+        if sessions.get(key) is task:
+            sessions.pop(key, None)
         logger.error("voice_livekit_join_timeout", room=dial.room, timeout=timeout)
         return 504, {"error": f"agent did not join room {dial.room} within {timeout:g}s"}
 
@@ -515,8 +569,14 @@ async def _run_livekit_session(
     except BaseException as e:
         # A failure before `join.ok()` is the request's answer; after it, the
         # request is long gone and this is just teardown (`fail` is a no-op
-        # once the handshake completed).
-        _reject(f"livekit session failed before join: {e}")
+        # once the handshake completed). The reason the caller sees is
+        # deliberately fixed — `e` carries internal hostnames and stack detail
+        # and this route is reachable by whoever can reach the process — so the
+        # detail goes to the log, once, and only for a real join failure
+        # (a cancel here is a shutdown or the 504 path, not news).
+        if join is not None and not join.done.is_set() and not isinstance(e, asyncio.CancelledError):
+            logger.error("voice_livekit_join_failed", room=room_name, error=str(e), exc_info=True)
+        _reject("the agent could not join the room")
         # Before the caller's mic subscribed, the idle timer is still armed —
         # release the claim and let it own the exit. After subscribe,
         # mark_connected disarmed it, so any failure (build_voice_session,

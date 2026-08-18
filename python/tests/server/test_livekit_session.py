@@ -4,10 +4,13 @@ Does not talk to a real SFU — the FFI extra is not required; the cancellation
 tests inject a fake ``livekit`` module.
 """
 
+# ruff: noqa: ARG001  — fakes have to match the real signatures they stand in for
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import json
 import sys
 from types import SimpleNamespace
 
@@ -24,8 +27,20 @@ from timbal.server.livekit_session import (
     is_livekit_dial,
     maybe_start_livekit_session,
     merge_client_config,
+    room_from_token,
     start_livekit_session,
 )
+
+
+def _jwt(payload: str) -> str:
+    """A JWT-shaped string around a raw payload — unpadded, as real ones are."""
+    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"header.{encoded}.signature"
+
+
+def _token_for(room: str, *, identity: str = "agent") -> str:
+    """A LiveKit-shaped JWT: only the payload's ``video.room`` grant matters."""
+    return _jwt(json.dumps({"sub": identity, "video": {"room": room, "roomJoin": True}}))
 
 
 class TestMaybeStart:
@@ -375,11 +390,48 @@ class TestDialParsing:
         assert dial.client_config == "{}"
 
 
+class TestRoomFromToken:
+    """The token pins the room; the body's `room` is only a label."""
+
+    def test_reads_the_video_room_grant(self) -> None:
+        assert room_from_token(_token_for("v1_1_2_3_abc")) == "v1_1_2_3_abc"
+
+    def test_padding_is_restored_before_decoding(self) -> None:
+        # base64 payloads whose length isn't a multiple of 4 are the common case.
+        for room in ("a", "ab", "abc", "abcd", "room-with-a-longer-name"):
+            assert room_from_token(_token_for(room)) == room
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "",
+            "not-a-jwt",
+            "header.!!!not-base64!!!.sig",
+            _jwt("[1, 2, 3]"),  # payload is not an object
+            _jwt("{}"),  # no grants
+            _jwt('{"video": "nope"}'),  # grants are not an object
+            _jwt('{"video": {"roomJoin": true}}'),  # no room claim
+            _jwt("not json at all"),
+        ],
+    )
+    def test_anything_unparseable_is_empty_not_an_error(self, token: str) -> None:
+        """A bad token is the SFU's problem to reject; this only needs a key."""
+        assert room_from_token(token) == ""
+
+
 @pytest.fixture
-def ecs_app(driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]) -> tuple[_FakeRoom, object]:
+def ecs_app(
+    driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_FakeRoom, object]:
     """A long-lived server: no single-session guard, no LiveKit boot env."""
     room, _guard, _log, app = driver_env
     app.state.single_session_guard = None
+    # The dial path defaults to the `auto` ceiling, which is sized from this
+    # machine's CPU — pin it so a test that runs two rooms doesn't depend on how
+    # many cores the runner has. Capacity tests below set their own.
+    monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "16")
+    capacity.reset_for_tests()
     return room, app
 
 
@@ -454,9 +506,10 @@ class TestStartLivekitSession:
         assert "url" in body["error"]
 
     async def test_unreachable_sfu_surfaces_the_join_failure(
-        self, ecs_app: tuple[_FakeRoom, object]
+        self, ecs_app: tuple[_FakeRoom, object], driver_env: tuple[object, object, _LogRecorder, object]
     ) -> None:
         room, app = ecs_app
+        _r, _g, log, _a = driver_env
 
         async def _connect_boom(url: str, token: str) -> None:
             raise RuntimeError("sfu unreachable")
@@ -464,7 +517,10 @@ class TestStartLivekitSession:
         room.connect = _connect_boom
         status, body = await start_livekit_session(app, dial_from_body(_dial()))
         assert status == 502
-        assert "sfu unreachable" in body["error"]
+        # The caller learns the join failed; *why* is in the log (see
+        # `test_a_join_failure_does_not_echo_internals_to_the_caller`).
+        assert body == {"error": "the agent could not join the room"}
+        assert "voice_livekit_join_failed" in log.events
 
     async def test_a_hung_join_times_out_and_cancels_the_task(
         self, ecs_app: tuple[_FakeRoom, object]
@@ -478,11 +534,126 @@ class TestStartLivekitSession:
         status, body = await start_livekit_session(app, dial_from_body(_dial()), timeout=0.05)
         assert status == 504
         assert "did not join" in body["error"]
-        live = app.state.livekit_sessions.get("v1_1_2_3_abc")
-        assert live is not None and live.cancelled() or live.cancelling()
+        # The key is freed with the 504 (see the retry test below), so reach the
+        # task by name rather than looking it up by room.
+        live = next(
+            t for t in asyncio.all_tasks() if t.get_name().startswith("voice-livekit-session:")
+        )
+        assert live.cancelled() or live.cancelling()
         with contextlib.suppress(asyncio.CancelledError):
             await live
         assert "v1_1_2_3_abc" not in app.state.livekit_sessions
+
+    async def test_a_504_frees_the_room_for_the_retry(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        """A caller that got a 504 retries. The abandoned task still has awaits
+        left in its teardown, so keying on "not done" would answer that retry
+        with a 409 for a room nothing is serving."""
+        room, app = ecs_app
+        hang = asyncio.Event()
+
+        async def _connect_hang(url: str, token: str) -> None:
+            await hang.wait()
+
+        room.connect = _connect_hang
+        assert (await start_livekit_session(app, dial_from_body(_dial()), timeout=0.05))[0] == 504
+        assert "v1_1_2_3_abc" not in app.state.livekit_sessions
+
+        # The retry succeeds instead of colliding with the corpse.
+        hang.set()
+        del room.connect  # back to the fixture's instant connect
+        status, _body = await start_livekit_session(app, dial_from_body(_dial()))
+        assert status == 200
+        for task in list(app.state.livekit_sessions.values()):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_one_token_cannot_join_its_room_twice(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        """Sessions key on the token's `video.room` grant, not the body's label.
+        Keying on the label lets one token put two agents in one real room,
+        both publishing, talking over each other."""
+        _room, app = ecs_app
+        token = _token_for("v1_1_2_3_abc")
+
+        assert (await start_livekit_session(app, dial_from_body(_dial(token=token))))[0] == 200
+        # Same token — so the same actual room — under a different label.
+        status, body = await start_livekit_session(
+            app, dial_from_body(_dial(token=token, room="pretending-to-be-elsewhere"))
+        )
+        assert status == 409
+        assert "already live" in body["error"]
+        assert len(app.state.livekit_sessions) == 1
+
+        for task in list(app.state.livekit_sessions.values()):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_two_rooms_still_run_side_by_side(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        """The dedupe is per room, not a second single-session guard."""
+        _room, app = ecs_app
+        assert (
+            await start_livekit_session(app, dial_from_body(_dial(token=_token_for("room-a"))))
+        )[0] == 200
+        assert (
+            await start_livekit_session(app, dial_from_body(_dial(token=_token_for("room-b"))))
+        )[0] == 200
+        assert sorted(app.state.livekit_sessions) == ["room-a", "room-b"]
+
+        for task in list(app.state.livekit_sessions.values()):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_a_dial_to_an_unpinned_url_is_a_403(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With TIMBAL_LIVEKIT_URL set, the body cannot redirect this process at
+        an SFU of the caller's choosing — the dial spends this deployment's
+        STT/TTS/LLM budget, streaming to whoever is in that room."""
+        _room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_LIVEKIT_URL", "ws://ours:7880")
+        status, body = await start_livekit_session(
+            app, dial_from_body(_dial(url="ws://attacker.example:7880"))
+        )
+        assert status == 403
+        assert "pinned" in body["error"]
+        # Refused before any state is touched: no session dict, no slot held.
+        assert not hasattr(app.state, "livekit_sessions")
+        assert capacity.active_sessions() == 0
+
+    async def test_the_pinned_url_still_joins(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_LIVEKIT_URL", "ws://fake:7880")
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        for task in list(app.state.livekit_sessions.values()):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_a_join_failure_does_not_echo_internals_to_the_caller(
+        self, ecs_app: tuple[_FakeRoom, object]
+    ) -> None:
+        """The 502 body goes to whoever posted the dial, so the SFU's hostname
+        and error text belong in the log, not the response."""
+        room, app = ecs_app
+
+        async def _connect_boom(url: str, token: str) -> None:
+            raise RuntimeError("connect failed: sfu-internal.vpc.local:7880 refused")
+
+        room.connect = _connect_boom
+        status, body = await start_livekit_session(app, dial_from_body(_dial()))
+        assert status == 502
+        assert body == {"error": "the agent could not join the room"}
+        assert "vpc.local" not in json.dumps(body)
 
     async def test_missing_extra_is_a_501(
         self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch

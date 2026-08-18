@@ -290,6 +290,45 @@ class TestTwilioBridge:
         assert frames == []  # closed without any media
 
 
+class TestTelephonyCapacity:
+    """A phone call is a voice session like any other. On a long-lived box it is
+    the transport most likely to produce real concurrency, so the cap has to
+    reach it — otherwise the ceiling is a ceiling with a hole in it."""
+
+    def test_a_full_process_refuses_the_call(self, monkeypatch, tmp_path) -> None:
+        from starlette.websockets import WebSocketDisconnect
+        from timbal.server import capacity
+
+        app = _setup_app(monkeypatch, tmp_path, _make_stt_class([]), _make_tts_class(_TTS_CHUNK))
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        capacity.reset_for_tests()
+        assert capacity.acquire_session_slot()  # the box is now full
+
+        with TestClient(app) as client:
+            with pytest.raises(WebSocketDisconnect) as excinfo:  # noqa: PT012
+                with client.websocket_connect("/voice/twilio/stream") as ws:
+                    ws.send_json(_twilio_start_frame())
+                    ws.receive_json()
+        # 1013 Try Again Later: the provider is not wrong, this process is full.
+        assert excinfo.value.code == 1013
+
+    def test_the_slot_comes_back_when_the_call_ends(self, monkeypatch, tmp_path) -> None:
+        from timbal.server import capacity
+
+        app = _setup_app(monkeypatch, tmp_path, _make_stt_class([]), _make_tts_class(_TTS_CHUNK))
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        capacity.reset_for_tests()
+
+        for _ in range(2):
+            with TestClient(app) as client, client.websocket_connect("/voice/twilio/stream") as ws:
+                ws.send_json(_twilio_start_frame())
+                ws.send_json({"event": "stop", "streamSid": "MZ_test_stream", "stop": {}})
+                _collect_frames(ws)
+            # A leak here would shrink the box one call at a time until every
+            # caller gets a busy signal.
+            assert capacity.active_sessions() == 0
+
+
 class TestTelnyxBridge:
     def test_turn_produces_media_and_marks_in_telnyx_dialect(self, monkeypatch, tmp_path) -> None:
         pytest.importorskip("av")

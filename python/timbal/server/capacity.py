@@ -15,15 +15,31 @@ that knows how many sessions it is actually running. A platform-side limit
 sits in front of some deployments and not others, and can be several
 schedulers wide.
 
-**Off unless asked for.** ``TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS`` takes an
-integer, or ``auto``; unset (and ``0``) means no cap. Opt-in because turning
-a cap on is a behaviour change for a deployment that is already overcommitted
-— rejecting its fifth call is the *right* answer, but it should be a decision
-someone made, not one an upgrade made for them.
+**Off unless asked for, on the transports that predate it.**
+``TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS`` takes an integer, or ``auto``; unset
+means no cap on those. Opt-in because turning a cap on is a behaviour change
+for a deployment that is already overcommitted — rejecting its fifth call is
+the *right* answer, but it should be a decision someone made, not one an
+upgrade made for them.
+
+That argument does not cover the per-request LiveKit dial, which is new: no
+deployment can regress to a ceiling on a path it never had, and it is the one
+entry point that is unbounded by construction (a request can start session
+N+1 forever). So ``acquire_session_slot(default_auto=True)`` — used only
+there — falls back to the ``auto`` ceiling when nothing is configured. One
+counter, two ceilings: an explicit env value still wins everywhere.
+
+Which makes ``0`` distinct from unset: it is the way to say "I know, leave it
+uncapped" and it turns the dial path's default off too. A typo reads as unset
+(a log line, not a wave of rejections).
 
 ``auto`` sizes the cap from the CPU the process may actually use — the
 **cgroup quota**, not ``os.cpu_count()``, which reports the host's cores and
-would tell a 0.5-vCPU container it has 16.
+would tell a 0.5-vCPU container it has 16 — divided by the worker count. The
+quota covers the whole container while this counter is per process, so
+without that divisor ``--workers 4`` on a 4-vCPU task would admit 8 per
+worker: 32 sessions on 4 CPUs, the exact overcommit this module exists to
+prevent.
 
 ``_PER_CPU`` is a starting point, not a measurement. The real number depends
 on the turn detector and the transport; size it on one task under load
@@ -41,6 +57,8 @@ import structlog
 logger = structlog.get_logger("timbal.server.capacity")
 
 _ENV_VAR = "TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS"
+# Exported by `run_server_cli` so a worker can size its share of the cgroup.
+_ENV_WORKERS = "TIMBAL_SERVER_WORKERS"
 
 _PER_CPU = 2.0
 
@@ -65,13 +83,14 @@ def _cgroup_cpus() -> float | None:
     """CPUs the cgroup is allowed, or None when unlimited/unreadable."""
     try:
         raw = _CGROUP_V2.read_text().split()
-        if len(raw) == 2 and raw[0] != "max":
+        if raw and raw[0] == "max":
+            return None
+        if len(raw) == 2:
             quota, period = int(raw[0]), int(raw[1])
             if quota > 0 and period > 0:
                 return quota / period
-            return None
-        if raw and raw[0] == "max":
-            return None
+            # Nonsense values are not a quota — fall through to v1 the same way
+            # an unreadable file does, rather than reporting "unlimited".
     except (OSError, ValueError, IndexError):
         pass
     quota = _read_int(_CGROUP_V1_QUOTA)
@@ -97,31 +116,38 @@ def available_cpus() -> float:
         return float(os.cpu_count() or 1)
 
 
-def _default_limit() -> int:
-    return max(_MIN_LIMIT, math.floor(available_cpus() * _PER_CPU))
+def _workers() -> int:
+    try:
+        return max(1, int(os.environ.get(_ENV_WORKERS, "") or 1))
+    except ValueError:
+        return 1
 
 
-def _resolve_limit() -> int:
+def _auto_limit() -> int:
+    """What ``auto`` sizes to: this worker's share of the cgroup's CPU."""
+    return max(_MIN_LIMIT, math.floor(available_cpus() * _PER_CPU / _workers()))
+
+
+def _resolve_limit() -> int | None:
+    """The configured ceiling, or None when nothing was configured.
+
+    ``0`` and ``None`` are different answers: ``0`` is an operator saying "I
+    know, leave it uncapped", which has to beat the ``auto`` default the
+    per-request path would otherwise apply.
+    """
     raw = os.environ.get(_ENV_VAR, "").strip()
     if not raw:
-        logger.info("voice_capacity_disabled", hint=f"set {_ENV_VAR} to a number or 'auto'")
-        return 0
+        return None
     if raw.lower() == "auto":
-        limit = _default_limit()
-        logger.info("voice_capacity_auto", limit=limit, cpus=round(available_cpus(), 2))
-        return limit
+        return _auto_limit()
     try:
         limit = int(raw)
     except ValueError:
         # Deriving a cap nobody asked for would start rejecting calls over a
-        # typo; staying uncapped keeps the failure to a log line.
-        logger.warning("voice_capacity_bad_limit", value=raw, using="no cap")
-        return 0
-    if limit <= 0:
-        logger.info("voice_capacity_disabled")
-        return 0
-    logger.info("voice_capacity_configured", limit=limit)
-    return limit
+        # typo; treating it as unconfigured keeps the failure to a log line.
+        logger.warning("voice_capacity_bad_limit", value=raw, using="unconfigured")
+        return None
+    return max(0, limit)
 
 
 class _VoiceCapacity:
@@ -133,21 +159,38 @@ class _VoiceCapacity:
     """
 
     def __init__(self) -> None:
+        self._resolved = False
         self._limit: int | None = None
+        self._auto: int | None = None
         self._active = 0
 
     @property
-    def limit(self) -> int:
-        if self._limit is None:
+    def configured(self) -> int | None:
+        """What the env asked for; None when it asked for nothing."""
+        if not self._resolved:
             self._limit = _resolve_limit()
+            self._resolved = True
         return self._limit
+
+    @property
+    def auto(self) -> int:
+        """The ceiling ``auto`` would pick, whatever is configured."""
+        if self._auto is None:
+            self._auto = _auto_limit()
+        return self._auto
 
     @property
     def active(self) -> int:
         return self._active
 
-    def acquire(self) -> bool:
-        limit = self.limit
+    def effective_limit(self, *, default_auto: bool = False) -> int:
+        configured = self.configured
+        if configured is not None:
+            return configured
+        return self.auto if default_auto else 0
+
+    def acquire(self, *, default_auto: bool = False) -> bool:
+        limit = self.effective_limit(default_auto=default_auto)
         if limit and self._active >= limit:
             logger.warning("voice_capacity_rejected", active=self._active, limit=limit)
             return False
@@ -164,16 +207,22 @@ class _VoiceCapacity:
 
     def reset(self) -> None:
         """Tests only: re-read the env and forget in-flight sessions."""
+        self._resolved = False
         self._limit = None
+        self._auto = None
         self._active = 0
 
 
 _capacity = _VoiceCapacity()
 
 
-def acquire_session_slot() -> bool:
-    """Claim a session slot. False means the process is at capacity."""
-    return _capacity.acquire()
+def acquire_session_slot(*, default_auto: bool = False) -> bool:
+    """Claim a session slot. False means the process is at capacity.
+
+    ``default_auto`` applies the ``auto`` ceiling when nothing is configured —
+    for entry points new enough that a default cap cannot regress anyone.
+    """
+    return _capacity.acquire(default_auto=default_auto)
 
 
 def release_session_slot() -> None:
@@ -181,13 +230,35 @@ def release_session_slot() -> None:
     _capacity.release()
 
 
-def max_concurrent_sessions() -> int:
-    """The resolved cap; 0 when disabled."""
-    return _capacity.limit
+def max_concurrent_sessions(*, default_auto: bool = False) -> int:
+    """The ceiling in force; 0 when uncapped."""
+    return _capacity.effective_limit(default_auto=default_auto)
 
 
 def active_sessions() -> int:
     return _capacity.active
+
+
+def log_capacity() -> None:
+    """State the ceilings at boot.
+
+    Resolution is lazy, so without this an operator who set ``auto`` sees
+    nothing until the first call lands — and a typo in the env var stays
+    invisible until the moment it stops mattering.
+    """
+    configured = _capacity.configured
+    logger.info(
+        "voice_capacity",
+        limit="unconfigured" if configured is None else (configured or "uncapped"),
+        livekit_dial_limit=max_concurrent_sessions(default_auto=True) or "uncapped",
+        cpus=round(available_cpus(), 2),
+        workers=_workers(),
+        hint=(
+            f"set {_ENV_VAR} to a number or 'auto' to cap every transport"
+            if configured is None
+            else None
+        ),
+    )
 
 
 def reset_for_tests() -> None:

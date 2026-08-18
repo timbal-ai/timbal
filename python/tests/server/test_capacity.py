@@ -67,11 +67,44 @@ class TestCpuDetection:
         _no_cgroups(monkeypatch, tmp_path)
         assert capacity.available_cpus() >= 1
 
+    def test_a_nonsense_v2_quota_falls_through_to_v1(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """A quota of 0 is not "unlimited" — it is an unreadable quota, and the
+        v1 files are still worth asking."""
+        _write_cgroup_v2(monkeypatch, tmp_path, "0 100000\n")
+        quota = tmp_path / "quota"
+        period = tmp_path / "period"
+        quota.write_text("300000\n")
+        period.write_text("100000\n")
+        monkeypatch.setattr(capacity, "_CGROUP_V1_QUOTA", quota)
+        monkeypatch.setattr(capacity, "_CGROUP_V1_PERIOD", period)
+        assert capacity.available_cpus() == pytest.approx(3.0)
+
 
 class TestAutoLimit:
     def test_scales_with_the_quota(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "auto")
         _write_cgroup_v2(monkeypatch, tmp_path, "400000 100000\n")  # 4 vCPU
+        assert capacity.max_concurrent_sessions() == 8
+
+    def test_the_quota_is_split_across_workers(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """The counter is per process but the cgroup quota covers the whole
+        container. Without the divisor, `--workers 4` on 4 vCPUs would admit 8
+        per worker — 32 sessions on 4 CPUs, the overcommit this exists to stop."""
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "auto")
+        monkeypatch.setenv("TIMBAL_SERVER_WORKERS", "4")
+        _write_cgroup_v2(monkeypatch, tmp_path, "400000 100000\n")  # 4 vCPU
+        assert capacity.max_concurrent_sessions() == 2
+
+    def test_a_garbage_worker_count_is_one_worker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "auto")
+        monkeypatch.setenv("TIMBAL_SERVER_WORKERS", "many")
+        _write_cgroup_v2(monkeypatch, tmp_path, "400000 100000\n")
         assert capacity.max_concurrent_sessions() == 8
 
     def test_a_fractional_task_still_admits_two(
@@ -144,3 +177,58 @@ class TestCounter:
         capacity.release_session_slot()
         capacity.release_session_slot()
         assert capacity.active_sessions() == 0
+
+
+class TestDefaultAuto:
+    """One counter, two ceilings. Entry points that predate the cap stay
+    uncapped when nothing is configured; the per-request LiveKit dial — which
+    nothing predates, and which is otherwise unbounded — gets `auto`."""
+
+    def test_a_new_path_is_capped_while_the_old_ones_are_not(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.delenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", raising=False)
+        _write_cgroup_v2(monkeypatch, tmp_path, "100000 100000\n")  # 1 vCPU -> auto == 2
+        assert capacity.max_concurrent_sessions() == 0
+        assert capacity.max_concurrent_sessions(default_auto=True) == 2
+
+        assert capacity.acquire_session_slot(default_auto=True)
+        assert capacity.acquire_session_slot(default_auto=True)
+        assert not capacity.acquire_session_slot(default_auto=True)
+        # Same counter, so the box really is at two — but a transport that was
+        # never capped still admits, which is what keeps this backwards
+        # compatible.
+        assert capacity.acquire_session_slot()
+        assert capacity.active_sessions() == 3
+
+    def test_an_explicit_limit_wins_over_the_auto_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        _write_cgroup_v2(monkeypatch, tmp_path, "1600000 100000\n")  # 16 vCPU -> auto == 32
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        assert capacity.max_concurrent_sessions(default_auto=True) == 1
+        assert capacity.acquire_session_slot(default_auto=True)
+        assert not capacity.acquire_session_slot(default_auto=True)
+
+    def test_an_explicit_zero_still_uncaps_the_new_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """`0` is how someone says "I know, and I want it uncapped" — it has to
+        beat the default, or there is no way to turn the ceiling off."""
+        _write_cgroup_v2(monkeypatch, tmp_path, "100000 100000\n")
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "0")
+        assert capacity.max_concurrent_sessions(default_auto=True) == 0
+        for _ in range(50):
+            assert capacity.acquire_session_slot(default_auto=True)
+
+
+class TestBootLog:
+    def test_log_capacity_resolves_without_a_session(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Boot-time visibility: resolution is lazy, so an operator who set
+        `auto` would otherwise learn the ceiling from the first rejection."""
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "auto")
+        _write_cgroup_v2(monkeypatch, tmp_path, "200000 100000\n")
+        capacity.log_capacity()
+        assert capacity.max_concurrent_sessions() == 4

@@ -433,3 +433,71 @@ class TestVoiceRtcLivekitFork:
             )
         assert resp.status_code == 501
         assert "voice-livekit" in resp.json()["error"]
+
+
+class TestVoiceRtcDialSecret:
+    """An SDP offer costs this process a session; a dial tells it which SFU to
+    call and then spends STT/TTS/LLM budget streaming to whoever is in that
+    room. So the dial — and only the dial — can be gated on a shared secret."""
+
+    def _dial(self) -> dict:
+        return {
+            "transport": "livekit",
+            "url": "ws://sfu:7880",
+            "token": "agent-jwt",
+            "room": "v1_1_2_3_abc",
+        }
+
+    def test_a_dial_without_the_secret_is_a_401(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_DIAL_SECRET", "s3cret")
+        # Fails before the transport is even loaded — a rejected dial must not
+        # be distinguishable from a missing extra by how far it gets.
+        monkeypatch.setitem(sys.modules, "livekit", None)
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post("/voice/rtc", json=self._dial())
+        assert resp.status_code == 401
+
+    def test_a_wrong_secret_is_a_401(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_DIAL_SECRET", "s3cret")
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/voice/rtc", json=self._dial(), headers={"X-Timbal-Dial-Secret": "guess"}
+            )
+        assert resp.status_code == 401
+
+    def test_the_right_secret_gets_through(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_DIAL_SECRET", "s3cret")
+        monkeypatch.setitem(sys.modules, "livekit", None)
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/voice/rtc", json=self._dial(), headers={"X-Timbal-Dial-Secret": "s3cret"}
+            )
+        # Past the gate: 501 is the missing extra, not the credentials.
+        assert resp.status_code == 501
+
+    def test_an_sdp_offer_is_not_gated(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The secret guards the dial only — an offer carries no destination."""
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_DIAL_SECRET", "s3cret")
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post("/voice/rtc", json={"sdp": "not-an-sdp", "type": "offer"})
+        assert resp.status_code == 400

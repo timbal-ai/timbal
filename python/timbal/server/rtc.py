@@ -9,7 +9,10 @@ The same route also accepts a LiveKit dial (``{"transport": "livekit", …}``),
 which joins a platform-created room instead of answering an offer and is
 handled by :mod:`timbal.server.livekit_session`. That fork is what lets a
 long-lived server (ECS / on-premise) serve LiveKit calls without the
-one-process-per-call boot env the serverless path uses.
+one-process-per-call boot env the serverless path uses. Unlike an offer, a
+dial names an outbound destination, so it is gated on
+``TIMBAL_VOICE_DIAL_SECRET`` / ``TIMBAL_LIVEKIT_URL`` where those are set —
+see :func:`_dial_authorized`.
 
 Protocol expectations for clients:
 
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import os
 from contextlib import aclosing
@@ -57,6 +61,10 @@ _pcs: set[Any] = set()
 _drivers: set[asyncio.Task] = set()
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# One warning per process for a dial route with neither a secret nor a pinned
+# url — see `_dial_authorized`.
+_warned_open_dial = False
 
 
 def _force_relay() -> bool:
@@ -100,6 +108,33 @@ def _ice_servers(*, relay_only: bool = False) -> list[Any]:
             )
         )
     return servers
+
+
+def _dial_authorized(request: Request) -> bool:
+    """Gate the LiveKit dial on ``TIMBAL_VOICE_DIAL_SECRET`` when it is set.
+
+    An SDP offer only ever costs this process a session; a dial tells it which
+    SFU to connect to and then spends STT/TTS/LLM budget streaming to whoever
+    is in that room, so it is the one body on this route worth authenticating.
+    Same shape as the Twilio/Telnyx signature checks in ``telephony.py``.
+
+    Unset means no check — the serverless platform fronts this route and the
+    tests do not carry a secret. A deployment reachable by anything else wants
+    this set, alongside ``TIMBAL_LIVEKIT_URL`` to pin the destination.
+    """
+    global _warned_open_dial
+    secret = os.environ.get("TIMBAL_VOICE_DIAL_SECRET", "").strip()
+    if not secret:
+        if not _warned_open_dial and not os.environ.get("TIMBAL_LIVEKIT_URL", "").strip():
+            # Once per process: it is a deployment fact, not a per-call event.
+            _warned_open_dial = True
+            logger.warning(
+                "voice_rtc_dial_unauthenticated",
+                hint="set TIMBAL_VOICE_DIAL_SECRET and/or TIMBAL_LIVEKIT_URL: any client that "
+                "can reach this route can make this process join an arbitrary room",
+            )
+        return True
+    return hmac.compare_digest(request.headers.get("x-timbal-dial-secret", ""), secret)
 
 
 def _strip_non_relay_candidates(sdp: str) -> str:
@@ -152,6 +187,9 @@ async def voice_rtc(request: Request) -> JSONResponse:
     except ValueError:
         sniffed = None
     if is_livekit_dial(sniffed):
+        if not _dial_authorized(request):
+            logger.warning("voice_rtc_dial_unauthorized")
+            return JSONResponse(status_code=401, content={"error": "Invalid dial credentials."})
         status, payload = await start_livekit_session(request.app, dial_from_body(sniffed))
         return JSONResponse(status_code=status, content=payload)
 

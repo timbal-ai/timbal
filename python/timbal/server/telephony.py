@@ -40,6 +40,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 
 from ..voice.config import VoiceConfig
+from .capacity import acquire_session_slot, release_session_slot
 
 logger = structlog.get_logger("timbal.server.telephony")
 
@@ -377,19 +378,33 @@ async def _media_ws(ws: WebSocket, dialect: Any) -> None:
         await ws.close(code=1008, reason="Voice requires an Agent runnable")
         return
 
+    # A phone call is a voice session like any other, and on a long-lived box
+    # it is the transport most likely to produce real concurrency. 1013 (Try
+    # Again Later) rather than 1008: the provider is not wrong, this process is
+    # full — and a provider that retries will land on a box that can serve it.
+    if not acquire_session_slot():
+        logger.warning("telephony_ws_rejected", reason="server at voice session capacity")
+        await ws.close(code=1013, reason="Server is at its voice session capacity")
+        return
+
     guard = getattr(ws.app.state, "single_session_guard", None)
     if guard is None:
-        await _serve_media_ws(ws, runnable, dialect)
+        try:
+            await _serve_media_ws(ws, runnable, dialect)
+        finally:
+            release_session_slot()
         return
 
     if not guard.claim():
         logger.info("telephony_ws_rejected", reason="single-session server already served its session")
+        release_session_slot()
         await ws.close(code=1008, reason="Single-session server: a voice session was already served")
         return
     guard.mark_connected()
     try:
         await _serve_media_ws(ws, runnable, dialect)
     finally:
+        release_session_slot()
         await guard.finish()
 
 
