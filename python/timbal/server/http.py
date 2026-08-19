@@ -65,10 +65,12 @@ async def lifespan(
     from .single_session import init_single_session_guard
 
     app.state.single_session_guard = init_single_session_guard()
-    # Resolution is lazy, so say the ceiling out loud here rather than leaving
-    # an operator to infer it from the first rejection.
-    from .capacity import log_capacity
+    # Size `auto` from this deployment's own voice config (the turn detector
+    # swings the per-session cost ~30x), then say the ceiling out loud rather
+    # than leaving an operator to infer it from the first rejection.
+    from .capacity import configure_capacity, log_capacity
 
+    configure_capacity(app.state.voice_config)
     log_capacity()
     from .livekit_session import maybe_start_livekit_session
 
