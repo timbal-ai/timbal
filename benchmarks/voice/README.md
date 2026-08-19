@@ -27,6 +27,79 @@ production live in that gap.
 | `harness.py` | fake browser: paced feeder, reactive driver, playback ack pump |
 | `score.py` | JSONL records, scorecard aggregation, baseline diffing |
 | `cli.py` | runner, reporting, regression gate |
+| `bench_cpu.py` | concurrency ceiling: sessions per event loop / per CPU (no API keys) |
+
+## `bench_cpu.py` — how many sessions fit in one process
+
+The odd one out in this directory: no network, no API keys, mock STT/TTS and
+`TestModel`. It exists to put a number behind the capacity cap in
+`timbal/server/capacity.py`, whose `_PER_CPU = 2.0` was explicitly "a starting
+point, not a measurement".
+
+```bash
+uv run python benchmarks/voice/bench_cpu.py --quick
+uv run python benchmarks/voice/bench_cpu.py --detector local --max-sessions 24
+uv run python benchmarks/voice/bench_cpu.py --recording   # inline mp3 encode
+# the cheap detectors need a long ladder and patient rungs to find their ceiling
+uv run python benchmarks/voice/bench_cpu.py --detector provider \
+    --max-sessions 96 --duration 30 --confirm 2
+```
+
+It ramps N concurrent sessions, feeds each one real-time-paced 20ms frames, and
+fails a rung on any of: p99 event-loop lag over the 20ms frame budget,
+persistently late frames, or p95 end-of-utterance→first-audio drifting past 3x
+the single-session baseline.
+
+**A failing rung is re-run before it counts** (`--confirm`, default 2). This is
+not a nicety, it is what makes the output mean anything. Pooled turn-latency p95
+over a few hundred turns trips on one stray GC pause, so a single unlucky rung
+became "the ceiling": `provider` first measured 28 sessions and is really 60. A
+real ceiling reproduces on every retry; noise does not.
+
+**Loop lag, not CPU%, is the ceiling.** A voice session is soft real time, so
+what breaks first is punctuality. Measured on an M-series laptop (10 cores),
+with the last rung that held and the first that failed three runs in a row:
+
+| `--detector` | CPU per session | sessions/cpu @70% | held | broke |
+|---|---|---|---|---|
+| `provider` (no Timbal EOU) | 0.001 cores | ~730 | 60 | 64 |
+| `lexical` (Silero + Python EOU) | 0.007 cores | ~97 | 48 | 52 |
+| `lexical` + `--recording` | 0.017 cores | ~41 | ≥ 12 | — |
+| `local` (Silero + Smart Turn ONNX) | 0.056 cores | ~12 | 12 | 16 |
+
+The ~50x spread is the whole point: the turn detector, not "a voice session", is
+what costs money. `local` runs Smart Turn per utterance boundary; `lexical`
+scores punctuation in ~0.1ms; `provider` has no EOU model, so it does not even
+arm the Silero endpointer and nothing but bookkeeping runs per frame.
+
+**Only `local` breaks on a resource.** Its failing 16 drew 0.94 cores — one full
+core on one loop — with 1.3% of frames late and a third of expected turns never
+completing. The cheap classes break on scheduling instead: `provider` at 60
+sessions was using 0.06 cores, so its ceiling is how many timers one loop can
+service on time, nowhere near a core's worth of work. Silero is the same story —
+at ~0.25ms per 32ms frame it would not saturate a loop until ~125 sessions.
+
+Which is why a single `_PER_CPU` was wrong in both directions at once: on a
+4-cpu box with 4 workers it yielded 2 sessions per worker where ~20 fit, and on
+a 10-core box with 1 worker it yielded 20 on a loop that broke at 16.
+`capacity.py` now resolves a per-deployment cost profile from the configured
+detector, and takes the smaller of a per-CPU and a per-*loop* ceiling — the
+latter undivided by worker count, since each worker has exactly one loop.
+
+The one thing this measurement does not license is trusting it as an absolute:
+**the mocks omit the loop's real work.** A live STT/TTS pair adds a websocket per
+session with per-message JSON parsing and base64 audio decode, on this same
+thread. The profile constants are therefore discounted well below what is
+measured here — treat sessions/loop as an upper bound, not a target.
+
+Numbers from an unpinned laptop are the *shape* of the answer, not the answer.
+For a figure you can size a container from, run it under the quota it will
+actually get:
+
+```bash
+docker run --rm --cpus=1 -v "$PWD:/w" -w /w python:3.11 \
+    sh -c 'pip install -q uv && uv run python benchmarks/voice/bench_cpu.py'
+```
 
 ### The echo suppressor fails on echo it cannot read
 

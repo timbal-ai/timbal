@@ -188,18 +188,23 @@ class TestAbandonWindow:
         assert guard.claim()
         guard.mark_connected()
         exited_before_teardown = []
+        torn_down = asyncio.Event()
 
         async def _close() -> None:
             # Simulate the driver: teardown lands shortly *after* close() returns.
             async def _teardown() -> None:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0)
                 exited_before_teardown.append(bool(exits))
                 await guard.finish()
+                torn_down.set()
 
             asyncio.get_running_loop().create_task(_teardown())
 
         guard.mark_disconnected(on_abandon=_close)
-        await asyncio.sleep(0.3)
+        # Don't sleep a wall-clock budget and hope: a loaded macos runner
+        # will miss 0.3s, and the list stays empty. Wait for the teardown
+        # itself — that's the property under test.
+        await asyncio.wait_for(torn_down.wait(), timeout=2.0)
         assert exited_before_teardown == [False]
         assert exits == [0]
 

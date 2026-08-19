@@ -65,6 +65,13 @@ async def lifespan(
     from .single_session import init_single_session_guard
 
     app.state.single_session_guard = init_single_session_guard()
+    # Size `auto` from this deployment's own voice config (the turn detector
+    # swings the per-session cost ~30x), then say the ceiling out loud rather
+    # than leaving an operator to infer it from the first rejection.
+    from .capacity import configure_capacity, log_capacity
+
+    configure_capacity(app.state.voice_config)
+    log_capacity()
     from .livekit_session import maybe_start_livekit_session
 
     livekit_task = maybe_start_livekit_session(app)
@@ -399,6 +406,10 @@ def run_server_cli(argv: list[str] | None = None) -> None:
         )
 
     os.environ["TIMBAL_RUNNABLE"] = import_spec
+    # The voice session cap counts per process, while the CPU it sizes itself
+    # from is the whole container's — a worker needs to know how many ways that
+    # quota is split. See `server.capacity`.
+    os.environ["TIMBAL_SERVER_WORKERS"] = str(max(1, args.workers))
     uvicorn.run(
         "timbal.server.http:create_app",
         factory=True,

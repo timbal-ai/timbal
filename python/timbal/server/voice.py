@@ -35,6 +35,7 @@ from ..voice.config import (
     RecordingConfig,
     VoiceConfig,
 )
+from .capacity import acquire_session_slot, release_session_slot
 
 logger = structlog.get_logger("timbal.server.voice")
 
@@ -908,13 +909,25 @@ async def voice_ws(ws: WebSocket) -> None:
         await ws.close(code=1008, reason="Voice requires an Agent runnable")
         return
 
+    # 1013 (Try Again Later) rather than 1008: the client is not wrong, this
+    # process is full. On a single-session box the guard below is the real
+    # limit and this never fires.
+    if not acquire_session_slot():
+        logger.warning("voice_ws_rejected", reason="server at voice session capacity")
+        await ws.close(code=1013, reason="Server is at its voice session capacity")
+        return
+
     guard = getattr(ws.app.state, "single_session_guard", None)
     if guard is None:
-        await _serve_voice_ws(ws, runnable)
+        try:
+            await _serve_voice_ws(ws, runnable)
+        finally:
+            release_session_slot()
         return
 
     if not guard.claim():
         logger.info("voice_ws_rejected", reason="single-session server already served its session")
+        release_session_slot()
         await ws.close(code=1008, reason="Single-session server: a voice session was already served")
         return
     # On this transport the socket *is* the media connection.
@@ -922,6 +935,7 @@ async def voice_ws(ws: WebSocket) -> None:
     try:
         await _serve_voice_ws(ws, runnable)
     finally:
+        release_session_slot()
         # However the session ended — including an exception in the handshake
         # or session build — this socket was the one session. Without this,
         # a failure between claim() (idle timer disarmed) and the session's

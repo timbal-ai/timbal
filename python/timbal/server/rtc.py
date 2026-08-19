@@ -5,6 +5,15 @@
 answer — WHIP-style, one round trip, no trickle ICE (aiortc finishes
 gathering before answering).
 
+The same route also accepts a LiveKit dial (``{"transport": "livekit", …}``),
+which joins a platform-created room instead of answering an offer and is
+handled by :mod:`timbal.server.livekit_session`. That fork is what lets a
+long-lived server (ECS / on-premise) serve LiveKit calls without the
+one-process-per-call boot env the serverless path uses. Unlike an offer, a
+dial names an outbound destination, so it is gated on
+``TIMBAL_VOICE_DIAL_SECRET`` / ``TIMBAL_LIVEKIT_URL`` where those are set —
+see :func:`_dial_authorized`.
+
 Protocol expectations for clients:
 
 * The offer must contain one audio track (the mic) **and** a data channel —
@@ -23,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import os
 from contextlib import aclosing
@@ -33,6 +43,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..voice.config import VoiceConfig
+from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
 from .voice import (
     build_voice_session,
     client_call_context,
@@ -50,6 +61,10 @@ _pcs: set[Any] = set()
 _drivers: set[asyncio.Task] = set()
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# One warning per process for a dial route with neither a secret nor a pinned
+# url — see `_dial_authorized`.
+_warned_open_dial = False
 
 
 def _force_relay() -> bool:
@@ -95,6 +110,33 @@ def _ice_servers(*, relay_only: bool = False) -> list[Any]:
     return servers
 
 
+def _dial_authorized(request: Request) -> bool:
+    """Gate the LiveKit dial on ``TIMBAL_VOICE_DIAL_SECRET`` when it is set.
+
+    An SDP offer only ever costs this process a session; a dial tells it which
+    SFU to connect to and then spends STT/TTS/LLM budget streaming to whoever
+    is in that room, so it is the one body on this route worth authenticating.
+    Same shape as the Twilio/Telnyx signature checks in ``telephony.py``.
+
+    Unset means no check — the serverless platform fronts this route and the
+    tests do not carry a secret. A deployment reachable by anything else wants
+    this set, alongside ``TIMBAL_LIVEKIT_URL`` to pin the destination.
+    """
+    global _warned_open_dial
+    secret = os.environ.get("TIMBAL_VOICE_DIAL_SECRET", "").strip()
+    if not secret:
+        if not _warned_open_dial and not os.environ.get("TIMBAL_LIVEKIT_URL", "").strip():
+            # Once per process: it is a deployment fact, not a per-call event.
+            _warned_open_dial = True
+            logger.warning(
+                "voice_rtc_dial_unauthenticated",
+                hint="set TIMBAL_VOICE_DIAL_SECRET and/or TIMBAL_LIVEKIT_URL: any client that "
+                "can reach this route can make this process join an arbitrary room",
+            )
+        return True
+    return hmac.compare_digest(request.headers.get("x-timbal-dial-secret", ""), secret)
+
+
 def _strip_non_relay_candidates(sdp: str) -> str:
     """Drop host/srflx ``a=candidate`` lines from an answer, keeping relay only.
 
@@ -132,6 +174,25 @@ def _strip_non_relay_candidates(sdp: str) -> str:
 
 @router.post("/rtc")
 async def voice_rtc(request: Request) -> JSONResponse:
+    # Body-discriminated fork. `{"transport": "livekit", "url", "token", …}`
+    # joins a room the platform already created; anything else is an SDP offer
+    # and keeps the aiortc path byte-for-byte. Sniffed *before* the aiortc
+    # import so a deployment pinned to timbal[voice-livekit] without
+    # timbal[voice] isn't 501'd on a transport it does support.
+    from .livekit_session import dial_from_body, is_livekit_dial, start_livekit_session
+
+    raw = await request.body()
+    try:
+        sniffed = json.loads(raw)
+    except ValueError:
+        sniffed = None
+    if is_livekit_dial(sniffed):
+        if not _dial_authorized(request):
+            logger.warning("voice_rtc_dial_unauthorized")
+            return JSONResponse(status_code=401, content={"error": "Invalid dial credentials."})
+        status, payload = await start_livekit_session(request.app, dial_from_body(sniffed))
+        return JSONResponse(status_code=status, content=payload)
+
     try:
         from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
@@ -164,6 +225,20 @@ async def voice_rtc(request: Request) -> JSONResponse:
         return JSONResponse(
             status_code=409,
             content={"error": "Single-session server: a voice session was already served."},
+        )
+
+    # Held for exactly as long as the guard's claim, so every release below
+    # sits next to an existing one. On a single-session box the guard is the
+    # real limit and this never rejects.
+    if not acquire_session_slot():
+        if guard is not None:
+            guard.release()
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": f"Server is at its voice session capacity "
+                f"({max_concurrent_sessions()} concurrent)."
+            },
         )
 
     pc: Any = None
@@ -242,6 +317,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         except Exception as e:
             _pcs.discard(pc)
+            release_session_slot()
             if guard is not None:
                 guard.release()
             logger.warning("voice_rtc_bad_offer", error=str(e))
@@ -251,6 +327,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             _pcs.discard(pc)
             with contextlib.suppress(Exception):
                 await pc.close()
+            release_session_slot()
             if guard is not None:
                 guard.release()
             return JSONResponse(status_code=400, content={"error": "Offer must contain an audio track."})
@@ -270,6 +347,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             _pcs.discard(pc)
             with contextlib.suppress(Exception):
                 await pc.close()
+        release_session_slot()
         if guard is not None:
             guard.release()
         raise
@@ -308,6 +386,9 @@ async def voice_rtc(request: Request) -> JSONResponse:
                 _pcs.discard(pc)
                 logger.info("voice_rtc_disconnected")
         finally:
+            # From here the driver owns the slot: the answer went out, so the
+            # session's end is the only thing that frees it.
+            release_session_slot()
             # Single-session box: this offer was the one session, however it
             # ended (call finished, ICE never completed, no data channel) —
             # finalize (recording already pushed by session cleanup above)
