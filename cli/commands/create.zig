@@ -768,6 +768,7 @@ fn createProjectStructure(
         \\.ruff_cache/
         \\_version.py
         \\.venv/
+        \\.timbal/
         \\
         \\# Node
         \\node_modules/
@@ -1358,6 +1359,10 @@ test "createProjectStructure scaffolds workforce and project files" {
     try expectEntryExists(tmp.dir, "README.md");
     try expectEntryMissing(tmp.dir, "ui");
 
+    const gitignore = try tmp.dir.readFileAlloc(a, ".gitignore", 64 * 1024);
+    defer a.free(gitignore);
+    try std.testing.expect(std.mem.indexOf(u8, gitignore, ".timbal/") != null);
+
     const agent_yaml = try tmp.dir.readFileAlloc(a, "workforce/foo/timbal.yaml", 64 * 1024);
     defer a.free(agent_yaml);
     var agent_cfg = utils.parseTimbalYaml(a, agent_yaml) orelse return error.TestUnexpectedResult;
@@ -1371,6 +1376,78 @@ test "createProjectStructure scaffolds workforce and project files" {
     defer workflow_cfg.deinit(a);
     try std.testing.expectEqualStrings("workflow", workflow_cfg.type);
     try std.testing.expectEqualStrings("workflow.py::workflow", workflow_cfg.fqn);
+}
+
+// Mirrors the monolith's post-create `git add -A && git commit`: runtime
+// payloads under workforce/<member>/.timbal/ (codegen spill, CRIU, uv hash)
+// must not be staged. Source files and the gitignore itself still must.
+test "scaffold gitignore keeps workforce .timbal out of git add -A" {
+    const a = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(path);
+
+    const foo_name = try a.dupe(u8, "foo");
+    defer a.free(foo_name);
+    var members_list = std.ArrayList(WorkforceMemberSpec).init(a);
+    defer members_list.deinit();
+    try members_list.append(.{ .name = foo_name, .project_type = .agent });
+
+    const config = ProjectConfig{
+        .members = members_list.items,
+        .include_ui = false,
+        .path = path,
+        .relative_path = ".",
+    };
+
+    try createProjectStructure(a, tmp.dir, config, .{
+        .fetch_blueprints = false,
+        .init_git = true,
+    });
+
+    try tmp.dir.makePath("workforce/foo/.timbal/codegen-spill");
+    {
+        const spill = try tmp.dir.createFile("workforce/foo/.timbal/codegen-spill/input.json", .{});
+        defer spill.close();
+        try spill.writeAll("{\"prompt\": \"x\"}");
+    }
+    {
+        const env_file = try tmp.dir.createFile(".env", .{});
+        defer env_file.close();
+        try env_file.writeAll("SECRET=1\n");
+    }
+
+    const add = try std.process.Child.run(.{
+        .allocator = a,
+        .argv = &[_][]const u8{ "git", "add", "-A" },
+        .cwd = path,
+    });
+    defer a.free(add.stdout);
+    defer a.free(add.stderr);
+    switch (add.term) {
+        .Exited => |c| try std.testing.expectEqual(@as(u8, 0), c),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const status = try std.process.Child.run(.{
+        .allocator = a,
+        .argv = &[_][]const u8{ "git", "status", "--porcelain" },
+        .cwd = path,
+    });
+    defer a.free(status.stdout);
+    defer a.free(status.stderr);
+    switch (status.term) {
+        .Exited => |c| try std.testing.expectEqual(@as(u8, 0), c),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(std.mem.indexOf(u8, status.stdout, "agent.py") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status.stdout, ".gitignore") != null);
+    try std.testing.expect(std.mem.indexOf(u8, status.stdout, ".timbal") == null);
+    try std.testing.expect(std.mem.indexOf(u8, status.stdout, ".env") == null);
 }
 
 // A failure partway through must leave nothing behind, so a retry on the same
