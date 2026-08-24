@@ -665,6 +665,15 @@ models:
   output_price: 10.0
   context_window: 1000000
   capabilities: [audio]
+- id: xai/grok-4.6
+  provider: xai
+  display_name: Grok 4.6
+  description: xAI's August 2026 flagship for coding, long-running agents, and ambitious interactive work.
+  notes: Long-context surcharge applies above 200k tokens ($4/$12 per 1M).
+  input_price: 2.0
+  output_price: 6.0
+  context_window: 500000
+  capabilities: [vision, tools, reasoning]
 - id: xai/grok-4.5
   provider: xai
   display_name: Grok 4.5

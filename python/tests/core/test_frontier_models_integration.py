@@ -38,6 +38,12 @@ LIVE_MODELS = [
         id="google-gemini-3.5-flash-lite",
     ),
     pytest.param(
+        "xai/grok-4.6",
+        "XAI_API_KEY",
+        None,
+        id="xai-grok-4.6",
+    ),
+    pytest.param(
         "xai/grok-4.5",
         "XAI_API_KEY",
         None,
@@ -99,8 +105,8 @@ async def test_frontier_model_llm_router_streams(model: str, env_key: str, fallb
     _skip_if_no_key(env_key, fallback_env)
 
     from timbal.core.llm import _llm_router
-    from timbal.types.message import Message
     from timbal.types.content import TextContent
+    from timbal.types.message import Message
 
     chunks = []
     async for chunk in _llm_router(

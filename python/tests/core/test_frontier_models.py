@@ -4,12 +4,12 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from timbal.core.models import Model, get_context_window
 from timbal.state import set_run_context
 from timbal.state.context import RunContext
 
 NEW_MODEL_IDS = [
+    "xai/grok-4.6",
     "xai/grok-4.5",
     "xai/grok-4.3",
     "fireworks/accounts/fireworks/models/minimax-m2p7",
@@ -89,8 +89,16 @@ class TestXaiRouterDispatch:
         mock_client.responses.create = fake_create
         return mock_client, captured_kwargs
 
+    @pytest.mark.parametrize(
+        "model_id,api_name",
+        [
+            ("xai/grok-4.6", "grok-4.6"),
+            ("xai/grok-4.5", "grok-4.5"),
+            ("xai/grok-4.3", "grok-4.3"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_grok_45_uses_responses_path(self):
+    async def test_grok_models_use_responses_path(self, model_id: str, api_name: str):
         from timbal.core.llm import _llm_router
 
         _make_run_context()
@@ -101,36 +109,14 @@ class TestXaiRouterDispatch:
                 with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
                     try:
                         async for _ in _llm_router(
-                            model="xai/grok-4.5",
+                            model=model_id,
                             max_tokens=32,
                         ):
                             pass
                     except (RuntimeError, StopAsyncIteration):
                         pass
 
-        assert captured_kwargs.get("model") == "grok-4.5"
-        assert captured_kwargs.get("max_output_tokens") == 32
-
-    @pytest.mark.asyncio
-    async def test_grok_43_uses_responses_path(self):
-        from timbal.core.llm import _llm_router
-
-        _make_run_context()
-        mock_client, captured_kwargs = self._make_mock_client_and_capturer()
-
-        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
-            with patch.dict(os.environ, {"XAI_API_KEY": "key"}):
-                with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "responses"):
-                    try:
-                        async for _ in _llm_router(
-                            model="xai/grok-4.3",
-                            max_tokens=32,
-                        ):
-                            pass
-                    except (RuntimeError, StopAsyncIteration):
-                        pass
-
-        assert captured_kwargs.get("model") == "grok-4.3"
+        assert captured_kwargs.get("model") == api_name
         assert captured_kwargs.get("max_output_tokens") == 32
 
 
