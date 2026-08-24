@@ -313,6 +313,11 @@ class Runnable(ABC, BaseModel):
     ``timed_out``. ``None`` / non-positive = no deadline. Only applies when the
     runnable actually detaches (``background_mode`` / ``run_in_background``)."""
 
+    background_stall_timeout: float | None = None
+    """Optional seconds without log events before a background child is
+    cancelled as ``stalled``. Resets on every emitted event. Distinct from
+    ``background_timeout`` (wall-clock). ``None`` / non-positive = disabled."""
+
     on_background_cancel: Callable[..., Any] | None = Field(default=None, exclude=True)
     """Optional hook fired when ``cancel_background_task`` cancels this child.
     Receives the ``BackgroundTask`` record (has ``task_id``, ``metadata`` with
@@ -1605,6 +1610,7 @@ class Runnable(ABC, BaseModel):
                 task=task,
                 on_cancel=self.on_background_cancel,
                 timeout=self.background_timeout,
+                stall_timeout=self.background_stall_timeout,
             )
             registered = True
         except BaseException:

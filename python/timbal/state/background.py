@@ -21,6 +21,8 @@ polling — never mid-turn while the parent is still talking.
 
 Optional ``timeout`` (seconds) on a child cancels it as ``timed_out`` when the
 deadline elapses (Task cancel + handler ``aclose`` + ``on_background_cancel``).
+Optional ``stall_timeout`` cancels as ``stalled`` when no log events arrive
+within the window (resets on every event).
 
 Session caps bound fan-out: ``max_concurrent`` (in-flight) and ``max_depth``
 (nesting). Defaults come from ``TIMBAL_MAX_CONCURRENT_BACKGROUND`` (20) and
@@ -45,7 +47,7 @@ _COMPLETION_SUMMARY_CHARS = 300
 _RESULT_PREVIEW_CHARS = 500
 _TASK_ID_LEN = 12
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
-_TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled", "timed_out"})
+_TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled", "timed_out", "stalled"})
 
 # Ring-buffer defaults (mirrors JobStore). ``None`` / 0 = unlimited.
 DEFAULT_BG_LOG_MAX_EVENTS = 50_000
@@ -578,6 +580,7 @@ class BackgroundTask:
         title: str | None = None,
         on_cancel: Callable[..., Any] | None = None,
         timeout: float | None = None,
+        stall_timeout: float | None = None,
         log_max_events: int | None = DEFAULT_BG_LOG_MAX_EVENTS,
         log_max_bytes: int | None = DEFAULT_BG_LOG_MAX_BYTES,
     ) -> None:
@@ -591,11 +594,19 @@ class BackgroundTask:
         self.metadata: dict[str, Any] = {}
         self.on_cancel = on_cancel
         self.timeout = timeout
+        self.stall_timeout = stall_timeout
+        self.last_event_at = time.monotonic()
         self.finished_at: float | None = None
         self._cancel_requested = False
         self._timed_out = False
+        self._stalled = False
         self._timeout_handle: asyncio.TimerHandle | None = None
+        self._stall_handle: asyncio.TimerHandle | None = None
         self._handler_aclose: Callable[..., Any] | None = None
+
+    def clear_watchdogs(self) -> None:
+        self.clear_timeout()
+        self.clear_stall()
 
     def schedule_timeout(self) -> None:
         """Arm a one-shot deadline; no-op when ``timeout`` is unset or non-positive."""
@@ -612,6 +623,41 @@ class BackgroundTask:
         self._timeout_handle = None
         if handle is not None:
             handle.cancel()
+
+    def schedule_stall_watchdog(self) -> None:
+        """Arm a one-shot idle deadline; reset on every :meth:`ingest`."""
+        self.clear_stall()
+        if self.stall_timeout is None or self.stall_timeout <= 0:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._stall_handle = loop.call_later(self.stall_timeout, self._on_stall)
+
+    def clear_stall(self) -> None:
+        handle = self._stall_handle
+        self._stall_handle = None
+        if handle is not None:
+            handle.cancel()
+
+    def _on_stall(self) -> None:
+        """Cancel the child when no events arrived within ``stall_timeout``."""
+        self._stall_handle = None
+        if self.task.done():
+            return
+        self._stalled = True
+        self._cancel_requested = True
+        self.task.cancel()
+        try:
+            asyncio.get_running_loop().create_task(self.aclose_handler())
+        except RuntimeError:
+            pass
+        if self.on_cancel is not None:
+            try:
+                self.on_cancel(self)
+            except Exception:
+                pass
 
     def _on_timeout(self) -> None:
         """Cancel the child and mark ``timed_out`` (distinct from user cancel)."""
@@ -659,7 +705,9 @@ class BackgroundTask:
 
     def ingest(self, event: Any) -> None:
         _lift_metadata(event, self.metadata)
+        self.last_event_at = time.monotonic()
         self.log.put_nowait(event)
+        self.schedule_stall_watchdog()
 
     def put_nowait(self, event: Any) -> None:
         """Queue-shaped sink used by ``_execute_handler``."""
@@ -669,6 +717,8 @@ class BackgroundTask:
         task = self.task
         if self._timed_out:
             return "timed_out"
+        if self._stalled:
+            return "stalled"
         if self._cancel_requested or (task.done() and task.cancelled()):
             return "cancelled"
         if not task.done():
@@ -697,10 +747,17 @@ class BackgroundTask:
         }
         if self.timeout is not None:
             snapshot["timeout"] = self.timeout
+        if self.stall_timeout is not None:
+            snapshot["stall_timeout"] = self.stall_timeout
+        if status == "running" and self.stall_timeout is not None:
+            snapshot["summary"]["seconds_since_event"] = round(time.monotonic() - self.last_event_at, 3)
         snapshot.update(self.metadata)
         if self._timed_out:
             timeout = self.timeout
             snapshot["error"] = f"Timed out after {timeout:g}s" if timeout else "Timed out"
+        elif self._stalled:
+            stall = self.stall_timeout
+            snapshot["error"] = f"No events for {stall:g}s" if stall else "Stalled"
         elif self.task.done() and not self.task.cancelled():
             exc = self.task.exception()
             if exc is not None:
@@ -809,15 +866,16 @@ class BackgroundTaskStore:
         # run on the loop thread; keep this sync and never raise.
         task = record.task
         record.schedule_timeout()
+        record.schedule_stall_watchdog()
         if task.done():
-            record.clear_timeout()
+            record.clear_watchdogs()
             if record.finished_at is None:
                 record.finished_at = time.monotonic()
             self._enqueue_completion(record)
         else:
 
             def _on_done(_t: asyncio.Task) -> None:
-                record.clear_timeout()
+                record.clear_watchdogs()
                 if record.finished_at is None:
                     record.finished_at = time.monotonic()
                 self._enqueue_completion(record)
@@ -885,7 +943,7 @@ class BackgroundTaskStore:
         record = self._tasks.get(task_id)
         if record is None:
             return {"status": "not_found", "task_id": task_id}
-        record.clear_timeout()
+        record.clear_watchdogs()
         if not record.task.done():
             record._cancel_requested = True
             record.task.cancel()
@@ -934,8 +992,8 @@ class BackgroundTaskStore:
             "status": status,
             "summary": summary_text,
         }
-        if status in ("error", "timed_out"):
-            note["error"] = str(snap.get("error") or ("Timed out" if status == "timed_out" else "unknown error"))
+        if status in ("error", "timed_out", "stalled"):
+            note["error"] = str(snap.get("error") or ("Timed out" if status == "timed_out" else "Stalled"))
         elif status == "completed" and "result" in snap:
             note["result"] = _preview_value(snap["result"])
         self._completion_inbox.append(note)
@@ -1198,10 +1256,12 @@ def register_background_task(
     on_cancel: Callable[..., Any] | None = None,
     started_at: int | None = None,
     timeout: float | None = None,
+    stall_timeout: float | None = None,
 ) -> BackgroundTask:
     """Register a running child on the current session bag.
 
     ``timeout`` is seconds until the child is cancelled as ``timed_out``.
+    ``stall_timeout`` is seconds without log events until ``stalled``.
     Raises :class:`BackgroundLimitError` if concurrent/depth caps would be exceeded.
     """
     from . import get_run_context
@@ -1222,6 +1282,7 @@ def register_background_task(
         started_at=started_at if started_at is not None else int(time.time() * 1000),
         on_cancel=on_cancel,
         timeout=timeout,
+        stall_timeout=stall_timeout,
         log_max_events=store.max_log_events,
         log_max_bytes=store.max_log_bytes,
     )

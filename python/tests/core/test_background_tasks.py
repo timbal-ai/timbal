@@ -1533,6 +1533,112 @@ class TestBackgroundTimeout:
         assert snap["status"] == "cancelled"
 
 
+class TestBackgroundStallTimeout:
+    """``background_stall_timeout`` cancels idle children as ``stalled``."""
+
+    @pytest.mark.asyncio
+    async def test_stall_after_last_event(self):
+        hang = asyncio.Event()
+
+        async def emit_once_then_hang(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta=f"{prompt} start")
+            await hang.wait()
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "x"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="builder",
+                    handler=emit_once_then_hang,
+                    background_mode="auto",
+                    background_stall_timeout=0.15,
+                )
+            ],
+        )
+
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+        snap = await _wait_until_terminal(task_id)
+        assert snap["status"] == "stalled"
+        assert snap["stall_timeout"] == 0.15
+        assert "No events for 0.15s" in snap["error"]
+
+    @pytest.mark.asyncio
+    async def test_steady_events_do_not_stall_under_wall_timeout(self):
+        """Streaming children reset the idle watchdog on every event."""
+
+        async def chatty(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            while True:
+                yield TextDelta(id="s", text_delta=f"{prompt}.")
+                await asyncio.sleep(0.04)
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "loop"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="builder",
+                    handler=chatty,
+                    background_mode="auto",
+                    background_stall_timeout=0.5,
+                    background_timeout=0.15,
+                )
+            ],
+        )
+
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        snap = await _wait_until_terminal(task_id)
+        assert snap["status"] == "timed_out"
+        assert snap["status"] != "stalled"
+
+    @pytest.mark.asyncio
+    async def test_running_snapshot_exposes_seconds_since_event(self):
+        gate = asyncio.Event()
+
+        async def paused_stream() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="one ")
+            await gate.wait()
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="builder",
+                    handler=paused_stream,
+                    background_mode="auto",
+                    background_stall_timeout=30.0,
+                )
+            ],
+        )
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+        await asyncio.sleep(0.08)
+        snap = get_background_task(task_id)
+        assert snap["status"] == "running"
+        assert snap["summary"]["seconds_since_event"] >= 0.05
+        gate.set()
+
+
 class TestBackgroundLimits:
     """Concurrent + depth caps on the session bag."""
 

@@ -54,7 +54,7 @@ Once this session has at least one background task, the agent automatically gain
 
 ## Completion notifications
 
-When a background child reaches a terminal status (`completed`, `error`, `cancelled`, or `timed_out`), the session store queues a one-shot notice. At the **start of the next parent turn** — not mid-turn while the parent is still talking — the agent drains that inbox and injects a synthetic user message into memory so the LLM learns without polling:
+When a background child reaches a terminal status (`completed`, `error`, `cancelled`, `timed_out`, or `stalled`), the session store queues a one-shot notice. At the **start of the next parent turn** — not mid-turn while the parent is still talking — the agent drains that inbox and injects a synthetic user message into memory so the LLM learns without polling:
 
 ```text
 Background task(s) finished since your last turn. ...
@@ -81,7 +81,7 @@ get_background_task("k4d9x2mq7c1a")
 
 ```python
 {
-    "status": "running",           # running | completed | error | cancelled | timed_out | not_found
+    "status": "running",           # running | completed | error | cancelled | timed_out | stalled | not_found
     "task_id": "k4d9x2mq7c1a",
     "name": "build_site",
     "title": "Build the marketing site",
@@ -118,6 +118,20 @@ long_running_tool = Tool(
 ```
 
 `None` (default) or a non-positive value means no deadline.
+
+## Stall detection
+
+Set `background_stall_timeout` (seconds) to cancel a child that stops emitting log events — distinct from wall-clock `background_timeout`. The idle timer **resets on every event** (streaming chunks, tool calls, progress dicts), so a long but chatty build stays alive while a hung subprocess does not.
+
+```python
+long_running_tool = Tool(
+    handler=slow_operation,
+    background_mode="always",
+    background_stall_timeout=120.0,  # no events for 2 minutes → stalled
+)
+```
+
+Terminal status is `stalled`. While still running, snapshots expose `summary.seconds_since_event` and `stall_timeout` for UI warnings before the watchdog fires.
 
 ## Concurrency and depth caps
 
