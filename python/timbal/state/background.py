@@ -22,6 +22,10 @@ polling — never mid-turn while the parent is still talking.
 Optional ``timeout`` (seconds) on a child cancels it as ``timed_out`` when the
 deadline elapses (Task cancel + handler ``aclose`` + ``on_background_cancel``).
 
+Session caps bound fan-out: ``max_concurrent`` (in-flight) and ``max_depth``
+(nesting). Defaults come from ``TIMBAL_MAX_CONCURRENT_BACKGROUND`` (20) and
+``TIMBAL_MAX_BACKGROUND_DEPTH`` (unlimited); Agents can override per session.
+
 If the parent already learned via the LLM ``get_background_task`` /
 ``list_background_tasks`` tools (``ack_completion=True``), the notice is
 dropped so the next turn does not re-announce a completion the model handled.
@@ -30,6 +34,8 @@ dropped so the next turn does not re-announce a completion the model handled.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import os
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -46,6 +52,63 @@ _TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled", "timed_out"})
 _STORES_BY_RUN_ID: dict[str, BackgroundTaskStore] = {}
 
 _DONE = object()
+_UNSET = object()
+
+# Nesting depth of the current coroutine relative to top-level session work.
+# 0 = parent agent/turn; each detached child increments by 1 for its body.
+_background_depth: contextvars.ContextVar[int] = contextvars.ContextVar("timbal_background_depth", default=0)
+
+
+class BackgroundLimitError(RuntimeError):
+    """Raised when a spawn would exceed concurrent or depth caps."""
+
+
+def get_background_depth() -> int:
+    return _background_depth.get()
+
+
+def set_background_depth(depth: int) -> contextvars.Token[int]:
+    return _background_depth.set(depth)
+
+
+def reset_background_depth(token: contextvars.Token[int]) -> None:
+    _background_depth.reset(token)
+
+
+def _default_max_concurrent() -> int | None:
+    """Default in-flight cap. ``TIMBAL_MAX_CONCURRENT_BACKGROUND`` overrides.
+
+    Unset → 20. ``0`` / ``none`` / ``unlimited`` → no cap.
+    """
+    raw = os.environ.get("TIMBAL_MAX_CONCURRENT_BACKGROUND")
+    if raw is None:
+        return 20
+    text = raw.strip().lower()
+    if text in ("", "0", "none", "unlimited"):
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return 20
+    return None if value <= 0 else value
+
+
+def _default_max_depth() -> int | None:
+    """Default spawn-depth cap. ``TIMBAL_MAX_BACKGROUND_DEPTH`` overrides.
+
+    Unset / ``none`` / ``unlimited`` → no cap. ``1`` = only top-level may spawn.
+    """
+    raw = os.environ.get("TIMBAL_MAX_BACKGROUND_DEPTH")
+    if raw is None:
+        return None
+    text = raw.strip().lower()
+    if text in ("", "none", "unlimited"):
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    return None if value < 0 else value
 
 
 def _new_task_id() -> str:
@@ -412,12 +475,24 @@ class BackgroundTaskStore:
     suppress the pending notice for that child.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_concurrent: int | None | object = _UNSET,
+        max_depth: int | None | object = _UNSET,
+    ) -> None:
         self._tasks: dict[str, BackgroundTask] = {}
         # Ordered, one-shot queue of lean completion payloads for the parent LLM.
         self._completion_inbox: list[dict[str, Any]] = []
         # task_ids already enqueued, drained, or acked via peek — never re-inject.
         self._completion_notified: set[str] = set()
+        self.max_concurrent = (
+            _default_max_concurrent() if max_concurrent is _UNSET else max_concurrent  # type: ignore[assignment]
+        )
+        self.max_depth = _default_max_depth() if max_depth is _UNSET else max_depth  # type: ignore[assignment]
+        # Spawns that passed check_can_spawn but are not yet in ``_tasks``
+        # (between create_task and add). Counts toward the concurrent cap.
+        self._pending_spawns = 0
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -425,7 +500,43 @@ class BackgroundTaskStore:
     def __contains__(self, task_id: str) -> bool:
         return task_id in self._tasks
 
+    def running_count(self) -> int:
+        """In-flight children + spawns reserved but not yet registered."""
+        live = sum(1 for record in self._tasks.values() if not record.task.done())
+        return live + self._pending_spawns
+
+    def check_can_spawn(self, depth: int | None = None) -> None:
+        """Raise :class:`BackgroundLimitError` if a new spawn is not allowed."""
+        if depth is None:
+            depth = get_background_depth()
+        if self.max_depth is not None and depth >= self.max_depth:
+            raise BackgroundLimitError(
+                f"Background spawn depth limit reached "
+                f"(depth={depth}, max_background_depth={self.max_depth}). "
+                "Nested background spawns are not allowed at this depth."
+            )
+        if self.max_concurrent is not None:
+            running = self.running_count()
+            if running >= self.max_concurrent:
+                raise BackgroundLimitError(
+                    f"Concurrent background limit reached "
+                    f"({running}/{self.max_concurrent}). "
+                    "Wait for a task to finish or cancel one before spawning another."
+                )
+
+    def begin_spawn(self, depth: int | None = None) -> None:
+        """Atomically reserve a concurrent slot (check + pending++)."""
+        self.check_can_spawn(depth)
+        self._pending_spawns += 1
+
+    def abort_spawn(self) -> None:
+        """Release a reservation if registration fails after :meth:`begin_spawn`."""
+        if self._pending_spawns > 0:
+            self._pending_spawns -= 1
+
     def add(self, record: BackgroundTask) -> None:
+        if self._pending_spawns > 0:
+            self._pending_spawns -= 1
         self._tasks[record.task_id] = record
         # Enqueue when the asyncio.Task reaches a terminal state. Done callbacks
         # run on the loop thread; keep this sync and never raise.
@@ -564,6 +675,26 @@ def bind_background_store(run_context: Any) -> BackgroundTaskStore | None:
     return store
 
 
+def apply_background_limits(
+    run_context: Any,
+    *,
+    max_concurrent: int | None | object = _UNSET,
+    max_depth: int | None | object = _UNSET,
+) -> None:
+    """Stash session caps on the RunContext and update an existing store."""
+    if max_concurrent is not _UNSET:
+        run_context._bg_max_concurrent = max_concurrent
+    if max_depth is not _UNSET:
+        run_context._bg_max_depth = max_depth
+    store = getattr(run_context, "_bg_store", None)
+    if store is None:
+        return
+    if max_concurrent is not _UNSET:
+        store.max_concurrent = max_concurrent  # type: ignore[assignment]
+    if max_depth is not _UNSET:
+        store.max_depth = max_depth  # type: ignore[assignment]
+
+
 def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
     """Get (creating if needed) the session bag, and register it for chaining.
 
@@ -572,7 +703,13 @@ def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
     """
     store = run_context._bg_store
     if store is None:
-        store = BackgroundTaskStore()
+        max_concurrent = (
+            run_context._bg_max_concurrent
+            if hasattr(run_context, "_bg_max_concurrent")
+            else _UNSET
+        )
+        max_depth = run_context._bg_max_depth if hasattr(run_context, "_bg_max_depth") else _UNSET
+        store = BackgroundTaskStore(max_concurrent=max_concurrent, max_depth=max_depth)
         run_context._bg_store = store
     _STORES_BY_RUN_ID[run_context.id] = store
     return store
@@ -662,6 +799,7 @@ def register_background_task(
     """Register a running child on the current session bag.
 
     ``timeout`` is seconds until the child is cancelled as ``timed_out``.
+    Raises :class:`BackgroundLimitError` if concurrent/depth caps would be exceeded.
     """
     from . import get_run_context
 
@@ -669,6 +807,10 @@ def register_background_task(
     if run_context is None:
         raise RuntimeError("Cannot register a background task without a RunContext.")
     store = ensure_background_store(run_context)
+    # Slot already reserved by Runnable._spawn_background_task via begin_spawn;
+    # direct callers must begin_spawn (or accept check_can_spawn here without reserve).
+    if store._pending_spawns == 0:
+        store.check_can_spawn()
     record = BackgroundTask(
         _new_task_id(),
         name=name,

@@ -1537,14 +1537,26 @@ class Runnable(ABC, BaseModel):
         across sequential turns via ``parent_id``). They are **not** yielded
         back onto the parent stream after detach.
         """
-        from ..state.background import register_background_task
+        from ..state.background import (
+            ensure_background_store,
+            get_background_depth,
+            register_background_task,
+            reset_background_depth,
+            set_background_depth,
+        )
 
         parent_span = run_context.parent_span()
         if not parent_span:
             raise ValueError("Parent span not found. Cannot run in background.")
+
+        store = ensure_background_store(run_context)
+        depth = get_background_depth()
+        # Reserve before create_task so parallel tool spawns cannot overrun the cap.
+        store.begin_spawn(depth)
         record_box: list[Any] = []
 
         async def _bg_handler_execution():
+            token = set_background_depth(depth + 1)
             record = record_box[0]
             output = None
             try:
@@ -1567,17 +1579,28 @@ class Runnable(ABC, BaseModel):
             except asyncio.CancelledError:
                 raise
             finally:
+                reset_background_depth(token)
                 record.log.close()
             return output
 
-        task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
-        record = register_background_task(
-            name=self.name,
-            input=input,
-            task=task,
-            on_cancel=self.on_background_cancel,
-            timeout=self.background_timeout,
-        )
+        task: asyncio.Task | None = None
+        registered = False
+        try:
+            task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
+            record = register_background_task(
+                name=self.name,
+                input=input,
+                task=task,
+                on_cancel=self.on_background_cancel,
+                timeout=self.background_timeout,
+            )
+            registered = True
+        except BaseException:
+            if not registered:
+                store.abort_spawn()
+                if task is not None:
+                    task.cancel()
+            raise
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}
 

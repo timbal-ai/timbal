@@ -1486,3 +1486,119 @@ class TestBackgroundTimeout:
         cancel_background_task(task_id)
         snap = await _wait_until_terminal(task_id)
         assert snap["status"] == "cancelled"
+
+
+class TestBackgroundLimits:
+    """Concurrent + depth caps on the session bag."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cap_rejects_extra_spawn(self):
+        gate = asyncio.Event()
+
+        async def gated(tag: str) -> str:
+            await gate.wait()
+            return tag
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_calls(
+                        ("gated", {"tag": "A"}, "c1", True),
+                        ("gated", {"tag": "B"}, "c2", True),
+                        ("gated", {"tag": "C"}, "c3", True),
+                    ),
+                    "Tried three.",
+                ]
+            ),
+            tools=[Tool(name="gated", handler=gated, background_mode="auto")],
+            max_background_concurrent=2,
+        )
+
+        result = await agent(prompt="start three").collect()
+        assert_has_output_event(result)
+        running = [t for t in list_background_tasks() if t["status"] == "running"]
+        assert len(running) == 2
+        # Third spawn failed — tool error visible in memory / output path.
+        from timbal.state.background import current_background_store
+
+        store = current_background_store()
+        assert store is not None
+        assert store.running_count() == 2
+        assert store.max_concurrent == 2
+
+        gate.set()
+        for t in running:
+            await _wait_until_terminal(t["task_id"])
+
+    @pytest.mark.asyncio
+    async def test_depth_cap_blocks_nested_background_spawn(self):
+        from timbal.state.background import (
+            BackgroundLimitError,
+            BackgroundTaskStore,
+            get_background_depth,
+            reset_background_depth,
+            set_background_depth,
+        )
+
+        store = BackgroundTaskStore(max_concurrent=10, max_depth=1)
+        # Top-level may spawn.
+        store.check_can_spawn(0)
+
+        token = set_background_depth(1)
+        try:
+            assert get_background_depth() == 1
+            with pytest.raises(BackgroundLimitError, match="depth"):
+                store.check_can_spawn()
+            with pytest.raises(BackgroundLimitError, match="depth"):
+                store.begin_spawn()
+        finally:
+            reset_background_depth(token)
+
+        # Agent wires max_background_depth onto the session store.
+        async def quick(tag: str) -> str:
+            return tag
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("quick", {"tag": "A"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+            max_background_depth=1,
+        )
+        await agent(prompt="go").collect()
+        from timbal.state.background import current_background_store
+
+        assert current_background_store().max_depth == 1
+
+    @pytest.mark.asyncio
+    async def test_unlimited_concurrent_when_none(self):
+        async def quick(tag: str) -> str:
+            await asyncio.sleep(0.02)
+            return tag
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_calls(
+                        ("quick", {"tag": "A"}, "c1", True),
+                        ("quick", {"tag": "B"}, "c2", True),
+                        ("quick", {"tag": "C"}, "c3", True),
+                    ),
+                    "All three.",
+                ]
+            ),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+            max_background_concurrent=None,
+        )
+
+        await agent(prompt="go").collect()
+        assert len(list_background_tasks()) == 3
+        from timbal.state.background import current_background_store
+
+        assert current_background_store().max_concurrent is None

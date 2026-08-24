@@ -112,6 +112,25 @@ long_running_tool = Tool(
 
 `None` (default) or a non-positive value means no deadline.
 
+## Concurrency and depth caps
+
+Each session bag bounds fan-out so one turn cannot detach unbounded work:
+
+- **Concurrent** — max children whose asyncio.Task is still running (default **20**). Override per Agent with `max_background_concurrent=...` or env `TIMBAL_MAX_CONCURRENT_BACKGROUND` (`0` / `none` / `unlimited` = no cap).
+- **Depth** — max nesting of background spawns (default **unlimited**). `max_background_depth=1` means only top-level code may detach; a background child cannot spawn further background work. Env: `TIMBAL_MAX_BACKGROUND_DEPTH`.
+
+Hitting a cap raises `BackgroundLimitError` (surfaced as a tool error to the LLM) instead of spawning.
+
+```python
+agent = Agent(
+    name="orchestrator",
+    model="...",
+    tools=[Bash("*")],
+    max_background_concurrent=4,
+    max_background_depth=1,
+)
+```
+
 ## Reading the Raw Transcript
 
 For the full event stream, read from a cursor. This does not drain either — the same `after` returns the same events, so it's safe to call from more than one place.

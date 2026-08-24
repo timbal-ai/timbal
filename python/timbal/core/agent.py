@@ -213,6 +213,15 @@ class Agent(Runnable):
     Mutually exclusive with skills_include."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
+    max_background_concurrent: int | None = 20
+    """Max in-flight background children for this agent's session bag.
+    ``None`` = unlimited. Applied at turn start; also settable via
+    ``TIMBAL_MAX_CONCURRENT_BACKGROUND`` when no Agent override is active yet."""
+    max_background_depth: int | None = None
+    """Max background spawn nesting depth. ``None`` = unlimited.
+    ``1`` allows only top-level (non-background) code to detach children —
+    a background child cannot spawn further background work.
+    Override with ``TIMBAL_MAX_BACKGROUND_DEPTH``."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -821,6 +830,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         else:
             memory.append(notice)
 
+    def _apply_background_limits(self, run_context: Any) -> None:
+        """Push Agent concurrent/depth caps onto the session BG store."""
+        from ..state.background import apply_background_limits
+
+        apply_background_limits(
+            run_context,
+            max_concurrent=self.max_background_concurrent,
+            max_depth=self.max_background_depth,
+        )
+
     async def _compact_preserving_last_assistant(self, current_span: Any, *, prev_usage: dict | None) -> None:
         """Compact memory while protecting the trailing assistant message (and anything after
         it) from the compactor.
@@ -1339,6 +1358,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._resolve_system_prompt()
 
         await self.resolve_memory()
+        # Session BG caps (concurrent / depth) before tools can spawn this turn.
+        self._apply_background_limits(run_context)
         # After memory is assembled (and before the dump): push any background
         # completions that finished since the last turn into the conversation.
         self._inject_background_completions(current_span)
