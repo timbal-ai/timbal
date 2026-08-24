@@ -1085,10 +1085,46 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     @staticmethod
     def _link_tool_call_span(event: Any, tool_call: ToolUseContent) -> None:
-        """Link the LLM tool_call id to the tool's span for memory resolution."""
-        if event.type == "START":
-            tool_call_span = get_run_context()._trace[event.call_id]
-            tool_call_span.metadata["tool_call_id"] = tool_call.id
+        """Link the LLM tool_call id to the tool's span for memory resolution.
+
+        Handlers that yield pre-built ``BaseEvent``s (coding harness, etc.) may
+        emit START events whose ``call_id`` is not in this run's trace. Those are
+        ignored — the tool's own Runnable START already carries the link.
+        """
+        if event.type != "START":
+            return
+        tool_call_span = get_run_context()._trace.get(event.call_id)
+        if tool_call_span is None:
+            return
+        tool_call_span.metadata["tool_call_id"] = tool_call.id
+
+    @staticmethod
+    def _adopt_native_tool_event(
+        event: Any,
+        tool_span_call_id: str | None,
+        tool_span_parent_call_id: str | None,
+    ) -> Any:
+        """Rewrite foreign BaseEvent ids onto the tool span for FE nesting.
+
+        Native-event tools mint their own ``call_id``s. On the parent stream
+        those must sit under the tool span or the FE can't group them with the
+        originating ``tool_use``. Mutates in place (events are SlotModels).
+        """
+        if tool_span_call_id is None or getattr(event, "call_id", None) == tool_span_call_id:
+            return event
+        event.call_id = tool_span_call_id
+        event.parent_call_id = tool_span_parent_call_id
+        return event
+
+    @staticmethod
+    def _tool_span_ids_from_start(event: Any) -> tuple[str | None, str | None]:
+        """Return ``(call_id, parent_call_id)`` for an in-trace tool START, else Nones."""
+        if event.type != "START":
+            return None, None
+        span = get_run_context()._trace.get(event.call_id)
+        if span is None:
+            return None, None
+        return span.call_id, span.parent_call_id
 
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
@@ -1107,6 +1143,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # so detect the still-pending cancel request and re-raise before
             # forwarding post-cancel events (keeps LLM-output salvage semantics).
             current_task = asyncio.current_task()
+            tool_span_call_id: str | None = None
+            tool_span_parent_call_id: str | None = None
             try:
                 # Raw stream: the collector wrapper is only needed at the public
                 # API boundary; internal consumers forward events themselves.
@@ -1114,6 +1152,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if current_task is not None and current_task.cancelling():
                         raise asyncio.CancelledError
                     self._link_tool_call_span(event, tool_call)
+                    if tool_span_call_id is None:
+                        captured_call_id, captured_parent = self._tool_span_ids_from_start(event)
+                        if captured_call_id is not None:
+                            tool_span_call_id = captured_call_id
+                            tool_span_parent_call_id = captured_parent
+                    event = self._adopt_native_tool_event(event, tool_span_call_id, tool_span_parent_call_id)
                     yield tool_call, event
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
@@ -1127,6 +1171,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tasks = []
 
         async def consume_tool(tool_call: ToolUseContent):
+            tool_span_call_id: str | None = None
+            tool_span_parent_call_id: str | None = None
             try:
                 tool = self._resolve_tool_for_call(tools, tool_call)
                 if tool is None:
@@ -1134,6 +1180,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     return
                 async for event in tool._stream(**tool_call.input):
                     self._link_tool_call_span(event, tool_call)
+                    if tool_span_call_id is None:
+                        captured_call_id, captured_parent = self._tool_span_ids_from_start(event)
+                        if captured_call_id is not None:
+                            tool_span_call_id = captured_call_id
+                            tool_span_parent_call_id = captured_parent
+                    event = self._adopt_native_tool_event(event, tool_span_call_id, tool_span_parent_call_id)
                     queue.put_nowait((tool_call, event))
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
@@ -1308,6 +1360,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
+                return
+            # Native-event handlers (coding harness) forward their own OutputEvent
+            # under the tool path. Only the Runnable-emitted completion (same
+            # run_id as this agent turn) should become a tool_result — otherwise
+            # we double-append and break the next LLM call.
+            if event.run_id != run_context.id:
                 return
             if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
                 # Gated (approval) or suspended (input_required) tool: leave the
