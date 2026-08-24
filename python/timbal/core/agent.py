@@ -1089,35 +1089,37 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tool_call: ToolUseContent,
         tool_span_call_id: str | None,
         tool_span_parent_call_id: str | None,
-        adopt_foreign: bool,
-    ) -> tuple[Any, str | None, str | None, bool]:
+    ) -> tuple[Any, str | None, str | None]:
         """Link tool_call_id, capture the tool span, adopt foreign native events.
 
-        Hot path for ordinary tools (every event already shares the Runnable
-        call_id): after the first in-trace START this is a few attribute checks
-        and no dict lookups or writes. Foreign BaseEvents (coding harness) flip
-        ``adopt_foreign`` once and then rewrite ids in place for FE grouping.
+        Ordinary tools: after the Runnable START, every event already shares that
+        call_id — early return, no dict writes. Nested runnables (agent-as-tool)
+        keep their in-trace call_ids. Only BaseEvents whose call_id is absent
+        from ``_trace`` (coding harness) are rewritten onto the tool span for FE
+        grouping.
         """
         if event.type == "START":
             span = get_run_context()._trace.get(event.call_id)
             if span is not None:
                 span.metadata["tool_call_id"] = tool_call.id
                 if tool_span_call_id is None:
-                    tool_span_call_id = span.call_id
-                    tool_span_parent_call_id = span.parent_call_id
-            elif tool_span_call_id is not None:
-                adopt_foreign = True
-        elif (
-            not adopt_foreign
-            and tool_span_call_id is not None
-            and event.call_id != tool_span_call_id
-        ):
-            adopt_foreign = True
+                    return event, span.call_id, span.parent_call_id
+                return event, tool_span_call_id, tool_span_parent_call_id
+            # Foreign START (not in this run's trace).
+            if tool_span_call_id is not None:
+                event.call_id = tool_span_call_id
+                event.parent_call_id = tool_span_parent_call_id
+            return event, tool_span_call_id, tool_span_parent_call_id
 
-        if adopt_foreign and tool_span_call_id is not None:
+        # Hot path: same call_id as the tool span (plain tools, tool's own deltas).
+        if tool_span_call_id is None or event.call_id == tool_span_call_id:
+            return event, tool_span_call_id, tool_span_parent_call_id
+
+        # Different call_id: nested runnable (in trace) vs native harness (not).
+        if event.call_id not in get_run_context()._trace:
             event.call_id = tool_span_call_id
             event.parent_call_id = tool_span_parent_call_id
-        return event, tool_span_call_id, tool_span_parent_call_id, adopt_foreign
+        return event, tool_span_call_id, tool_span_parent_call_id
 
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
@@ -1138,21 +1140,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_task = asyncio.current_task()
             tool_span_call_id: str | None = None
             tool_span_parent_call_id: str | None = None
-            adopt_foreign = False
             try:
                 # Raw stream: the collector wrapper is only needed at the public
                 # API boundary; internal consumers forward events themselves.
                 async for event in tool._stream(**tool_call.input):
                     if current_task is not None and current_task.cancelling():
                         raise asyncio.CancelledError
-                    event, tool_span_call_id, tool_span_parent_call_id, adopt_foreign = (
-                        self._prepare_multiplex_event(
-                            event,
-                            tool_call,
-                            tool_span_call_id,
-                            tool_span_parent_call_id,
-                            adopt_foreign,
-                        )
+                    event, tool_span_call_id, tool_span_parent_call_id = self._prepare_multiplex_event(
+                        event,
+                        tool_call,
+                        tool_span_call_id,
+                        tool_span_parent_call_id,
                     )
                     yield tool_call, event
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
@@ -1169,21 +1167,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         async def consume_tool(tool_call: ToolUseContent):
             tool_span_call_id: str | None = None
             tool_span_parent_call_id: str | None = None
-            adopt_foreign = False
             try:
                 tool = self._resolve_tool_for_call(tools, tool_call)
                 if tool is None:
                     queue.put_nowait((tool_call, self._build_unknown_tool_event(tool_call, tools)))
                     return
                 async for event in tool._stream(**tool_call.input):
-                    event, tool_span_call_id, tool_span_parent_call_id, adopt_foreign = (
-                        self._prepare_multiplex_event(
-                            event,
-                            tool_call,
-                            tool_span_call_id,
-                            tool_span_parent_call_id,
-                            adopt_foreign,
-                        )
+                    event, tool_span_call_id, tool_span_parent_call_id = self._prepare_multiplex_event(
+                        event,
+                        tool_call,
+                        tool_span_call_id,
+                        tool_span_parent_call_id,
                     )
                     queue.put_nowait((tool_call, event))
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
