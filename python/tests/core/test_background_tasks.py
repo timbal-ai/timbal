@@ -2413,6 +2413,31 @@ class TestBackgroundEventLogSubscribe:
         assert collected[1:] == ["b", "c", "live"]
 
     @pytest.mark.asyncio
+    async def test_subscribe_gapped_snapshots_before_sentinel_yield(self):
+        """Ring trim during GAPPED handling must not skew replay offset."""
+        from timbal.state.background import BACKGROUND_LOG_GAPPED
+
+        log = BackgroundEventLog(max_events=2, max_bytes=None)
+        log.put_nowait("a")
+        log.put_nowait("b")
+        log.put_nowait("c")  # forgotten_through=1, buffer ["b", "c"]
+
+        collected: list[Any] = []
+
+        async def consume() -> None:
+            async for event in log.subscribe(after=0):
+                if event is BACKGROUND_LOG_GAPPED:
+                    log.put_nowait("d")  # forgotten_through=2, buffer ["c", "d"]
+                    await asyncio.sleep(0)
+                collected.append(event)
+                if event == "d":
+                    log.close()
+
+        await asyncio.wait_for(consume(), timeout=1.0)
+
+        assert collected == [BACKGROUND_LOG_GAPPED, "b", "c", "d"]
+
+    @pytest.mark.asyncio
     async def test_subscribe_not_gapped_replays_from_after(self):
         log = BackgroundEventLog(max_events=2, max_bytes=None)
         log.put_nowait("a")

@@ -537,11 +537,14 @@ class BackgroundEventLog:
         replay_from = self.forgotten_through if gapped else after
         queue: asyncio.Queue = asyncio.Queue()
         self._subscribers.append(queue)
+        # Snapshot before any yield — the ring may trim while the consumer handles
+        # BACKGROUND_LOG_GAPPED, which would make a post-yield offset negative.
+        offset = replay_from - self.forgotten_through
+        replay = list(self._events[offset:])
         try:
             if gapped:
                 yield _GAPPED
-            offset = replay_from - self.forgotten_through
-            for event in self._events[offset:]:
+            for event in replay:
                 yield event
             while True:
                 event = await queue.get()
