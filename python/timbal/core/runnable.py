@@ -869,6 +869,18 @@ class Runnable(ABC, BaseModel):
 
         return _read(task_id, after=after)
 
+    async def wait_for_background(
+        self,
+        task_id: str,
+        *,
+        timeout: float | None = None,
+        after: int | None = None,
+    ) -> dict[str, Any]:
+        """Block until a session background child is terminal or new events arrive."""
+        from ..state.background import wait_for_background as _wait
+
+        return await _wait(task_id, timeout=timeout, after=after)
+
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
         """Execute a runtime callable handling async context automatically.
 

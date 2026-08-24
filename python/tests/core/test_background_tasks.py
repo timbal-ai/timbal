@@ -16,6 +16,7 @@ from timbal.state import (
     set_call_id,
     set_parent_call_id,
     set_run_context,
+    wait_for_background,
 )
 from timbal.state.background import BackgroundEventLog
 from timbal.types.content import ToolUseContent
@@ -1023,25 +1024,8 @@ class TestBackgroundMultitask:
 
 
 async def _wait_until_terminal(task_id: str, timeout: float = 5.0) -> dict:
-    """Wait until the child asyncio.Task is done and status is terminal.
-
-    ``status_code()`` can report ``cancelled`` as soon as cancel is requested,
-    before the done-callback has enqueued the completion notice — so we require
-    ``task.done()`` as well.
-    """
-    from timbal.state.background import current_background_store
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        store = current_background_store()
-        record = store.get(task_id) if store is not None else None
-        snap = get_background_task(task_id)
-        if record is not None and record.task.done() and snap["status"] != "running":
-            # Yield once so done-callbacks scheduled on this loop can run.
-            await asyncio.sleep(0)
-            return snap
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"background task {task_id} never reached a terminal status")
+    """Wait until the child asyncio.Task is done and status is terminal."""
+    return await wait_for_background(task_id, timeout=timeout)
 
 
 def _completion_notices_in_memory(memory: list[Message]) -> list[str]:
@@ -1834,3 +1818,87 @@ class TestStructuredProgress:
         assert summary["last_tool"] == "write_file"
         assert summary["tools_in_flight"] == ["write_file"]
         assert summary["phase"] == "tool:write_file"
+
+
+class TestWaitForBackground:
+    @pytest.mark.asyncio
+    async def test_wait_until_terminal(self):
+        async def slow_task() -> str:
+            await asyncio.sleep(0.15)
+            return "done"
+
+        agent = Agent(
+            name="wait_agent",
+            model=TestModel(
+                responses=[
+                    _tool_call("slow_task", {}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="slow_task", handler=slow_task, background_mode="auto")],
+        )
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        snap = await wait_for_background(task_id, timeout=5.0)
+        assert snap["status"] == "completed"
+        assert snap["result"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_wait_timeout_returns_running_snapshot(self):
+        async def slow_task() -> str:
+            await asyncio.sleep(2.0)
+            return "done"
+
+        agent = Agent(
+            name="wait_agent",
+            model=TestModel(
+                responses=[
+                    _tool_call("slow_task", {}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="slow_task", handler=slow_task, background_mode="auto")],
+        )
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        snap = await wait_for_background(task_id, timeout=0.05)
+        assert snap["status"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_wait_after_long_polls_on_new_events(self):
+        gate = asyncio.Event()
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="a", text_delta="first ")
+            await gate.wait()
+            yield TextDelta(id="a", text_delta="second")
+            await asyncio.Event().wait()
+
+        agent = Agent(
+            name="poll_agent",
+            model=TestModel(
+                responses=[
+                    _tool_call("streaming", {}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="streaming", handler=streaming, background_mode="auto")],
+        )
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+        cursor = read_background_transcript(task_id)["cursor"]
+
+        wait_task = asyncio.create_task(wait_for_background(task_id, timeout=2.0, after=cursor))
+        await asyncio.sleep(0.05)
+        assert not wait_task.done()
+        gate.set()
+        snap = await wait_task
+        assert snap["status"] == "running"
+        assert snap["summary"]["event_count"] > cursor
+        assert "second" in snap["summary"]["text"]
+
+    @pytest.mark.asyncio
+    async def test_wait_not_found(self):
+        snap = await wait_for_background("missing_task_id")
+        assert snap["status"] == "not_found"

@@ -166,6 +166,24 @@ page = read_background_transcript("k4d9x2mq7c1a")
 page = read_background_transcript("k4d9x2mq7c1a", after=page["cursor"])
 ```
 
+## Waiting for completion
+
+For app code or frontends that want to block instead of polling the agent loop, use `wait_for_background`. It returns the same snapshot as `get_background_task` and does **not** ack completion notices.
+
+```python
+from timbal.state import wait_for_background
+
+# Block until terminal (or timeout)
+snap = await wait_for_background("k4d9x2mq7c1a", timeout=30.0)
+if snap["status"] == "running":
+    ...  # timeout — poll again
+
+# Long-poll until new events land past a cursor (or terminal / timeout)
+snap = await wait_for_background("k4d9x2mq7c1a", after=cursor, timeout=5.0)
+```
+
+Without `after`, the wait is tied to the child's asyncio task finishing. With `after`, it wakes when the append-only log advances, the log closes on completion, or the timeout hits — useful for streaming UIs that already have a `transcript_cursor`.
+
 ## Log retention
 
 Each child's event log is a **ring buffer** (defaults: 50k events / 32 MiB — same idea as HTTP `JobStore`). Oldest events drop when over cap; `forgotten_through` is the logical floor. Finished **task records** are removed from the session bag after **300 seconds** by default so long-lived workers do not leak metadata.

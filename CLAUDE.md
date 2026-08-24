@@ -418,6 +418,7 @@ Tool(name="build", handler=..., background_mode="always",
 - The log is peekable, not consume-once: the parent agent and a frontend can both watch one child. `record.log.subscribe(after=)` replays then streams live.
 - `get_background_task` returns `{status, task_id, name, title, input, started_at, summary: {text, phase, pct, last_tool, tools_in_flight, event_count}, transcript_cursor}` (+ `result`/`error` when done). `summary.text` is capped — for briefing, not for dumping a build into context.
 - Cancel stops in-flight work: the Task is cancelled *and* the handler generator is closed (an async gen suspended at a yield would otherwise never run its `finally`), then `on_background_cancel` fires for work the loop can't reach.
+- `wait_for_background(task_id, timeout=..., after=...)` blocks until terminal (no `after`) or until the log advances past `after` — app/frontends; does not ack completion notices.
 
 ---
 

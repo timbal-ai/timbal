@@ -444,6 +444,7 @@ class BackgroundEventLog:
         self._nbytes = 0
         self.forgotten_through = 0
         self._subscribers: list[asyncio.Queue] = []
+        self._waiters: list[asyncio.Future[None]] = []
         self._closed = False
 
     @property
@@ -461,6 +462,39 @@ class BackgroundEventLog:
         self._trim()
         for queue in self._subscribers:
             queue.put_nowait(event)
+        self._wake_waiters()
+
+    def _wake_waiters(self) -> None:
+        for waiter in self._waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+        self._waiters.clear()
+
+    def _discard_waiter(self, waiter: asyncio.Future[None]) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    async def wait(self, after: int = 0, timeout: float | None = None) -> None:
+        """Block until ``cursor_end > after``, the log :meth:`close`s, or timeout.
+
+        Returns (does not raise) on timeout — callers re-read the snapshot.
+        """
+        if after < self.forgotten_through or self.cursor_end > after or self._closed:
+            return
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        self._waiters.append(waiter)
+        try:
+            if timeout is None:
+                await waiter
+            elif timeout > 0:
+                await asyncio.wait_for(waiter, timeout)
+        except TimeoutError:
+            pass
+        finally:
+            self._discard_waiter(waiter)
 
     def peek(self, after: int = 0) -> tuple[list[Any], bool]:
         """Return ``(events, gapped)`` from logical cursor ``after``."""
@@ -508,6 +542,7 @@ class BackgroundEventLog:
         self._closed = True
         for queue in self._subscribers:
             queue.put_nowait(_DONE)
+        self._wake_waiters()
 
     def _over_cap(self, n: int, nbytes: int) -> bool:
         return (self._max_events > 0 and n > self._max_events) or (
@@ -1087,6 +1122,72 @@ def read_background_transcript(task_id: str, after: int = 0) -> dict[str, Any]:
             "forgotten_through": 0,
         }
     return store.transcript(task_id, after=after)
+
+
+async def wait_for_background(
+    task_id: str,
+    *,
+    timeout: float | None = None,
+    after: int | None = None,
+) -> dict[str, Any]:
+    """Block until a background child is ready to report, then return its snapshot.
+
+    Without ``after``, waits for a **terminal** status (``completed``,
+    ``error``, ``cancelled``, ``timed_out``). With ``after``, long-polls until
+    the event log advances past that logical cursor, the child finishes, or
+    ``timeout`` elapses — whichever comes first.
+
+    Returns the same dict shape as :func:`get_background_task` (does not ack
+    completion notices). On timeout while still running, returns the current
+    snapshot so callers can poll again.
+    """
+    store = current_background_store()
+    if store is None:
+        return {"status": "not_found", "task_id": task_id}
+
+    record = store.get(task_id)
+    if record is None:
+        return {"status": "not_found", "task_id": task_id}
+
+    def _is_ready(rec: BackgroundTask) -> bool:
+        if after is not None and rec.log.cursor_end > after:
+            return True
+        return rec.task.done() and rec.status_code() in _TERMINAL_STATUSES
+
+    async def _yield_for_callbacks(rec: BackgroundTask) -> None:
+        if rec.task.done():
+            await asyncio.sleep(0)
+
+    if _is_ready(record):
+        await _yield_for_callbacks(record)
+        fresh = store.get(task_id)
+        return fresh.summarize() if fresh is not None else {"status": "not_found", "task_id": task_id}
+
+    if after is None:
+        wait_set = {record.task}
+        if timeout is None:
+            await asyncio.wait(wait_set)
+        else:
+            await asyncio.wait(wait_set, timeout=timeout)
+        await _yield_for_callbacks(record)
+        fresh = store.get(task_id)
+        return fresh.summarize() if fresh is not None else {"status": "not_found", "task_id": task_id}
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        rec = store.get(task_id)
+        if rec is None:
+            return {"status": "not_found", "task_id": task_id}
+        if _is_ready(rec):
+            await _yield_for_callbacks(rec)
+            return rec.summarize()
+
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return rec.summarize()
+
+        wait_timeout = remaining if remaining is not None else None
+        await rec.log.wait(after, timeout=wait_timeout)
 
 
 def register_background_task(
