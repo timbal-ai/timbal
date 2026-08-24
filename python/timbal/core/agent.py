@@ -45,6 +45,7 @@ from ..state.background import (
     GET_BACKGROUND_TASK_DESCRIPTION,
     LIST_BACKGROUND_TASKS_DESCRIPTION,
     current_background_store,
+    format_background_completion_notice,
 )
 from ..types.content import (
     CustomContent,
@@ -793,6 +794,33 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 await self._compact_on_resume(current_span, prev_usage=previous_span.usage)
 
+    def _inject_background_completions(self, current_span: Any) -> None:
+        """Drain session completion inbox into memory at turn start (Claude-style).
+
+        Delivered between turns only — never mid-loop — so the parent is not
+        interrupted while talking. Skipped for subagents and approval/suspend
+        resumes (must not insert a user message between tool_use and tool_result).
+        Peek APIs are unchanged; notices are one-shot after drain.
+        """
+        if current_span.parent_call_id is not None:
+            return
+        if self._find_pending_tool_uses(current_span.memory):
+            return
+        store = current_background_store()
+        if store is None:
+            return
+        notifications = store.drain_completions()
+        if not notifications:
+            return
+        notice = format_background_completion_notice(notifications)
+        memory = current_span.memory
+        # Sit immediately before the current user prompt so history stays
+        # [...prior turns..., completion notice, user prompt].
+        if memory and memory[-1].role == "user":
+            memory.insert(-1, notice)
+        else:
+            memory.append(notice)
+
     async def _compact_preserving_last_assistant(self, current_span: Any, *, prev_usage: dict | None) -> None:
         """Compact memory while protecting the trailing assistant message (and anything after
         it) from the compactor.
@@ -1311,11 +1339,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._resolve_system_prompt()
 
         await self.resolve_memory()
+        # After memory is assembled (and before the dump): push any background
+        # completions that finished since the last turn into the conversation.
+        self._inject_background_completions(current_span)
 
         prev_dump = getattr(current_span, "_prev_memory_dump", None)
         if prev_dump is not None and "compaction" not in current_span.metadata:
             # Reuse the already-serialized previous messages; only dump new ones
-            # (prompt + any synthetic tool results added by _synthesize_missing_tool_results).
+            # (prompt + any synthetic tool results added by _synthesize_missing_tool_results,
+            # plus background completion notices injected above).
             # If compaction ran it rewrites memory, invalidating the cached dump.
             new_messages = current_span.memory[len(prev_dump) :]
             current_span._memory_dump = prev_dump + await dump(new_messages)

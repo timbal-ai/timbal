@@ -834,16 +834,23 @@ class Runnable(ABC, BaseModel):
         return self.anthropic_schema
 
     def get_background_task(self, task_id: str) -> dict[str, Any]:
-        """Peek a summary of a session-scoped background task. Does not drain."""
+        """Peek a summary of a session-scoped background task. Does not drain.
+
+        Acks a pending completion notice when the child is already terminal so
+        the next turn does not re-announce a status the model just fetched.
+        """
         from ..state.background import get_background_task as _get
 
-        return _get(task_id)
+        return _get(task_id, ack_completion=True)
 
     def list_background_tasks(self) -> list[dict[str, Any]]:
-        """List background tasks for the current session."""
+        """List background tasks for the current session.
+
+        Acks completion notices for any terminal children returned.
+        """
         from ..state.background import list_background_tasks as _list
 
-        return _list()
+        return _list(ack_completion=True)
 
     def cancel_background_task(self, task_id: str) -> dict[str, Any]:
         """Cancel a running background task in the current session."""

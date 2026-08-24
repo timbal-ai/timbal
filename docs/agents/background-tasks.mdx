@@ -52,6 +52,27 @@ Once this session has at least one background task, the agent automatically gain
 
 `get_background_task` **peeks**; it does not drain. Calling it twice returns the same thing, so the agent polling a child never steals events from a frontend streaming the same child.
 
+## Completion notifications
+
+When a background child reaches a terminal status (`completed`, `error`, or `cancelled`), the session store queues a one-shot notice. At the **start of the next parent turn** — not mid-turn while the parent is still talking — the agent drains that inbox and injects a synthetic user message into memory so the LLM learns without polling:
+
+```text
+Background task(s) finished since your last turn. ...
+
+<background_task_completed>
+task_id: k4d9x2mq7c1a
+name: build_site
+title: Build the marketing site
+status: completed
+result: ...
+summary: ...
+</background_task_completed>
+```
+
+Notices are lean (short summary / result preview, error string if any) — not full transcripts. After drain they are not re-injected; `get_background_task` still peeks the full snapshot. Concurrent parent runs without a shared `parent_id` keep isolated inboxes.
+
+If the model already polls via the auto-registered `get_background_task` / `list_background_tasks` tools and sees a terminal status, that peek **acks** the notice — the next turn will not fire a duplicate `<background_task_completed>` for a completion the agent already handled. App/Python peeks (`timbal.state.get_background_task`) do not ack by default, so UIs can inspect without stealing the LLM inbox.
+
 ```python
 from timbal.state import get_background_task
 

@@ -959,3 +959,379 @@ class TestBackgroundMultitask:
         assert bag.snapshot(task_id)["status"] == "running"
         bag.cancel(task_id)
         await asyncio.sleep(0.1)
+
+
+async def _wait_until_terminal(task_id: str, timeout: float = 5.0) -> dict:
+    """Wait until the child asyncio.Task is done and status is terminal.
+
+    ``status_code()`` can report ``cancelled`` as soon as cancel is requested,
+    before the done-callback has enqueued the completion notice — so we require
+    ``task.done()`` as well.
+    """
+    from timbal.state.background import current_background_store
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        store = current_background_store()
+        record = store.get(task_id) if store is not None else None
+        snap = get_background_task(task_id)
+        if record is not None and record.task.done() and snap["status"] != "running":
+            # Yield once so done-callbacks scheduled on this loop can run.
+            await asyncio.sleep(0)
+            return snap
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"background task {task_id} never reached a terminal status")
+
+
+def _completion_notices_in_memory(memory: list[Message]) -> list[str]:
+    return [
+        msg.collect_text()
+        for msg in memory
+        if msg.role == "user" and "<background_task_completed>" in (msg.collect_text() or "")
+    ]
+
+
+def _capture_memory_hook(bucket: list[list[Message]]):
+    def _hook() -> None:
+        bucket.append(list(get_run_context().current_span().memory))
+
+    return _hook
+
+
+class TestBackgroundCompletionNotify:
+    """Completion inbox → synthetic user message on the next parent turn."""
+
+    @pytest.mark.asyncio
+    async def test_success_injected_on_next_turn(self):
+        async def quick(tag: str) -> str:
+            await asyncio.sleep(0.05)
+            return f"done:{tag}"
+
+        seen_messages: list[list[Message]] = []
+        memories: list[list[Message]] = []
+
+        def _handler(messages: list[Message]):
+            from timbal.types.content import ToolResultContent
+
+            seen_messages.append(list(messages))
+            if any(isinstance(c, ToolResultContent) for m in messages for c in m.content):
+                return "Acknowledged."
+            if any("<background_task_completed>" in (m.collect_text() or "") for m in messages):
+                return "Got the completion."
+            return _tool_call("quick", {"tag": "ok"}, run_in_background=True)
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(handler=_handler),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        r1 = await agent(prompt="start").collect()
+        assert_has_output_event(r1)
+        task_id = list_background_tasks()[0]["task_id"]
+        snap = await _wait_until_terminal(task_id)
+        assert snap["status"] == "completed"
+
+        from timbal.state.background import current_background_store
+
+        assert current_background_store().pending_completions()
+        # Spawn turn must not have seen a completion notice (between-turns only).
+        assert not any(
+            "<background_task_completed>" in (m.collect_text() or "") for msgs in seen_messages for m in msgs
+        )
+
+        r2 = await agent(prompt="what happened?").collect()
+        assert_has_output_event(r2)
+        assert get_run_context().parent_id == r1.run_id
+        notices = _completion_notices_in_memory(memories[-1])
+        assert len(notices) == 1
+        assert task_id in notices[0]
+        assert "status: completed" in notices[0]
+        assert "done:ok" in notices[0]
+        # One-shot: inbox empty; peek still works.
+        assert current_background_store().pending_completions() == []
+        assert get_background_task(task_id)["status"] == "completed"
+
+        await agent(prompt="again?").collect()
+        # Historical notice remains in memory, but is not re-injected.
+        notices_again = _completion_notices_in_memory(memories[-1])
+        assert len(notices_again) == 1
+        assert current_background_store().pending_completions() == []
+
+    @pytest.mark.asyncio
+    async def test_error_injected(self):
+        async def boom(should_fail: bool = True) -> str:
+            await asyncio.sleep(0.05)
+            if should_fail:
+                raise ValueError("Intentional failure for testing")
+            return "ok"
+
+        memories: list[list[Message]] = []
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("boom", {"should_fail": True}, run_in_background=True),
+                    "Started.",
+                    "Saw the error.",
+                ]
+            ),
+            tools=[Tool(name="boom", handler=boom, background_mode="auto")],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        await agent(prompt="start").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_until_terminal(task_id)
+
+        await agent(prompt="status?").collect()
+        notices = _completion_notices_in_memory(memories[-1])
+        assert len(notices) == 1
+        assert "status: error" in notices[0]
+        assert "Intentional failure" in notices[0]
+
+    @pytest.mark.asyncio
+    async def test_cancel_injected(self):
+        async def stubborn(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            try:
+                while True:
+                    yield TextDelta(id="s", text_delta=f"{prompt}...")
+                    await asyncio.sleep(0.05)
+            finally:
+                pass
+
+        memories: list[list[Message]] = []
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "loop"}, run_in_background=True),
+                    "Started.",
+                    "Cancelled, noted.",
+                ]
+            ),
+            tools=[Tool(name="builder", handler=stubborn, background_mode="auto")],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+        cancel_background_task(task_id)
+        await _wait_until_terminal(task_id)
+
+        await agent(prompt="what about the builder?").collect()
+        notices = _completion_notices_in_memory(memories[-1])
+        assert len(notices) == 1
+        assert task_id in notices[0]
+        assert "status: cancelled" in notices[0]
+
+    @pytest.mark.asyncio
+    async def test_multi_child_one_notice_block(self):
+        async def quick(tag: str) -> str:
+            await asyncio.sleep(0.05)
+            return f"done:{tag}"
+
+        memories: list[list[Message]] = []
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_calls(
+                        ("quick", {"tag": "A"}, "c1", True),
+                        ("quick", {"tag": "B"}, "c2", True),
+                    ),
+                    "Both started.",
+                    "Both done.",
+                ]
+            ),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        await agent(prompt="start both").collect()
+        ids = [t["task_id"] for t in list_background_tasks()]
+        assert len(ids) == 2
+        for task_id in ids:
+            await _wait_until_terminal(task_id)
+
+        await agent(prompt="update?").collect()
+        notices = _completion_notices_in_memory(memories[-1])
+        assert len(notices) == 1
+        body = notices[0]
+        assert body.count("<background_task_completed>") == 2
+        for task_id in ids:
+            assert task_id in body
+
+    @pytest.mark.asyncio
+    async def test_no_mid_turn_injection(self):
+        """Child completes during the spawn turn; notice waits for the *next* turn."""
+        gate = asyncio.Event()
+        memories: list[list[Message]] = []
+
+        async def gated(tag: str) -> str:
+            await gate.wait()
+            return f"done:{tag}"
+
+        llm_calls = {"n": 0}
+
+        def _handler(messages: list[Message]):
+            from timbal.types.content import ToolResultContent
+
+            llm_calls["n"] += 1
+            has_notice = any("<background_task_completed>" in (m.collect_text() or "") for m in messages)
+            if has_notice:
+                return "noticed"
+            if any(isinstance(c, ToolResultContent) for m in messages for c in m.content):
+                # Still the spawn turn — release the child so it finishes before
+                # we return the final assistant text, proving no mid-turn inject.
+                gate.set()
+                return "Started."
+            return _tool_call("gated", {"tag": "x"}, run_in_background=True)
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(handler=_handler),
+            tools=[Tool(name="gated", handler=gated, background_mode="auto")],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        r1 = await agent(prompt="start").collect()
+        assert_has_output_event(r1)
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_until_terminal(task_id)
+        # Spawn turn LLM calls never saw a completion notice.
+        assert llm_calls["n"] == 2
+        assert not _completion_notices_in_memory(memories[0])
+
+        from timbal.state.background import current_background_store
+
+        assert current_background_store().pending_completions()
+
+        await agent(prompt="now?").collect()
+        notices = _completion_notices_in_memory(memories[-1])
+        assert len(notices) == 1
+        assert task_id in notices[0]
+
+    @pytest.mark.asyncio
+    async def test_isolation_concurrent_sessions(self):
+        async def slow(tag: str) -> str:
+            await asyncio.sleep(0.05)
+            return tag
+
+        def _handler(messages: list[Message]):
+            from timbal.types.content import ToolResultContent
+
+            if any(isinstance(c, ToolResultContent) for m in messages for c in m.content):
+                return "Started."
+            if any("<background_task_completed>" in (m.collect_text() or "") for m in messages):
+                return "Saw mine."
+            prompt = messages[-1].collect_text()
+            tag = "A" if "A" in prompt else "B"
+            return _tool_call("builder", {"tag": tag}, id=tag, run_in_background=True)
+
+        async def run_session(prompt: str) -> tuple[str, list[str]]:
+            memories: list[list[Message]] = []
+            parent = Agent(
+                name="composer",
+                model=TestModel(handler=_handler),
+                tools=[Tool(name="builder", handler=slow, background_mode="auto")],
+                post_hook=_capture_memory_hook(memories),
+            )
+            set_run_context(None)
+            set_call_id(None)
+            set_parent_call_id(None)
+            await parent(prompt=prompt).collect()
+            task_id = list_background_tasks()[0]["task_id"]
+            await _wait_until_terminal(task_id)
+            await parent(prompt=f"check {prompt}").collect()
+            notices = _completion_notices_in_memory(memories[-1])
+            return task_id, notices
+
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        (id_a, notices_a), (id_b, notices_b) = await asyncio.gather(run_session("A"), run_session("B"))
+        assert id_a != id_b
+        assert len(notices_a) == 1 and id_a in notices_a[0] and id_b not in notices_a[0]
+        assert len(notices_b) == 1 and id_b in notices_b[0] and id_a not in notices_b[0]
+
+    @pytest.mark.asyncio
+    async def test_agent_poll_acks_so_next_turn_does_not_reinject(self):
+        """LLM-tool peek (ack_completion=True) must consume the pending notice."""
+        async def quick(tag: str) -> str:
+            await asyncio.sleep(0.05)
+            return f"done:{tag}"
+
+        memories: list[list[Message]] = []
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("quick", {"tag": "ok"}, run_in_background=True),
+                    "Started.",
+                    "Checked — it's done.",
+                    "Nothing new.",
+                ]
+            ),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        await agent(prompt="start").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_until_terminal(task_id)
+
+        from timbal.state.background import current_background_store
+
+        store = current_background_store()
+        assert store.pending_completions()
+        # Same path as the auto-registered LLM tool — acks terminal peeks.
+        snap = agent.get_background_task(task_id)
+        assert snap["status"] == "completed"
+        assert store.pending_completions() == []
+        # Module peek still works and does not need to ack again.
+        assert get_background_task(task_id)["status"] == "completed"
+
+        await agent(prompt="status?").collect()
+        assert not _completion_notices_in_memory(memories[-1])
+
+        await agent(prompt="again?").collect()
+        assert not _completion_notices_in_memory(memories[-1])
+
+    @pytest.mark.asyncio
+    async def test_module_peek_does_not_ack(self):
+        """App/UI peeks must not steal the LLM completion inbox."""
+        async def quick(tag: str) -> str:
+            await asyncio.sleep(0.05)
+            return f"done:{tag}"
+
+        memories: list[list[Message]] = []
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("quick", {"tag": "ok"}, run_in_background=True),
+                    "Started.",
+                    "Got the push notice.",
+                ]
+            ),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        await agent(prompt="start").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_until_terminal(task_id)
+        # _wait_until_terminal uses module get_background_task (ack=False).
+        from timbal.state.background import current_background_store
+
+        assert current_background_store().pending_completions()
+        assert get_background_task(task_id)["status"] == "completed"
+        assert current_background_store().pending_completions()
+
+        await agent(prompt="what happened?").collect()
+        notices = _completion_notices_in_memory(memories[-1])
+        assert len(notices) == 1
+        assert task_id in notices[0]

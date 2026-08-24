@@ -13,6 +13,15 @@ stores.
 The event log is append-only. ``get_background_task`` peeks a summary; it does
 not drain. Raw events are ``read_background_transcript(after=)`` or
 :meth:`BackgroundEventLog.subscribe`.
+
+When a child reaches a terminal status, the store enqueues a one-shot
+completion notice. The parent agent drains that inbox at the **start** of the
+next turn and injects a synthetic user message so the LLM learns without
+polling — never mid-turn while the parent is still talking.
+
+If the parent already learned via the LLM ``get_background_task`` /
+``list_background_tasks`` tools (``ack_completion=True``), the notice is
+dropped so the next turn does not re-announce a completion the model handled.
 """
 
 from __future__ import annotations
@@ -23,8 +32,11 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 _SUMMARY_TEXT_CHARS = 1_000
+_COMPLETION_SUMMARY_CHARS = 300
+_RESULT_PREVIEW_CHARS = 500
 _TASK_ID_LEN = 12
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+_TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
 
 # Process-local: run_id → store. Sequential turns find the bag via parent_id.
 # Concurrent siblings (no parent_id) each create a new store.
@@ -123,6 +135,60 @@ def _title_from_input(name: str, input: dict[str, Any]) -> str:
             if text:
                 return text if len(text) <= 80 else text[:77] + "..."
     return name
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _preview_value(value: Any, *, limit: int = _RESULT_PREVIEW_CHARS) -> str:
+    """Short, context-safe preview of a terminal result (not a full dump)."""
+    if value is None:
+        return ""
+    collect = getattr(value, "collect_text", None)
+    if callable(collect):
+        try:
+            text = collect() or ""
+        except Exception:
+            text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = str(value)
+    return _truncate(text.strip(), limit)
+
+
+def format_background_completion_notice(notifications: list[dict[str, Any]]) -> Any:
+    """Build the user-role message injected at the start of the next parent turn."""
+    from ..types.content import TextContent
+    from ..types.message import Message
+
+    blocks: list[str] = []
+    for note in notifications:
+        lines = [
+            f"task_id: {note['task_id']}",
+            f"name: {note['name']}",
+            f"status: {note['status']}",
+        ]
+        title = note.get("title")
+        if title:
+            lines.insert(2, f"title: {title}")
+        if note.get("error"):
+            lines.append(f"error: {note['error']}")
+        elif note.get("result"):
+            lines.append(f"result: {note['result']}")
+        summary = note.get("summary")
+        if summary:
+            lines.append(f"summary: {summary}")
+        blocks.append("<background_task_completed>\n" + "\n".join(lines) + "\n</background_task_completed>")
+
+    header = (
+        "Background task(s) finished since your last turn. "
+        "You do not need to poll get_background_task unless you want more detail.\n\n"
+    )
+    return Message(role="user", content=[TextContent(text=header + "\n\n".join(blocks))])
 
 
 class BackgroundEventLog:
@@ -289,10 +355,21 @@ class BackgroundTask:
 
 class BackgroundTaskStore:
     """Per-session bag of background children. Shared across sequential
-    ``RunContext``s in the same parent_id chain; not across concurrent runs."""
+    ``RunContext``s in the same parent_id chain; not across concurrent runs.
+
+    Terminal children enqueue a one-shot completion notice on
+    :attr:`_completion_inbox`. The parent agent drains that inbox at the
+    **start** of the next turn (not mid-turn) so the LLM learns without
+    polling ``get_background_task``. LLM peeks with ``ack_completion=True``
+    suppress the pending notice for that child.
+    """
 
     def __init__(self) -> None:
         self._tasks: dict[str, BackgroundTask] = {}
+        # Ordered, one-shot queue of lean completion payloads for the parent LLM.
+        self._completion_inbox: list[dict[str, Any]] = []
+        # task_ids already enqueued, drained, or acked via peek — never re-inject.
+        self._completion_notified: set[str] = set()
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -302,18 +379,33 @@ class BackgroundTaskStore:
 
     def add(self, record: BackgroundTask) -> None:
         self._tasks[record.task_id] = record
+        # Enqueue when the asyncio.Task reaches a terminal state. Done callbacks
+        # run on the loop thread; keep this sync and never raise.
+        task = record.task
+        if task.done():
+            self._enqueue_completion(record)
+        else:
+            task.add_done_callback(lambda _t: self._enqueue_completion(record))
 
     def get(self, task_id: str) -> BackgroundTask | None:
         return self._tasks.get(task_id)
 
-    def list(self) -> list[dict[str, Any]]:
-        return [record.listing() for record in self._tasks.values()]
+    def list(self, *, ack_completion: bool = False) -> list[dict[str, Any]]:
+        listings = [record.listing() for record in self._tasks.values()]
+        if ack_completion:
+            for item in listings:
+                if item.get("status") in _TERMINAL_STATUSES:
+                    self.ack_completion(item["task_id"])
+        return listings
 
-    def snapshot(self, task_id: str) -> dict[str, Any]:
+    def snapshot(self, task_id: str, *, ack_completion: bool = False) -> dict[str, Any]:
         record = self._tasks.get(task_id)
         if record is None:
             return {"status": "not_found", "task_id": task_id}
-        return record.summarize()
+        snap = record.summarize()
+        if ack_completion and snap.get("status") in _TERMINAL_STATUSES:
+            self.ack_completion(task_id)
+        return snap
 
     def transcript(self, task_id: str, after: int = 0) -> dict[str, Any]:
         record = self._tasks.get(task_id)
@@ -344,6 +436,56 @@ class BackgroundTaskStore:
             except Exception:
                 pass
         return record.summarize()
+
+    def ack_completion(self, task_id: str) -> None:
+        """Mark ``task_id`` as already delivered to the parent LLM.
+
+        Drops any pending inbox entry and blocks a later done-callback from
+        re-enqueuing. Used when the model polls a terminal child mid-turn.
+        """
+        self._completion_notified.add(task_id)
+        if self._completion_inbox:
+            self._completion_inbox = [n for n in self._completion_inbox if n["task_id"] != task_id]
+
+    def _enqueue_completion(self, record: BackgroundTask) -> None:
+        """Push a lean notice if this child just became terminal (once)."""
+        if record.task_id in self._completion_notified:
+            return
+        # status_code() can report cancelled as soon as cancel is requested,
+        # before the asyncio.Task has actually finished — wait for done.
+        if not record.task.done():
+            return
+        status = record.status_code()
+        if status not in _TERMINAL_STATUSES:
+            return
+        self._completion_notified.add(record.task_id)
+        snap = record.summarize()
+        summary_text = ""
+        summary = snap.get("summary")
+        if isinstance(summary, dict):
+            summary_text = _truncate(str(summary.get("text") or ""), _COMPLETION_SUMMARY_CHARS)
+        note: dict[str, Any] = {
+            "task_id": snap["task_id"],
+            "name": snap["name"],
+            "title": snap.get("title"),
+            "status": status,
+            "summary": summary_text,
+        }
+        if status == "error":
+            note["error"] = str(snap.get("error") or "unknown error")
+        elif status == "completed" and "result" in snap:
+            note["result"] = _preview_value(snap["result"])
+        self._completion_inbox.append(note)
+
+    def pending_completions(self) -> list[dict[str, Any]]:
+        """Peek the completion inbox without draining (tests / UIs)."""
+        return list(self._completion_inbox)
+
+    def drain_completions(self) -> list[dict[str, Any]]:
+        """Take all pending completion notices. Empty after a successful drain."""
+        notices = self._completion_inbox
+        self._completion_inbox = []
+        return notices
 
 
 def bind_background_store(run_context: Any) -> BackgroundTaskStore | None:
@@ -394,7 +536,7 @@ def current_background_store() -> BackgroundTaskStore | None:
     return getattr(run_context, "_bg_store", None)
 
 
-def get_background_task(task_id: str) -> dict[str, Any]:
+def get_background_task(task_id: str, *, ack_completion: bool = False) -> dict[str, Any]:
     """Peek a summary of a background task. Does not drain the event log.
 
     Use this to answer questions about an in-flight or finished background
@@ -402,23 +544,29 @@ def get_background_task(task_id: str) -> dict[str, Any]:
     ``cursor_agent_id``, ``run_id``). You must have a ``task_id`` from a
     previous background-tool result or from ``list_background_tasks``.
     Raw events: ``read_background_transcript``.
+
+    When ``ack_completion`` is true and the child is terminal, any pending
+    completion notice for this task is dropped (LLM tool path).
     """
     store = current_background_store()
     if store is None:
         return {"status": "not_found", "task_id": task_id}
-    return store.snapshot(task_id)
+    return store.snapshot(task_id, ack_completion=ack_completion)
 
 
-def list_background_tasks() -> list[dict[str, Any]]:
+def list_background_tasks(*, ack_completion: bool = False) -> list[dict[str, Any]]:
     """List background tools for this session (not other concurrent runs).
 
     Returns ``[{task_id, name, status, started_at, title}]``. Use a ``task_id``
     with ``get_background_task`` to answer questions about a child.
+
+    When ``ack_completion`` is true, terminal children are treated as already
+    delivered (LLM tool path) so the next turn does not re-inject notices.
     """
     store = current_background_store()
     if store is None:
         return []
-    return store.list()
+    return store.list(ack_completion=ack_completion)
 
 
 def cancel_background_task(task_id: str) -> dict[str, Any]:
