@@ -89,7 +89,10 @@ get_background_task("k4d9x2mq7c1a")
     "started_at": 1755385200000,   # Unix ms
     "summary": {
         "text": "...",             # trailing assistant text, capped at 1000 chars
-        "tools_in_flight": ["write_file", "bash"],
+        "phase": "processing",     # last stage label, heuristic phase, or terminal status
+        "pct": 50,                 # 0–100 when the child reports progress (else null)
+        "last_tool": "write_file", # most recent tool_use name, if any
+        "tools_in_flight": ["write_file", "bash"],  # open tool calls not yet finished
         "event_count": 42,
     },
     "transcript_cursor": 42,       # pass as `after` to read raw events
@@ -97,6 +100,10 @@ get_background_task("k4d9x2mq7c1a")
 ```
 
 The summary is deliberately bounded — it's for briefing the user, not for dumping a long build into the context window. When the task finishes, the snapshot also carries `result` (or `error` on failure / timeout). Durable child ids seen on the child's events, such as its `run_id`, are lifted onto the snapshot as they arrive.
+
+### Structured progress
+
+Handlers that yield progress dicts (e.g. `{"stage": "processing", "progress": 50}`) surface as `summary.phase` and `summary.pct`. Agent children also expose `summary.last_tool` and `summary.tools_in_flight` (open tool calls inferred from the event log — a tool drops off when its `OutputEvent` arrives). While running with no explicit stage, `phase` falls back to `streaming`, `tool:{name}`, or `running`; on terminal success `phase` becomes `completed` and `pct` is `100`.
 
 ## Timeouts
 

@@ -344,6 +344,9 @@ class TestBackgroundTasks:
         assert status["status"] in ("completed", "running")
         assert "events" not in status
         assert status["summary"]["event_count"] >= 1
+        if status["status"] == "completed":
+            assert status["summary"]["phase"] == "completed"
+            assert status["summary"]["pct"] == 100
 
     @pytest.mark.asyncio
     async def test_multiple_background_tasks_sequential_turns(self):
@@ -1684,3 +1687,93 @@ class TestBackgroundLogRetention:
         store = current_background_store()
         store.reap_finished()
         assert get_background_task(task_id)["status"] == "not_found"
+
+
+class TestStructuredProgress:
+    """Structured phase/pct/last_tool/tools_in_flight in get_background_task snapshots."""
+
+    @pytest.mark.asyncio
+    async def test_mid_flight_custom_progress(self):
+        gate = asyncio.Event()
+
+        async def staged_task() -> AsyncGenerator[dict[str, Any], None]:
+            yield {"stage": "init", "progress": 10}
+            await gate.wait()
+            yield {"stage": "processing", "progress": 55}
+
+        agent = Agent(
+            name="progress_agent",
+            model=TestModel(
+                responses=[
+                    _tool_call("staged_task", {}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="staged_task", handler=staged_task, background_mode="auto")],
+        )
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        for _ in range(200):
+            snap = get_background_task(task_id)
+            if snap["summary"].get("phase") == "init":
+                break
+            await asyncio.sleep(0.01)
+        snap = get_background_task(task_id)
+        assert snap["status"] == "running"
+        assert snap["summary"]["phase"] == "init"
+        assert snap["summary"]["pct"] == 10
+        assert snap["summary"]["last_tool"] is None
+        assert snap["summary"]["tools_in_flight"] == []
+        gate.set()
+        for _ in range(200):
+            if get_background_task(task_id)["status"] == "completed":
+                break
+            await asyncio.sleep(0.01)
+        done = get_background_task(task_id)
+        assert done["summary"]["phase"] == "completed"
+        assert done["summary"]["pct"] == 100
+
+    @pytest.mark.asyncio
+    async def test_streaming_phase_without_custom_progress(self):
+        parent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "x"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="builder", handler=_fake_streaming_builder, background_mode="auto")],
+        )
+        await parent(prompt="build").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+        snap = get_background_task(task_id)
+        assert snap["status"] == "running"
+        assert snap["summary"]["phase"] == "streaming"
+        assert snap["summary"]["text"]
+        assert snap["summary"]["last_tool"] is None
+
+    def test_tools_in_flight_from_event_log(self):
+        from timbal.state.background import _build_summary_from_events
+        from timbal.types.events.delta import DeltaEvent, ToolUse
+        from timbal.types.events.output import OutputEvent
+        from timbal.types.run_status import RunStatus
+
+        ids = {"run_id": "r1", "call_id": "c1"}
+        events = [
+            DeltaEvent(**ids, path="agent", item=ToolUse(id="t1", name="bash")),
+            DeltaEvent(**ids, path="agent", item=ToolUse(id="t2", name="write_file")),
+            OutputEvent(
+                **ids,
+                path="agent.bash",
+                status=RunStatus(code="success"),
+                t0=0,
+                t1=1,
+                metadata={"tool_call_id": "t1"},
+            ),
+        ]
+        summary = _build_summary_from_events(events)
+        assert summary["last_tool"] == "write_file"
+        assert summary["tools_in_flight"] == ["write_file"]
+        assert summary["phase"] == "tool:write_file"

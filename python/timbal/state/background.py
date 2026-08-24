@@ -185,7 +185,7 @@ def _event_classes() -> dict[str, Any]:
     """
     if not _EVENT_CLASSES:
         from ..types.events import OutputEvent
-        from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
+        from ..types.events.delta import Custom, DeltaEvent, Text, TextDelta, ToolUse
 
         _EVENT_CLASSES.update(
             delta_event=DeltaEvent,
@@ -193,6 +193,7 @@ def _event_classes() -> dict[str, Any]:
             text=Text,
             text_delta=TextDelta,
             tool_use=ToolUse,
+            custom=Custom,
         )
     return _EVENT_CLASSES
 
@@ -219,11 +220,125 @@ def _event_text(event: Any, classes: dict[str, Any] | None = None) -> str:
     return ""
 
 
-def _event_tool_name(event: Any, classes: dict[str, Any] | None = None) -> str | None:
-    classes = classes or _event_classes()
-    if isinstance(event, classes["delta_event"]) and isinstance(event.item, classes["tool_use"]):
-        return event.item.name
+def _coerce_pct(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        n = float(value)
+        if 0 <= n <= 1:
+            n *= 100
+        if 0 <= n <= 100:
+            return int(round(n))
     return None
+
+
+def _progress_fields_from_mapping(data: dict[str, Any]) -> tuple[str | None, int | None]:
+    phase: str | None = None
+    for key in ("phase", "stage", "status", "step"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            phase = value.strip()
+            break
+    pct: int | None = None
+    for key in ("pct", "progress", "percent", "percentage"):
+        if key in data:
+            pct = _coerce_pct(data[key])
+            if pct is not None:
+                break
+    return phase, pct
+
+
+def _progress_from_payload(payload: Any) -> tuple[str | None, int | None]:
+    if isinstance(payload, dict):
+        return _progress_fields_from_mapping(payload)
+    return None, None
+
+
+def _resolve_inflight_tool(
+    open_tools: dict[str, str],
+    *,
+    tool_call_id: str | None,
+    path: str | None,
+) -> None:
+    if tool_call_id and tool_call_id in open_tools:
+        del open_tools[tool_call_id]
+        return
+    if not path or "." not in path:
+        return
+    segment = path.rsplit(".", 1)[-1]
+    for call_id, name in list(open_tools.items()):
+        if name == segment:
+            del open_tools[call_id]
+            break
+
+
+def _build_summary_from_events(
+    events: list[Any],
+    *,
+    terminal_status: str | None = None,
+) -> dict[str, Any]:
+    """Derive bounded briefing fields from a background child's event log."""
+    classes = _event_classes()
+    text_parts: list[str] = []
+    open_tools: dict[str, str] = {}
+    last_tool: str | None = None
+    phase: str | None = None
+    pct: int | None = None
+
+    for event in events:
+        chunk = _event_text(event, classes)
+        if chunk:
+            text_parts.append(chunk)
+
+        if isinstance(event, classes["delta_event"]):
+            item = event.item
+            if isinstance(item, classes["tool_use"]):
+                open_tools[item.id] = item.name
+                last_tool = item.name
+            elif isinstance(item, classes["custom"]):
+                custom_phase, custom_pct = _progress_from_payload(item.data)
+                if custom_phase is not None:
+                    phase = custom_phase
+                if custom_pct is not None:
+                    pct = custom_pct
+        elif isinstance(event, classes["output_event"]):
+            meta = event.metadata if isinstance(event.metadata, dict) else {}
+            custom_phase, custom_pct = _progress_from_payload(meta)
+            if custom_phase is not None:
+                phase = custom_phase
+            if custom_pct is not None:
+                pct = custom_pct
+            _resolve_inflight_tool(
+                open_tools,
+                tool_call_id=meta.get("tool_call_id") if isinstance(meta.get("tool_call_id"), str) else None,
+                path=getattr(event, "path", None),
+            )
+
+    text = "".join(text_parts)
+    if len(text) > _SUMMARY_TEXT_CHARS:
+        text = text[-_SUMMARY_TEXT_CHARS:]
+
+    tools_in_flight = list(dict.fromkeys(open_tools.values()))
+
+    if terminal_status in _TERMINAL_STATUSES:
+        phase = terminal_status
+        if terminal_status == "completed":
+            pct = 100
+    elif phase is None:
+        if tools_in_flight and last_tool:
+            phase = f"tool:{last_tool}"
+        elif text:
+            phase = "streaming"
+        elif events:
+            phase = "running"
+
+    return {
+        "text": text,
+        "last_tool": last_tool,
+        "tools_in_flight": tools_in_flight,
+        "phase": phase,
+        "pct": pct,
+    }
 
 
 def _lift_metadata(event: Any, metadata: dict[str, Any]) -> None:
@@ -529,29 +644,17 @@ class BackgroundTask:
 
     def summarize(self) -> dict[str, Any]:
         events, _ = self.log.peek(self.log.forgotten_through)
-        classes = _event_classes()
-        text_parts: list[str] = []
-        tools: list[str] = []
-        for event in events:
-            chunk = _event_text(event, classes)
-            if chunk:
-                text_parts.append(chunk)
-            tool_name = _event_tool_name(event, classes)
-            if tool_name:
-                tools.append(tool_name)
-        text = "".join(text_parts)
-        if len(text) > _SUMMARY_TEXT_CHARS:
-            text = text[-_SUMMARY_TEXT_CHARS:]
+        status = self.status_code()
+        briefing = _build_summary_from_events(events, terminal_status=status if status in _TERMINAL_STATUSES else None)
         snapshot: dict[str, Any] = {
-            "status": self.status_code(),
+            "status": status,
             "task_id": self.task_id,
             "name": self.name,
             "input": self.input,
             "title": self.title,
             "started_at": self.started_at,
             "summary": {
-                "text": text,
-                "tools_in_flight": tools,
+                **briefing,
                 "event_count": self.log.cursor_end,
             },
             "transcript_cursor": self.log.cursor_end,
@@ -923,7 +1026,8 @@ def get_background_task(task_id: str, *, ack_completion: bool = False) -> dict[s
     """Peek a summary of a background task. Does not drain the event log.
 
     Use this to answer questions about an in-flight or finished background
-    tool. You get status, a short text summary, and any child ids (e.g.
+    tool. You get status, structured progress (phase, pct, last_tool,
+    tools_in_flight), a short text summary, and any child ids (e.g.
     ``cursor_agent_id``, ``run_id``). You must have a ``task_id`` from a
     previous background-tool result or from ``list_background_tasks``.
     Raw events: ``read_background_transcript``.
@@ -1031,10 +1135,10 @@ def clear_background_stores() -> None:
 
 GET_BACKGROUND_TASK_DESCRIPTION = (
     "Get a summary of an in-flight or finished background tool so you can "
-    "answer questions about it (status, last assistant text, tools it called, "
-    "error). You must have a task_id from a previous background-tool result "
-    "or from list_background_tasks. This does not return the full event log — "
-    "use it to brief the user, not to dump a long build."
+    "answer questions about it (status, phase, pct, last_tool, tools_in_flight, "
+    "last assistant text, error). You must have a task_id from a previous "
+    "background-tool result or from list_background_tasks. This does not return "
+    "the full event log — use it to brief the user, not to dump a long build."
 )
 
 LIST_BACKGROUND_TASKS_DESCRIPTION = (
