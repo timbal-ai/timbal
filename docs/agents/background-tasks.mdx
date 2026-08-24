@@ -54,7 +54,7 @@ Once this session has at least one background task, the agent automatically gain
 
 ## Completion notifications
 
-When a background child reaches a terminal status (`completed`, `error`, or `cancelled`), the session store queues a one-shot notice. At the **start of the next parent turn** — not mid-turn while the parent is still talking — the agent drains that inbox and injects a synthetic user message into memory so the LLM learns without polling:
+When a background child reaches a terminal status (`completed`, `error`, `cancelled`, or `timed_out`), the session store queues a one-shot notice. At the **start of the next parent turn** — not mid-turn while the parent is still talking — the agent drains that inbox and injects a synthetic user message into memory so the LLM learns without polling:
 
 ```text
 Background task(s) finished since your last turn. ...
@@ -81,7 +81,7 @@ get_background_task("k4d9x2mq7c1a")
 
 ```python
 {
-    "status": "running",           # running | completed | error | cancelled | not_found
+    "status": "running",           # running | completed | error | cancelled | timed_out | not_found
     "task_id": "k4d9x2mq7c1a",
     "name": "build_site",
     "title": "Build the marketing site",
@@ -96,7 +96,21 @@ get_background_task("k4d9x2mq7c1a")
 }
 ```
 
-The summary is deliberately bounded — it's for briefing the user, not for dumping a long build into the context window. When the task finishes, the snapshot also carries `result` (or `error` on failure). Durable child ids seen on the child's events, such as its `run_id`, are lifted onto the snapshot as they arrive.
+The summary is deliberately bounded — it's for briefing the user, not for dumping a long build into the context window. When the task finishes, the snapshot also carries `result` (or `error` on failure / timeout). Durable child ids seen on the child's events, such as its `run_id`, are lifted onto the snapshot as they arrive.
+
+## Timeouts
+
+Set `background_timeout` (seconds) on a tool to hard-cap how long a detached child may run. When the deadline hits, the child is cancelled like a user cancel (Task cancel + handler `aclose` + `on_background_cancel`) but reports status `timed_out` so the next-turn completion notice is unambiguous.
+
+```python
+long_running_tool = Tool(
+    handler=slow_operation,
+    background_mode="always",
+    background_timeout=600.0,  # 10 minutes
+)
+```
+
+`None` (default) or a non-positive value means no deadline.
 
 ## Reading the Raw Transcript
 

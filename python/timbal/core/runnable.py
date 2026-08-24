@@ -308,6 +308,11 @@ class Runnable(ABC, BaseModel):
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
 
+    background_timeout: float | None = None
+    """Optional wall-clock seconds before a background child is cancelled as
+    ``timed_out``. ``None`` / non-positive = no deadline. Only applies when the
+    runnable actually detaches (``background_mode`` / ``run_in_background``)."""
+
     on_background_cancel: Callable[..., Any] | None = Field(default=None, exclude=True)
     """Optional hook fired when ``cancel_background_task`` cancels this child.
     Receives the ``BackgroundTask`` record (has ``task_id``, ``metadata`` with
@@ -1571,6 +1576,7 @@ class Runnable(ABC, BaseModel):
             input=input,
             task=task,
             on_cancel=self.on_background_cancel,
+            timeout=self.background_timeout,
         )
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}

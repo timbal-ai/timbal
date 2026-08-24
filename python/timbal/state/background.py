@@ -19,6 +19,9 @@ completion notice. The parent agent drains that inbox at the **start** of the
 next turn and injects a synthetic user message so the LLM learns without
 polling — never mid-turn while the parent is still talking.
 
+Optional ``timeout`` (seconds) on a child cancels it as ``timed_out`` when the
+deadline elapses (Task cancel + handler ``aclose`` + ``on_background_cancel``).
+
 If the parent already learned via the LLM ``get_background_task`` /
 ``list_background_tasks`` tools (``ack_completion=True``), the notice is
 dropped so the next turn does not re-announce a completion the model handled.
@@ -36,7 +39,7 @@ _COMPLETION_SUMMARY_CHARS = 300
 _RESULT_PREVIEW_CHARS = 500
 _TASK_ID_LEN = 12
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
-_TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
+_TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled", "timed_out"})
 
 # Process-local: run_id → store. Sequential turns find the bag via parent_id.
 # Concurrent siblings (no parent_id) each create a new store.
@@ -248,6 +251,7 @@ class BackgroundTask:
         started_at: int,
         title: str | None = None,
         on_cancel: Callable[..., Any] | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.task_id = task_id
         self.name = name
@@ -258,8 +262,45 @@ class BackgroundTask:
         self.log = BackgroundEventLog()
         self.metadata: dict[str, Any] = {}
         self.on_cancel = on_cancel
+        self.timeout = timeout
         self._cancel_requested = False
+        self._timed_out = False
+        self._timeout_handle: asyncio.TimerHandle | None = None
         self._handler_aclose: Callable[..., Any] | None = None
+
+    def schedule_timeout(self) -> None:
+        """Arm a one-shot deadline; no-op when ``timeout`` is unset or non-positive."""
+        if self.timeout is None or self.timeout <= 0:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._timeout_handle = loop.call_later(self.timeout, self._on_timeout)
+
+    def clear_timeout(self) -> None:
+        handle = self._timeout_handle
+        self._timeout_handle = None
+        if handle is not None:
+            handle.cancel()
+
+    def _on_timeout(self) -> None:
+        """Cancel the child and mark ``timed_out`` (distinct from user cancel)."""
+        self._timeout_handle = None
+        if self.task.done():
+            return
+        self._timed_out = True
+        self._cancel_requested = True
+        self.task.cancel()
+        try:
+            asyncio.get_running_loop().create_task(self.aclose_handler())
+        except RuntimeError:
+            pass
+        if self.on_cancel is not None:
+            try:
+                self.on_cancel(self)
+            except Exception:
+                pass
 
     async def aclose_handler(self) -> None:
         """Stop the child's handler gen, not just the wrapping asyncio.Task.
@@ -297,6 +338,8 @@ class BackgroundTask:
 
     def status_code(self) -> str:
         task = self.task
+        if self._timed_out:
+            return "timed_out"
         if self._cancel_requested or (task.done() and task.cancelled()):
             return "cancelled"
         if not task.done():
@@ -334,8 +377,13 @@ class BackgroundTask:
             },
             "transcript_cursor": len(events),
         }
+        if self.timeout is not None:
+            snapshot["timeout"] = self.timeout
         snapshot.update(self.metadata)
-        if self.task.done() and not self.task.cancelled():
+        if self._timed_out:
+            timeout = self.timeout
+            snapshot["error"] = f"Timed out after {timeout:g}s" if timeout else "Timed out"
+        elif self.task.done() and not self.task.cancelled():
             exc = self.task.exception()
             if exc is not None:
                 snapshot["error"] = str(exc)
@@ -382,10 +430,17 @@ class BackgroundTaskStore:
         # Enqueue when the asyncio.Task reaches a terminal state. Done callbacks
         # run on the loop thread; keep this sync and never raise.
         task = record.task
+        record.schedule_timeout()
         if task.done():
+            record.clear_timeout()
             self._enqueue_completion(record)
         else:
-            task.add_done_callback(lambda _t: self._enqueue_completion(record))
+
+            def _on_done(_t: asyncio.Task) -> None:
+                record.clear_timeout()
+                self._enqueue_completion(record)
+
+            task.add_done_callback(_on_done)
 
     def get(self, task_id: str) -> BackgroundTask | None:
         return self._tasks.get(task_id)
@@ -423,6 +478,7 @@ class BackgroundTaskStore:
         record = self._tasks.get(task_id)
         if record is None:
             return {"status": "not_found", "task_id": task_id}
+        record.clear_timeout()
         if not record.task.done():
             record._cancel_requested = True
             record.task.cancel()
@@ -471,8 +527,8 @@ class BackgroundTaskStore:
             "status": status,
             "summary": summary_text,
         }
-        if status == "error":
-            note["error"] = str(snap.get("error") or "unknown error")
+        if status in ("error", "timed_out"):
+            note["error"] = str(snap.get("error") or ("Timed out" if status == "timed_out" else "unknown error"))
         elif status == "completed" and "result" in snap:
             note["result"] = _preview_value(snap["result"])
         self._completion_inbox.append(note)
@@ -601,8 +657,12 @@ def register_background_task(
     task: asyncio.Task,
     on_cancel: Callable[..., Any] | None = None,
     started_at: int | None = None,
+    timeout: float | None = None,
 ) -> BackgroundTask:
-    """Register a running child on the current session bag."""
+    """Register a running child on the current session bag.
+
+    ``timeout`` is seconds until the child is cancelled as ``timed_out``.
+    """
     from . import get_run_context
 
     run_context = get_run_context()
@@ -616,6 +676,7 @@ def register_background_task(
         task=task,
         started_at=started_at if started_at is not None else int(time.time() * 1000),
         on_cancel=on_cancel,
+        timeout=timeout,
     )
     store.add(record)
     return record

@@ -1335,3 +1335,154 @@ class TestBackgroundCompletionNotify:
         notices = _completion_notices_in_memory(memories[-1])
         assert len(notices) == 1
         assert task_id in notices[0]
+
+
+class TestBackgroundTimeout:
+    """``background_timeout`` cancels stuck children as ``timed_out``."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_marks_timed_out_and_fires_on_cancel(self):
+        cancelled: list[str] = []
+
+        async def stubborn(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            try:
+                while True:
+                    yield TextDelta(id="s", text_delta=f"{prompt}...")
+                    await asyncio.sleep(0.05)
+            finally:
+                pass
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "loop"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="builder",
+                    handler=stubborn,
+                    background_mode="auto",
+                    background_timeout=0.15,
+                    on_background_cancel=lambda record: cancelled.append(record.task_id),
+                )
+            ],
+        )
+
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        snap = await _wait_until_terminal(task_id)
+        assert snap["status"] == "timed_out"
+        assert snap["timeout"] == 0.15
+        assert "Timed out after 0.15s" in snap["error"]
+        assert task_id in cancelled
+
+        from timbal.state.background import current_background_store
+
+        pending = current_background_store().pending_completions()
+        assert len(pending) == 1
+        assert pending[0]["status"] == "timed_out"
+        assert "Timed out" in pending[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_timeout_notice_injected_on_next_turn(self):
+        async def stubborn(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            while True:
+                yield TextDelta(id="s", text_delta=f"{prompt}...")
+                await asyncio.sleep(0.05)
+
+        memories: list[list[Message]] = []
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "loop"}, run_in_background=True),
+                    "Started.",
+                    "Saw the timeout.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="builder",
+                    handler=stubborn,
+                    background_mode="auto",
+                    background_timeout=0.15,
+                )
+            ],
+            post_hook=_capture_memory_hook(memories),
+        )
+
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_until_terminal(task_id)
+
+        await agent(prompt="status?").collect()
+        notices = _completion_notices_in_memory(memories[-1])
+        assert len(notices) == 1
+        assert task_id in notices[0]
+        assert "status: timed_out" in notices[0]
+
+    @pytest.mark.asyncio
+    async def test_completes_before_timeout(self):
+        async def quick(tag: str) -> str:
+            await asyncio.sleep(0.05)
+            return f"done:{tag}"
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("quick", {"tag": "ok"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="quick",
+                    handler=quick,
+                    background_mode="auto",
+                    background_timeout=5.0,
+                )
+            ],
+        )
+
+        await agent(prompt="start").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        snap = await _wait_until_terminal(task_id)
+        assert snap["status"] == "completed"
+        assert snap["result"] == "done:ok"
+        assert snap.get("timeout") == 5.0
+
+    @pytest.mark.asyncio
+    async def test_user_cancel_still_cancelled_not_timed_out(self):
+        async def stubborn(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            while True:
+                yield TextDelta(id="s", text_delta=f"{prompt}...")
+                await asyncio.sleep(0.05)
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "loop"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="builder",
+                    handler=stubborn,
+                    background_mode="auto",
+                    background_timeout=30.0,
+                )
+            ],
+        )
+
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+        cancel_background_task(task_id)
+        snap = await _wait_until_terminal(task_id)
+        assert snap["status"] == "cancelled"
