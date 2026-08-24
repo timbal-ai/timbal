@@ -17,6 +17,7 @@ from timbal.state import (
     set_parent_call_id,
     set_run_context,
 )
+from timbal.state.background import BackgroundEventLog
 from timbal.types.content import ToolUseContent
 from timbal.types.events.delta import DeltaEvent, TextDelta
 from timbal.types.events.output import OutputEvent
@@ -1602,3 +1603,84 @@ class TestBackgroundLimits:
         from timbal.state.background import current_background_store
 
         assert current_background_store().max_concurrent is None
+
+
+class TestBackgroundLogRetention:
+    """Ring-buffer logs + finished-task retention on the session bag."""
+
+    def test_log_ring_drops_head_and_reports_gapped(self):
+        log = BackgroundEventLog(max_events=2, max_bytes=None)
+        log.put_nowait("a")
+        log.put_nowait("b")
+        log.put_nowait("c")
+        assert log.forgotten_through == 1
+        assert log.qsize() == 2
+        events, cursor, gapped = log.read(after=0)
+        assert gapped is True
+        assert events == []
+        assert cursor == 0
+        events, cursor, gapped = log.read(after=log.forgotten_through)
+        assert gapped is False
+        assert events == ["b", "c"]
+        assert cursor == 3
+
+    @pytest.mark.asyncio
+    async def test_long_stream_respects_store_event_cap(self):
+        async def many_chunks(tag: str) -> AsyncGenerator[TextDelta, None]:
+            for i in range(6):
+                yield TextDelta(id="m", text_delta=f"{i}")
+                await asyncio.sleep(0.01)
+
+        from timbal.state.background import current_background_store
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("many", {"tag": "x"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="many", handler=many_chunks, background_mode="auto")],
+            max_background_log_events=3,
+            max_background_concurrent=5,
+        )
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_until_terminal(task_id)
+        snap = get_background_task(task_id)
+        assert snap["summary"]["event_count"] >= 6
+        assert snap["forgotten_through"] >= 3
+        page = read_background_transcript(task_id, after=0)
+        assert page["gapped"] is True
+        tail = read_background_transcript(task_id, after=page["forgotten_through"])
+        assert tail["gapped"] is False
+        assert len(tail["events"]) <= 3
+
+    @pytest.mark.asyncio
+    async def test_finished_task_reaped_after_retention(self):
+        async def quick(tag: str) -> str:
+            return tag
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("quick", {"tag": "A"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+            background_task_retention_secs=0.05,
+            max_background_concurrent=5,
+        )
+        await agent(prompt="go").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_until_terminal(task_id)
+        assert get_background_task(task_id)["status"] == "completed"
+        await asyncio.sleep(0.08)
+        from timbal.state.background import current_background_store
+
+        store = current_background_store()
+        store.reap_finished()
+        assert get_background_task(task_id)["status"] == "not_found"

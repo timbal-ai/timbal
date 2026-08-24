@@ -47,6 +47,11 @@ _TASK_ID_LEN = 12
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled", "timed_out"})
 
+# Ring-buffer defaults (mirrors JobStore). ``None`` / 0 = unlimited.
+DEFAULT_BG_LOG_MAX_EVENTS = 50_000
+DEFAULT_BG_LOG_MAX_BYTES = 32 * 1024 * 1024
+DEFAULT_BG_TASK_RETENTION_SECS = 300.0
+
 # Process-local: run_id → store. Sequential turns find the bag via parent_id.
 # Concurrent siblings (no parent_id) each create a new store.
 _STORES_BY_RUN_ID: dict[str, BackgroundTaskStore] = {}
@@ -109,6 +114,51 @@ def _default_max_depth() -> int | None:
     except ValueError:
         return None
     return None if value < 0 else value
+
+
+def _event_nbytes(event: Any) -> int:
+    dump_json = getattr(event, "model_dump_json", None)
+    if callable(dump_json):
+        return len(dump_json())
+    if isinstance(event, str):
+        return len(event)
+    if isinstance(event, (bytes, bytearray)):
+        return len(event)
+    return len(repr(event))
+
+
+def _bg_log_limit(raw: str | None, default: int | None) -> int | None:
+    if raw is None:
+        return default
+    text = raw.strip().lower()
+    if text in ("", "0", "none", "unlimited"):
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return default
+    return None if value <= 0 else value
+
+
+def _default_max_log_events() -> int | None:
+    return _bg_log_limit(os.environ.get("TIMBAL_BG_LOG_MAX_EVENTS"), DEFAULT_BG_LOG_MAX_EVENTS)
+
+
+def _default_max_log_bytes() -> int | None:
+    return _bg_log_limit(os.environ.get("TIMBAL_BG_LOG_MAX_BYTES"), DEFAULT_BG_LOG_MAX_BYTES)
+
+
+def _default_task_retention_secs() -> float:
+    raw = os.environ.get("TIMBAL_BG_TASK_RETENTION_SECS")
+    if raw is None:
+        return DEFAULT_BG_TASK_RETENTION_SECS
+    text = raw.strip().lower()
+    if text in ("", "0", "none", "unlimited"):
+        return 0.0
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        return DEFAULT_BG_TASK_RETENTION_SECS
 
 
 def _new_task_id() -> str:
@@ -258,20 +308,61 @@ def format_background_completion_notice(notifications: list[dict[str, Any]]) -> 
 
 
 class BackgroundEventLog:
-    """Append-only log. ``put_nowait`` matches :class:`asyncio.Queue` so
-    ``_execute_handler`` can treat this as the event sink."""
+    """Append-only ring-buffer log. ``put_nowait`` matches :class:`asyncio.Queue`.
 
-    def __init__(self) -> None:
+    Cursors are **logical** indices: ``after`` is how many events the reader has
+    already seen. When ``max_events`` / ``max_bytes`` is exceeded the oldest
+    entries drop and :attr:`forgotten_through` advances. ``after <
+    forgotten_through`` is a gap — not a silent skip to the new head.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_events: int | None = DEFAULT_BG_LOG_MAX_EVENTS,
+        max_bytes: int | None = DEFAULT_BG_LOG_MAX_BYTES,
+    ) -> None:
+        self._max_events = max_events or 0
+        self._max_bytes = max_bytes or 0
         self._events: list[Any] = []
+        self._sizes: list[int] = []
+        self._nbytes = 0
+        self.forgotten_through = 0
         self._subscribers: list[asyncio.Queue] = []
+        self._closed = False
+
+    @property
+    def cursor_end(self) -> int:
+        """Next logical index to pass as ``after`` (total events appended)."""
+        return self.forgotten_through + len(self._events)
 
     def put_nowait(self, event: Any) -> None:
+        if self._closed:
+            return
+        nbytes = _event_nbytes(event) if self._max_bytes > 0 else 0
         self._events.append(event)
+        self._sizes.append(nbytes)
+        self._nbytes += nbytes
+        self._trim()
         for queue in self._subscribers:
             queue.put_nowait(event)
 
-    def peek(self, after: int = 0) -> list[Any]:
-        return list(self._events[after:])
+    def peek(self, after: int = 0) -> tuple[list[Any], bool]:
+        """Return ``(events, gapped)`` from logical cursor ``after``."""
+        if after < self.forgotten_through:
+            return [], True
+        offset = after - self.forgotten_through
+        return list(self._events[offset:]), False
+
+    def read(self, after: int = 0, limit: int | None = None) -> tuple[list[Any], int, bool]:
+        """``(events, next_cursor, gapped)`` from logical ``after``."""
+        if after < self.forgotten_through:
+            return [], after, True
+        events, _ = self.peek(after)
+        if limit is not None and limit > 0:
+            events = events[:limit]
+        next_cursor = after + len(events)
+        return events, next_cursor, False
 
     def qsize(self) -> int:
         return len(self._events)
@@ -280,12 +371,14 @@ class BackgroundEventLog:
         return not self._events
 
     async def subscribe(self, after: int = 0) -> AsyncIterator[Any]:
-        """Replay from ``after``, then yield live events until :meth:`close`."""
+        """Replay from logical ``after``, then yield live events until :meth:`close`."""
+        if after < self.forgotten_through:
+            return
         queue: asyncio.Queue = asyncio.Queue()
-        # Register before replay so we cannot drop events that arrive mid-replay.
         self._subscribers.append(queue)
         try:
-            for event in self._events[after:]:
+            offset = after - self.forgotten_through
+            for event in self._events[offset:]:
                 yield event
             while True:
                 event = await queue.get()
@@ -297,8 +390,28 @@ class BackgroundEventLog:
                 self._subscribers.remove(queue)
 
     def close(self) -> None:
+        self._closed = True
         for queue in self._subscribers:
             queue.put_nowait(_DONE)
+
+    def _over_cap(self, n: int, nbytes: int) -> bool:
+        return (self._max_events > 0 and n > self._max_events) or (
+            self._max_bytes > 0 and nbytes > self._max_bytes
+        )
+
+    def _trim(self) -> None:
+        """Drop oldest events until the ring fits. Never drops the tip."""
+        drop = 0
+        n = len(self._events)
+        nbytes = self._nbytes
+        while n - drop > 1 and self._over_cap(n - drop, nbytes):
+            nbytes -= self._sizes[drop]
+            drop += 1
+        if drop:
+            del self._events[:drop]
+            del self._sizes[:drop]
+            self._nbytes = nbytes
+            self.forgotten_through += drop
 
 
 class BackgroundTask:
@@ -315,6 +428,8 @@ class BackgroundTask:
         title: str | None = None,
         on_cancel: Callable[..., Any] | None = None,
         timeout: float | None = None,
+        log_max_events: int | None = DEFAULT_BG_LOG_MAX_EVENTS,
+        log_max_bytes: int | None = DEFAULT_BG_LOG_MAX_BYTES,
     ) -> None:
         self.task_id = task_id
         self.name = name
@@ -322,10 +437,11 @@ class BackgroundTask:
         self.task = task
         self.started_at = started_at
         self.title = title or _title_from_input(name, input)
-        self.log = BackgroundEventLog()
+        self.log = BackgroundEventLog(max_events=log_max_events, max_bytes=log_max_bytes)
         self.metadata: dict[str, Any] = {}
         self.on_cancel = on_cancel
         self.timeout = timeout
+        self.finished_at: float | None = None
         self._cancel_requested = False
         self._timed_out = False
         self._timeout_handle: asyncio.TimerHandle | None = None
@@ -412,7 +528,7 @@ class BackgroundTask:
         return "completed"
 
     def summarize(self) -> dict[str, Any]:
-        events = self.log.peek()
+        events, _ = self.log.peek(self.log.forgotten_through)
         classes = _event_classes()
         text_parts: list[str] = []
         tools: list[str] = []
@@ -436,9 +552,10 @@ class BackgroundTask:
             "summary": {
                 "text": text,
                 "tools_in_flight": tools,
-                "event_count": len(events),
+                "event_count": self.log.cursor_end,
             },
-            "transcript_cursor": len(events),
+            "transcript_cursor": self.log.cursor_end,
+            "forgotten_through": self.log.forgotten_through,
         }
         if self.timeout is not None:
             snapshot["timeout"] = self.timeout
@@ -480,6 +597,9 @@ class BackgroundTaskStore:
         *,
         max_concurrent: int | None | object = _UNSET,
         max_depth: int | None | object = _UNSET,
+        max_log_events: int | None | object = _UNSET,
+        max_log_bytes: int | None | object = _UNSET,
+        task_retention_secs: float | object = _UNSET,
     ) -> None:
         self._tasks: dict[str, BackgroundTask] = {}
         # Ordered, one-shot queue of lean completion payloads for the parent LLM.
@@ -490,6 +610,15 @@ class BackgroundTaskStore:
             _default_max_concurrent() if max_concurrent is _UNSET else max_concurrent  # type: ignore[assignment]
         )
         self.max_depth = _default_max_depth() if max_depth is _UNSET else max_depth  # type: ignore[assignment]
+        self.max_log_events = (
+            _default_max_log_events() if max_log_events is _UNSET else max_log_events  # type: ignore[assignment]
+        )
+        self.max_log_bytes = (
+            _default_max_log_bytes() if max_log_bytes is _UNSET else max_log_bytes  # type: ignore[assignment]
+        )
+        self.task_retention_secs = (
+            _default_task_retention_secs() if task_retention_secs is _UNSET else float(task_retention_secs)  # type: ignore[arg-type]
+        )
         # Spawns that passed check_can_spawn but are not yet in ``_tasks``
         # (between create_task and add). Counts toward the concurrent cap.
         self._pending_spawns = 0
@@ -544,14 +673,34 @@ class BackgroundTaskStore:
         record.schedule_timeout()
         if task.done():
             record.clear_timeout()
+            if record.finished_at is None:
+                record.finished_at = time.monotonic()
             self._enqueue_completion(record)
         else:
 
             def _on_done(_t: asyncio.Task) -> None:
                 record.clear_timeout()
+                if record.finished_at is None:
+                    record.finished_at = time.monotonic()
                 self._enqueue_completion(record)
 
             task.add_done_callback(_on_done)
+
+    def reap_finished(self, now: float | None = None) -> None:
+        """Drop terminal tasks whose retention window has lapsed."""
+        secs = self.task_retention_secs
+        if secs <= 0:
+            return
+        now = time.monotonic() if now is None else now
+        expired = [
+            task_id
+            for task_id, record in self._tasks.items()
+            if record.task.done()
+            and record.finished_at is not None
+            and now - record.finished_at >= secs
+        ]
+        for task_id in expired:
+            del self._tasks[task_id]
 
     def get(self, task_id: str) -> BackgroundTask | None:
         return self._tasks.get(task_id)
@@ -576,13 +725,22 @@ class BackgroundTaskStore:
     def transcript(self, task_id: str, after: int = 0) -> dict[str, Any]:
         record = self._tasks.get(task_id)
         if record is None:
-            return {"status": "not_found", "task_id": task_id, "events": [], "cursor": after}
-        events = record.log.peek(after)
+            return {
+                "status": "not_found",
+                "task_id": task_id,
+                "events": [],
+                "cursor": after,
+                "gapped": False,
+                "forgotten_through": 0,
+            }
+        events, cursor, gapped = record.log.read(after)
         return {
             "status": record.status_code(),
             "task_id": task_id,
             "events": [_dump_event(event) for event in events],
-            "cursor": after + len(events),
+            "cursor": cursor,
+            "gapped": gapped,
+            "forgotten_through": record.log.forgotten_through,
         }
 
     def cancel(self, task_id: str) -> dict[str, Any]:
@@ -680,12 +838,21 @@ def apply_background_limits(
     *,
     max_concurrent: int | None | object = _UNSET,
     max_depth: int | None | object = _UNSET,
+    max_log_events: int | None | object = _UNSET,
+    max_log_bytes: int | None | object = _UNSET,
+    task_retention_secs: float | object = _UNSET,
 ) -> None:
     """Stash session caps on the RunContext and update an existing store."""
     if max_concurrent is not _UNSET:
         run_context._bg_max_concurrent = max_concurrent
     if max_depth is not _UNSET:
         run_context._bg_max_depth = max_depth
+    if max_log_events is not _UNSET:
+        run_context._bg_max_log_events = max_log_events
+    if max_log_bytes is not _UNSET:
+        run_context._bg_max_log_bytes = max_log_bytes
+    if task_retention_secs is not _UNSET:
+        run_context._bg_task_retention_secs = task_retention_secs
     store = getattr(run_context, "_bg_store", None)
     if store is None:
         return
@@ -693,6 +860,13 @@ def apply_background_limits(
         store.max_concurrent = max_concurrent  # type: ignore[assignment]
     if max_depth is not _UNSET:
         store.max_depth = max_depth  # type: ignore[assignment]
+    if max_log_events is not _UNSET:
+        store.max_log_events = max_log_events  # type: ignore[assignment]
+    if max_log_bytes is not _UNSET:
+        store.max_log_bytes = max_log_bytes  # type: ignore[assignment]
+    if task_retention_secs is not _UNSET:
+        store.task_retention_secs = float(task_retention_secs)  # type: ignore[arg-type]
+    store.reap_finished()
 
 
 def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
@@ -709,8 +883,24 @@ def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
             else _UNSET
         )
         max_depth = run_context._bg_max_depth if hasattr(run_context, "_bg_max_depth") else _UNSET
-        store = BackgroundTaskStore(max_concurrent=max_concurrent, max_depth=max_depth)
+        max_log_events = (
+            run_context._bg_max_log_events if hasattr(run_context, "_bg_max_log_events") else _UNSET
+        )
+        max_log_bytes = (
+            run_context._bg_max_log_bytes if hasattr(run_context, "_bg_max_log_bytes") else _UNSET
+        )
+        task_retention_secs = (
+            run_context._bg_task_retention_secs if hasattr(run_context, "_bg_task_retention_secs") else _UNSET
+        )
+        store = BackgroundTaskStore(
+            max_concurrent=max_concurrent,
+            max_depth=max_depth,
+            max_log_events=max_log_events,
+            max_log_bytes=max_log_bytes,
+            task_retention_secs=task_retention_secs,
+        )
         run_context._bg_store = store
+    store.reap_finished()
     _STORES_BY_RUN_ID[run_context.id] = store
     return store
 
@@ -776,14 +966,22 @@ def cancel_background_task(task_id: str) -> dict[str, Any]:
 
 
 def read_background_transcript(task_id: str, after: int = 0) -> dict[str, Any]:
-    """Raw events for a background task, from cursor ``after`` (inclusive).
+    """Raw events for a background task, from logical cursor ``after``.
 
-    Does not drain. A second read with the same ``after`` returns the same
-    events. ``cursor`` is the next index to pass.
+    Does not drain. Returns ``gapped=True`` when ``after`` is behind
+    ``forgotten_through`` (events were dropped from the ring). ``cursor`` is
+    the next logical index to pass.
     """
     store = current_background_store()
     if store is None:
-        return {"status": "not_found", "task_id": task_id, "events": [], "cursor": after}
+        return {
+            "status": "not_found",
+            "task_id": task_id,
+            "events": [],
+            "cursor": after,
+            "gapped": False,
+            "forgotten_through": 0,
+        }
     return store.transcript(task_id, after=after)
 
 
@@ -819,6 +1017,8 @@ def register_background_task(
         started_at=started_at if started_at is not None else int(time.time() * 1000),
         on_cancel=on_cancel,
         timeout=timeout,
+        log_max_events=store.max_log_events,
+        log_max_bytes=store.max_log_bytes,
     )
     store.add(record)
     return record

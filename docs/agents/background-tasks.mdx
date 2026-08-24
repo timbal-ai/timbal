@@ -133,17 +133,37 @@ agent = Agent(
 
 ## Reading the Raw Transcript
 
-For the full event stream, read from a cursor. This does not drain either — the same `after` returns the same events, so it's safe to call from more than one place.
+For the full event stream, read from a logical cursor. This does not drain either — the same `after` returns the same events while they remain in the ring, so it's safe to call from more than one place.
+
+When the ring has dropped older events, `gapped` is `true` and `after` is behind `forgotten_through` — treat that like an expired reconnect, not a silent skip to the new head.
 
 ```python
 from timbal.state import read_background_transcript
 
 page = read_background_transcript("k4d9x2mq7c1a")
-# {"status": "running", "task_id": ..., "events": [...], "cursor": 42}
+# {"status": "running", "task_id": ..., "events": [...], "cursor": 42,
+#  "gapped": false, "forgotten_through": 0}
 
 # Later, pick up where you left off
 page = read_background_transcript("k4d9x2mq7c1a", after=page["cursor"])
 ```
+
+## Log retention
+
+Each child's event log is a **ring buffer** (defaults: 50k events / 32 MiB — same idea as HTTP `JobStore`). Oldest events drop when over cap; `forgotten_through` is the logical floor. Finished **task records** are removed from the session bag after **300 seconds** by default so long-lived workers do not leak metadata.
+
+Override per Agent:
+
+```python
+agent = Agent(
+    ...,
+    max_background_log_events=10_000,
+    max_background_log_bytes=None,  # unlimited bytes
+    background_task_retention_secs=600,
+)
+```
+
+Env: `TIMBAL_BG_LOG_MAX_EVENTS`, `TIMBAL_BG_LOG_MAX_BYTES`, `TIMBAL_BG_TASK_RETENTION_SECS` (`0` / `none` = unlimited / keep forever).
 
 To follow a child live instead of polling, subscribe to its log. `subscribe` replays from `after` and then yields events as they arrive, so you cannot miss one that lands mid-replay.
 

@@ -42,6 +42,9 @@ from ..guardrails.types import GuardrailContext, GuardrailStage, Verdict
 from ..state import get_run_context
 from ..state.background import (
     CANCEL_BACKGROUND_TASK_DESCRIPTION,
+    DEFAULT_BG_LOG_MAX_BYTES,
+    DEFAULT_BG_LOG_MAX_EVENTS,
+    DEFAULT_BG_TASK_RETENTION_SECS,
     GET_BACKGROUND_TASK_DESCRIPTION,
     LIST_BACKGROUND_TASKS_DESCRIPTION,
     current_background_store,
@@ -222,6 +225,15 @@ class Agent(Runnable):
     ``1`` allows only top-level (non-background) code to detach children —
     a background child cannot spawn further background work.
     Override with ``TIMBAL_MAX_BACKGROUND_DEPTH``."""
+    max_background_log_events: int | None = DEFAULT_BG_LOG_MAX_EVENTS
+    """Ring-buffer cap on events retained per background child (default 50_000).
+    ``None`` = unlimited. Env: ``TIMBAL_BG_LOG_MAX_EVENTS``."""
+    max_background_log_bytes: int | None = DEFAULT_BG_LOG_MAX_BYTES
+    """Ring-buffer byte cap per background child (default 32 MiB).
+    ``None`` = unlimited. Env: ``TIMBAL_BG_LOG_MAX_BYTES``."""
+    background_task_retention_secs: float = DEFAULT_BG_TASK_RETENTION_SECS
+    """Drop finished task records from the session bag after this many seconds
+    (default 300). ``0`` = keep forever. Env: ``TIMBAL_BG_TASK_RETENTION_SECS``."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -838,6 +850,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             run_context,
             max_concurrent=self.max_background_concurrent,
             max_depth=self.max_background_depth,
+            max_log_events=self.max_background_log_events,
+            max_log_bytes=self.max_background_log_bytes,
+            task_retention_secs=self.background_task_retention_secs,
         )
 
     async def _compact_preserving_last_assistant(self, current_span: Any, *, prev_usage: dict | None) -> None:
