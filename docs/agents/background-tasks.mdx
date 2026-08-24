@@ -48,7 +48,7 @@ Background tools return immediately with a task handle:
 {"task_id": "k4d9x2mq7c1a", "status": "running"}
 ```
 
-Once this session has at least one background task, the agent automatically gains three tools — `get_background_task`, `list_background_tasks`, and `cancel_background_task` — so it can brief the user or stop a child on a follow-up turn without you wiring anything.
+Once this session has at least one background task, the agent automatically gains three tools — `get_background_task`, `list_background_tasks`, and `cancel_background_task` — so it can brief the user or stop a child on a follow-up turn without you wiring anything. Set `background_transcript_tool=True` on the Agent to also expose `read_background_transcript` for paged raw event replay (off by default).
 
 `get_background_task` **peeks**; it does not drain. Calling it twice returns the same thing, so the agent polling a child never steals events from a frontend streaming the same child.
 
@@ -141,6 +141,17 @@ agent = Agent(
 ## Reading the Raw Transcript
 
 For the full event stream, read from a logical cursor. This does not drain either — the same `after` returns the same events while they remain in the ring, so it's safe to call from more than one place.
+
+**Python / app code** — always available via `timbal.state.read_background_transcript`. **LLM tool** — opt in with `background_transcript_tool=True` on the Agent (registered alongside the other session background tools once a child exists).
+
+```python
+agent = Agent(
+    name="debugger",
+    model="...",
+    tools=[...],
+    background_transcript_tool=True,
+)
+```
 
 When the ring has dropped older events, `gapped` is `true` and `after` is behind `forgotten_through` — treat that like an expired reconnect, not a silent skip to the new head.
 

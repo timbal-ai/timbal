@@ -209,7 +209,64 @@ class TestBackgroundTasks:
         assert "get_background_task" in tool_names_seen
         assert "list_background_tasks" in tool_names_seen
         assert "cancel_background_task" in tool_names_seen
+        assert "read_background_transcript" not in tool_names_seen
         await asyncio.sleep(0.4)
+
+    @pytest.mark.asyncio
+    async def test_read_background_transcript_tool_opt_in(self):
+        async def slow_task(duration: float) -> str:
+            await asyncio.sleep(duration)
+            return "done"
+
+        agent = Agent(
+            name="bg_agent",
+            model=TestModel(
+                responses=[
+                    _tool_call("slow_task", {"duration": 0.3}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="slow_task", description="Run a slow task", handler=slow_task, background_mode="auto")],
+            background_transcript_tool=True,
+        )
+
+        tool_names_seen = []
+        async for event in agent(prompt="run in background"):
+            if isinstance(event, OutputEvent) and event.path == "bg_agent.llm" and list_background_tasks():
+                tool_names_seen.extend(tool.name for tool in event.input["tools"])
+
+        assert "read_background_transcript" in tool_names_seen
+        await asyncio.sleep(0.4)
+
+    @pytest.mark.asyncio
+    async def test_agent_read_background_transcript_tool_call(self):
+        parent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "x"}, run_in_background=True),
+                    "Started.",
+                    _tool_call("read_background_transcript", {"task_id": "placeholder", "after": 0}),
+                    "Here is the log.",
+                ]
+            ),
+            tools=[Tool(name="builder", handler=_fake_streaming_builder, background_mode="auto")],
+            background_transcript_tool=True,
+        )
+        await parent(prompt="build").collect()
+        task_id = list_background_tasks()[0]["task_id"]
+        await _wait_for_first_event(task_id)
+        parent.model = TestModel(
+            responses=[
+                _tool_call("read_background_transcript", {"task_id": task_id, "after": 0}),
+                "Fetched transcript.",
+            ]
+        )
+        result = await parent(prompt="show me the raw log").collect()
+        assert_has_output_event(result)
+        page = read_background_transcript(task_id, after=0)
+        assert page["cursor"] >= 1
+        assert len(page["events"]) >= 1
 
     @pytest.mark.asyncio
     async def test_background_task_with_events_and_logs(self):

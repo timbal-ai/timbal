@@ -1153,3 +1153,12 @@ CANCEL_BACKGROUND_TASK_DESCRIPTION = (
     "or list_background_tasks). Stops the child's in-flight work. Use when the "
     "user says to stop/cancel a builder or background task."
 )
+
+READ_BACKGROUND_TRANSCRIPT_DESCRIPTION = (
+    "Read raw events from a background task's append-only log. Use when "
+    "get_background_task's summary is not enough — e.g. to inspect streaming "
+    "output or tool calls mid-build. Pass task_id and optional after (logical "
+    "cursor from a prior read or from get_background_task's transcript_cursor). "
+    "Does not drain — safe to re-read. Page with after on long tasks; when "
+    "gapped is true, events before forgotten_through were dropped from the ring."
+)

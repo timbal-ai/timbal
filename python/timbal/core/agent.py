@@ -47,6 +47,7 @@ from ..state.background import (
     DEFAULT_BG_TASK_RETENTION_SECS,
     GET_BACKGROUND_TASK_DESCRIPTION,
     LIST_BACKGROUND_TASKS_DESCRIPTION,
+    READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
     format_background_completion_notice,
 )
@@ -234,6 +235,10 @@ class Agent(Runnable):
     background_task_retention_secs: float = DEFAULT_BG_TASK_RETENTION_SECS
     """Drop finished task records from the session bag after this many seconds
     (default 300). ``0`` = keep forever. Env: ``TIMBAL_BG_TASK_RETENTION_SECS``."""
+    background_transcript_tool: bool = False
+    """When True, register ``read_background_transcript`` for the LLM once this
+    session has background tasks. Default off — summaries via
+    ``get_background_task`` are enough for most agents."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -1051,11 +1056,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         store = current_background_store()
         if store is not None and len(store) > 0:
-            for name, description, handler in (
+            bg_tools: list[tuple[str, str, Any]] = [
                 ("get_background_task", GET_BACKGROUND_TASK_DESCRIPTION, self.get_background_task),
                 ("list_background_tasks", LIST_BACKGROUND_TASKS_DESCRIPTION, self.list_background_tasks),
                 ("cancel_background_task", CANCEL_BACKGROUND_TASK_DESCRIPTION, self.cancel_background_task),
-            ):
+            ]
+            if self.background_transcript_tool:
+                bg_tools.append(
+                    (
+                        "read_background_transcript",
+                        READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
+                        self.read_background_transcript,
+                    )
+                )
+            for name, description, handler in bg_tools:
                 bg_tool = Tool(name=name, description=description, handler=handler)
                 bg_tool.nest(self._path)
                 _register(bg_tool)

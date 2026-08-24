@@ -414,7 +414,7 @@ Tool(name="build", handler=..., background_mode="always",
 ```
 
 - Tasks live on a `BackgroundTaskStore` bound to the `RunContext`, inherited across sequential turns via `parent_id`. Concurrent runs of the same Agent get isolated stores (no shared `parent_id`), so a foreign `task_id` is `not_found`. Process-local — does not survive a restart.
-- Once *this session* has a task, the agent auto-gains `get_background_task` / `list_background_tasks` / `cancel_background_task`.
+- Once *this session* has a task, the agent auto-gains `get_background_task` / `list_background_tasks` / `cancel_background_task`. Opt in to `read_background_transcript` with `background_transcript_tool=True`.
 - The log is peekable, not consume-once: the parent agent and a frontend can both watch one child. `record.log.subscribe(after=)` replays then streams live.
 - `get_background_task` returns `{status, task_id, name, title, input, started_at, summary: {text, phase, pct, last_tool, tools_in_flight, event_count}, transcript_cursor}` (+ `result`/`error` when done). `summary.text` is capped — for briefing, not for dumping a build into context.
 - Cancel stops in-flight work: the Task is cancelled *and* the handler generator is closed (an async gen suspended at a yield would otherwise never run its `finally`), then `on_background_cancel` fires for work the loop can't reach.
