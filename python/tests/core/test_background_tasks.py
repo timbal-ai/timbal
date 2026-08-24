@@ -2384,6 +2384,54 @@ class TestWaitForBackground:
         assert snap["result"] == "done"
 
 
+class TestBackgroundEventLogSubscribe:
+    """Unit tests for :meth:`BackgroundEventLog.subscribe`."""
+
+    @pytest.mark.asyncio
+    async def test_subscribe_gapped_yields_sentinel_and_live_events(self):
+        from timbal.state.background import BACKGROUND_LOG_GAPPED
+
+        log = BackgroundEventLog(max_events=2, max_bytes=None)
+        log.put_nowait("a")
+        log.put_nowait("b")
+        log.put_nowait("c")  # forgotten_through=1, buffer ["b", "c"]
+
+        collected: list[Any] = []
+
+        async def consume() -> None:
+            async for event in log.subscribe(after=0):
+                collected.append(event)
+                if event == "live":
+                    log.close()
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.02)
+        log.put_nowait("live")
+        await asyncio.wait_for(task, timeout=1.0)
+
+        assert collected[0] is BACKGROUND_LOG_GAPPED
+        assert collected[1:] == ["b", "c", "live"]
+
+    @pytest.mark.asyncio
+    async def test_subscribe_not_gapped_replays_from_after(self):
+        log = BackgroundEventLog(max_events=2, max_bytes=None)
+        log.put_nowait("a")
+        log.put_nowait("b")
+        log.put_nowait("c")
+
+        collected: list[Any] = []
+
+        async def consume() -> None:
+            async for event in log.subscribe(after=2):
+                collected.append(event)
+                log.close()
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(task, timeout=1.0)
+
+        assert collected == ["c"]
+
+
 class TestBackgroundEventLogWait:
     """Unit tests for :meth:`BackgroundEventLog.wait`."""
 

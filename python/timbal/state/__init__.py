@@ -21,6 +21,9 @@ from contextvars import ContextVar
 from typing import Any
 
 from .background import (
+    BACKGROUND_LOG_GAPPED as BACKGROUND_LOG_GAPPED,
+)
+from .background import (
     cancel_background_task as cancel_background_task,
 )
 from .background import (
