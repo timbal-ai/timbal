@@ -1084,11 +1084,42 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return tool
 
     @staticmethod
-    def _link_tool_call_span(event: Any, tool_call: ToolUseContent) -> None:
-        """Link the LLM tool_call id to the tool's span for memory resolution."""
+    def _prepare_multiplex_event(
+        event: Any,
+        tool_call: ToolUseContent,
+        tool_span_call_id: str | None,
+        tool_span_parent_call_id: str | None,
+    ) -> tuple[Any, str | None, str | None]:
+        """Link tool_call_id, capture the tool span, adopt foreign native events.
+
+        Ordinary tools: after the Runnable START, every event already shares that
+        call_id — early return, no dict writes. Nested runnables (agent-as-tool)
+        keep their in-trace call_ids. Only BaseEvents whose call_id is absent
+        from ``_trace`` (coding harness) are rewritten onto the tool span for FE
+        grouping.
+        """
         if event.type == "START":
-            tool_call_span = get_run_context()._trace[event.call_id]
-            tool_call_span.metadata["tool_call_id"] = tool_call.id
+            span = get_run_context()._trace.get(event.call_id)
+            if span is not None:
+                span.metadata["tool_call_id"] = tool_call.id
+                if tool_span_call_id is None:
+                    return event, span.call_id, span.parent_call_id
+                return event, tool_span_call_id, tool_span_parent_call_id
+            # Foreign START (not in this run's trace).
+            if tool_span_call_id is not None:
+                event.call_id = tool_span_call_id
+                event.parent_call_id = tool_span_parent_call_id
+            return event, tool_span_call_id, tool_span_parent_call_id
+
+        # Hot path: same call_id as the tool span (plain tools, tool's own deltas).
+        if tool_span_call_id is None or event.call_id == tool_span_call_id:
+            return event, tool_span_call_id, tool_span_parent_call_id
+
+        # Different call_id: nested runnable (in trace) vs native harness (not).
+        if event.call_id not in get_run_context()._trace:
+            event.call_id = tool_span_call_id
+            event.parent_call_id = tool_span_parent_call_id
+        return event, tool_span_call_id, tool_span_parent_call_id
 
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
@@ -1107,13 +1138,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # so detect the still-pending cancel request and re-raise before
             # forwarding post-cancel events (keeps LLM-output salvage semantics).
             current_task = asyncio.current_task()
+            tool_span_call_id: str | None = None
+            tool_span_parent_call_id: str | None = None
             try:
                 # Raw stream: the collector wrapper is only needed at the public
                 # API boundary; internal consumers forward events themselves.
                 async for event in tool._stream(**tool_call.input):
                     if current_task is not None and current_task.cancelling():
                         raise asyncio.CancelledError
-                    self._link_tool_call_span(event, tool_call)
+                    event, tool_span_call_id, tool_span_parent_call_id = self._prepare_multiplex_event(
+                        event,
+                        tool_call,
+                        tool_span_call_id,
+                        tool_span_parent_call_id,
+                    )
                     yield tool_call, event
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
@@ -1127,13 +1165,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tasks = []
 
         async def consume_tool(tool_call: ToolUseContent):
+            tool_span_call_id: str | None = None
+            tool_span_parent_call_id: str | None = None
             try:
                 tool = self._resolve_tool_for_call(tools, tool_call)
                 if tool is None:
                     queue.put_nowait((tool_call, self._build_unknown_tool_event(tool_call, tools)))
                     return
                 async for event in tool._stream(**tool_call.input):
-                    self._link_tool_call_span(event, tool_call)
+                    event, tool_span_call_id, tool_span_parent_call_id = self._prepare_multiplex_event(
+                        event,
+                        tool_call,
+                        tool_span_call_id,
+                        tool_span_parent_call_id,
+                    )
                     queue.put_nowait((tool_call, event))
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
@@ -1308,6 +1353,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
+                return
+            # Native-event handlers (coding harness) forward their own OutputEvent
+            # under the tool path. Only the Runnable-emitted completion (same
+            # run_id as this agent turn) should become a tool_result — otherwise
+            # we double-append and break the next LLM call.
+            if event.run_id != run_context.id:
                 return
             if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
                 # Gated (approval) or suspended (input_required) tool: leave the

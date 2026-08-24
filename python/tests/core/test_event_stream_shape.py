@@ -250,6 +250,12 @@ class TestNestedGrandchildStream:
         for i, e in enumerate(events):
             if e.path == "main_agent.specialist.llm":
                 assert sub_start < i < sub_output, _shape(events)
+        # Nested call_ids must stay distinct — multiplex must not flatten them onto
+        # the tool span (that rewrite is only for foreign native-event call_ids).
+        specialist_start = events[sub_start]
+        nested_llm = next(e for e in events if e.path == "main_agent.specialist.llm" and e.type == "START")
+        assert nested_llm.call_id != specialist_start.call_id
+        assert nested_llm.parent_call_id == specialist_start.call_id
 
     async def test_workflow_in_workflow_grandchild_events_surface(self):
         def leaf(x: int = 1) -> int:

@@ -733,6 +733,58 @@ class TestBackgroundMultitask:
         assert get_background_task(task_id)["cursor_agent_id"] == "cursor-agent-1"
 
     @pytest.mark.asyncio
+    async def test_foreground_native_event_tool_does_not_keyerror(self):
+        """Foreground builder yielding foreign-call_id BaseEvents must not KeyError.
+
+        Regression: ``_link_tool_call_span`` indexed ``_trace[event.call_id]`` on
+        every START. Harness StartEvents mint their own call_id, so the first
+        yielded event crashed the agent. Background spawn avoided the path;
+        ``run_in_background=false`` (schema default) did not.
+        """
+        memory_snapshots: list[list[Message]] = []
+
+        def _capture_memory() -> None:
+            memory_snapshots.append(list(get_run_context().current_span().memory))
+
+        parent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("builder", {"prompt": "harness"}, run_in_background=False),
+                    "Built.",
+                ]
+            ),
+            tools=[Tool(name="builder", handler=_fake_event_builder, background_mode="auto")],
+            post_hook=_capture_memory,
+        )
+
+        events = [event async for event in parent(prompt="build")]
+        result = next(e for e in events if isinstance(e, OutputEvent) and e.path == "composer")
+        assert result.status.code == "success"
+        assert_has_output_event(result)
+
+        # Tool Runnable START is first; harness events are rewritten onto its call_id.
+        tool_starts = [e for e in events if isinstance(e, StartEvent) and e.path == "composer.builder"]
+        assert tool_starts
+        tool_span_call_id = tool_starts[0].call_id
+        assert tool_span_call_id != "child-call-1"
+
+        harness_events = [e for e in events if getattr(e, "run_id", None) == CHILD_RUN_ID]
+        assert harness_events, "harness BaseEvents must reach the parent stream"
+        assert all(e.call_id == tool_span_call_id for e in harness_events)
+
+        # Harness OutputEvent shares the tool path but must not become a second tool_result.
+        assert memory_snapshots
+        tool_results = [
+            block
+            for msg in memory_snapshots[-1]
+            if msg.role == "tool"
+            for block in msg.content
+            if getattr(block, "type", None) == "tool_result"
+        ]
+        assert len(tool_results) == 1
+
+    @pytest.mark.asyncio
     async def test_agent_as_tool_background(self):
         """5.5.4 — child Agent with its own tools, parent detaches, parent peeks."""
 
