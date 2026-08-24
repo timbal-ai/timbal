@@ -7,7 +7,7 @@ Public API:
     - get_run_context(): Retrieves the current run context.
     - get_or_create_run_context(): Retrieves the current run context, creating a new one if necessary.
     - get_background_task / list_background_tasks / cancel_background_task /
-      read_background_transcript: session-scoped background children.
+      read_background_transcript / wait_for_background: session-scoped background children.
 
 The context is typically managed automatically by the framework. Advanced users
 may need to set the context manually when creating custom execution flows.
@@ -31,6 +31,9 @@ from .background import (
 )
 from .background import (
     read_background_transcript as read_background_transcript,
+)
+from .background import (
+    wait_for_background as wait_for_background,
 )
 from .context import RunContext
 

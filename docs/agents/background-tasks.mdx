@@ -48,9 +48,30 @@ Background tools return immediately with a task handle:
 {"task_id": "k4d9x2mq7c1a", "status": "running"}
 ```
 
-Once this session has at least one background task, the agent automatically gains three tools — `get_background_task`, `list_background_tasks`, and `cancel_background_task` — so it can brief the user or stop a child on a follow-up turn without you wiring anything.
+Once this session has at least one background task, the agent automatically gains three tools — `get_background_task`, `list_background_tasks`, and `cancel_background_task` — so it can brief the user or stop a child on a follow-up turn without you wiring anything. Set `background_transcript_tool=True` on the Agent to also expose `read_background_transcript` for paged raw event replay (off by default).
 
 `get_background_task` **peeks**; it does not drain. Calling it twice returns the same thing, so the agent polling a child never steals events from a frontend streaming the same child.
+
+## Completion notifications
+
+When a background child reaches a terminal status (`completed`, `error`, `cancelled`, `timed_out`, or `stalled`), the session store queues a one-shot notice. At the **start of the next parent turn** — not mid-turn while the parent is still talking — the agent drains that inbox and injects a synthetic user message into memory so the LLM learns without polling:
+
+```text
+Background task(s) finished since your last turn. ...
+
+<background_task_completed>
+task_id: k4d9x2mq7c1a
+name: build_site
+title: Build the marketing site
+status: completed
+result: ...
+summary: ...
+</background_task_completed>
+```
+
+Notices are lean (short summary / result preview, error string if any) — not full transcripts. After drain they are not re-injected; `get_background_task` still peeks the full snapshot. Concurrent parent runs without a shared `parent_id` keep isolated inboxes.
+
+If the model already polls via the auto-registered `get_background_task` / `list_background_tasks` tools and sees a terminal status, that peek **acks** the notice — the next turn will not fire a duplicate `<background_task_completed>` for a completion the agent already handled. App/Python peeks (`timbal.state.get_background_task`) do not ack by default, so UIs can inspect without stealing the LLM inbox.
 
 ```python
 from timbal.state import get_background_task
@@ -60,7 +81,7 @@ get_background_task("k4d9x2mq7c1a")
 
 ```python
 {
-    "status": "running",           # running | completed | error | cancelled | not_found
+    "status": "running",           # running | completed | error | cancelled | timed_out | stalled | not_found
     "task_id": "k4d9x2mq7c1a",
     "name": "build_site",
     "title": "Build the marketing site",
@@ -68,28 +89,131 @@ get_background_task("k4d9x2mq7c1a")
     "started_at": 1755385200000,   # Unix ms
     "summary": {
         "text": "...",             # trailing assistant text, capped at 1000 chars
-        "tools_in_flight": ["write_file", "bash"],
+        "phase": "processing",     # last stage label, heuristic phase, or terminal status
+        "pct": 50,                 # 0–100 when the child reports progress (else null)
+        "last_tool": "write_file", # most recent tool_use name, if any
+        "tools_in_flight": ["write_file", "bash"],  # open tool calls not yet finished
         "event_count": 42,
     },
     "transcript_cursor": 42,       # pass as `after` to read raw events
 }
 ```
 
-The summary is deliberately bounded — it's for briefing the user, not for dumping a long build into the context window. When the task finishes, the snapshot also carries `result` (or `error` on failure). Durable child ids seen on the child's events, such as its `run_id`, are lifted onto the snapshot as they arrive.
+The summary is deliberately bounded — it's for briefing the user, not for dumping a long build into the context window. When the task finishes, the snapshot also carries `result` (or `error` on failure / timeout). Durable child ids seen on the child's events, such as its `run_id`, are lifted onto the snapshot as they arrive.
+
+### Structured progress
+
+Handlers that yield progress dicts (e.g. `{"stage": "processing", "progress": 50}`) surface as `summary.phase` and `summary.pct`. Agent children also expose `summary.last_tool` and `summary.tools_in_flight` (open tool calls inferred from the event log — a tool drops off when its `OutputEvent` arrives). While running with no explicit stage, `phase` falls back to `streaming`, `tool:{name}`, or `running`; on terminal success `phase` becomes `completed` and `pct` is `100`.
+
+## Timeouts
+
+Set `background_timeout` (seconds) on a tool to hard-cap how long a detached child may run. When the deadline hits, the child is cancelled like a user cancel (Task cancel + handler `aclose` + `on_background_cancel`) but reports status `timed_out` so the next-turn completion notice is unambiguous.
+
+```python
+long_running_tool = Tool(
+    handler=slow_operation,
+    background_mode="always",
+    background_timeout=600.0,  # 10 minutes
+)
+```
+
+`None` (default) or a non-positive value means no deadline.
+
+## Stall detection
+
+Set `background_stall_timeout` (seconds) to cancel a child that stops emitting log events — distinct from wall-clock `background_timeout`. The idle timer **resets on every event** (streaming chunks, tool calls, progress dicts), so a long but chatty build stays alive while a hung subprocess does not.
+
+```python
+long_running_tool = Tool(
+    handler=slow_operation,
+    background_mode="always",
+    background_stall_timeout=120.0,  # no events for 2 minutes → stalled
+)
+```
+
+Terminal status is `stalled`. While still running, snapshots expose `summary.seconds_since_event` and `stall_timeout` for UI warnings before the watchdog fires.
+
+## Concurrency and depth caps
+
+Each session bag bounds fan-out so one turn cannot detach unbounded work:
+
+- **Concurrent** — max children whose asyncio.Task is still running (default **20**). Override per Agent with `max_background_concurrent=...` or env `TIMBAL_MAX_CONCURRENT_BACKGROUND` (`0` / `none` / `unlimited` = no cap).
+- **Depth** — max nesting of background spawns (default **unlimited**). `max_background_depth=1` means only top-level code may detach; a background child cannot spawn further background work. Env: `TIMBAL_MAX_BACKGROUND_DEPTH`.
+
+Hitting a cap raises `BackgroundLimitError` (surfaced as a tool error to the LLM) instead of spawning.
+
+```python
+agent = Agent(
+    name="orchestrator",
+    model="...",
+    tools=[Bash("*")],
+    max_background_concurrent=4,
+    max_background_depth=1,
+)
+```
 
 ## Reading the Raw Transcript
 
-For the full event stream, read from a cursor. This does not drain either — the same `after` returns the same events, so it's safe to call from more than one place.
+For the full event stream, read from a logical cursor. This does not drain either — the same `after` returns the same events while they remain in the ring, so it's safe to call from more than one place.
+
+**Python / app code** — always available via `timbal.state.read_background_transcript`. **LLM tool** — opt in with `background_transcript_tool=True` on the Agent (registered alongside the other session background tools once a child exists).
+
+```python
+agent = Agent(
+    name="debugger",
+    model="...",
+    tools=[...],
+    background_transcript_tool=True,
+)
+```
+
+When the ring has dropped older events, `gapped` is `true` and `after` is behind `forgotten_through` — treat that like an expired reconnect, not a silent skip to the new head.
 
 ```python
 from timbal.state import read_background_transcript
 
 page = read_background_transcript("k4d9x2mq7c1a")
-# {"status": "running", "task_id": ..., "events": [...], "cursor": 42}
+# {"status": "running", "task_id": ..., "events": [...], "cursor": 42,
+#  "gapped": false, "forgotten_through": 0}
 
 # Later, pick up where you left off
 page = read_background_transcript("k4d9x2mq7c1a", after=page["cursor"])
 ```
+
+## Waiting for completion
+
+For app code or frontends that want to block instead of polling the agent loop, use `wait_for_background`. It returns the same snapshot as `get_background_task` and does **not** ack completion notices.
+
+```python
+from timbal.state import wait_for_background
+
+# Block until terminal (or timeout)
+snap = await wait_for_background("k4d9x2mq7c1a", timeout=30.0)
+if snap["status"] == "running":
+    ...  # timeout — poll again
+
+# Long-poll until new events land past a cursor (or terminal / timeout)
+snap = await wait_for_background("k4d9x2mq7c1a", after=cursor, timeout=5.0)
+```
+
+Without `after`, the wait is tied to the child's asyncio task finishing. With `after`, it wakes when the append-only log advances, the log closes on completion, or the timeout hits — useful for streaming UIs that already have a `transcript_cursor`.
+
+## Log retention
+
+Each child's event log is a **ring buffer** (defaults: 50k events / 32 MiB — same idea as HTTP `JobStore`). Oldest events drop when over cap; `forgotten_through` is the logical floor. Finished **task records** are removed from the session bag after **300 seconds** by default so long-lived workers do not leak metadata.
+
+Override per Agent:
+
+```python
+agent = Agent(
+    ...,
+    max_background_log_events=10_000,
+    max_background_log_bytes=None,  # unlimited bytes
+    background_task_retention_secs=600,
+)
+```
+
+Env: `TIMBAL_BG_LOG_MAX_EVENTS`, `TIMBAL_BG_LOG_MAX_BYTES`, `TIMBAL_BG_TASK_RETENTION_SECS` (`0` / `none` = unlimited / keep forever).
 
 To follow a child live instead of polling, subscribe to its log. `subscribe` replays from `after` and then yields events as they arrive, so you cannot miss one that lands mid-replay.
 

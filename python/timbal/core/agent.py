@@ -42,9 +42,14 @@ from ..guardrails.types import GuardrailContext, GuardrailStage, Verdict
 from ..state import get_run_context
 from ..state.background import (
     CANCEL_BACKGROUND_TASK_DESCRIPTION,
+    DEFAULT_BG_LOG_MAX_BYTES,
+    DEFAULT_BG_LOG_MAX_EVENTS,
+    DEFAULT_BG_TASK_RETENTION_SECS,
     GET_BACKGROUND_TASK_DESCRIPTION,
     LIST_BACKGROUND_TASKS_DESCRIPTION,
+    READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
+    format_background_completion_notice,
 )
 from ..types.content import (
     CustomContent,
@@ -212,6 +217,28 @@ class Agent(Runnable):
     Mutually exclusive with skills_include."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
+    max_background_concurrent: int | None = 20
+    """Max in-flight background children for this agent's session bag.
+    ``None`` = unlimited. Applied at turn start; also settable via
+    ``TIMBAL_MAX_CONCURRENT_BACKGROUND`` when no Agent override is active yet."""
+    max_background_depth: int | None = None
+    """Max background spawn nesting depth. ``None`` = unlimited.
+    ``1`` allows only top-level (non-background) code to detach children —
+    a background child cannot spawn further background work.
+    Override with ``TIMBAL_MAX_BACKGROUND_DEPTH``."""
+    max_background_log_events: int | None = DEFAULT_BG_LOG_MAX_EVENTS
+    """Ring-buffer cap on events retained per background child (default 50_000).
+    ``None`` = unlimited. Env: ``TIMBAL_BG_LOG_MAX_EVENTS``."""
+    max_background_log_bytes: int | None = DEFAULT_BG_LOG_MAX_BYTES
+    """Ring-buffer byte cap per background child (default 32 MiB).
+    ``None`` = unlimited. Env: ``TIMBAL_BG_LOG_MAX_BYTES``."""
+    background_task_retention_secs: float = DEFAULT_BG_TASK_RETENTION_SECS
+    """Drop finished task records from the session bag after this many seconds
+    (default 300). ``0`` = keep forever. Env: ``TIMBAL_BG_TASK_RETENTION_SECS``."""
+    background_transcript_tool: bool = False
+    """When True, register ``read_background_transcript`` for the LLM once this
+    session has background tasks. Default off — summaries via
+    ``get_background_task`` are enough for most agents."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -793,6 +820,46 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 await self._compact_on_resume(current_span, prev_usage=previous_span.usage)
 
+    def _inject_background_completions(self, current_span: Any) -> None:
+        """Drain session completion inbox into memory at turn start (Claude-style).
+
+        Delivered between turns only — never mid-loop — so the parent is not
+        interrupted while talking. Skipped for subagents and approval/suspend
+        resumes (must not insert a user message between tool_use and tool_result).
+        Peek APIs are unchanged; notices are one-shot after drain.
+        """
+        if current_span.parent_call_id is not None:
+            return
+        if self._find_pending_tool_uses(current_span.memory):
+            return
+        store = current_background_store()
+        if store is None:
+            return
+        notifications = store.drain_completions()
+        if not notifications:
+            return
+        notice = format_background_completion_notice(notifications)
+        memory = current_span.memory
+        # Sit immediately before the current user prompt so history stays
+        # [...prior turns..., completion notice, user prompt].
+        if memory and memory[-1].role == "user":
+            memory.insert(-1, notice)
+        else:
+            memory.append(notice)
+
+    def _apply_background_limits(self, run_context: Any) -> None:
+        """Push Agent concurrent/depth caps onto the session BG store."""
+        from ..state.background import apply_background_limits
+
+        apply_background_limits(
+            run_context,
+            max_concurrent=self.max_background_concurrent,
+            max_depth=self.max_background_depth,
+            max_log_events=self.max_background_log_events,
+            max_log_bytes=self.max_background_log_bytes,
+            task_retention_secs=self.background_task_retention_secs,
+        )
+
     async def _compact_preserving_last_assistant(self, current_span: Any, *, prev_usage: dict | None) -> None:
         """Compact memory while protecting the trailing assistant message (and anything after
         it) from the compactor.
@@ -989,11 +1056,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         store = current_background_store()
         if store is not None and len(store) > 0:
-            for name, description, handler in (
+            bg_tools: list[tuple[str, str, Any]] = [
                 ("get_background_task", GET_BACKGROUND_TASK_DESCRIPTION, self.get_background_task),
                 ("list_background_tasks", LIST_BACKGROUND_TASKS_DESCRIPTION, self.list_background_tasks),
                 ("cancel_background_task", CANCEL_BACKGROUND_TASK_DESCRIPTION, self.cancel_background_task),
-            ):
+            ]
+            if self.background_transcript_tool:
+                bg_tools.append(
+                    (
+                        "read_background_transcript",
+                        READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
+                        self.read_background_transcript,
+                    )
+                )
+            for name, description, handler in bg_tools:
                 bg_tool = Tool(name=name, description=description, handler=handler)
                 bg_tool.nest(self._path)
                 _register(bg_tool)
@@ -1311,11 +1387,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._resolve_system_prompt()
 
         await self.resolve_memory()
+        # Session BG caps (concurrent / depth) before tools can spawn this turn.
+        self._apply_background_limits(run_context)
+        # After memory is assembled (and before the dump): push any background
+        # completions that finished since the last turn into the conversation.
+        self._inject_background_completions(current_span)
 
         prev_dump = getattr(current_span, "_prev_memory_dump", None)
         if prev_dump is not None and "compaction" not in current_span.metadata:
             # Reuse the already-serialized previous messages; only dump new ones
-            # (prompt + any synthetic tool results added by _synthesize_missing_tool_results).
+            # (prompt + any synthetic tool results added by _synthesize_missing_tool_results,
+            # plus background completion notices injected above).
             # If compaction ran it rewrites memory, invalidating the cached dump.
             new_messages = current_span.memory[len(prev_dump) :]
             current_span._memory_dump = prev_dump + await dump(new_messages)

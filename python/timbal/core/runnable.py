@@ -308,6 +308,16 @@ class Runnable(ABC, BaseModel):
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
 
+    background_timeout: float | None = None
+    """Optional wall-clock seconds before a background child is cancelled as
+    ``timed_out``. ``None`` / non-positive = no deadline. Only applies when the
+    runnable actually detaches (``background_mode`` / ``run_in_background``)."""
+
+    background_stall_timeout: float | None = None
+    """Optional seconds without log events before a background child is
+    cancelled as ``stalled``. Resets on every emitted event. Distinct from
+    ``background_timeout`` (wall-clock). ``None`` / non-positive = disabled."""
+
     on_background_cancel: Callable[..., Any] | None = Field(default=None, exclude=True)
     """Optional hook fired when ``cancel_background_task`` cancels this child.
     Receives the ``BackgroundTask`` record (has ``task_id``, ``metadata`` with
@@ -834,16 +844,23 @@ class Runnable(ABC, BaseModel):
         return self.anthropic_schema
 
     def get_background_task(self, task_id: str) -> dict[str, Any]:
-        """Peek a summary of a session-scoped background task. Does not drain."""
+        """Peek a summary of a session-scoped background task. Does not drain.
+
+        Acks a pending completion notice when the child is already terminal so
+        the next turn does not re-announce a status the model just fetched.
+        """
         from ..state.background import get_background_task as _get
 
-        return _get(task_id)
+        return _get(task_id, ack_completion=True)
 
     def list_background_tasks(self) -> list[dict[str, Any]]:
-        """List background tasks for the current session."""
+        """List background tasks for the current session.
+
+        Acks completion notices for any terminal children returned.
+        """
         from ..state.background import list_background_tasks as _list
 
-        return _list()
+        return _list(ack_completion=True)
 
     def cancel_background_task(self, task_id: str) -> dict[str, Any]:
         """Cancel a running background task in the current session."""
@@ -856,6 +873,18 @@ class Runnable(ABC, BaseModel):
         from ..state.background import read_background_transcript as _read
 
         return _read(task_id, after=after)
+
+    async def wait_for_background(
+        self,
+        task_id: str,
+        *,
+        timeout: float | None = None,
+        after: int | None = None,
+    ) -> dict[str, Any]:
+        """Block until a session background child is terminal or new events arrive."""
+        from ..state.background import wait_for_background as _wait
+
+        return await _wait(task_id, timeout=timeout, after=after)
 
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
         """Execute a runtime callable handling async context automatically.
@@ -1525,14 +1554,26 @@ class Runnable(ABC, BaseModel):
         across sequential turns via ``parent_id``). They are **not** yielded
         back onto the parent stream after detach.
         """
-        from ..state.background import register_background_task
+        from ..state.background import (
+            ensure_background_store,
+            get_background_depth,
+            register_background_task,
+            reset_background_depth,
+            set_background_depth,
+        )
 
         parent_span = run_context.parent_span()
         if not parent_span:
             raise ValueError("Parent span not found. Cannot run in background.")
+
+        store = ensure_background_store(run_context)
+        depth = get_background_depth()
+        # Reserve before create_task so parallel tool spawns cannot overrun the cap.
+        store.begin_spawn(depth)
         record_box: list[Any] = []
 
         async def _bg_handler_execution():
+            token = set_background_depth(depth + 1)
             record = record_box[0]
             output = None
             try:
@@ -1555,16 +1596,29 @@ class Runnable(ABC, BaseModel):
             except asyncio.CancelledError:
                 raise
             finally:
+                reset_background_depth(token)
                 record.log.close()
             return output
 
-        task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
-        record = register_background_task(
-            name=self.name,
-            input=input,
-            task=task,
-            on_cancel=self.on_background_cancel,
-        )
+        task: asyncio.Task | None = None
+        registered = False
+        try:
+            task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
+            record = register_background_task(
+                name=self.name,
+                input=input,
+                task=task,
+                on_cancel=self.on_background_cancel,
+                timeout=self.background_timeout,
+                stall_timeout=self.background_stall_timeout,
+            )
+            registered = True
+        except BaseException:
+            if not registered:
+                store.abort_spawn()
+                if task is not None:
+                    task.cancel()
+            raise
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}
 

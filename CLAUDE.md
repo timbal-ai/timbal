@@ -414,10 +414,12 @@ Tool(name="build", handler=..., background_mode="always",
 ```
 
 - Tasks live on a `BackgroundTaskStore` bound to the `RunContext`, inherited across sequential turns via `parent_id`. Concurrent runs of the same Agent get isolated stores (no shared `parent_id`), so a foreign `task_id` is `not_found`. Process-local — does not survive a restart.
-- Once *this session* has a task, the agent auto-gains `get_background_task` / `list_background_tasks` / `cancel_background_task`.
+- Once *this session* has a task, the agent auto-gains `get_background_task` / `list_background_tasks` / `cancel_background_task`. Opt in to `read_background_transcript` with `background_transcript_tool=True`.
 - The log is peekable, not consume-once: the parent agent and a frontend can both watch one child. `record.log.subscribe(after=)` replays then streams live.
-- `get_background_task` returns `{status, task_id, name, title, input, started_at, summary: {text, tools_in_flight, event_count}, transcript_cursor}` (+ `result`/`error` when done). `summary.text` is capped — for briefing, not for dumping a build into context.
+- `get_background_task` returns `{status, task_id, name, title, input, started_at, summary: {text, phase, pct, last_tool, tools_in_flight, event_count}, transcript_cursor}` (+ `result`/`error` when done). `summary.text` is capped — for briefing, not for dumping a build into context.
+- `background_timeout` → store enforces wall-clock deadline; status `timed_out`. `background_stall_timeout` → no log events within window; status `stalled` (timer resets on every event).
 - Cancel stops in-flight work: the Task is cancelled *and* the handler generator is closed (an async gen suspended at a yield would otherwise never run its `finally`), then `on_background_cancel` fires for work the loop can't reach.
+- `wait_for_background(task_id, timeout=..., after=...)` blocks until terminal (no `after`) or until the log advances past `after` — app/frontends; does not ack completion notices.
 
 ---
 
