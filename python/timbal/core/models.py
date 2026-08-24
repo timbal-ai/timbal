@@ -119,6 +119,7 @@ Model = Literal[
     "google/gemini-2.5-flash-lite",
     "google/gemini-2.5-flash-image",
     "google/gemini-2.5-flash-preview-tts",
+    "xai/grok-4.6",
     "xai/grok-4.5",
     "xai/grok-4.3",
     "groq/llama-3.3-70b-versatile",

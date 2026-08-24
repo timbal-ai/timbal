@@ -5,9 +5,11 @@ on:
     branches: [main]
     paths:
       - "python/**"
+      - "docs/models/**"
       - "pyproject.toml"
       - "uv.lock"
       - "scripts/audit_models.py"
+      - "scripts/generate_models.py"
       - ".github/workflows/ci.yml"
   workflow_dispatch:
     inputs:

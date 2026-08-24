@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -34,6 +35,10 @@ import yaml
 
 ROOT = Path(__file__).parent.parent
 MODELS_YAML = ROOT / "python/timbal/models.yaml"
+MODELS_PY = ROOT / "python/timbal/core/models.py"
+DOCS_MODELS_DIR = ROOT / "docs/models"
+
+_LITERAL_PATTERN = re.compile(r"Model = Literal\[(.*?)\]", re.DOTALL)
 
 STANDARD_CAPABILITIES = frozenset(
     {"vision", "tools", "reasoning", "audio", "video", "image_generation"}
@@ -161,6 +166,56 @@ def _offline_audit(models: list[dict]) -> list[str]:
         if m.get("requires_activation") and m.get("dedicated_only"):
             errors.append(f"model has both requires_activation and dedicated_only: {mid}")
 
+    return errors
+
+
+def _literal_model_ids() -> list[str]:
+    source = MODELS_PY.read_text()
+    match = _LITERAL_PATTERN.search(source)
+    if not match:
+        raise ValueError(f"could not find Model = Literal[...] block in {MODELS_PY}")
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def _check_models_py_sync(models: list[dict]) -> list[str]:
+    """Ensure core/models.py Literal matches models.yaml (ids and order)."""
+    errors: list[str] = []
+    yaml_ids = [m["id"] for m in models]
+    try:
+        literal_ids = _literal_model_ids()
+    except ValueError as exc:
+        return [str(exc)]
+
+    yaml_set = set(yaml_ids)
+    literal_set = set(literal_ids)
+    for mid in yaml_ids:
+        if mid not in literal_set:
+            errors.append(f"models.yaml id missing from core/models.py Literal: {mid}")
+    for mid in literal_ids:
+        if mid not in yaml_set:
+            errors.append(f"core/models.py Literal id missing from models.yaml: {mid}")
+    if not errors and yaml_ids != literal_ids:
+        errors.append(
+            "models.yaml and core/models.py have the same ids but different order — run scripts/generate_models.py"
+        )
+    return errors
+
+
+def _check_docs_sync(models: list[dict]) -> list[str]:
+    """Ensure every catalog model appears in docs/models/{provider}.mdx."""
+    errors: list[str] = []
+    doc_cache: dict[str, str] = {}
+    for m in models:
+        provider = m["provider"]
+        doc_path = DOCS_MODELS_DIR / f"{provider}.mdx"
+        if not doc_path.exists():
+            errors.append(f"no docs file for provider {provider} (model {m['id']})")
+            continue
+        if provider not in doc_cache:
+            doc_cache[provider] = doc_path.read_text()
+        if f"`{m['id']}`" not in doc_cache[provider]:
+            rel = doc_path.relative_to(ROOT)
+            errors.append(f"model id not documented in {rel}: {m['id']}")
     return errors
 
 
@@ -516,12 +571,14 @@ def main() -> int:
         return 1
 
     errors = _offline_audit(models)
+    errors.extend(_check_models_py_sync(models))
+    errors.extend(_check_docs_sync(models))
     if errors:
         print("OFFLINE ERRORS:")
         for err in errors:
             print(f"  ✗ {err}")
     else:
-        print(f"Offline checks passed ({len(models)} models)")
+        print(f"Offline checks passed ({len(models)} models; models.py + docs in sync)")
 
     exit_code = 1 if errors else 0
 
