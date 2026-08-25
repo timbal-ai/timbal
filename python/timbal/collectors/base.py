@@ -101,20 +101,23 @@ class BaseCollector(ABC):
         await self._async_gen.aclose()
         self._collected = True
 
-    def background(self) -> BackgroundRequest:
-        """Move the sole active eligible foreground child to the background.
+    def background(self, call_id: str | None = None) -> BackgroundRequest:
+        """Move one active eligible foreground child to the background.
 
         This is a cooperative handoff: a streaming child switches ownership at
         its next emitted event. The returned request resolves to the usual
         ``{"task_id", "status": "running"}`` placeholder after cutover.
-        Keep consuming this collector while awaiting the future from another
-        task; awaiting it inline pauses the producer and therefore the handoff.
+        Omit ``call_id`` when exactly one ``background_mode="auto"`` child is
+        in flight; pass it (from that child's ``START`` / ``DELTA``) when
+        several are. Keep consuming this collector while awaiting the future
+        from another task; awaiting it inline pauses the producer and
+        therefore the handoff.
         """
         if self._collected:
             raise RuntimeError("This run has already finished.")
         if self._background_handoff is None:
             raise RuntimeError("This collector does not support foreground-to-background handoff.")
-        future = self._background_handoff.request()
+        future = self._background_handoff.request(call_id=call_id)
         consumer_task = self._consumer_task or asyncio.current_task()
         return BackgroundRequest(future, consumer_task)
     

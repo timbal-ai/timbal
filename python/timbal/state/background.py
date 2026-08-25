@@ -98,12 +98,14 @@ class BackgroundHandoff:
         if self.target_call_id == call_id:
             self.fail(RuntimeError(f"'{name}' completed before it could move to the background."))
 
-    def request(self) -> asyncio.Future[dict[str, Any]]:
-        """Target the sole active eligible foreground runnable.
+    def request(self, call_id: str | None = None) -> asyncio.Future[dict[str, Any]]:
+        """Target one active eligible foreground runnable.
 
-        Requests are deliberately explicit and fail fast when there is no
-        unambiguous target. The returned future resolves after the foreground
-        snapshot is saved and the background continuation owns the iterator.
+        Omit ``call_id`` only when a single child is active — that fails fast
+        if the target would be ambiguous. Pass ``call_id`` (from the child's
+        ``START`` / ``DELTA``) to pick among several. The returned future
+        resolves after the foreground snapshot is saved and the background
+        continuation owns the iterator.
         """
         if self._closed:
             raise RuntimeError("This run has already finished.")
@@ -114,12 +116,21 @@ class BackgroundHandoff:
                 "No active foreground runnable can move to the background. "
                 "Only streaming runnables with background_mode='auto' are eligible."
             )
-        if len(self._active) != 1:
-            names = ", ".join(sorted(self._active.values()))
-            raise RuntimeError(
-                f"Cannot choose a background target while {len(self._active)} eligible runnables are active: {names}."
-            )
-        self.target_call_id = next(iter(self._active))
+        if call_id is not None:
+            if call_id not in self._active:
+                names = ", ".join(sorted(self._active.values())) or "none"
+                raise RuntimeError(
+                    f"No active foreground runnable with call_id {call_id!r}. "
+                    f"Eligible: {names}."
+                )
+            self.target_call_id = call_id
+        else:
+            if len(self._active) != 1:
+                names = ", ".join(sorted(self._active.values()))
+                raise RuntimeError(
+                    f"Cannot choose a background target while {len(self._active)} eligible runnables are active: {names}."
+                )
+            self.target_call_id = next(iter(self._active))
         loop = asyncio.get_running_loop()
         self._result = loop.create_future()
         return self._result

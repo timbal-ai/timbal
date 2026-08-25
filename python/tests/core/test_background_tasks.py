@@ -2659,6 +2659,84 @@ class TestForegroundBackgroundHandoff:
         assert list_background_tasks() == []
 
     @pytest.mark.asyncio
+    async def test_call_id_selects_one_of_several_eligible_tools(self):
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = 0
+
+        async def streaming(name: str) -> AsyncGenerator[TextDelta, None]:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+            yield TextDelta(id=name, text_delta=f"{name}-fg")
+            await release.wait()
+            yield TextDelta(id=name, text_delta=f"{name}-cut")
+            yield TextDelta(id=name, text_delta=f"{name}-bg")
+
+        agent = Agent(
+            name="targeted_handoff_agent",
+            model=TestModel(
+                responses=[
+                    _tool_calls(
+                        ("streaming", {"name": "a"}, "a", False),
+                        ("streaming", {"name": "b"}, "b", False),
+                    ),
+                    "done",
+                ]
+            ),
+            tools=[Tool(name="streaming", handler=streaming, background_mode="auto")],
+            tracing_provider=None,
+        )
+        stream = agent(prompt="go")
+        handoff = None
+        parked_call_id = None
+        parent_text: list[str] = []
+
+        async for event in stream:
+            if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta):
+                parent_text.append(event.item.text_delta)
+                if handoff is None:
+                    parked_call_id = event.call_id
+                    handoff = stream.background(call_id=event.call_id)
+                    release.set()
+
+        assert handoff is not None
+        placeholder = await handoff
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+        transcript = read_background_transcript(placeholder["task_id"])
+        background_text = [
+            event["item"]["text_delta"]
+            for event in transcript["events"]
+            if event.get("type") == "DELTA" and event.get("item", {}).get("type") == "text_delta"
+        ]
+
+        assert parked_call_id is not None
+        assert snap["status"] == "completed"
+        assert any(text.endswith("-bg") for text in background_text)
+        assert any(text.endswith("-fg") for text in parent_text)
+        assert len(list_background_tasks()) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_call_id_is_rejected(self):
+        release = asyncio.Event()
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="only")
+            await release.wait()
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        seen = False
+        async for event in stream:
+            if isinstance(event, DeltaEvent):
+                with pytest.raises(RuntimeError, match="call_id 'nope'"):
+                    stream.background(call_id="nope")
+                seen = True
+                release.set()
+        assert seen
+
+    @pytest.mark.asyncio
     async def test_handler_error_after_handoff_is_background_error_only(self):
         async def streaming() -> AsyncGenerator[TextDelta, None]:
             yield TextDelta(id="s", text_delta="before")
