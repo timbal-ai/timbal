@@ -215,7 +215,7 @@ agent = Agent(
 
 Env: `TIMBAL_BG_LOG_MAX_EVENTS`, `TIMBAL_BG_LOG_MAX_BYTES`, `TIMBAL_BG_TASK_RETENTION_SECS` (`0` / `none` = unlimited / keep forever).
 
-To follow a child live instead of polling, subscribe to its log. `subscribe` replays from `after` and then yields events as they arrive, so you cannot miss one that lands mid-replay.
+To follow a child live instead of polling, subscribe to its log. `subscribe` replays from `after` and then yields events as they arrive, so you cannot miss one that lands mid-replay. If `after` is behind `forgotten_through` (ring eviction), the iterator yields `BACKGROUND_LOG_GAPPED` once — same signal as `gapped=True` on `read`/`peek` — then replays from the ring head and continues with live events.
 
 ```python
 from timbal.state.background import current_background_store

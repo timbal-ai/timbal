@@ -59,7 +59,12 @@ DEFAULT_BG_TASK_RETENTION_SECS = 300.0
 _STORES_BY_RUN_ID: dict[str, BackgroundTaskStore] = {}
 
 _DONE = object()
+_GAPPED = object()
 _UNSET = object()
+
+# Yielded once by :meth:`BackgroundEventLog.subscribe` when ``after`` is behind
+# ``forgotten_through`` (same gap ``read``/``peek`` report via ``gapped=True``).
+BACKGROUND_LOG_GAPPED = _GAPPED
 
 # Nesting depth of the current coroutine relative to top-level session work.
 # 0 = parent agent/turn; each detached child increments by 1 for its body.
@@ -522,14 +527,24 @@ class BackgroundEventLog:
         return not self._events
 
     async def subscribe(self, after: int = 0) -> AsyncIterator[Any]:
-        """Replay from logical ``after``, then yield live events until :meth:`close`."""
-        if after < self.forgotten_through:
-            return
+        """Replay from logical ``after``, then yield live events until :meth:`close`.
+
+        When ``after < forgotten_through``, yields :data:`BACKGROUND_LOG_GAPPED` once
+        (matching ``gapped=True`` on :meth:`read`/``peek``), replays from the ring
+        head, then continues with live events — never returns an empty iterator.
+        """
+        gapped = after < self.forgotten_through
+        replay_from = self.forgotten_through if gapped else after
         queue: asyncio.Queue = asyncio.Queue()
         self._subscribers.append(queue)
+        # Snapshot before any yield — the ring may trim while the consumer handles
+        # BACKGROUND_LOG_GAPPED, which would make a post-yield offset negative.
+        offset = replay_from - self.forgotten_through
+        replay = list(self._events[offset:])
         try:
-            offset = after - self.forgotten_through
-            for event in self._events[offset:]:
+            if gapped:
+                yield _GAPPED
+            for event in replay:
                 yield event
             while True:
                 event = await queue.get()
