@@ -5,12 +5,47 @@ from functools import wraps
 from typing import Any
 
 
+class BackgroundRequest:
+    """Awaitable result of a cooperative foreground-to-background request."""
+
+    def __init__(self, future: asyncio.Future[dict[str, Any]], consumer_task: asyncio.Task | None) -> None:
+        self._future = future
+        self._consumer_task = consumer_task
+        future.add_done_callback(self._consume_unretrieved_exception)
+
+    @staticmethod
+    def _consume_unretrieved_exception(future: asyncio.Future[dict[str, Any]]) -> None:
+        if not future.cancelled():
+            future.exception()
+
+    def __await__(self):
+        if not self._future.done() and asyncio.current_task() is self._consumer_task:
+            raise RuntimeError(
+                "Cannot await background() from the task consuming this stream. "
+                "Keep consuming, then await the request after the placeholder is emitted."
+            )
+        return self._future.__await__()
+
+    def done(self) -> bool:
+        return self._future.done()
+
+    def result(self) -> dict[str, Any]:
+        return self._future.result()
+
+
 class BaseCollector(ABC):
     """Base abstract class for all event collectors with internal state management."""
     
-    def __init__(self, async_gen: AsyncGenerator[Any, None], **kwargs: Any): # noqa: ARG002
+    def __init__(
+        self,
+        async_gen: AsyncGenerator[Any, None],
+        background_handoff: Any = None,
+        **kwargs: Any,  # noqa: ARG002
+    ):
         self._async_gen = async_gen
         self._collected = False
+        self._background_handoff = background_handoff
+        self._consumer_task: asyncio.Task | None = None
 
     def __aiter__(self):
         """Return the async iterator object (self).
@@ -26,6 +61,7 @@ class BaseCollector(ABC):
         Returns:
             Self as the async iterator
         """
+        self._consumer_task = asyncio.current_task()
         return self
 
     async def __anext__(self):
@@ -64,6 +100,26 @@ class BaseCollector(ABC):
         """
         await self._async_gen.aclose()
         self._collected = True
+
+    def background(self, call_id: str | None = None) -> BackgroundRequest:
+        """Move one active eligible foreground child to the background.
+
+        This is a cooperative handoff: a streaming child switches ownership at
+        its next emitted event. The returned request resolves to the usual
+        ``{"task_id", "status": "running"}`` placeholder after cutover.
+        Omit ``call_id`` when exactly one ``background_mode="auto"`` child is
+        in flight; pass it (from that child's ``START`` / ``DELTA``) when
+        several are. Keep consuming this collector while awaiting the future
+        from another task; awaiting it inline pauses the producer and
+        therefore the handoff.
+        """
+        if self._collected:
+            raise RuntimeError("This run has already finished.")
+        if self._background_handoff is None:
+            raise RuntimeError("This collector does not support foreground-to-background handoff.")
+        future = self._background_handoff.request(call_id=call_id)
+        consumer_task = self._consumer_task or asyncio.current_task()
+        return BackgroundRequest(future, consumer_task)
     
     async def collect(self) -> Any:
         """Collect the final result by consuming the entire stream.

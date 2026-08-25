@@ -1622,6 +1622,114 @@ class Runnable(ABC, BaseModel):
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}
 
+    def _handoff_background_task(
+        self,
+        handler_events: AsyncGenerator[tuple[Event | None, Any, Any], None],
+        input: dict[str, Any],
+        run_context: Any,
+        span: Any,
+        collector: Any,
+    ) -> tuple[dict[str, Any], asyncio.Event, Any]:
+        """Transfer exclusive ownership of a live handler iterator to a child task."""
+        from ..state.background import (
+            ensure_background_store,
+            get_background_depth,
+            register_background_task,
+            reset_background_depth,
+            set_background_depth,
+        )
+
+        store = ensure_background_store(run_context)
+        depth = get_background_depth()
+        store.begin_spawn(depth)
+        start = asyncio.Event()
+        record_box: list[Any] = []
+
+        async def _continue_in_background() -> Any:
+            token = set_background_depth(depth + 1)
+            output = None
+            try:
+                await start.wait()
+                record = record_box[0]
+                record.schedule_stall_watchdog()
+                async for event, final_output, _handler_collector in handler_events:
+                    if event is not None:
+                        record.ingest(event)
+                    if final_output is not None:
+                        output = final_output
+
+                if isinstance(output, OutputEvent):
+                    if output.status.code in {"cancelled", "error"}:
+                        span.status = output.status
+                        span.error = output.error
+                    output = output.output
+                span.output = output
+                if span.status is None:
+                    _emit_default_tool_usage(self)
+
+                set_parent_call_id(span.parent_call_id)
+                set_call_id(span.call_id)
+                if self.post_hook is not None:
+                    await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+                    invalidate_message_dump_caches(span.output)
+                span._output_dump = await dump(span.output)
+                if span.status is None:
+                    stop_reason = output.stop_reason if isinstance(output, Message) else None
+                    span.status = RunStatus(code="success", reason=stop_reason, message=None)
+                return output
+            except asyncio.CancelledError:
+                span.status = RunStatus(code="cancelled", reason="interrupted", message="")
+                raise
+            except Exception as err:
+                span.status = RunStatus(code="error", reason=None, message=None)
+                span.error = {
+                    "type": type(err).__name__,
+                    "message": str(err),
+                    "traceback": traceback.format_exc(),
+                }
+                raise
+            finally:
+                span.t1 = int(time.time() * 1000)
+                try:
+                    await run_context._save_trace()
+                finally:
+                    reset_background_depth(token)
+                    if record_box:
+                        record_box[0].log.close()
+
+        task: asyncio.Task | None = None
+        registered = False
+        try:
+            task = asyncio.create_task(_continue_in_background(), context=contextvars.copy_context())
+            record = register_background_task(
+                name=self.name,
+                input=input,
+                task=task,
+                on_cancel=self.on_background_cancel,
+                timeout=self.background_timeout,
+                stall_timeout=self.background_stall_timeout,
+            )
+            # Stall time starts when the continuation owns the iterator. Keep
+            # the wall-clock timeout armed so a stuck trace snapshot is bounded.
+            record.clear_watchdogs()
+            record.schedule_timeout()
+
+            async def _close_handler() -> None:
+                await handler_events.aclose()
+                if collector is not None:
+                    await collector.aclose()
+
+            record._handler_aclose = _close_handler
+            registered = True
+        except BaseException:
+            if not registered:
+                store.abort_spawn()
+                if task is not None:
+                    task.cancel()
+            raise
+        record_box.append(record)
+        return {"task_id": record.task_id, "status": "running"}, start, record
+
     def __call__(self, **kwargs: Any) -> Any:
         """Execute the runnable, returning a TimbalCollector over its event stream.
 
@@ -1646,9 +1754,17 @@ class Runnable(ABC, BaseModel):
             from ..collectors.impl.timbal import TimbalCollector
 
             _TimbalCollector = TimbalCollector
-        return _TimbalCollector(async_gen=self._stream(**kwargs))
+        background_handoff = None
+        if self.background_mode == "auto" or self._is_orchestrator:
+            from ..state.background import BackgroundHandoff
 
-    async def _stream(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
+            background_handoff = BackgroundHandoff()
+        return _TimbalCollector(
+            async_gen=self._stream(_background_handoff_control=background_handoff, **kwargs),
+            background_handoff=background_handoff,
+        )
+
+    async def _stream(self, _background_handoff_control: Any = None, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Raw event stream for one runnable execution (internal entry point).
 
         Handles:
@@ -1716,6 +1832,9 @@ class Runnable(ABC, BaseModel):
         # Session data is loaded once per run; nested calls see it already set.
         if run_context._session_data is None:
             await run_context.get_session()
+        previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
+        if _background_handoff_control is not None:
+            run_context._background_handoff_control = _background_handoff_control
         previous_resume_values = dict(run_context._resume_values)
         run_context._resume_values.update(resume_values)
         set_run_context(run_context)
@@ -1759,6 +1878,17 @@ class Runnable(ABC, BaseModel):
         collector = None
         suspend_signal: Suspend | None = None
         _generator_closed = False
+        handed_off = False
+        handoff_start: asyncio.Event | None = None
+        handoff_result: dict[str, Any] | None = None
+        handoff_record = None
+        handoff_control = (
+            getattr(run_context, "_background_handoff_control", None)
+            if self.background_mode == "auto" and self._is_async_gen and not self._is_orchestrator
+            else None
+        )
+        if handoff_control is not None:
+            handoff_control.register(span.call_id, self.name)
         try:
             start_event = StartEvent(
                 run_id=run_context.id,
@@ -1821,6 +1951,10 @@ class Runnable(ABC, BaseModel):
                             _get_logger().info(approval_event.type, **approval_event.model_dump())
                         yield approval_event
                         _restore_context()
+                        if handoff_control is not None and handoff_control.target_call_id == span.call_id:
+                            handoff_control.fail(
+                                RuntimeError("A runnable waiting for approval cannot move to the background.")
+                            )
                     if not proceed:
                         return
 
@@ -1844,10 +1978,9 @@ class Runnable(ABC, BaseModel):
                     suspend_signal = susp
             else:
                 # Iterate over events from handler and yield them
+                handler_events = self._execute_handler(validated_input, run_context, span)
                 try:
-                    async for event, final_output, handler_collector in self._execute_handler(
-                        validated_input, run_context, span
-                    ):
+                    async for event, final_output, handler_collector in handler_events:
                         # Update collector immediately so it's available for interruption handling
                         if handler_collector is not None:
                             collector = handler_collector
@@ -1866,6 +1999,28 @@ class Runnable(ABC, BaseModel):
                                 span.status = RunStatus(code="cancelled", reason=reason, message=message)
                             yield event
                             _restore_context()
+                            if handoff_control is not None and handoff_control.target_call_id == span.call_id:
+                                if isinstance(event, ApprovalEvent | InteractionEvent):
+                                    handoff_control.fail(
+                                        RuntimeError(
+                                            "A runnable waiting for approval or input cannot move to the background."
+                                        )
+                                    )
+                                else:
+                                    try:
+                                        output, handoff_start, handoff_record = self._handoff_background_task(
+                                            handler_events,
+                                            input,
+                                            run_context,
+                                            span,
+                                            collector,
+                                        )
+                                    except Exception as exc:
+                                        handoff_control.fail(exc)
+                                    else:
+                                        handed_off = True
+                                        handoff_result = output
+                                        break
                         if final_output is not None:
                             output = final_output
                 except Suspend as susp:
@@ -1875,7 +2030,9 @@ class Runnable(ABC, BaseModel):
                     # re-fire the handler with the supplied value on resume.
                     suspend_signal = susp
 
-            if suspend_signal is not None:
+            if handed_off:
+                pass
+            elif suspend_signal is not None:
                 interaction_event = await self._finalize_suspend(suspend_signal, span, run_context)
                 if interaction_event.type in self._log_events and _events_logging_enabled():
                     _get_logger().info(interaction_event.type, **interaction_event.model_dump())
@@ -1900,12 +2057,12 @@ class Runnable(ABC, BaseModel):
 
                 span.output = output
 
-                if not run_in_background and span.status.code == "success":
+                if not run_in_background and not handed_off and span.status.code == "success":
                     _emit_default_tool_usage(self)
 
                 set_parent_call_id(_new_parent_call_id)
                 set_call_id(_new_call_id)
-                if self.post_hook is not None and not run_in_background:
+                if self.post_hook is not None and not run_in_background and not handed_off:
                     await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
                     # Hooks may mutate message content in place; drop any cached
                     # dumps on the output so the re-dump below sees the changes.
@@ -2053,26 +2210,66 @@ class Runnable(ABC, BaseModel):
             raise
 
         finally:
+            if handoff_control is not None and not handed_off:
+                handoff_control.unregister(span.call_id)
             t1 = int(time.time() * 1000)
-            span.t1 = t1
-            output_event = OutputEvent(
-                run_id=run_context.id,
-                parent_run_id=run_context.parent_id,
-                path=span.path,
-                call_id=span.call_id,
-                parent_call_id=span.parent_call_id,
-                input=span.input,
-                status=span.status,
-                output=span.output,
-                error=span.error,
-                t0=span.t0,
-                t1=span.t1,
-                usage=span.usage,
-                metadata=span.metadata,
-            )
+            if handed_off:
+                output_event = OutputEvent(
+                    run_id=run_context.id,
+                    parent_run_id=run_context.parent_id,
+                    path=span.path,
+                    call_id=span.call_id,
+                    parent_call_id=span.parent_call_id,
+                    input=span.input,
+                    status=RunStatus(code="success", reason=None, message=None),
+                    output=handoff_result,
+                    error=None,
+                    t0=span.t0,
+                    t1=t1,
+                    usage=dict(span.usage),
+                    metadata={**span.metadata, "background_handoff": True},
+                )
+            else:
+                span.t1 = t1
+                output_event = OutputEvent(
+                    run_id=run_context.id,
+                    parent_run_id=run_context.parent_id,
+                    path=span.path,
+                    call_id=span.call_id,
+                    parent_call_id=span.parent_call_id,
+                    input=span.input,
+                    status=span.status,
+                    output=span.output,
+                    error=span.error,
+                    t0=span.t0,
+                    t1=span.t1,
+                    usage=dict(span.usage),
+                    metadata=span.metadata,
+                )
             output_event._input_dump = span._input_dump
-            output_event._output_dump = span._output_dump
-            await run_context._save_trace()
+            output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
+            if handoff_start is None:
+                await run_context._save_trace()
+            else:
+                # The continuation must not mutate the shared span until the
+                # foreground placeholder has been snapshotted for tracing.
+                try:
+                    await run_context._save_trace()
+                finally:
+                    handoff_start.set()
+                    if handoff_control is not None and handoff_result is not None:
+                        if handoff_record is not None and (
+                            handoff_record.task.done() or handoff_record.task.cancelling()
+                        ):
+                            status = handoff_record.status_code()
+                            output_event.output = {**handoff_result, "status": status}
+                            output_event._output_dump = await dump(output_event.output)
+                            handoff_control.fail(
+                                RuntimeError(f"Foreground-to-background handoff ended before cutover: {status}.")
+                            )
+                            handoff_control.unregister(span.call_id)
+                        else:
+                            handoff_control.complete(span.call_id, handoff_result)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children
@@ -2087,6 +2284,13 @@ class Runnable(ABC, BaseModel):
                         runnable_path=self._path,
                     )
             run_context._resume_values = previous_resume_values
+            if _background_handoff_control is not None:
+                _background_handoff_control.close()
+                if previous_handoff_control is None:
+                    if getattr(run_context, "_background_handoff_control", None) is _background_handoff_control:
+                        del run_context._background_handoff_control
+                else:
+                    run_context._background_handoff_control = previous_handoff_control
             set_parent_call_id(_parent_call_id)
             set_call_id(_call_id)
             if _entry_call_id is not None:

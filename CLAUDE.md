@@ -411,8 +411,17 @@ from timbal.state import (
 
 Tool(name="build", handler=..., background_mode="always",
  on_background_cancel=lambda record: remote.stop(record.metadata["run_id"]))
+
+# A foreground async-generator tool with background_mode="auto" can be parked
+# cooperatively while its collector keeps being consumed:
+run = agent(prompt="start the build")
+handoff = run.background()  # or run.background(call_id=...) if several auto children
+async for event in run:
+ ...
+task = await handoff  # {"task_id": "...", "status": "running"}
 ```
 
+- `collector.background()` parks one in-flight streaming runnable with `background_mode="auto"` at its next event. Foreground events are not copied into the ring. With one eligible child, omit the argument; with several, pass `call_id=` (from that child's `START`/`DELTA`) or it fails fast as ambiguous. Continue consuming the collector while the returned future is pending.
 - Tasks live on a `BackgroundTaskStore` bound to the `RunContext`, inherited across sequential turns via `parent_id`. Concurrent runs of the same Agent get isolated stores (no shared `parent_id`), so a foreign `task_id` is `not_found`. Process-local — does not survive a restart.
 - Once *this session* has a task, the agent auto-gains `get_background_task` / `list_background_tasks` / `cancel_background_task`. Opt in to `read_background_transcript` with `background_transcript_tool=True`.
 - The log is peekable, not consume-once: the parent agent and a frontend can both watch one child. `record.log.subscribe(after=)` replays then streams live.

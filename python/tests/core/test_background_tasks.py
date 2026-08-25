@@ -1306,6 +1306,7 @@ class TestBackgroundCompletionNotify:
     @pytest.mark.asyncio
     async def test_agent_poll_acks_so_next_turn_does_not_reinject(self):
         """LLM-tool peek (ack_completion=True) must consume the pending notice."""
+
         async def quick(tag: str) -> str:
             await asyncio.sleep(0.05)
             return f"done:{tag}"
@@ -1349,6 +1350,7 @@ class TestBackgroundCompletionNotify:
     @pytest.mark.asyncio
     async def test_module_peek_does_not_ack(self):
         """App/UI peeks must not steal the LLM completion inbox."""
+
         async def quick(tag: str) -> str:
             await asyncio.sleep(0.05)
             return f"done:{tag}"
@@ -1557,9 +1559,7 @@ class TestBackgroundCompletionNotify:
 
         events = [event async for event in agent(prompt="gate me", parent_id=r1.run_id)]
         approval = next(event for event in events if isinstance(event, ApprovalEvent))
-        r2 = next(
-            event for event in events if isinstance(event, OutputEvent) and event.path == "composer"
-        )
+        r2 = next(event for event in events if isinstance(event, OutputEvent) and event.path == "composer")
         assert r2.status.reason == "approval_required"
 
         from timbal.state.background import current_background_store
@@ -2382,6 +2382,691 @@ class TestWaitForBackground:
         snap = await wait_for_background(task_id, after=0, timeout=5.0)
         assert snap["status"] == "completed"
         assert snap["result"] == "done"
+
+
+class TestForegroundBackgroundHandoff:
+    """Cooperative foreground-to-background ownership transfer."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_tool_moves_to_background_without_replaying_foreground_events(self):
+        release = asyncio.Event()
+        post_hook_calls = 0
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="foreground-1")
+            await release.wait()
+            yield TextDelta(id="s", text_delta="foreground-2")
+            yield TextDelta(id="s", text_delta="background")
+
+        def post_hook() -> None:
+            nonlocal post_hook_calls
+            post_hook_calls += 1
+
+        tool = Tool(
+            name="streaming",
+            handler=streaming,
+            background_mode="auto",
+            post_hook=post_hook,
+            tracing_provider=None,
+        )
+        stream = tool()
+        parent_events: list[Any] = []
+        handoff = None
+
+        async for event in stream:
+            parent_events.append(event)
+            if (
+                isinstance(event, DeltaEvent)
+                and isinstance(event.item, TextDelta)
+                and event.item.text_delta == "foreground-1"
+            ):
+                handoff = stream.background()
+                release.set()
+
+        assert handoff is not None
+        placeholder = await handoff
+        task_id = placeholder["task_id"]
+        snap = await wait_for_background(task_id, timeout=1.0)
+
+        parent_text = [
+            event.item.text_delta
+            for event in parent_events
+            if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta)
+        ]
+        transcript = read_background_transcript(task_id)
+        background_text = [
+            event["item"]["text_delta"]
+            for event in transcript["events"]
+            if event.get("type") == "DELTA" and event.get("item", {}).get("type") == "text_delta"
+        ]
+
+        assert parent_text == ["foreground-1"]
+        assert background_text == ["foreground-2", "background"]
+        assert snap["status"] == "completed"
+        assert post_hook_calls == 1
+        tool_outputs = [
+            event for event in parent_events if isinstance(event, OutputEvent) and event.path == "streaming"
+        ]
+        assert len(tool_outputs) == 1
+        assert tool_outputs[0].output == placeholder
+        assert tool_outputs[0].usage == {}
+        span = get_run_context()._trace[tool_outputs[0].call_id]
+        assert span.status.code == "success"
+        assert span.t1 >= tool_outputs[0].t1
+        assert span.output != placeholder
+
+    @pytest.mark.asyncio
+    async def test_ordinary_foreground_stream_uses_no_queue_or_child_task(self, monkeypatch: pytest.MonkeyPatch):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            for text in ("a", "b", "c"):
+                yield TextDelta(id="s", text_delta=text)
+
+        def unexpected(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError(f"foreground hot path scheduled or queued work: {args!r} {kwargs!r}")
+
+        tool = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)
+        monkeypatch.setattr(asyncio, "create_task", unexpected)
+        monkeypatch.setattr(asyncio, "Event", unexpected)
+        monkeypatch.setattr(asyncio, "Queue", unexpected)
+        stream = tool()
+
+        text = [
+            event.item.text_delta
+            async for event in stream
+            if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta)
+        ]
+
+        assert text == ["a", "b", "c"]
+
+    @pytest.mark.asyncio
+    async def test_single_tool_agent_foreground_path_uses_no_queue_or_child_task(self, monkeypatch: pytest.MonkeyPatch):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            for text in ("a", "b", "c"):
+                yield TextDelta(id="s", text_delta=text)
+
+        def unexpected(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError(f"single-tool hot path scheduled or queued work: {args!r} {kwargs!r}")
+
+        agent = Agent(
+            name="hot_path_agent",
+            model=TestModel(responses=[_tool_call("streaming", {}), "done"]),
+            tools=[Tool(name="streaming", handler=streaming, background_mode="auto")],
+            tracing_provider=None,
+        )
+        monkeypatch.setattr(asyncio, "create_task", unexpected)
+        monkeypatch.setattr(asyncio, "Event", unexpected)
+        monkeypatch.setattr(asyncio, "Queue", unexpected)
+        stream = agent(prompt="go")
+
+        result = await stream.collect()
+
+        assert result.status.code == "success"
+
+    @pytest.mark.asyncio
+    async def test_agent_receives_one_placeholder_tool_result_and_continues(self):
+        release = asyncio.Event()
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="before")
+            await release.wait()
+            yield TextDelta(id="s", text_delta="after")
+
+        model = TestModel(
+            responses=[
+                _tool_call("streaming", {}),
+                "The task is continuing in the background.",
+            ]
+        )
+        agent = Agent(
+            name="handoff_agent",
+            model=model,
+            tools=[Tool(name="streaming", handler=streaming, background_mode="auto")],
+            tracing_provider=None,
+        )
+        stream = agent(prompt="start")
+        events: list[Any] = []
+        handoff = None
+
+        async for event in stream:
+            events.append(event)
+            if (
+                isinstance(event, DeltaEvent)
+                and event.path == "handoff_agent.streaming"
+                and isinstance(event.item, TextDelta)
+            ):
+                handoff = stream.background()
+                release.set()
+
+        assert handoff is not None
+        placeholder = await handoff
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+        tool_outputs = [
+            event for event in events if isinstance(event, OutputEvent) and event.path == "handoff_agent.streaming"
+        ]
+
+        assert model.call_count == 2
+        assert len(tool_outputs) == 1
+        assert tool_outputs[0].output == placeholder
+        assert snap["status"] == "completed"
+        assert snap["summary"]["text"] == "after"
+
+    @pytest.mark.asyncio
+    async def test_background_cancel_closes_handed_off_handler_and_calls_hook_once(self):
+        blocker = asyncio.Event()
+        closed = asyncio.Event()
+        cancel_calls = 0
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            try:
+                yield TextDelta(id="s", text_delta="before")
+                await blocker.wait()
+                yield TextDelta(id="s", text_delta="never")
+            finally:
+                closed.set()
+
+        def on_cancel(_record: Any) -> None:
+            nonlocal cancel_calls
+            cancel_calls += 1
+
+        stream = Tool(
+            name="streaming",
+            handler=streaming,
+            background_mode="auto",
+            on_background_cancel=on_cancel,
+            tracing_provider=None,
+        )()
+        handoff = None
+
+        async for event in stream:
+            if isinstance(event, DeltaEvent):
+                handoff = stream.background()
+
+        assert handoff is not None
+        placeholder = await handoff
+        result = cancel_background_task(placeholder["task_id"])
+        await asyncio.wait_for(closed.wait(), timeout=1.0)
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+
+        assert result["status"] == "cancelled"
+        assert snap["status"] == "cancelled"
+        assert cancel_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_handoff_keeps_foreground_stream_alive(self):
+        from timbal.state.background import ensure_background_store
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="a")
+            yield TextDelta(id="s", text_delta="b")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        text: list[str] = []
+        handoff = None
+
+        async for event in stream:
+            if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta):
+                text.append(event.item.text_delta)
+                if event.item.text_delta == "a":
+                    ensure_background_store(get_run_context()).max_concurrent = 0
+                    handoff = stream.background()
+
+        assert handoff is not None
+        with pytest.raises(RuntimeError, match="Concurrent background limit reached"):
+            await handoff
+        assert text == ["a", "b"]
+        assert list_background_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_parallel_eligible_tools_are_rejected_as_ambiguous(self):
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = 0
+
+        async def streaming(name: str) -> AsyncGenerator[TextDelta, None]:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+            yield TextDelta(id=name, text_delta=name)
+            await release.wait()
+
+        agent = Agent(
+            name="parallel_handoff_agent",
+            model=TestModel(
+                responses=[
+                    _tool_calls(
+                        ("streaming", {"name": "a"}, "a", False),
+                        ("streaming", {"name": "b"}, "b", False),
+                    ),
+                    "done",
+                ]
+            ),
+            tools=[Tool(name="streaming", handler=streaming, background_mode="auto")],
+            tracing_provider=None,
+        )
+        stream = agent(prompt="go")
+        checked = False
+
+        async for event in stream:
+            if not checked and isinstance(event, DeltaEvent) and event.path == "parallel_handoff_agent.streaming":
+                with pytest.raises(RuntimeError, match="2 eligible runnables"):
+                    stream.background()
+                checked = True
+                release.set()
+
+        assert checked
+        assert list_background_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_call_id_selects_one_of_several_eligible_tools(self):
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = 0
+
+        async def streaming(name: str) -> AsyncGenerator[TextDelta, None]:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+            yield TextDelta(id=name, text_delta=f"{name}-fg")
+            await release.wait()
+            yield TextDelta(id=name, text_delta=f"{name}-cut")
+            yield TextDelta(id=name, text_delta=f"{name}-bg")
+
+        agent = Agent(
+            name="targeted_handoff_agent",
+            model=TestModel(
+                responses=[
+                    _tool_calls(
+                        ("streaming", {"name": "a"}, "a", False),
+                        ("streaming", {"name": "b"}, "b", False),
+                    ),
+                    "done",
+                ]
+            ),
+            tools=[Tool(name="streaming", handler=streaming, background_mode="auto")],
+            tracing_provider=None,
+        )
+        stream = agent(prompt="go")
+        handoff = None
+        parked_call_id = None
+        parent_text: list[str] = []
+
+        async for event in stream:
+            if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta):
+                parent_text.append(event.item.text_delta)
+                if handoff is None:
+                    parked_call_id = event.call_id
+                    handoff = stream.background(call_id=event.call_id)
+                    release.set()
+
+        assert handoff is not None
+        placeholder = await handoff
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+        transcript = read_background_transcript(placeholder["task_id"])
+        background_text = [
+            event["item"]["text_delta"]
+            for event in transcript["events"]
+            if event.get("type") == "DELTA" and event.get("item", {}).get("type") == "text_delta"
+        ]
+
+        assert parked_call_id is not None
+        assert snap["status"] == "completed"
+        assert any(text.endswith("-bg") for text in background_text)
+        assert any(text.endswith("-fg") for text in parent_text)
+        assert len(list_background_tasks()) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_call_id_is_rejected(self):
+        release = asyncio.Event()
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="only")
+            await release.wait()
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        seen = False
+        async for event in stream:
+            if isinstance(event, DeltaEvent):
+                with pytest.raises(RuntimeError, match="call_id 'nope'"):
+                    stream.background(call_id="nope")
+                seen = True
+                release.set()
+        assert seen
+
+    @pytest.mark.asyncio
+    async def test_handler_error_after_handoff_is_background_error_only(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="before")
+            raise ValueError("background boom")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        parent_outputs: list[OutputEvent] = []
+        handoff = None
+
+        async for event in stream:
+            if isinstance(event, DeltaEvent):
+                handoff = stream.background()
+            elif isinstance(event, OutputEvent):
+                parent_outputs.append(event)
+
+        assert handoff is not None
+        placeholder = await handoff
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+
+        assert len(parent_outputs) == 1
+        assert parent_outputs[0].status.code == "success"
+        assert parent_outputs[0].output == placeholder
+        assert snap["status"] == "error"
+        assert snap["error"] == "background boom"
+        span = get_run_context()._trace[parent_outputs[0].call_id]
+        assert span.status.code == "error"
+        assert span.error["message"] == "background boom"
+
+    @pytest.mark.asyncio
+    async def test_post_hook_error_after_handoff_finalizes_error_span(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="before")
+            yield TextDelta(id="s", text_delta="after")
+
+        def fail_post_hook() -> None:
+            raise ValueError("post-hook boom")
+
+        stream = Tool(
+            name="streaming",
+            handler=streaming,
+            background_mode="auto",
+            post_hook=fail_post_hook,
+            tracing_provider=None,
+        )()
+        handoff = None
+        parent_output = None
+
+        async for event in stream:
+            if isinstance(event, DeltaEvent):
+                handoff = stream.background()
+            elif isinstance(event, OutputEvent):
+                parent_output = event
+
+        assert handoff is not None
+        placeholder = await handoff
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+        span = get_run_context()._trace[parent_output.call_id]
+
+        assert snap["status"] == "error"
+        assert snap["error"] == "post-hook boom"
+        assert span.status.code == "error"
+        assert span.error["message"] == "post-hook boom"
+        assert span.t1 is not None
+
+    @pytest.mark.asyncio
+    async def test_background_request_on_start_event_is_accepted(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="first")
+            yield TextDelta(id="s", text_delta="second")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        handoff = None
+        parent_text: list[str] = []
+
+        async for event in stream:
+            if isinstance(event, StartEvent):
+                handoff = stream.background()
+            elif isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta):
+                parent_text.append(event.item.text_delta)
+
+        assert handoff is not None
+        placeholder = await handoff
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+
+        assert parent_text == ["first"]
+        assert snap["summary"]["text"] == "second"
+
+    @pytest.mark.asyncio
+    async def test_inline_await_fails_fast_without_cancelling_request(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="first")
+            yield TextDelta(id="s", text_delta="second")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        handoff = None
+
+        async for event in stream:
+            if isinstance(event, DeltaEvent):
+                handoff = stream.background()
+                with pytest.raises(RuntimeError, match="task consuming this stream"):
+                    await handoff
+
+        assert handoff is not None
+        placeholder = await handoff
+        snap = await wait_for_background(placeholder["task_id"], timeout=1.0)
+        assert snap["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_cross_task_request_hands_off_blocked_before_first_event(self):
+        from timbal.state.background import store_for_run
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            entered.set()
+            await release.wait()
+            yield TextDelta(id="s", text_delta="first")
+            yield TextDelta(id="s", text_delta="second")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        parent_events: list[Any] = []
+
+        async def consume() -> None:
+            async for event in stream:
+                parent_events.append(event)
+
+        consumer = asyncio.create_task(consume())
+        await entered.wait()
+        handoff = stream.background()
+        release.set()
+        placeholder = await asyncio.wait_for(handoff, timeout=1.0)
+        await asyncio.wait_for(consumer, timeout=1.0)
+        store = store_for_run(parent_events[0].run_id)
+        record = store.get(placeholder["task_id"])
+        await asyncio.wait_for(record.task, timeout=1.0)
+        snap = record.summarize()
+
+        parent_text = [
+            event.item.text_delta
+            for event in parent_events
+            if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta)
+        ]
+        assert parent_text == ["first"]
+        assert snap["summary"]["text"] == "second"
+
+    @pytest.mark.asyncio
+    async def test_approval_event_rejects_pending_handoff(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="never")
+
+        stream = Tool(
+            name="streaming",
+            handler=streaming,
+            background_mode="auto",
+            requires_approval=True,
+            tracing_provider=None,
+        )()
+        handoff = None
+        saw_approval = False
+
+        async for event in stream:
+            if isinstance(event, ApprovalEvent):
+                saw_approval = True
+                handoff = stream.background()
+
+        assert saw_approval
+        assert handoff is not None
+        with pytest.raises(RuntimeError, match="waiting for approval"):
+            await handoff
+        assert list_background_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_stall_watchdog_starts_after_foreground_snapshot(self, monkeypatch: pytest.MonkeyPatch):
+        from timbal.state.context import RunContext
+
+        save_entered = asyncio.Event()
+        release_save = asyncio.Event()
+        delta_seen = asyncio.Event()
+        resume_consumer = asyncio.Event()
+        blocker = asyncio.Event()
+        closed = asyncio.Event()
+        context: list[Any] = []
+        original_save = RunContext._save_trace
+
+        async def delayed_save(self: Any) -> None:
+            if self is context[0] and not release_save.is_set():
+                save_entered.set()
+                await release_save.wait()
+            await original_save(self)
+
+        monkeypatch.setattr(RunContext, "_save_trace", delayed_save)
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            context.append(get_run_context())
+            try:
+                yield TextDelta(id="s", text_delta="before")
+                await blocker.wait()
+            finally:
+                closed.set()
+
+        stream = Tool(
+            name="streaming",
+            handler=streaming,
+            background_mode="auto",
+            background_stall_timeout=0.01,
+            tracing_provider=None,
+        )()
+
+        async def consume() -> None:
+            async for event in stream:
+                if isinstance(event, DeltaEvent):
+                    delta_seen.set()
+                    await resume_consumer.wait()
+
+        consumer = asyncio.create_task(consume())
+        await delta_seen.wait()
+        handoff = stream.background()
+        resume_consumer.set()
+        await save_entered.wait()
+        record = next(iter(context[0]._bg_store._tasks.values()))
+
+        await asyncio.sleep(0.03)
+        assert record.status_code() == "running"
+        assert not handoff.done()
+
+        release_save.set()
+        await asyncio.wait_for(handoff, timeout=1.0)
+        await asyncio.wait_for(consumer, timeout=1.0)
+        await asyncio.gather(record.task, return_exceptions=True)
+        await asyncio.wait_for(closed.wait(), timeout=1.0)
+
+        assert record.status_code() == "stalled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_snapshot_fails_handoff_and_finalizes_span(self, monkeypatch: pytest.MonkeyPatch):
+        from timbal.state.context import RunContext
+
+        save_entered = asyncio.Event()
+        release_save = asyncio.Event()
+        delta_seen = asyncio.Event()
+        resume_consumer = asyncio.Event()
+        blocker = asyncio.Event()
+        closed = asyncio.Event()
+        context: list[Any] = []
+        parent_outputs: list[OutputEvent] = []
+        original_save = RunContext._save_trace
+
+        async def delayed_save(self: Any) -> None:
+            if self is context[0] and not release_save.is_set():
+                save_entered.set()
+                await release_save.wait()
+            await original_save(self)
+
+        monkeypatch.setattr(RunContext, "_save_trace", delayed_save)
+
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            context.append(get_run_context())
+            try:
+                yield TextDelta(id="s", text_delta="before")
+                await blocker.wait()
+            finally:
+                closed.set()
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+
+        async def consume() -> None:
+            async for event in stream:
+                if isinstance(event, DeltaEvent):
+                    delta_seen.set()
+                    await resume_consumer.wait()
+                elif isinstance(event, OutputEvent):
+                    parent_outputs.append(event)
+
+        consumer = asyncio.create_task(consume())
+        await delta_seen.wait()
+        handoff = stream.background()
+        resume_consumer.set()
+        await save_entered.wait()
+        record = next(iter(context[0]._bg_store._tasks.values()))
+        context[0]._bg_store.cancel(record.task_id)
+        release_save.set()
+
+        await asyncio.wait_for(consumer, timeout=1.0)
+        with pytest.raises(RuntimeError, match="ended before cutover: cancelled"):
+            await handoff
+        await asyncio.gather(record.task, return_exceptions=True)
+        await asyncio.wait_for(closed.wait(), timeout=1.0)
+
+        span = context[0]._trace[parent_outputs[0].call_id]
+        assert record.status_code() == "cancelled"
+        assert parent_outputs[0].output["status"] == "cancelled"
+        assert span.status.code == "cancelled"
+        assert span.t1 is not None
+
+    @pytest.mark.asyncio
+    async def test_duplicate_pending_request_is_rejected(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="first")
+            yield TextDelta(id="s", text_delta="second")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto", tracing_provider=None)()
+        handoff = None
+
+        async for event in stream:
+            if isinstance(event, StartEvent):
+                handoff = stream.background()
+                with pytest.raises(RuntimeError, match="already pending"):
+                    stream.background()
+
+        assert handoff is not None
+        await handoff
+
+    def test_background_request_fails_without_active_eligible_runnable(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="x")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="auto")()
+
+        with pytest.raises(RuntimeError, match="No active foreground runnable"):
+            stream.background()
+
+    def test_never_mode_collector_rejects_background_request(self):
+        async def streaming() -> AsyncGenerator[TextDelta, None]:
+            yield TextDelta(id="s", text_delta="x")
+
+        stream = Tool(name="streaming", handler=streaming, background_mode="never")()
+
+        with pytest.raises(RuntimeError, match="does not support"):
+            stream.background()
 
 
 class TestBackgroundEventLogSubscribe:

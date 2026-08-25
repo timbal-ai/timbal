@@ -75,6 +75,88 @@ class BackgroundLimitError(RuntimeError):
     """Raised when a spawn would exceed concurrent or depth caps."""
 
 
+class BackgroundHandoff:
+    """Loop-local control plane for cooperatively parking one foreground child.
+
+    The producer remains a direct async-generator ``yield`` until a caller asks
+    to background the currently active eligible runnable. No queue, task, or
+    event is allocated on the ordinary foreground event path.
+    """
+
+    def __init__(self) -> None:
+        self._active: dict[str, str] = {}
+        self.target_call_id: str | None = None
+        self._result: asyncio.Future[dict[str, Any]] | None = None
+        self._closed = False
+
+    def register(self, call_id: str, name: str) -> None:
+        if not self._closed:
+            self._active[call_id] = name
+
+    def unregister(self, call_id: str) -> None:
+        name = self._active.pop(call_id, call_id)
+        if self.target_call_id == call_id:
+            self.fail(RuntimeError(f"'{name}' completed before it could move to the background."))
+
+    def request(self, call_id: str | None = None) -> asyncio.Future[dict[str, Any]]:
+        """Target one active eligible foreground runnable.
+
+        Omit ``call_id`` only when a single child is active — that fails fast
+        if the target would be ambiguous. Pass ``call_id`` (from the child's
+        ``START`` / ``DELTA``) to pick among several. The returned future
+        resolves after the foreground snapshot is saved and the background
+        continuation owns the iterator.
+        """
+        if self._closed:
+            raise RuntimeError("This run has already finished.")
+        if self._result is not None and not self._result.done():
+            raise RuntimeError("A foreground-to-background handoff is already pending.")
+        if not self._active:
+            raise RuntimeError(
+                "No active foreground runnable can move to the background. "
+                "Only streaming runnables with background_mode='auto' are eligible."
+            )
+        if call_id is not None:
+            if call_id not in self._active:
+                names = ", ".join(sorted(self._active.values())) or "none"
+                raise RuntimeError(
+                    f"No active foreground runnable with call_id {call_id!r}. "
+                    f"Eligible: {names}."
+                )
+            self.target_call_id = call_id
+        else:
+            if len(self._active) != 1:
+                names = ", ".join(sorted(self._active.values()))
+                raise RuntimeError(
+                    f"Cannot choose a background target while {len(self._active)} eligible runnables are active: {names}."
+                )
+            self.target_call_id = next(iter(self._active))
+        loop = asyncio.get_running_loop()
+        self._result = loop.create_future()
+        return self._result
+
+    def complete(self, call_id: str, result: dict[str, Any]) -> None:
+        if self.target_call_id != call_id:
+            return
+        self._active.pop(call_id, None)
+        self.target_call_id = None
+        future = self._result
+        if future is not None and not future.done():
+            future.set_result(result)
+
+    def fail(self, error: Exception) -> None:
+        self.target_call_id = None
+        future = self._result
+        if future is not None and not future.done():
+            future.set_exception(error)
+
+    def close(self) -> None:
+        self._closed = True
+        self._active.clear()
+        if self.target_call_id is not None:
+            self.fail(RuntimeError("The run finished before the foreground task could move to the background."))
+
+
 def get_background_depth() -> int:
     return _background_depth.get()
 
@@ -562,9 +644,7 @@ class BackgroundEventLog:
         self._wake_waiters()
 
     def _over_cap(self, n: int, nbytes: int) -> bool:
-        return (self._max_events > 0 and n > self._max_events) or (
-            self._max_bytes > 0 and nbytes > self._max_bytes
-        )
+        return (self._max_events > 0 and n > self._max_events) or (self._max_bytes > 0 and nbytes > self._max_bytes)
 
     def _trim(self) -> None:
         """Drop oldest events until the ring fits. Never drops the tip."""
@@ -906,9 +986,7 @@ class BackgroundTaskStore:
         expired = [
             task_id
             for task_id, record in self._tasks.items()
-            if record.task.done()
-            and record.finished_at is not None
-            and now - record.finished_at >= secs
+            if record.task.done() and record.finished_at is not None and now - record.finished_at >= secs
         ]
         for task_id in expired:
             del self._tasks[task_id]
@@ -1088,18 +1166,10 @@ def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
     """
     store = run_context._bg_store
     if store is None:
-        max_concurrent = (
-            run_context._bg_max_concurrent
-            if hasattr(run_context, "_bg_max_concurrent")
-            else _UNSET
-        )
+        max_concurrent = run_context._bg_max_concurrent if hasattr(run_context, "_bg_max_concurrent") else _UNSET
         max_depth = run_context._bg_max_depth if hasattr(run_context, "_bg_max_depth") else _UNSET
-        max_log_events = (
-            run_context._bg_max_log_events if hasattr(run_context, "_bg_max_log_events") else _UNSET
-        )
-        max_log_bytes = (
-            run_context._bg_max_log_bytes if hasattr(run_context, "_bg_max_log_bytes") else _UNSET
-        )
+        max_log_events = run_context._bg_max_log_events if hasattr(run_context, "_bg_max_log_events") else _UNSET
+        max_log_bytes = run_context._bg_max_log_bytes if hasattr(run_context, "_bg_max_log_bytes") else _UNSET
         task_retention_secs = (
             run_context._bg_task_retention_secs if hasattr(run_context, "_bg_task_retention_secs") else _UNSET
         )
