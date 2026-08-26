@@ -64,9 +64,12 @@ def test_message_metadata_roundtrip() -> None:
     assert message.is_runtime()
     dumped = Message.serialize(message)
     assert dumped["metadata"] == {"source": "runtime", "kind": "background_task_completed"}
+    assert dumped["metadata"] is not message.metadata
+    dumped["metadata"]["source"] = "forged"
+    assert message.is_runtime()
     restored = Message.validate(dumped)
-    assert restored.is_runtime()
-    assert restored.metadata == message.metadata
+    assert not restored.is_runtime()
+    assert message.metadata["source"] == RUNTIME_SOURCE
     # Provider wire formats omit metadata.
     assert "metadata" not in message.to_anthropic_input()
     assert "metadata" not in message.to_openai_chat_completions_input()
@@ -83,6 +86,9 @@ async def test_message_metadata_survives_trace_dump() -> None:
     )
     dumped = await dump(message)
     assert dumped["metadata"] == {"source": "runtime", "kind": "background_task_completed"}
+    assert dumped["metadata"] is not message.metadata
+    dumped["metadata"]["source"] = "forged"
+    assert message.is_runtime()
     ordinary = Message(role="user", content=[TextContent(text="hi")])
     ordinary_dump = await dump(ordinary)
     assert "metadata" not in ordinary_dump

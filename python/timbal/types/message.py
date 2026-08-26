@@ -290,7 +290,9 @@ class Message:
         if value.stop_reason is not None:
             result["stop_reason"] = value.stop_reason
         if value.metadata:
-            result["metadata"] = value.metadata
+            # Copy so mutating the envelope cannot change the live Message
+            # (dump() already copies; serialize must match).
+            result["metadata"] = dict(value.metadata)
         return result
 
     @classmethod
