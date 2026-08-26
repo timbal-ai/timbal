@@ -89,12 +89,28 @@ async def test_message_metadata_survives_trace_dump() -> None:
 
 
 def test_message_metadata_omitted_when_empty() -> None:
+    from copy import deepcopy
+
     message = Message(role="user", content=[TextContent(text="hi")])
     assert message.metadata == {}
     assert not message.is_runtime()
     assert "metadata" not in Message.serialize(message)
     with pytest.raises(TypeError):
         message.metadata["source"] = "runtime"
+    # Tracing providers deepcopy live Message graphs — empty metadata must
+    # not store a MappingProxyType on the instance.
+    cloned = deepcopy(message)
+    assert cloned.metadata == {}
+    assert not cloned.is_runtime()
+    tagged = Message(
+        role="user",
+        content=[TextContent(text="notice")],
+        metadata={"source": "runtime", "kind": "background_task_completed"},
+    )
+    cloned_tagged = deepcopy(tagged)
+    assert cloned_tagged.is_runtime()
+    assert cloned_tagged.metadata == tagged.metadata
+    assert cloned_tagged.metadata is not tagged.metadata
 
 
 def test_message_text_to_openai_chat_completions_input() -> None:

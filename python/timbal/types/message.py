@@ -13,8 +13,9 @@ from pydantic_core import CoreSchema, core_schema
 
 from .content import TextContent, ThinkingContent, ToolResultContent, ToolUseContent, content_factory
 
-# Shared empty mapping for the common case (no runtime annotations). Mutating it
-# is a TypeError — Message is immutable after construction aside from content appends.
+# Shared empty view returned by the ``metadata`` property when unset. Never
+# stored on the instance — MappingProxyType is not deepcopy/pickle-safe, and
+# voice/tracing deepcopy live Message graphs in memory.
 _EMPTY_METADATA: MappingProxyType[str, Any] = MappingProxyType({})
 
 # Runtime-injected control messages (not human utterances). Consumers that paint
@@ -54,7 +55,7 @@ class Message:
             Background completion notices use ``{"source": "runtime", "kind": "..."}``.
     """
 
-    __slots__ = ("role", "content", "stop_reason", "metadata", "_cached_dump", "_cached_dump_len")
+    __slots__ = ("role", "content", "stop_reason", "_metadata", "_cached_dump", "_cached_dump_len")
 
     def __init__(
         self,
@@ -74,7 +75,9 @@ class Message:
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "content", content)
         object.__setattr__(self, "stop_reason", stop_reason)
-        object.__setattr__(self, "metadata", dict(metadata) if metadata else _EMPTY_METADATA)
+        # Store None (not MappingProxyType) when empty so deepcopy/pickle of
+        # Message graphs used by tracing providers keeps working.
+        object.__setattr__(self, "_metadata", dict(metadata) if metadata else None)
         # Serialized-form cache (see timbal.utils.serialization). Long
         # conversations re-dump the same Message objects on every turn
         # (span input dump, memory dump, LLM input dump); messages are
@@ -84,19 +87,25 @@ class Message:
         object.__setattr__(self, "_cached_dump", None)
         object.__setattr__(self, "_cached_dump_len", -1)
 
+    @property
+    def metadata(self) -> MappingProxyType[str, Any] | dict[str, Any]:
+        """Runtime annotations. Empty messages share a read-only view (no alloc)."""
+        return self._metadata if self._metadata is not None else _EMPTY_METADATA
+
     def __str__(self) -> str:
         parts = [f"role={self.role}", f"content={self.content}"]
         if self.stop_reason:
             parts.append(f"stop_reason={self.stop_reason}")
-        if self.metadata:
-            parts.append(f"metadata={self.metadata}")
+        if self._metadata:
+            parts.append(f"metadata={self._metadata}")
         return f"Message({', '.join(parts)})"
 
     __repr__ = __str__
 
     def is_runtime(self) -> bool:
         """True when this message is a runtime control signal, not a human utterance."""
-        return self.metadata.get("source") == RUNTIME_SOURCE
+        md = self._metadata
+        return md is not None and md.get("source") == RUNTIME_SOURCE
 
     def to_openai_responses_input(self) -> list[dict[str, Any]]:
         """Convert the message to OpenAI's responses api expected input format."""
