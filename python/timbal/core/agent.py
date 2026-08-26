@@ -1305,13 +1305,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 break
 
     def _trailing_user_messages(self, memory: list[Message]) -> list[Message]:
-        """The user messages of the current turn: everything after the last assistant/tool message."""
+        """The human user messages of the current turn.
+
+        Everything after the last assistant/tool message, excluding runtime
+        control messages (e.g. background completion notices) so input
+        guardrails do not treat them as user content.
+        """
         start = 0
         for idx in range(len(memory) - 1, -1, -1):
             if memory[idx].role != "user":
                 start = idx + 1
                 break
-        return [m for m in memory[start:] if m.role == "user"]
+        return [m for m in memory[start:] if m.role == "user" and not m.is_runtime()]
 
     async def _run_input_guardrails(
         self,

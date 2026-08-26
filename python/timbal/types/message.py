@@ -1,3 +1,4 @@
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import (
@@ -12,8 +13,20 @@ from pydantic_core import CoreSchema, core_schema
 
 from .content import TextContent, ThinkingContent, ToolResultContent, ToolUseContent, content_factory
 
+# Shared empty view returned by the ``metadata`` property when unset. Never
+# stored on the instance — MappingProxyType is not deepcopy/pickle-safe, and
+# voice/tracing deepcopy live Message graphs in memory.
+_EMPTY_METADATA: MappingProxyType[str, Any] = MappingProxyType({})
 
-def _append_anthropic_content_blocks(target: list[dict[str, Any]], anthropic_input: dict[str, Any] | list[dict[str, Any]]) -> None:
+# Runtime-injected control messages (not human utterances). Consumers that paint
+# chat transcripts should filter ``source == "runtime"`` rather than sniffing text.
+RUNTIME_SOURCE = "runtime"
+BACKGROUND_TASK_COMPLETED_KIND = "background_task_completed"
+
+
+def _append_anthropic_content_blocks(
+    target: list[dict[str, Any]], anthropic_input: dict[str, Any] | list[dict[str, Any]]
+) -> None:
     """Append Anthropic content blocks, dropping empty text (API rejects text: '')."""
     if isinstance(anthropic_input, list):
         for block in anthropic_input:
@@ -38,21 +51,33 @@ class Message:
             - Anthropic: 'end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn', 'refusal'
             - OpenAI Chat Completions: 'stop', 'length', 'tool_calls', 'content_filter', 'function_call'
             - OpenAI Responses: 'completed', 'max_output_tokens', 'content_filter', etc.
+        metadata: Optional bag for runtime annotations (not sent to LLM providers).
+            Background completion notices use ``{"source": "runtime", "kind": "..."}``.
     """
 
-    __slots__ = ("role", "content", "stop_reason", "_cached_dump", "_cached_dump_len")
+    __slots__ = ("role", "content", "stop_reason", "_metadata", "_cached_dump", "_cached_dump_len")
 
-    def __init__(self, role: Any, content: Any, stop_reason: str | None = None) -> None:
+    def __init__(
+        self,
+        role: Any,
+        content: Any,
+        stop_reason: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Initialize a Message instance.
 
         Args:
             role: The role of the message sender
             content: The content of the message
             stop_reason: The reason the LLM stopped generating (optional, only for assistant messages)
+            metadata: Optional runtime annotations (omitted from provider wire formats)
         """
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "content", content)
         object.__setattr__(self, "stop_reason", stop_reason)
+        # Store None (not MappingProxyType) when empty so deepcopy/pickle of
+        # Message graphs used by tracing providers keeps working.
+        object.__setattr__(self, "_metadata", dict(metadata) if metadata else None)
         # Serialized-form cache (see timbal.utils.serialization). Long
         # conversations re-dump the same Message objects on every turn
         # (span input dump, memory dump, LLM input dump); messages are
@@ -62,12 +87,25 @@ class Message:
         object.__setattr__(self, "_cached_dump", None)
         object.__setattr__(self, "_cached_dump_len", -1)
 
+    @property
+    def metadata(self) -> MappingProxyType[str, Any] | dict[str, Any]:
+        """Runtime annotations. Empty messages share a read-only view (no alloc)."""
+        return self._metadata if self._metadata is not None else _EMPTY_METADATA
+
     def __str__(self) -> str:
+        parts = [f"role={self.role}", f"content={self.content}"]
         if self.stop_reason:
-            return f"Message(role={self.role}, content={self.content}, stop_reason={self.stop_reason})"
-        return f"Message(role={self.role}, content={self.content})"
+            parts.append(f"stop_reason={self.stop_reason}")
+        if self._metadata:
+            parts.append(f"metadata={self._metadata}")
+        return f"Message({', '.join(parts)})"
 
     __repr__ = __str__
+
+    def is_runtime(self) -> bool:
+        """True when this message is a runtime control signal, not a human utterance."""
+        md = self._metadata
+        return md is not None and md.get("source") == RUNTIME_SOURCE
 
     def to_openai_responses_input(self) -> list[dict[str, Any]]:
         """Convert the message to OpenAI's responses api expected input format."""
@@ -166,7 +204,8 @@ class Message:
         from .content import FileContent
 
         unloaded = [
-            c.file for c in self.content
+            c.file
+            for c in self.content
             if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
         ]
         if not unloaded:
@@ -175,6 +214,7 @@ class Message:
             await asyncio.gather(*(f.load(client=client) for f in unloaded))
         else:
             import httpx
+
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as own_client:
                 await asyncio.gather(*(f.load(client=own_client) for f in unloaded))
 
@@ -193,7 +233,12 @@ class Message:
             return None
         if len(kept) == len(self.content):
             return self
-        return Message(role=self.role, content=kept, stop_reason=self.stop_reason)
+        return Message(
+            role=self.role,
+            content=kept,
+            stop_reason=self.stop_reason,
+            metadata=dict(self.metadata) if self.metadata else None,
+        )
 
     @classmethod
     def validate(cls, value: ValidatorFunctionWrapHandler, _info: dict | ValidationInfo | None = None) -> "Message":
@@ -210,10 +255,13 @@ class Message:
                 role = value.get("role", "user")
                 content = value.get("content", None)
                 stop_reason = value.get("stop_reason", None)
+                metadata = value.get("metadata", None)
                 if not isinstance(content, list):
                     content = [content]
                 content = [content_factory(item) for item in content]
-                return cls(role=role, content=content, stop_reason=stop_reason)
+                if metadata is not None and not isinstance(metadata, dict):
+                    metadata = None
+                return cls(role=role, content=content, stop_reason=stop_reason, metadata=metadata)
             # Arbitrary payload (e.g. a tool's dict output wired straight into a prompt):
             # stringify the whole dict via content_factory instead of silently dropping
             # it to the literal "None" (which is what the envelope path used to produce).
@@ -238,9 +286,13 @@ class Message:
             "role": value.role,
             "content": value.content,
         }
-        # Only include stop_reason if it's set (to avoid breaking existing serialization)
+        # Only include optional fields when set (avoid breaking existing serialization)
         if value.stop_reason is not None:
             result["stop_reason"] = value.stop_reason
+        if value.metadata:
+            # Copy so mutating the envelope cannot change the live Message
+            # (dump() already copies; serialize must match).
+            result["metadata"] = dict(value.metadata)
         return result
 
     @classmethod
@@ -258,6 +310,10 @@ class Message:
                 "content": {
                     "type": "array",
                     "items": {},  # Keep it open/generic for now.
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": True,
                 },
             },
         }

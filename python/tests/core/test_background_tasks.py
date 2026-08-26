@@ -1030,11 +1030,7 @@ async def _wait_until_terminal(task_id: str, timeout: float = 5.0) -> dict:
 
 
 def _completion_notices_in_memory(memory: list[Message]) -> list[str]:
-    return [
-        msg.collect_text()
-        for msg in memory
-        if msg.role == "user" and "<background_task_completed>" in (msg.collect_text() or "")
-    ]
+    return [msg.collect_text() for msg in memory if msg.is_runtime()]
 
 
 def _capture_memory_hook(bucket: list[list[Message]]):
@@ -1095,6 +1091,9 @@ class TestBackgroundCompletionNotify:
         assert task_id in notices[0]
         assert "status: completed" in notices[0]
         assert "done:ok" in notices[0]
+        tagged = [m for m in memories[-1] if m.is_runtime()]
+        assert len(tagged) == 1
+        assert tagged[0].metadata == {"source": "runtime", "kind": "background_task_completed"}
         # One-shot: inbox empty; peek still works.
         assert current_background_store().pending_completions() == []
         assert get_background_task(task_id)["status"] == "completed"

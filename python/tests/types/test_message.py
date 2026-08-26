@@ -1,4 +1,3 @@
-import base64
 import pathlib
 
 import pytest
@@ -54,9 +53,78 @@ def test_message_full_envelope_dict_is_parsed() -> None:
     assert message.content == [TextContent(text="hi")]
 
 
+def test_message_metadata_roundtrip() -> None:
+    from timbal.types.message import BACKGROUND_TASK_COMPLETED_KIND, RUNTIME_SOURCE
+
+    message = Message(
+        role="user",
+        content=[TextContent(text="notice")],
+        metadata={"source": RUNTIME_SOURCE, "kind": BACKGROUND_TASK_COMPLETED_KIND},
+    )
+    assert message.is_runtime()
+    dumped = Message.serialize(message)
+    assert dumped["metadata"] == {"source": "runtime", "kind": "background_task_completed"}
+    assert dumped["metadata"] is not message.metadata
+    dumped["metadata"]["source"] = "forged"
+    assert message.is_runtime()
+    restored = Message.validate(dumped)
+    assert not restored.is_runtime()
+    assert message.metadata["source"] == RUNTIME_SOURCE
+    # Provider wire formats omit metadata.
+    assert "metadata" not in message.to_anthropic_input()
+    assert "metadata" not in message.to_openai_chat_completions_input()
+
+
+@pytest.mark.asyncio
+async def test_message_metadata_survives_trace_dump() -> None:
+    from timbal.utils import dump
+
+    message = Message(
+        role="user",
+        content=[TextContent(text="notice")],
+        metadata={"source": "runtime", "kind": "background_task_completed"},
+    )
+    dumped = await dump(message)
+    assert dumped["metadata"] == {"source": "runtime", "kind": "background_task_completed"}
+    assert dumped["metadata"] is not message.metadata
+    dumped["metadata"]["source"] = "forged"
+    assert message.is_runtime()
+    ordinary = Message(role="user", content=[TextContent(text="hi")])
+    ordinary_dump = await dump(ordinary)
+    assert "metadata" not in ordinary_dump
+
+
+def test_message_metadata_omitted_when_empty() -> None:
+    from copy import deepcopy
+
+    message = Message(role="user", content=[TextContent(text="hi")])
+    assert message.metadata == {}
+    assert not message.is_runtime()
+    assert "metadata" not in Message.serialize(message)
+    with pytest.raises(TypeError):
+        message.metadata["source"] = "runtime"
+    # Tracing providers deepcopy live Message graphs — empty metadata must
+    # not store a MappingProxyType on the instance.
+    cloned = deepcopy(message)
+    assert cloned.metadata == {}
+    assert not cloned.is_runtime()
+    tagged = Message(
+        role="user",
+        content=[TextContent(text="notice")],
+        metadata={"source": "runtime", "kind": "background_task_completed"},
+    )
+    cloned_tagged = deepcopy(tagged)
+    assert cloned_tagged.is_runtime()
+    assert cloned_tagged.metadata == tagged.metadata
+    assert cloned_tagged.metadata is not tagged.metadata
+
+
 def test_message_text_to_openai_chat_completions_input() -> None:
     message = Message(role="assistant", content=[TextContent(text="Hello, World!")])
-    assert message.to_openai_chat_completions_input() == {"role": "assistant", "content": [{"type": "text", "text": "Hello, World!"}]}
+    assert message.to_openai_chat_completions_input() == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Hello, World!"}],
+    }
 
 
 def test_message_thinking_omitted_by_default() -> None:
@@ -115,7 +183,7 @@ def test_message_to_anthropic_input_omits_empty_text() -> None:
 def test_message_file_validation(tmp_path: pathlib.Path) -> None:
     test_file = tmp_path / "image.png"
     png_content = bytes.fromhex(
-        '89504e470d0a1a0a'  # PNG signature
+        "89504e470d0a1a0a"  # PNG signature
     )
     test_file.write_bytes(png_content)
     file_content = FileContent(file=File.validate(str(test_file)))
@@ -130,27 +198,46 @@ def test_message_file_validation(tmp_path: pathlib.Path) -> None:
 
 
 def test_message_tool_use_validation() -> None:
-    message = Message(role="assistant", content=[ToolUseContent(id="123", name="get_weather", input={"city": "London"})])
+    message = Message(
+        role="assistant", content=[ToolUseContent(id="123", name="get_weather", input={"city": "London"})]
+    )
     assert isinstance(message, Message)
     assert message.role == "assistant"
     assert message.content == [ToolUseContent(id="123", name="get_weather", input={"city": "London"})]
 
     with pytest.raises(ValidationError):
-        Message.validate({"role": "assistant", "content": [{"type": "tool_use", "id": "123", "name": "get_weather", "input": "not a dict"}]})
+        Message.validate(
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "123", "name": "get_weather", "input": "not a dict"}],
+            }
+        )
 
 
 def test_message_with_tool_use_to_openai_chat_completions_input() -> None:
-    message = Message(role="assistant", content=[ToolUseContent(id="123", name="get_weather", input={"city": "London"})])
-    assert message.to_openai_chat_completions_input() == {"role": "assistant", "tool_calls": [{"id": "123", "type": "function", "function": {"arguments": '{"city": "London"}', "name": "get_weather"}}]}
+    message = Message(
+        role="assistant", content=[ToolUseContent(id="123", name="get_weather", input={"city": "London"})]
+    )
+    assert message.to_openai_chat_completions_input() == {
+        "role": "assistant",
+        "tool_calls": [
+            {"id": "123", "type": "function", "function": {"arguments": '{"city": "London"}', "name": "get_weather"}}
+        ],
+    }
 
 
 def test_message_with_tool_use_to_anthropic_input() -> None:
     message = Message(role="user", content=[ToolUseContent(id="123", name="get_weather", input={"city": "London"})])
-    assert message.to_anthropic_input() == {"role": "user", "content": [{"type": "tool_use", "id": "123", "name": "get_weather", "input": {"city": "London"}}]}
+    assert message.to_anthropic_input() == {
+        "role": "user",
+        "content": [{"type": "tool_use", "id": "123", "name": "get_weather", "input": {"city": "London"}}],
+    }
 
 
 def test_message_tool_result_validation() -> None:
-    message = Message(role="assistant", content=[ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])])
+    message = Message(
+        role="assistant", content=[ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])]
+    )
     assert isinstance(message, Message)
     assert message.role == "assistant"
     assert message.content == [ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])]
@@ -160,12 +247,21 @@ def test_message_tool_result_validation() -> None:
 
 def test_message_with_tool_result_to_openai_chat_completions_input() -> None:
     message = Message(role="user", content=[ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])])
-    assert message.to_openai_chat_completions_input() == {"role": "tool", "tool_call_id": "123", "content": [{"type": "text", "text": "Hello, World!"}]}
+    assert message.to_openai_chat_completions_input() == {
+        "role": "tool",
+        "tool_call_id": "123",
+        "content": [{"type": "text", "text": "Hello, World!"}],
+    }
 
 
 def test_message_with_tool_result_to_anthropic_input() -> None:
     message = Message(role="user", content=[ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])])
-    assert message.to_anthropic_input() == {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "123", "content": [{"type": "text", "text": "Hello, World!"}]}]}
+    assert message.to_anthropic_input() == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "123", "content": [{"type": "text", "text": "Hello, World!"}]}
+        ],
+    }
 
 
 # --- Cross-provider replay of server-side tool blocks -----------------------
@@ -191,7 +287,10 @@ def _anthropic_server_tool_message() -> Message:
 def test_server_tool_blocks_skipped_in_openai_responses_input() -> None:
     inputs = _anthropic_server_tool_message().to_openai_responses_input()
     assert inputs == [
-        {"role": "assistant", "content": [{"type": "output_text", "text": "It is sunny. [[weather.com](https://weather.com)]"}]}
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "It is sunny. [[weather.com](https://weather.com)]"}],
+        }
     ]
 
 
