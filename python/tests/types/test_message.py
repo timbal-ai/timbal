@@ -72,11 +72,29 @@ def test_message_metadata_roundtrip() -> None:
     assert "metadata" not in message.to_openai_chat_completions_input()
 
 
+@pytest.mark.asyncio
+async def test_message_metadata_survives_trace_dump() -> None:
+    from timbal.utils import dump
+
+    message = Message(
+        role="user",
+        content=[TextContent(text="notice")],
+        metadata={"source": "runtime", "kind": "background_task_completed"},
+    )
+    dumped = await dump(message)
+    assert dumped["metadata"] == {"source": "runtime", "kind": "background_task_completed"}
+    ordinary = Message(role="user", content=[TextContent(text="hi")])
+    ordinary_dump = await dump(ordinary)
+    assert "metadata" not in ordinary_dump
+
+
 def test_message_metadata_omitted_when_empty() -> None:
     message = Message(role="user", content=[TextContent(text="hi")])
     assert message.metadata == {}
     assert not message.is_runtime()
     assert "metadata" not in Message.serialize(message)
+    with pytest.raises(TypeError):
+        message.metadata["source"] = "runtime"
 
 
 def test_message_text_to_openai_chat_completions_input() -> None:

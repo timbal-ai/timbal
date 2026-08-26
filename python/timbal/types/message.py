@@ -1,3 +1,4 @@
+from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import (
@@ -11,6 +12,10 @@ from pydantic import (
 from pydantic_core import CoreSchema, core_schema
 
 from .content import TextContent, ThinkingContent, ToolResultContent, ToolUseContent, content_factory
+
+# Shared empty mapping for the common case (no runtime annotations). Mutating it
+# is a TypeError — Message is immutable after construction aside from content appends.
+_EMPTY_METADATA: MappingProxyType[str, Any] = MappingProxyType({})
 
 # Runtime-injected control messages (not human utterances). Consumers that paint
 # chat transcripts should filter ``source == "runtime"`` rather than sniffing text.
@@ -69,7 +74,7 @@ class Message:
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "content", content)
         object.__setattr__(self, "stop_reason", stop_reason)
-        object.__setattr__(self, "metadata", dict(metadata) if metadata else {})
+        object.__setattr__(self, "metadata", dict(metadata) if metadata else _EMPTY_METADATA)
         # Serialized-form cache (see timbal.utils.serialization). Long
         # conversations re-dump the same Message objects on every turn
         # (span input dump, memory dump, LLM input dump); messages are
@@ -223,7 +228,7 @@ class Message:
             role=self.role,
             content=kept,
             stop_reason=self.stop_reason,
-            metadata=self.metadata or None,
+            metadata=dict(self.metadata) if self.metadata else None,
         )
 
     @classmethod

@@ -104,6 +104,9 @@ def _dump_sync(value: Any) -> Any:
         }
         if value.stop_reason is not None:
             result["stop_reason"] = value.stop_reason
+        metadata = value.metadata
+        if metadata:
+            result["metadata"] = dict(metadata)
         object.__setattr__(value, "_cached_dump", result)
         object.__setattr__(value, "_cached_dump_len", len(content))
         return result
@@ -140,6 +143,7 @@ def _dump_sync(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Async path — only entered when a File object exists in the value tree
 # ---------------------------------------------------------------------------
+
 
 async def _dump_async(value: Any) -> Any:
     _ensure_types()
@@ -187,6 +191,9 @@ async def _dump_async(value: Any) -> Any:
         }
         if value.stop_reason is not None:
             result["stop_reason"] = value.stop_reason
+        metadata = value.metadata
+        if metadata:
+            result["metadata"] = dict(metadata)
         object.__setattr__(value, "_cached_dump", result)
         object.__setattr__(value, "_cached_dump_len", len(content))
         return result
@@ -217,6 +224,7 @@ async def _dump_async(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def invalidate_message_dump_caches(value: Any) -> None:
     """Reset the cached dump on any Message reachable in *value* (shallow containers).
