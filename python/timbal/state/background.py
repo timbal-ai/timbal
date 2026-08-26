@@ -481,9 +481,14 @@ def _preview_value(value: Any, *, limit: int = _RESULT_PREVIEW_CHARS) -> str:
 
 
 def format_background_completion_notice(notifications: list[dict[str, Any]]) -> Any:
-    """Build the user-role message injected at the start of the next parent turn."""
+    """Build the user-role message injected at the start of the next parent turn.
+
+    Stays ``role="user"`` so provider wire formats accept it mid-history, but is
+    tagged ``metadata.source="runtime"`` so transcript UIs can drop it without
+    sniffing the XML body.
+    """
     from ..types.content import TextContent
-    from ..types.message import Message
+    from ..types.message import BACKGROUND_TASK_COMPLETED_KIND, RUNTIME_SOURCE, Message
 
     blocks: list[str] = []
     for note in notifications:
@@ -508,7 +513,11 @@ def format_background_completion_notice(notifications: list[dict[str, Any]]) -> 
         "Background task(s) finished since your last turn. "
         "You do not need to poll get_background_task unless you want more detail.\n\n"
     )
-    return Message(role="user", content=[TextContent(text=header + "\n\n".join(blocks))])
+    return Message(
+        role="user",
+        content=[TextContent(text=header + "\n\n".join(blocks))],
+        metadata={"source": RUNTIME_SOURCE, "kind": BACKGROUND_TASK_COMPLETED_KIND},
+    )
 
 
 class BackgroundEventLog:

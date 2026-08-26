@@ -19,6 +19,14 @@ def _msg_user(text: str) -> Message:
     return Message(role="user", content=[TextContent(text=text)])
 
 
+def _msg_runtime(text: str, *, kind: str = "background_task_completed") -> Message:
+    return Message(
+        role="user",
+        content=[TextContent(text=text)],
+        metadata={"source": "runtime", "kind": kind},
+    )
+
+
 def _msg_system(text: str) -> Message:
     return Message(role="system", content=[TextContent(text=text)])
 
@@ -473,6 +481,25 @@ class TestKeepLastNTurns:
         result = compactor(memory)
         assert len(result) == 1
 
+    def test_runtime_notice_does_not_count_as_turn_but_stays_with_user(self) -> None:
+        memory = [
+            _msg_user("turn1"),
+            _msg_assistant_text("reply1"),
+            _msg_user("turn2"),
+            _msg_assistant_text("reply2"),
+            _msg_runtime("<background_task_completed>\ntask_id: t1\nstatus: completed\n</background_task_completed>"),
+            _msg_user("turn3"),
+            _msg_assistant_text("reply3"),
+        ]
+        compactor = keep_last_n_turns(1)
+        result = compactor(memory)
+        assert [m.collect_text() for m in result] == [
+            "<background_task_completed>\ntask_id: t1\nstatus: completed\n</background_task_completed>",
+            "turn3",
+            "reply3",
+        ]
+        assert result[0].is_runtime()
+
 
 # ---------------------------------------------------------------------------
 # summarize
@@ -500,7 +527,9 @@ class TestSummarizeOldMessages:
     async def test_above_threshold_summarizes(self) -> None:
         """When above threshold, older messages are summarized."""
         memory = [_msg_user(f"Message {i}") for i in range(20)]
-        compactor = summarize(threshold=5, keep_last_n=2, model=TestModel(responses=["The user discussed topics 0 through 17."]))
+        compactor = summarize(
+            threshold=5, keep_last_n=2, model=TestModel(responses=["The user discussed topics 0 through 17."])
+        )
         result = await compactor(memory)
 
         assert len(result) < 20
@@ -610,9 +639,7 @@ class TestSummarizeOldMessages:
     async def test_previous_summary_nothing_new_returns_unchanged(self) -> None:
         """Existing summary + keep_last_n covers all remaining messages — no new call."""
         test_model = TestModel(responses=["Should not be called."])
-        summary_msg = Message.validate(
-            {"role": "user", "content": f"{_SUMMARY_MARKER}\nExisting summary."}
-        )
+        summary_msg = Message.validate({"role": "user", "content": f"{_SUMMARY_MARKER}\nExisting summary."})
         # summary + 2 new messages; keep_last_n=2 covers exactly those 2
         memory = [summary_msg, _msg_user("a"), _msg_user("b")]
         compactor = summarize(threshold=2, keep_last_n=2, model=test_model)
@@ -665,14 +692,17 @@ class TestSummarizeOldMessages:
         """to_keep[0] is assistant: summary(user) → assistant is valid alternation, no ack inserted."""
         # 6 alternating messages ending with assistant; keep_last_n=1 → to_keep=[a3]
         memory = [
-            _msg_user("u1"), _msg_assistant_text("a1"),
-            _msg_user("u2"), _msg_assistant_text("a2"),
-            _msg_user("u3"), _msg_assistant_text("a3"),
+            _msg_user("u1"),
+            _msg_assistant_text("a1"),
+            _msg_user("u2"),
+            _msg_assistant_text("a2"),
+            _msg_user("u3"),
+            _msg_assistant_text("a3"),
         ]
         compactor = summarize(threshold=3, keep_last_n=1, model=TestModel(responses=["Summary."]))
         result = await compactor(memory)
 
-        assert result[0].role == "user"       # summary
+        assert result[0].role == "user"  # summary
         assert result[1].role == "assistant"  # to_keep[0] — no ack in between
         # Verify no "Understood." message inserted
         roles = [m.role for m in result]
@@ -683,16 +713,18 @@ class TestSummarizeOldMessages:
         """to_keep[0] is user: summary(user) + user would be consecutive — ack inserted."""
         # 5 alternating messages ending with user; keep_last_n=1 → to_keep=[u3(current)]
         memory = [
-            _msg_user("u1"), _msg_assistant_text("a1"),
-            _msg_user("u2"), _msg_assistant_text("a2"),
+            _msg_user("u1"),
+            _msg_assistant_text("a1"),
+            _msg_user("u2"),
+            _msg_assistant_text("a2"),
             _msg_user("u3"),
         ]
         compactor = summarize(threshold=3, keep_last_n=1, model=TestModel(responses=["Summary."]))
         result = await compactor(memory)
 
-        assert result[0].role == "user"       # summary
+        assert result[0].role == "user"  # summary
         assert result[1].role == "assistant"  # ack
-        assert result[2].role == "user"       # to_keep[0]
+        assert result[2].role == "user"  # to_keep[0]
         # No consecutive same-role messages anywhere
         for prev, cur in zip(result, result[1:]):
             assert prev.role != cur.role, f"Consecutive {prev.role!r} messages"
@@ -756,9 +788,9 @@ class TestSummarizeOldMessages:
         result = await compactor(memory)
 
         # After orphan cleanup to_keep = [a2, u2] → starts with assistant → no ack
-        assert result[0].role == "user"       # summary
+        assert result[0].role == "user"  # summary
         assert result[1].role == "assistant"  # a2 (not an orphaned tool result)
-        assert result[2].role == "user"       # u2
+        assert result[2].role == "user"  # u2
         # No tool messages in result
         assert all(m.role != "tool" for m in result)
         # No consecutive same-role messages
@@ -861,9 +893,7 @@ class TestCompactToolResultsMultipleToolCalls:
         compactor = compact_tool_results()
         result = compactor(memory)
         assert all(m.role != "tool" for m in result)
-        assert all(
-            not any(isinstance(c, ToolUseContent) for c in m.content) for m in result
-        )
+        assert all(not any(isinstance(c, ToolUseContent) for c in m.content) for m in result)
 
     def test_keep_last_n_one_keeps_entire_last_batch(self) -> None:
         """With keep_last_n=1, the entire last batch (all parallel calls in one assistant message) is kept."""
@@ -881,12 +911,7 @@ class TestCompactToolResultsMultipleToolCalls:
         compactor = compact_tool_results(keep_last_n=1)
         result = compactor(memory)
         # t1 and t2 are in the same batch — both should survive
-        tool_ids = {
-            c.id
-            for m in result
-            for c in m.content
-            if isinstance(c, (ToolUseContent, ToolResultContent))
-        }
+        tool_ids = {c.id for m in result for c in m.content if isinstance(c, (ToolUseContent, ToolResultContent))}
         assert "t1" in tool_ids
         assert "t2" in tool_ids
 
@@ -931,9 +956,7 @@ class TestCompactToolResultsKeepLastNZero:
         compactor = compact_tool_results(keep_last_n=0)
         result = compactor(memory)
         assert all(m.role != "tool" for m in result)
-        assert all(
-            not any(isinstance(c, ToolUseContent) for c in m.content) for m in result
-        )
+        assert all(not any(isinstance(c, ToolUseContent) for c in m.content) for m in result)
 
     def test_replace_mode_zero_replaces_all(self) -> None:
         memory = [
@@ -1150,10 +1173,7 @@ class TestCompactionMetadata:
 
 
 def _has_id(memory: list[Message], uid: str, role: str, content_type: type) -> bool:
-    return any(
-        m.role == role and any(isinstance(c, content_type) and c.id == uid for c in m.content)
-        for m in memory
-    )
+    return any(m.role == role and any(isinstance(c, content_type) and c.id == uid for c in m.content) for m in memory)
 
 
 class TestPinnedResults:
@@ -1181,8 +1201,7 @@ class TestPinnedResults:
         assert _has_id(result, "P", "assistant", ToolUseContent), "pinned tool_use orphaned/dropped"
         # The pinned body must be verbatim, never replaced/truncated.
         pinned = next(
-            c for m in result if m.role == "tool" for c in m.content
-            if isinstance(c, ToolResultContent) and c.id == "P"
+            c for m in result if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent) and c.id == "P"
         )
         assert pinned.content[0].text == "SKILL DOC BODY"
         assert pinned.pinned is True
@@ -1199,8 +1218,7 @@ class TestPinnedResults:
         self._assert_pinned_pair_intact(result)
         # Unpinned results are replaced (not verbatim).
         a = next(
-            c for m in result if m.role == "tool" for c in m.content
-            if isinstance(c, ToolResultContent) and c.id == "A"
+            c for m in result if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent) and c.id == "A"
         )
         assert "chars]" in a.content[0].text
 
@@ -1216,10 +1234,16 @@ class TestPinnedResults:
         result = keep_last_n_messages(2)(self._memory())
         self._assert_pinned_pair_intact(result)
         # Order preserved: pinned tool_use precedes its result.
-        idx_use = next(i for i, m in enumerate(result) if m.role == "assistant"
-                       and any(isinstance(c, ToolUseContent) and c.id == "P" for c in m.content))
-        idx_res = next(i for i, m in enumerate(result) if m.role == "tool"
-                       and any(isinstance(c, ToolResultContent) and c.id == "P" for c in m.content))
+        idx_use = next(
+            i
+            for i, m in enumerate(result)
+            if m.role == "assistant" and any(isinstance(c, ToolUseContent) and c.id == "P" for c in m.content)
+        )
+        idx_res = next(
+            i
+            for i, m in enumerate(result)
+            if m.role == "tool" and any(isinstance(c, ToolResultContent) and c.id == "P" for c in m.content)
+        )
         assert idx_use < idx_res
         # No consecutive same-role messages.
         for prev, cur in zip(result, result[1:], strict=False):
@@ -1811,6 +1835,7 @@ class TestCompactionIntegrationLowRatio:
 # Integration test: Anthropic — alternation fix
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 class TestCompactionIntegrationAnthropic:
     """Integration tests against the real Anthropic API.
@@ -2047,11 +2072,11 @@ class TestServerToolUse:
         compactor = compact_tool_results(keep_last_n=1)
         result = compactor(memory)
 
-        tool_ids_kept = {
-            c.id for m in result for c in m.content if isinstance(c, ToolUseContent)
-        }
+        tool_ids_kept = {c.id for m in result for c in m.content if isinstance(c, ToolUseContent)}
         custom_ids_kept = {
-            c.value.get("tool_use_id") for m in result for c in m.content
+            c.value.get("tool_use_id")
+            for m in result
+            for c in m.content
             if isinstance(c, CustomContent) and isinstance(c.value, dict)
         }
         assert "srvtoolu_1" not in tool_ids_kept
@@ -2088,9 +2113,9 @@ class TestServerToolUse:
         result = _remove_orphaned_tool_parts(memory)
 
         cleaned = next(
-            m for m in result
-            if m.role == "assistant"
-            and any(isinstance(c, TextContent) and c.text == "Some text." for c in m.content)
+            m
+            for m in result
+            if m.role == "assistant" and any(isinstance(c, TextContent) and c.text == "Some text." for c in m.content)
         )
         assert not any(isinstance(c, CustomContent) for c in cleaned.content)
 
@@ -2238,6 +2263,31 @@ class TestSummarizeV2:
         )
         result = await compactor(memory)
         assert _VERBATIM_MARKER not in result[0].collect_text()
+
+    @pytest.mark.asyncio
+    async def test_verbatim_skips_runtime_notices(self) -> None:
+        """Runtime control messages must not land in the Verbatim User Messages section."""
+        from timbal.core.memory_compaction import _VERBATIM_MARKER
+
+        notice = (
+            "Background task(s) finished since your last turn.\n\n"
+            "<background_task_completed>\ntask_id: abc\nstatus: completed\n</background_task_completed>"
+        )
+        memory = [
+            _msg_runtime(notice),
+            _msg_user("Deploy to staging only."),
+            _msg_assistant_text("ok"),
+            *[_msg_user(f"filler {i}") for i in range(8)],
+        ]
+        compactor = summarize(threshold=3, keep_last_n=2, model=TestModel(responses=["Summary text."]))
+        result = await compactor(memory)
+
+        text = result[0].collect_text()
+        assert _VERBATIM_MARKER in text
+        verbatim_section = text.split(_VERBATIM_MARKER, 1)[1]
+        assert "Deploy to staging only." in verbatim_section
+        assert "background_task_completed" not in verbatim_section
+        assert "Background task(s) finished" not in verbatim_section
 
     @pytest.mark.asyncio
     async def test_verbatim_carried_forward_incrementally(self) -> None:
@@ -2531,7 +2581,9 @@ class TestSummarizeV2:
 
         # A second pass re-parses the (now hostile) summary message — must not raise,
         # and must still produce a well-formed summary message with the note last-ish.
-        twice = await compactor([*once, _msg_user("new instruction"), *[_msg_assistant_text(f"more {i}") for i in range(5)]])
+        twice = await compactor(
+            [*once, _msg_user("new instruction"), *[_msg_assistant_text(f"more {i}") for i in range(5)]]
+        )
         text_twice = twice[0].collect_text()
         assert text_twice.startswith(_SUMMARY_MARKER)
         assert "new instruction" in text_twice

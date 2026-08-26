@@ -38,7 +38,9 @@ _REHYDRATED_MARKER = "[Rehydrated Context]"
 _SECTION_MARKERS = (_SUMMARY_MARKER, _VERBATIM_MARKER, _TRANSCRIPT_MARKER, _NOTE_MARKER, _REHYDRATED_MARKER)
 _VERBATIM_SEPARATOR = "\n----8<----\n"
 _VERBATIM_HEADER = "The user's own messages from the compacted region, verbatim, oldest first:"
-_VERBATIM_TRIMMED_NOTE = "[Earlier user messages were dropped from this section; they are covered by the summary above.]"
+_VERBATIM_TRIMMED_NOTE = (
+    "[Earlier user messages were dropped from this section; they are covered by the summary above.]"
+)
 _MAX_TRANSCRIPT_HANDLES = 5
 
 # The continuation guidance is deliberately conservative: post-compaction "continue without
@@ -106,25 +108,24 @@ def _remove_orphaned_tool_parts(memory: list[Message]) -> list[Message]:
             kept = [c for c in msg.content if isinstance(c, ToolResultContent) and c.id in valid_tool_ids]
             if not kept:
                 continue
-            result.append(Message(role=msg.role, content=kept, stop_reason=msg.stop_reason))
+            result.append(
+                Message(role=msg.role, content=kept, stop_reason=msg.stop_reason, metadata=msg.metadata or None)
+            )
         elif msg.role == "assistant":
             # Server tool use blocks (e.g. web search) are self-contained: both the
             # server_tool_use ToolUseContent and its paired result CustomContent live in
             # the same assistant message with no separate tool-role message — never treat
             # them as orphans. Conversely, drop any CustomContent whose tool_use_id has
             # no matching server_tool_use in this message.
-            server_tool_ids = {
-                c.id for c in msg.content
-                if isinstance(c, ToolUseContent) and c.is_server_tool_use
-            }
+            server_tool_ids = {c.id for c in msg.content if isinstance(c, ToolUseContent) and c.is_server_tool_use}
             kept = [
-                c for c in msg.content
-                if not isinstance(c, ToolUseContent)
-                or c.id in valid_tool_ids
-                or c.is_server_tool_use
+                c
+                for c in msg.content
+                if not isinstance(c, ToolUseContent) or c.id in valid_tool_ids or c.is_server_tool_use
             ]
             kept = [
-                c for c in kept
+                c
+                for c in kept
                 if not (
                     isinstance(c, CustomContent)
                     and isinstance(c.value, dict)
@@ -134,7 +135,9 @@ def _remove_orphaned_tool_parts(memory: list[Message]) -> list[Message]:
             ]
             if not kept:
                 continue
-            result.append(Message(role=msg.role, content=kept, stop_reason=msg.stop_reason))
+            result.append(
+                Message(role=msg.role, content=kept, stop_reason=msg.stop_reason, metadata=msg.metadata or None)
+            )
         else:
             result.append(msg)
     return result
@@ -473,9 +476,7 @@ def compact_tool_results(
                         else:
                             # Replace content
                             tool_name = call_id_to_name.get(c.id, "unknown")
-                            result_text = "".join(
-                                item.text for item in c.content if isinstance(item, TextContent)
-                            )
+                            result_text = "".join(item.text for item in c.content if isinstance(item, TextContent))
                             if callable(replacement):
                                 placeholder = replacement(tool_name, c.id, result_text)
                             else:
@@ -499,7 +500,14 @@ def compact_tool_results(
                         new_content.append(c)
                 if not new_content:
                     continue
-                result.append(Message(role=msg.role, content=new_content, stop_reason=msg.stop_reason))
+                result.append(
+                    Message(
+                        role=msg.role,
+                        content=new_content,
+                        stop_reason=msg.stop_reason,
+                        metadata=msg.metadata or None,
+                    )
+                )
             elif msg.role == "assistant":
                 if drop_mode:
                     # Collect IDs of server tool use blocks that are being dropped so we
@@ -507,13 +515,15 @@ def compact_tool_results(
                     # matching tool_use_id). Both live in the same assistant message and
                     # must always travel together, regardless of the result block type.
                     dropped_server_ids = {
-                        c.id for c in msg.content
+                        c.id
+                        for c in msg.content
                         if isinstance(c, ToolUseContent) and c.is_server_tool_use and c.id not in kept_ids
                     }
                     kept = [c for c in msg.content if not isinstance(c, ToolUseContent) or c.id in kept_ids]
                     if dropped_server_ids:
                         kept = [
-                            c for c in kept
+                            c
+                            for c in kept
                             if not (
                                 isinstance(c, CustomContent)
                                 and isinstance(c.value, dict)
@@ -522,7 +532,14 @@ def compact_tool_results(
                         ]
                     if not kept:
                         continue
-                    result.append(Message(role=msg.role, content=kept, stop_reason=msg.stop_reason))
+                    result.append(
+                        Message(
+                            role=msg.role,
+                            content=kept,
+                            stop_reason=msg.stop_reason,
+                            metadata=msg.metadata or None,
+                        )
+                    )
                 else:
                     result.append(msg)
             else:
@@ -573,10 +590,16 @@ def keep_last_n_turns(n: int) -> Callable[[list[Message]], list[Message]]:
     def _compact(memory: list[Message]) -> list[Message]:
         if not memory:
             return memory
-        user_indices = [i for i, m in enumerate(memory) if m.role == "user"]
+        # Runtime control messages (e.g. background completion notices) are role=user
+        # for the LLM wire but must not count as turn boundaries.
+        user_indices = [i for i, m in enumerate(memory) if m.role == "user" and not m.is_runtime()]
         if len(user_indices) <= n:
             return _remove_orphaned_tool_parts(memory)
         start = user_indices[-n]
+        # Pull contiguous runtime notices that sit immediately before the first kept
+        # human user message so [...notice, user...] stays intact.
+        while start > 0 and memory[start - 1].is_runtime():
+            start -= 1
         # Keep the last n turns, plus any pinned messages (and their paired tool_use) from
         # earlier turns. Order is preserved.
         keep = set(range(start, len(memory))) | _pinned_protected_indices(memory)
@@ -633,7 +656,8 @@ def summarize(
         keep_last_n: Number of recent messages to keep unsummarized.
         max_summary_tokens: Maximum tokens for the summary response.
         preserve_user_messages: Carry the user's messages from the summarized region
-            verbatim in the summary message (default True).
+            verbatim in the summary message (default True). Runtime control messages
+            (``Message.is_runtime()``) are excluded — they are not human utterances.
         max_verbatim_chars: Budget for the verbatim section; oldest entries are
             dropped first when exceeded.
         store: OffloadStore for the canonical record. Defaults to None, which uses
@@ -722,7 +746,7 @@ def summarize(
         # Mechanical sections — assembled by us, never trusted to the summarizer.
         if preserve_user_messages:
             for msg in to_summarize:
-                if msg.role != "user":
+                if msg.role != "user" or msg.is_runtime():
                     continue
                 text = msg.collect_text().strip()
                 if text and not text.startswith(_SUMMARY_MARKER):

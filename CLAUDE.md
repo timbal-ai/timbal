@@ -554,6 +554,9 @@ msg = Message(
 msg.collect_text()   # concatenate all TextContent.text
 msg.to_anthropic_input()
 msg.to_openai_chat_completions_input()
+# Optional metadata (not sent to providers). Runtime control messages use:
+# metadata={"source": "runtime", "kind": "background_task_completed"}
+# Filter with msg.is_runtime() when painting human transcripts.
 ```
 
 ### File

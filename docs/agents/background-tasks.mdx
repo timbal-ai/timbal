@@ -69,6 +69,14 @@ summary: ...
 </background_task_completed>
 ```
 
+The notice stays `role="user"` (provider wire formats require it mid-history) but is tagged:
+
+```json
+{"source": "runtime", "kind": "background_task_completed"}
+```
+
+Transcript UIs should filter `metadata.source == "runtime"` (or `Message.is_runtime()`) — do not sniff the XML tag. The model still sees the message; humans should not.
+
 Notices are lean (short summary / result preview, error string if any) — not full transcripts. After drain they are not re-injected; `get_background_task` still peeks the full snapshot. Concurrent parent runs without a shared `parent_id` keep isolated inboxes.
 
 If the model already polls via the auto-registered `get_background_task` / `list_background_tasks` tools and sees a terminal status, that peek **acks** the notice — the next turn will not fire a duplicate `<background_task_completed>` for a completion the agent already handled. App/Python peeks (`timbal.state.get_background_task`) do not ack by default, so UIs can inspect without stealing the LLM inbox.
