@@ -226,6 +226,25 @@ class Message:
                 message_text += content.text + "\n\n"
         return message_text.strip()
 
+    def closing_text(self) -> str:
+        """Return the trailing contiguous run of text blocks (the closing report).
+
+        Scans content backwards and keeps the last contiguous sequence of
+        ``TextContent``. Stops at a ``ToolUseContent`` only after at least one
+        text block has been collected — so a turn that ends mid-edit (trailing
+        tool calls from token limit / cancellation) still yields its prose.
+        Non-text, non-tool blocks (thinking, tool results, files, etc.) are
+        skipped without breaking the run.
+        """
+        parts: list[str] = []
+        for content in reversed(self.content):
+            if isinstance(content, TextContent):
+                parts.append(content.text)
+            elif isinstance(content, ToolUseContent) and parts:
+                break
+        parts.reverse()
+        return "\n\n".join(p for p in parts if p).strip()
+
     def without_empty_text_blocks(self) -> "Message | None":
         """Drop ``TextContent`` with empty text (invalid for Anthropic; see DEBUG2)."""
         kept = [c for c in self.content if not (isinstance(c, TextContent) and c.text == "")]

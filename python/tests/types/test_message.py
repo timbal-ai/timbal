@@ -119,6 +119,54 @@ def test_message_metadata_omitted_when_empty() -> None:
     assert cloned_tagged.metadata is not tagged.metadata
 
 
+def test_message_collect_text() -> None:
+    message = Message(
+        role="assistant",
+        content=[
+            TextContent(text="Hello"),
+            ToolUseContent(id="1", name="edit", input={}),
+            TextContent(text="World"),
+        ],
+    )
+    assert message.collect_text() == "Hello\n\nWorld"
+
+
+def test_message_closing_text_is_trailing_contiguous_run() -> None:
+    message = Message(
+        role="assistant",
+        content=[
+            TextContent(text="narration before tools"),
+            ToolUseContent(id="1", name="write", input={"path": "a.py"}),
+            ToolUseContent(id="2", name="bash", input={"cmd": "ls"}),
+            TextContent(text="Contract: /api/users"),
+            TextContent(text="Done."),
+        ],
+    )
+    assert message.closing_text() == "Contract: /api/users\n\nDone."
+    assert message.collect_text() == "narration before tools\n\nContract: /api/users\n\nDone."
+
+
+def test_message_closing_text_still_reports_when_turn_ends_on_tool_call() -> None:
+    """Trailing tool_use (token limit / cancel) must not erase the closing prose."""
+    message = Message(
+        role="assistant",
+        content=[
+            TextContent(text="Wrote the route contract."),
+            ToolUseContent(id="1", name="edit", input={"path": "routes.ts"}),
+            ToolUseContent(id="2", name="bash", input={"cmd": "pytest"}),
+        ],
+    )
+    assert message.closing_text() == "Wrote the route contract."
+
+
+def test_message_closing_text_empty_without_trailing_text() -> None:
+    message = Message(
+        role="assistant",
+        content=[ToolUseContent(id="1", name="edit", input={})],
+    )
+    assert message.closing_text() == ""
+
+
 def test_message_text_to_openai_chat_completions_input() -> None:
     message = Message(role="assistant", content=[TextContent(text="Hello, World!")])
     assert message.to_openai_chat_completions_input() == {

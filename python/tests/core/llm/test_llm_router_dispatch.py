@@ -851,24 +851,25 @@ class TestLlmRouterTestModelPath:
 class TestLlmRouterPlatformHeaders:
     """Test that platform config subject fields are forwarded as request headers."""
 
-    def _make_platform_context(self, app_id=None):
+    def _make_platform_context(self, app_id=None, project_id=None):
         from timbal.state.config import PlatformConfig
 
         platform_config = MagicMock(spec=PlatformConfig)
         platform_config.subject = MagicMock()
         platform_config.subject.org_id = "org_999"
+        # Explicit None — MagicMock attributes are truthy by default and would
+        # otherwise leak a mock object into the header value.
         platform_config.subject.app_id = app_id
+        platform_config.subject.project_id = project_id
         platform_config.host = "api.timbal.ai"
         platform_config.auth = MagicMock()
         platform_config.auth.header_value = "Bearer tok"
         return _make_run_context(platform_config=platform_config)
 
-    @pytest.mark.asyncio
-    async def test_app_id_added_to_headers(self):
+    async def _capture_headers(self, **platform_kwargs):
         from timbal.core.llm import _llm_router
 
-        self._make_platform_context(app_id="app_123")
-
+        self._make_platform_context(**platform_kwargs)
         captured_kwargs = {}
 
         async def fake_create(**kwargs):
@@ -888,38 +889,38 @@ class TestLlmRouterPlatformHeaders:
             except (RuntimeError, StopAsyncIteration):
                 pass
 
-        headers = captured_kwargs.get("extra_headers", {})
+        return captured_kwargs.get("extra_headers", {})
+
+    @pytest.mark.asyncio
+    async def test_app_id_added_to_headers(self):
+        headers = await self._capture_headers(app_id="app_123")
         assert headers.get("x-timbal-app-id") == "app_123"
+        assert "x-timbal-project-id" not in headers
         assert "x-timbal-version-id" not in headers
 
     @pytest.mark.asyncio
     async def test_app_id_absent_omits_header(self):
-        from timbal.core.llm import _llm_router
-
-        self._make_platform_context(app_id=None)
-
-        captured_kwargs = {}
-
-        async def fake_create(**kwargs):
-            captured_kwargs.update(kwargs)
-            return _empty_async_stream()
-
-        mock_client = MagicMock()
-        mock_client.messages.create = fake_create
-
-        with patch("timbal.core.llm.clients._get_client", return_value=mock_client):
-            try:
-                async for _ in _llm_router(
-                    model="anthropic/claude-sonnet-4-6",
-                    max_tokens=100,
-                ):
-                    pass
-            except (RuntimeError, StopAsyncIteration):
-                pass
-
-        headers = captured_kwargs.get("extra_headers", {})
+        headers = await self._capture_headers(app_id=None)
         assert "x-timbal-app-id" not in headers
+        assert "x-timbal-project-id" not in headers
         assert "x-timbal-version-id" not in headers
+
+    @pytest.mark.asyncio
+    async def test_project_id_added_to_headers(self):
+        headers = await self._capture_headers(project_id="proj_456")
+        assert headers.get("x-timbal-project-id") == "proj_456"
+        assert "x-timbal-app-id" not in headers
+
+    @pytest.mark.asyncio
+    async def test_project_id_absent_omits_header(self):
+        headers = await self._capture_headers(project_id=None)
+        assert "x-timbal-project-id" not in headers
+
+    @pytest.mark.asyncio
+    async def test_app_and_project_id_both_forwarded(self):
+        headers = await self._capture_headers(app_id="app_123", project_id="proj_456")
+        assert headers.get("x-timbal-app-id") == "app_123"
+        assert headers.get("x-timbal-project-id") == "proj_456"
 
 
 class TestLlmRouterAnthropicStructuredOutput:
