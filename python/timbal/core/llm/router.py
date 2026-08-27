@@ -96,6 +96,8 @@ async def _llm_router(
     if run_context.platform_config and run_context.platform_config.subject:
         if run_context.platform_config.subject.app_id:
             request_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
+        if run_context.platform_config.subject.project_id:
+            request_headers["x-timbal-project-id"] = run_context.platform_config.subject.project_id
 
     client, base_url = _resolve_client(provider, config, api_key, base_url, run_context)
 
