@@ -121,6 +121,14 @@ Two transport notes:
 - Both events are additive. A client that dispatches on `type` and ignores unknown values behaves exactly as it did before.
 - On LiveKit, a payload over the ~12 KiB reliable-data cap is split into `{"type":"chunk","chunk_id","msg_type","seq","total","data"}` envelopes, where `data` is a base64 slice. Concatenate by `seq`, base64-decode, and parse one message. This matters for approvals: a card carrying a long brief in `ui`/`input` routinely exceeds the cap. (`session_transcript` keeps its own entry-wise split, unchanged.)
 
+### Continuing a conversation across modalities
+
+A voice call and a text session are the same run chain — every voice turn persists with a `parent_run_id` — so moving between them is just a matter of carrying the pointer.
+
+**Voice → text.** `agent_text_done` carries the `run_id` of the run that produced the turn. Together with the suspension events above, a client holds a current pointer after every turn, suspended or not: to continue in chat, `POST /stream` with `parent_id` set to the last `run_id` seen. It is `null` for text with no run behind it — the opener greeting (spoken before any turn exists) and realtime speech-to-speech sessions (provider-held state, no runs).
+
+**Text → voice.** The voice session accepts the run to continue from — `VoiceSession(parent_run_id=...)` — and makes the call's **first** turn a child of that run, memory included; from turn two on the session's own chaining takes over. Where it comes from is deliberate: a `parent_id` says *which conversation this caller is joining*, so it rides the server-minted dial (`parent_id` on the LiveKit dial body, or `TIMBAL_VOICE_PARENT_RUN_ID` in the serverless boot env), never the browser hello. For the playground, a hello-supplied `parent_id` sits behind the same `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT` development gate as `call_context` — both are the caller asserting its own identity. When a seed was applied, `session_started` reports it back as `parent_run_id`.
+
 ## See also
 
 - [Resuming a paused run](/human-in-the-loop/resuming) — the in-process and durable-provider story
