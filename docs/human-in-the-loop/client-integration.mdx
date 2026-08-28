@@ -94,6 +94,33 @@ To abort instead of answering (user closed the dialog, navigated away), resume t
 
 The run ends with a terminal `OUTPUT` of `status.reason == "cancelled"` (not `input_required`/`approval_denied`), and nothing is sent back to the model. An edit-on-approve over HTTP is the same idea on an approval id: `{ "<approval_id>": { "approved": true, "override_input": { "to": "fixed@example.com" } } }`.
 
+## Over a voice session
+
+A voice agent that pauses is, from the caller's side, a voice agent that went quiet. `VoiceSession` lifts both pause events into session events, so they reach the client over whichever transport the call uses (WebSocket, WebRTC, LiveKit) alongside transcripts, agent text and audio:
+
+```json
+{
+  "type": "agent_approval",
+  "run_id": "06a22e62b85d7b558000db9caf2790b2",
+  "approval_id": "8f21c0d4e93b47a1b0c5d2e6f7a81b34",
+  "kind": "payment",
+  "prompt": "Wire $500?",
+  "ui": { "title": "Wire transfer", "severity": "high" },
+  "input": { "amount": 500 },
+  "input_schema": { "type": "object", "properties": { "amount": { "type": "integer" } } },
+  "tool_call_id": "toolu_01abc..."
+}
+```
+
+`agent_interaction` is the same idea for `suspend()`/`ask_user`, carrying `interaction_id`, `kind`, `payload` and `response_schema`. Both are emitted the moment the run parks, not at the end of the turn.
+
+**Resuming is still HTTP.** The voice channel carries the pause outward only; there is no inbound resume message. `run_id` is what makes the suspension actionable — resume exactly as above, with `parent_id` set to the `run_id` you received and the id in the `resume` map. It is also the only way a voice client learns the run id behind the call.
+
+Two transport notes:
+
+- Both events are additive. A client that dispatches on `type` and ignores unknown values behaves exactly as it did before.
+- On LiveKit, a payload over the ~12 KiB reliable-data cap is split into `{"type":"chunk","chunk_id","msg_type","seq","total","data"}` envelopes, where `data` is a base64 slice. Concatenate by `seq`, base64-decode, and parse one message. This matters for approvals: a card carrying a long brief in `ui`/`input` routinely exceeds the cap. (`session_transcript` keeps its own entry-wise split, unchanged.)
+
 ## See also
 
 - [Resuming a paused run](/human-in-the-loop/resuming) — the in-process and durable-provider story
