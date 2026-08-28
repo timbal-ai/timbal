@@ -28,7 +28,7 @@ class Moderate(Guardrail):
     ```python
     Moderate()                                        # openai, block on any flag
     Moderate(categories=["hate", "violence"], threshold=0.7, action="warn")
-    Moderate(provider="llama_guard", model="groq/llama-3.3-70b-versatile")
+    Moderate(provider="llama_guard", model="groq/openai/gpt-oss-120b")
     ```
     """
 

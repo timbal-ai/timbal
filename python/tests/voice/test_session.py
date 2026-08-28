@@ -455,7 +455,7 @@ class TestLlmWarmup:
             warmed.append(model)
 
         monkeypatch.setattr("timbal.core.llm.warmup_llm_connection", _fake_warmup)
-        agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
+        agent = Agent(name="t", model="groq/openai/gpt-oss-20b", tools=[])
         session = VoiceSession(
             agent=agent,
             stt=MockSTT(),
@@ -475,12 +475,12 @@ class TestLlmWarmup:
             warmed.append(model)
 
         monkeypatch.setattr("timbal.core.llm.warmup_llm_connection", _fake_warmup)
-        agent = Agent(name="t", model="groq/llama-3.1-8b-instant", tools=[])
+        agent = Agent(name="t", model="groq/openai/gpt-oss-20b", tools=[])
         session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
         session._start_llm_warmup()
         assert session._llm_warmup_task is not None
         await session._llm_warmup_task
-        assert warmed == ["groq/llama-3.1-8b-instant"]
+        assert warmed == ["groq/openai/gpt-oss-20b"]
 
     def test_warmup_skips_test_model(self) -> None:
         agent = Agent(name="t", model=TestModel(responses=["ok"]), tools=[])
