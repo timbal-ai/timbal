@@ -805,25 +805,6 @@ models:
   output_price: 3.0
   context_window: 256000
   capabilities: [vision, tools, reasoning]
-- id: fireworks/accounts/fireworks/models/minimax-m2p5
-  provider: fireworks
-  display_name: MiniMax M2.5 (Fireworks)
-  description: MoE with 230B total parameters (10B active), achieving SOTA in coding and agentic tool use, completing tasks
-    37% faster than its predecessor.
-  notes: Serverless deprecated on Fireworks; migrate to minimax-m2p7 or minimax-m3.
-  input_price: 0.3
-  output_price: 1.2
-  context_window: 200000
-  capabilities: [tools]
-- id: fireworks/accounts/fireworks/models/minimax-m2p7
-  provider: fireworks
-  display_name: MiniMax M2.7 (Fireworks)
-  description: 'MiniMax M2.7 MoE on Fireworks serverless: improved agent harnesses, complex skills, and dynamic tool search
-    over M2.5.'
-  input_price: 0.3
-  output_price: 1.2
-  context_window: 196608
-  capabilities: [tools, reasoning]
 - id: fireworks/accounts/fireworks/models/minimax-m3
   provider: fireworks
   display_name: MiniMax M3 (Fireworks)

@@ -12,7 +12,6 @@ NEW_MODEL_IDS = [
     "xai/grok-4.6",
     "xai/grok-4.5",
     "xai/grok-4.3",
-    "fireworks/accounts/fireworks/models/minimax-m2p7",
     "fireworks/accounts/fireworks/models/minimax-m3",
     "fireworks/accounts/fireworks/models/qwen3p7-plus",
     "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
@@ -135,7 +134,7 @@ class TestFireworksRouterDispatch:
     @pytest.mark.parametrize(
         "model_id,api_name",
         [
-            ("fireworks/accounts/fireworks/models/minimax-m2p7", "accounts/fireworks/models/minimax-m2p7"),
+            ("fireworks/accounts/fireworks/models/minimax-m3", "accounts/fireworks/models/minimax-m3"),
             ("fireworks/accounts/fireworks/models/qwen3p7-plus", "accounts/fireworks/models/qwen3p7-plus"),
             ("fireworks/accounts/fireworks/models/deepseek-v4-flash-0731", "accounts/fireworks/models/deepseek-v4-flash-0731"),
         ],

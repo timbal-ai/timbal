@@ -135,8 +135,6 @@ Model = Literal[
     "fireworks/accounts/fireworks/models/kimi-k2p6",
     "fireworks/accounts/fireworks/models/kimi-k2p7-code",
     "fireworks/accounts/fireworks/models/kimi-k2p5",
-    "fireworks/accounts/fireworks/models/minimax-m2p5",
-    "fireworks/accounts/fireworks/models/minimax-m2p7",
     "fireworks/accounts/fireworks/models/minimax-m3",
     "fireworks/accounts/fireworks/models/gpt-oss-120b",
     "fireworks/accounts/fireworks/models/gpt-oss-20b",

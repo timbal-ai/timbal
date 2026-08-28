@@ -50,10 +50,10 @@ LIVE_MODELS = [
         id="xai-grok-4.5",
     ),
     pytest.param(
-        "fireworks/accounts/fireworks/models/minimax-m2p7",
+        "fireworks/accounts/fireworks/models/minimax-m3",
         "FIREWORKS_API_KEY",
         None,
-        id="fireworks-minimax-m2p7",
+        id="fireworks-minimax-m3",
     ),
     pytest.param(
         "fireworks/accounts/fireworks/models/qwen3p7-plus",
