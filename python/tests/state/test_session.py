@@ -50,6 +50,50 @@ class TestSessionBasic:
         assert session1 is session2
 
 
+class _RaisingProvider(InMemoryTracingProvider):
+    """A provider whose reads fail — models the platform provider, which
+    raises on a missing or unreachable run where in-memory returns None."""
+
+    @classmethod
+    async def get(cls, run_context):  # noqa: ARG003
+        raise RuntimeError("boom: run not found / platform unreachable")
+
+
+class TestProviderReadFailures:
+    """A dangling or flaky parent pointer must degrade, not abort.
+
+    The 'parent trace not found' path already continues without session data
+    or memory; a provider that *raises* for the same situation must land on
+    the same path — otherwise a voice call seeded with parent_run_id dies
+    right after session_started on the platform provider."""
+
+    @pytest.mark.asyncio
+    async def test_get_session_survives_a_raising_provider(self):
+        ctx = RunContext(parent_id="gone", tracing_provider=_RaisingProvider)
+        session = await ctx.get_session()
+        assert session == {}
+        # Cached like the missing-trace path: no re-fetch, no later raise.
+        assert (await ctx.get_session()) is session
+
+    @pytest.mark.asyncio
+    async def test_get_parent_trace_survives_a_raising_provider(self):
+        ctx = RunContext(parent_id="gone", tracing_provider=_RaisingProvider)
+        assert await ctx._get_parent_trace() is None
+
+    @pytest.mark.asyncio
+    async def test_agent_run_with_raising_provider_still_succeeds(self):
+        """Memory resolution goes through _get_parent_trace — the run must
+        proceed without memory rather than error."""
+        agent = Agent(
+            name="degrade",
+            model=TestModel(responses=["ok"]),
+            tools=[],
+            tracing_provider=_RaisingProvider,
+        )
+        result = await agent(prompt="hi", parent_id="gone").collect()
+        assert result.status.code == "success"
+
+
 class TestSessionPersistence:
     """Test session persistence across runs."""
 

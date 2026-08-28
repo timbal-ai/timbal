@@ -19,6 +19,7 @@ from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import (
     AgentTextDone,
+    SessionError,
     SessionStarted,
     TranscriptEvent,
     VoiceSession,
@@ -216,6 +217,36 @@ class TestParentRunSeed:
     def test_blank_seed_is_normalized_to_none(self) -> None:
         session = _make_session(parent_run_id="   ")
         assert session.parent_run_id is None
+
+    async def test_a_raising_provider_degrades_instead_of_ending_the_call(self) -> None:
+        """The platform provider *raises* on a missing or unreachable run where
+        in-memory returns None. A dangling or flaky seed must cost the call its
+        continuity, not the call itself — the seed loads during session startup,
+        right after session_started."""
+        from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
+
+        class _RaisingProvider(InMemoryTracingProvider):
+            @classmethod
+            async def get(cls, run_context):  # noqa: ARG003
+                raise RuntimeError("platform unreachable")
+
+        agent = Agent(
+            name="continuity",
+            model=TestModel(responses=["Still here."]),
+            tools=[],
+            tracing_provider=_RaisingProvider,
+        )
+        session = _make_session(
+            stt_script=[TranscriptEvent(type="committed", text="hello?")],
+            agent=agent,
+            parent_run_id="dangling-or-unreachable",
+        )
+        events = await _collect_events(session)
+
+        assert not [e for e in events if isinstance(e, SessionError)], "the call must survive the seed"
+        done = next(e for e in events if isinstance(e, AgentTextDone))
+        assert "Still here" in done.text
+        assert done.run_id == session._last_run_context.id
 
 
 class TestSeededPreRunTimeout:

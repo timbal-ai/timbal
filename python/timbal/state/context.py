@@ -259,10 +259,25 @@ class RunContext(BaseModel):
         interaction with the tracing provider.
 
         Returns:
-            The parent run's tracing data, or None if this is a root run.
+            The parent run's tracing data, or None if this is a root run or the
+            provider could not produce it. Provider failures are deliberately
+            not fatal: unlike the in-memory provider, the platform provider
+            *raises* on a missing or unreachable run, and a dangling or flaky
+            ``parent_id`` must degrade to "continue without memory" — the same
+            path callers already take for ``None`` — not abort a run (or end a
+            voice call) that can otherwise proceed.
         """
         if self.parent_id and self._tracing_provider is not None:
-            return await self._tracing_provider.get(self)
+            try:
+                return await self._tracing_provider.get(self)
+            except Exception as e:
+                _get_logger().error(
+                    "Parent trace fetch failed. Continuing without it...",
+                    parent_id=self.parent_id,
+                    run_id=self.id,
+                    error=str(e),
+                )
+                return None
         return None
 
     async def _save_trace(self) -> None:
@@ -290,7 +305,20 @@ class RunContext(BaseModel):
         if self._session_data is None:
             self._session_data = {}
             if self.parent_id and self._tracing_provider is not None:
-                trace = await self._tracing_provider.get(self)
+                try:
+                    trace = await self._tracing_provider.get(self)
+                except Exception as e:
+                    # Same degrade-to-empty as a missing trace below: the
+                    # platform provider raises on a dangling/unreachable run
+                    # where in-memory returns None, and session data is
+                    # auxiliary — a run that can proceed without it should.
+                    _get_logger().error(
+                        "Parent trace fetch failed. Continuing without session data...",
+                        parent_id=self.parent_id,
+                        run_id=self.id,
+                        error=str(e),
+                    )
+                    return self._session_data
                 if trace is None or trace._root_call_id is None:
                     _get_logger().error(
                         "Parent trace not found. Continuing without session data...",
