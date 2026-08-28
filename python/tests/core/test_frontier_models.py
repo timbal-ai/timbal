@@ -28,7 +28,6 @@ NEW_MODEL_IDS = [
     "togetherai/MiniMaxAI/MiniMax-M3",
     "moonshot/kimi-k3",
     "moonshot/kimi-k2.6",
-    "moonshot/kimi-k2.5",
     "moonshot/kimi-k2.7-code",
     "moonshot/kimi-k2.7-code-highspeed",
 ]
@@ -175,7 +174,7 @@ class TestMoonshotRouterDispatch:
         [
             ("moonshot/kimi-k3", "kimi-k3"),
             ("moonshot/kimi-k2.6", "kimi-k2.6"),
-            ("moonshot/kimi-k2.5", "kimi-k2.5"),
+            ("moonshot/kimi-k2.6", "kimi-k2.6"),
             ("moonshot/kimi-k2.7-code", "kimi-k2.7-code"),
             ("moonshot/kimi-k2.7-code-highspeed", "kimi-k2.7-code-highspeed"),
         ],
