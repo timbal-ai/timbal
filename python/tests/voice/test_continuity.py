@@ -25,7 +25,7 @@ from timbal.voice import (
     VoiceSessionEvent,
 )
 
-from .test_session import DelayedMockSTT, MockSTT, MockTTS, _collect_events
+from .test_session import DelayedMockSTT, MockSTT, MockTTS, _collect_events, _HungAgent
 
 
 async def _text_turn(agent: Agent, prompt: str):
@@ -216,6 +216,71 @@ class TestParentRunSeed:
     def test_blank_seed_is_normalized_to_none(self) -> None:
         session = _make_session(parent_run_id="   ")
         assert session.parent_run_id is None
+
+
+class TestSeededPreRunTimeout:
+    async def test_a_turn_that_never_started_does_not_report_the_seed(self) -> None:
+        """The seed context exists before any run does. A turn that dies before
+        the first ``__anext__`` must report run_id None — the seed's id points
+        at nothing persisted — and must NOT adopt the seed as _last_run_context,
+        or the retry's genuine run (which reuses the empty-trace seed) would be
+        identical to _last_run_context and report None itself."""
+        text_agent = Agent(name="continuity", model=TestModel(responses=["ok"]), tools=[])
+        first = await _text_turn(text_agent, "hello from text")
+
+        stt = DelayedMockSTT()
+        session = VoiceSession(
+            agent=_HungAgent(),  # type: ignore[arg-type]
+            stt=stt,
+            tts=MockTTS(),
+            turn_detector="heuristic",
+            turn_timeout_secs=0.15,
+            turn_timeout_fallback="Sorry, try again.",
+            parent_run_id=first.run_id,
+        )
+        live_agent = Agent(name="continuity", model=TestModel(responses=["Recovered."]), tools=[])
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _empty_audio() -> AsyncIterator[bytes]:
+            return
+            yield  # noqa: RET504
+
+        async def _drive() -> None:
+            while not any(isinstance(e, SessionStarted) for e in events):
+                await asyncio.sleep(0.01)
+            await stt.inject(TranscriptEvent(type="committed", text="Are you there?"))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            while session._current_turn_task is not None and not session._current_turn_task.done():
+                await asyncio.sleep(0.01)
+            # No run happened — the failed turn must not have adopted the seed.
+            assert session._last_run_context is None
+
+            session.agent = live_agent
+            await stt.inject(TranscriptEvent(type="committed", text="Hello again"))
+            while session._last_run_context is None:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            await stt.finish()
+
+        async def _run() -> None:
+            async with aclosing(session.run(_empty_audio())) as stream:
+                driver = asyncio.create_task(_drive())
+                async for ev in stream:
+                    events.append(ev)
+                await driver
+
+        await asyncio.wait_for(_run(), timeout=10)
+
+        dones = [e for e in events if isinstance(e, AgentTextDone)]
+        assert dones[0].text == "Sorry, try again."
+        assert dones[0].run_id is None, "no run started — the seed id points at nothing persisted"
+        # The retry ran for real, on the surviving seed: it reports its run and
+        # still joined the conversation the dial named.
+        assert dones[1].run_id is not None
+        assert dones[1].run_id == session._last_run_context.id
+        assert session._last_run_context.parent_id == first.run_id
 
 
 class TestTimeoutFallbackRunId:

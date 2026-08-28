@@ -31,6 +31,7 @@ from uuid_extensions import uuid7
 from ..core.agent import Agent
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
+from ..state.tracing.providers import TRACING_UNSET
 from ..types.content import TextContent, ToolUseContent
 from ..types.events import ApprovalEvent, InteractionEvent, OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
@@ -1969,7 +1970,13 @@ class VoiceSession:
                     except Exception as e:
                         logger.warning("turn_truncation_failed", error=str(e), exc_info=True)
                 ctx = get_run_context()
-                if ctx is not None:
+                # An empty trace means no run happened this turn — the ambient
+                # context is the pre-turn seed (call_context / parent_run_id)
+                # after a pre-run timeout or cancel. Adopting it would make the
+                # NEXT turn's run invisible to _turn_run_id: the agent reuses
+                # the empty-trace seed, so the retry's context is identical to
+                # _last_run_context and its genuine run would report None.
+                if ctx is not None and ctx._trace:
                     self._last_run_context = ctx
                     # Re-persist the trace: the agent's own generator saved it on
                     # exhaustion, *before* this finally attached the final metrics.
@@ -2184,7 +2191,14 @@ class VoiceSession:
             return
         ctx = get_run_context()
         if ctx is None:
-            ctx = RunContext(parent_id=self.parent_run_id, tracing_provider=self.agent.tracing_provider)
+            # getattr: the session accepts duck-typed agents (tests, custom
+            # wrappers); missing attribute falls back to env auto-detection,
+            # which is what a bare RunContext() did before the seed carried
+            # the provider at all.
+            ctx = RunContext(
+                parent_id=self.parent_run_id,
+                tracing_provider=getattr(self.agent, "tracing_provider", TRACING_UNSET),
+            )
         elif self.parent_run_id and ctx.parent_id is None and not ctx._trace:
             # A transport seeded an ambient context of its own (platform run
             # wrapper). Point it at the conversation this call joins; a context
@@ -2980,9 +2994,15 @@ class VoiceSession:
         on exit), while ``_last_run_context`` still points at the *previous*
         turn until the turn's ``finally`` — so ``ambient is _last_run_context``
         means the generator never got far enough to start a run.
+
+        The identity check alone is not enough: ``_seed_call_context`` plants
+        an empty-trace context before turn one, so a turn that dies before the
+        first ``__anext__`` would otherwise report the seed's id — a pointer to
+        a run that never started and persisted nothing. An empty trace means no
+        run recorded anything, whoever owns the context.
         """
         ctx = get_run_context()
-        if ctx is None or ctx is self._last_run_context:
+        if ctx is None or ctx is self._last_run_context or not ctx._trace:
             return None
         return ctx.id
 
