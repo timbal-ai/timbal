@@ -47,6 +47,7 @@ from .capacity import acquire_session_slot, max_concurrent_sessions, release_ses
 from .voice import (
     build_voice_session,
     client_call_context,
+    client_parent_run_id,
     event_to_payloads,
     merge_client_voice_overrides,
 )
@@ -253,6 +254,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             config,
             playback_tracker=PacedPlaybackTracker(downlink),
             call_context=client_call_context(config),
+            parent_run_id=client_parent_run_id(config),
         )
         meta = {"playback_acks": "native", "transport": "webrtc", **meta}
         session.recording_meta = meta

@@ -31,6 +31,7 @@ from uuid_extensions import uuid7
 from ..core.agent import Agent
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
+from ..state.tracing.providers import TRACING_UNSET
 from ..types.content import TextContent, ToolUseContent
 from ..types.events import ApprovalEvent, InteractionEvent, OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
@@ -236,6 +237,7 @@ class VoiceSession:
         filler: FillerConfig | dict[str, Any] | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
         call_context: dict[str, str] | None = None,
+        parent_run_id: str | None = None,
     ):
         self.agent = agent
         self.stt = stt
@@ -325,6 +327,13 @@ class VoiceSession:
         # the session bag. Do not pass these as agent(prompt=..., rep_id=...);
         # leftover kwargs leak into ``_llm._stream(**kwargs)``.
         self.call_context: dict[str, str] = dict(call_context or {})
+
+        # Run id this call continues from (text → voice). Session identity, not
+        # a voice knob: it says which conversation the caller is joining, so it
+        # must come from whoever authorized the call (the dial / boot env), not
+        # the browser hello. Applies to turn 1 only — from turn 2 on the
+        # session's own ``_last_run_context`` chaining takes over unchanged.
+        self.parent_run_id = parent_run_id.strip() if isinstance(parent_run_id, str) and parent_run_id.strip() else None
 
         self._event_queue: asyncio.Queue[VoiceSessionEvent | None] = asyncio.Queue()
         self._cancel_turn = asyncio.Event()
@@ -480,8 +489,9 @@ class VoiceSession:
             await self._maybe_start_endpointer()
             await self._emit(SessionStarted())
             # Seed before the greeting task so turn 1 (and a callable
-            # system_prompt resolved for the opener) sees identity. Empty
-            # ``_trace`` is what lets runnable.py reuse this context.
+            # system_prompt resolved for the opener) sees identity and the
+            # parent run this call continues. Empty ``_trace`` is what lets
+            # runnable.py reuse this context.
             await self._seed_call_context()
             # A task, not an await: the opener's TTS (and, for the LLM-authored
             # variant, its completion) must overlap the reader tasks below —
@@ -1810,7 +1820,9 @@ class VoiceSession:
                 turn_phase = "emit_agent_text_done"
                 if full_response.strip():
                     self._transcript.append(TranscriptEntry(role="assistant", text=full_response))
-                await self._emit(AgentTextDone(text=full_response))
+                # run_id makes this a current pointer to the conversation: pass
+                # it as parent_id over HTTP to continue on another transport.
+                await self._emit(AgentTextDone(text=full_response, run_id=self._turn_run_id()))
                 self._turn_finalized_ok = True
                 logger.debug(
                     "turn_agent_text_done_emitted",
@@ -1850,7 +1862,10 @@ class VoiceSession:
                     async with asyncio.timeout(min(self.turn_timeout_secs, 10.0)):
                         await self._speak(fallback)
                     self._transcript.append(TranscriptEntry(role="assistant", text=fallback))
-                    await self._emit(AgentTextDone(text=fallback))
+                    # The apology is session-synthesized, but the timed-out run
+                    # persisted in the generator's aclose — its id still names
+                    # the thread. None if the run never started.
+                    await self._emit(AgentTextDone(text=fallback, run_id=self._turn_run_id()))
                     self._turn_finalized_ok = True
                 except Exception as e:
                     logger.warning("turn_timeout_fallback_failed", error=str(e), exc_info=True)
@@ -1955,7 +1970,13 @@ class VoiceSession:
                     except Exception as e:
                         logger.warning("turn_truncation_failed", error=str(e), exc_info=True)
                 ctx = get_run_context()
-                if ctx is not None:
+                # An empty trace means no run happened this turn — the ambient
+                # context is the pre-turn seed (call_context / parent_run_id)
+                # after a pre-run timeout or cancel. Adopting it would make the
+                # NEXT turn's run invisible to _turn_run_id: the agent reuses
+                # the empty-trace seed, so the retry's context is identical to
+                # _last_run_context and its genuine run would report None.
+                if ctx is not None and ctx._trace:
                     self._last_run_context = ctx
                     # Re-persist the trace: the agent's own generator saved it on
                     # exhaustion, *before* this finally attached the final metrics.
@@ -2150,17 +2171,39 @@ class VoiceSession:
         return out.output.collect_text().strip().strip('"').strip() or None
 
     async def _seed_call_context(self) -> None:
-        """Stash telephony identity on the session bag before any turn.
+        """Plant turn one's identity before any turn runs: telephony call
+        context on the session bag, and the run this call continues from.
 
         Extra RunContext attrs are dropped when turn 2 forks a child context
         (runnable.py: existing ``_trace`` → new ``RunContext(parent_id=…)``).
         The session bag is not: turn 1 reuses this empty-``_trace`` context,
         ``_save_trace`` writes ``root.session``, and turn 2+ reloads it via
         ``get_session()``.
+
+        ``parent_run_id`` (text → voice continuity) rides the same seed. It
+        must be *on the context*, not passed as ``agent(parent_id=…)``: the
+        reuse path in ``Runnable.__call__`` keeps an ambient empty-trace
+        context as-is and would drop the kwarg. The seed carries the agent's
+        tracing provider so ``get_session()`` (here) and memory resolution
+        (turn 1) can actually reach the parent run's trace.
         """
-        if not self.call_context:
+        if not self.call_context and not self.parent_run_id:
             return
-        ctx = get_run_context() or RunContext()
+        ctx = get_run_context()
+        if ctx is None:
+            # getattr: the session accepts duck-typed agents (tests, custom
+            # wrappers); missing attribute falls back to env auto-detection,
+            # which is what a bare RunContext() did before the seed carried
+            # the provider at all.
+            ctx = RunContext(
+                parent_id=self.parent_run_id,
+                tracing_provider=getattr(self.agent, "tracing_provider", TRACING_UNSET),
+            )
+        elif self.parent_run_id and ctx.parent_id is None and not ctx._trace:
+            # A transport seeded an ambient context of its own (platform run
+            # wrapper). Point it at the conversation this call joins; a context
+            # that already names a parent or carries spans is left alone.
+            ctx.parent_id = self.parent_run_id
         session_data = await ctx.get_session()
         session_data.update(self.call_context)
         set_run_context(ctx)
@@ -2942,6 +2985,26 @@ class VoiceSession:
             logger.debug("turn_metrics_trace_attach_failed", error=str(e))
 
     # -- Internal: helpers --------------------------------------------------
+
+    def _turn_run_id(self) -> str | None:
+        """Id of the in-flight turn's run, or None if no run started.
+
+        Only valid inside ``_run_turn``: the first ``__anext__`` on the agent
+        generator swaps the new run's context in (top-level calls leave it set
+        on exit), while ``_last_run_context`` still points at the *previous*
+        turn until the turn's ``finally`` — so ``ambient is _last_run_context``
+        means the generator never got far enough to start a run.
+
+        The identity check alone is not enough: ``_seed_call_context`` plants
+        an empty-trace context before turn one, so a turn that dies before the
+        first ``__anext__`` would otherwise report the seed's id — a pointer to
+        a run that never started and persisted nothing. An empty trace means no
+        run recorded anything, whoever owns the context.
+        """
+        ctx = get_run_context()
+        if ctx is None or ctx is self._last_run_context or not ctx._trace:
+            return None
+        return ctx.id
 
     async def _emit(self, event: VoiceSessionEvent | None) -> None:
         await self._event_queue.put(event)
