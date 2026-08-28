@@ -397,7 +397,11 @@ class TestVoiceWsSuspension:
         app = create_app()
         with TestClient(app) as client:
             with client.websocket_connect("/voice/ws") as ws:
-                ws.send_json({})
+                # The injected commit has to start a turn immediately. A holding
+                # detector (the server default) parks unpunctuated text for
+                # seconds, and the scripted STT stream ends well before that —
+                # the turn would never run and there would be nothing to assert.
+                ws.send_json({"turn_detector": "heuristic"})
                 messages = _collect_ws_messages(ws)
 
         types = [m["type"] for m in messages]
