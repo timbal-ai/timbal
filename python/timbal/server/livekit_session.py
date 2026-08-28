@@ -23,6 +23,9 @@ Env contract for the boot-env path (all platform-owned):
 * ``TIMBAL_VOICE_CLIENT_CONFIG`` — JSON, same keys as the WS hello / rtc config.
   Overlay: after the caller publishes a mic, the driver waits up to 2s for an
   untyped data-message hello (playground dropdowns) and merges it on top.
+* ``TIMBAL_VOICE_PARENT_RUN_ID`` — run id this call continues (text → voice).
+  Session identity, not a voice knob: it is read here (and off the dial body
+  on the per-request path), never off the data-channel hello.
 * ``TIMBAL_VOICE_ABANDON_SECS`` — default 45; see ``SingleSessionGuard``
 
 Env contract for the per-request path (both optional, both recommended on
@@ -94,6 +97,10 @@ class LivekitDial:
     caller_identity: str = ""
     # JSON string (not a dict) so the env and body paths share one type.
     client_config: str = "{}"
+    # Run id this call continues (text → voice). Session identity, not a voice
+    # knob, so it rides the dial — minted by whoever authorized the call — and
+    # never the data-channel hello, which the browser controls.
+    parent_id: str = ""
 
 
 def dial_from_env() -> LivekitDial:
@@ -104,6 +111,7 @@ def dial_from_env() -> LivekitDial:
         room=os.environ.get("TIMBAL_LIVEKIT_ROOM", "").strip(),
         caller_identity=os.environ.get("TIMBAL_LIVEKIT_CALLER_IDENTITY", "").strip(),
         client_config=os.environ.get("TIMBAL_VOICE_CLIENT_CONFIG") or "{}",
+        parent_id=os.environ.get("TIMBAL_VOICE_PARENT_RUN_ID", "").strip(),
     )
 
 
@@ -147,6 +155,7 @@ def dial_from_body(body: dict[str, Any]) -> LivekitDial:
         room=str(body.get("room") or "").strip(),
         caller_identity=str(body.get("caller_identity") or "").strip(),
         client_config=json.dumps(config) if isinstance(config, dict) else "{}",
+        parent_id=str(body.get("parent_id") or "").strip(),
     )
 
 
@@ -575,7 +584,13 @@ async def _run_livekit_session(
 
         downlink = LkPacedSource(sample_rate=sample_rate)
         session, meta = build_voice_session(
-            runnable, defaults, config, playback_tracker=downlink.tracker
+            runnable,
+            defaults,
+            config,
+            playback_tracker=downlink.tracker,
+            # From the dial only — server-minted. The data-channel hello is the
+            # browser's, and a browser must not pick the thread it joins.
+            parent_run_id=dial.parent_id or None,
         )
         meta = {"playback_acks": "native", "transport": "livekit", **meta}
         session.recording_meta = meta

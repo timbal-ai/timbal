@@ -421,6 +421,104 @@ class TestVoiceWsSuspension:
         assert types[-2:] == ["session_transcript", "session_ended"]
 
 
+class TestParentRunId:
+    """Text → voice: the run a call continues. Session identity, not a voice
+    knob, so the hello path sits behind the same development gate as
+    ``call_context`` — one policy switch for "the caller asserts who it is"."""
+
+    def test_hello_parent_id_is_dropped_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server import voice as voice_routes
+
+        monkeypatch.delenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", raising=False)
+        assert voice_routes.client_parent_run_id({"parent_id": "abc"}) is None
+
+    def test_env_opens_the_door(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server import voice as voice_routes
+
+        monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "1")
+        assert voice_routes.client_parent_run_id({"parent_id": " abc "}) == "abc"
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", 7, {"id": "x"}, ["x"]])
+    def test_non_string_values_are_ignored(self, monkeypatch: pytest.MonkeyPatch, raw) -> None:
+        from timbal.server import voice as voice_routes
+
+        monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "1")
+        assert voice_routes.client_parent_run_id({"parent_id": raw}) is None
+
+    def test_not_a_client_settable_voice_field(self) -> None:
+        from timbal.server import voice as voice_routes
+
+        assert "parent_id" not in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
+
+    def test_build_voice_session_plumbs_it(self) -> None:
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.server import voice as voice_routes
+        from timbal.voice.config import VoiceConfig
+
+        agent = Agent(name="voice_test", model=TestModel(responses=["hi"]), tools=[])
+        session, meta = voice_routes.build_voice_session(
+            agent, VoiceConfig(), {"turn_detector": "heuristic"}, parent_run_id="seed-1"
+        )
+        assert session.parent_run_id == "seed-1"
+        # Surfaced so the client can confirm which conversation the call joined.
+        assert meta["parent_run_id"] == "seed-1"
+
+    def test_ws_turn_reports_its_run_and_honors_a_gated_seed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Voice → text over a real socket: agent_text_done carries the run id a
+        client would pass back as parent_id. The gated hello seed reaches the
+        session even when the seed run does not exist (memory resolution logs
+        and continues — a dangling pointer must not take the call down)."""
+        spec = _write_agent_module(tmp_path, responses=["Sure."])
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "1")
+
+        stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Hello")])
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", stt_cls)
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"turn_detector": "heuristic", "parent_id": "cafe0000cafe0000"})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert started["parent_run_id"] == "cafe0000cafe0000"
+
+        done = next(m for m in messages if m["type"] == "agent_text_done" and m["text"])
+        assert isinstance(done["run_id"], str) and done["run_id"]
+
+    def test_ws_seed_is_ignored_when_the_door_is_shut(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        spec = _write_agent_module(tmp_path, responses=["Sure."])
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Hello")])
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", stt_cls)
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                ws.send_json({"turn_detector": "heuristic", "parent_id": "cafe0000cafe0000"})
+                messages = _collect_ws_messages(ws)
+
+        started = next(m for m in messages if m["type"] == "session_started")
+        assert "parent_run_id" not in started
+
+
 class TestVoiceWsSessionTranscript:
     """Verify session_transcript payload structure and ordering."""
 

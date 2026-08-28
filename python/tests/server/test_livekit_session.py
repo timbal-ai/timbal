@@ -23,6 +23,7 @@ from timbal.server.livekit_session import (
     _run_livekit_session,
     chunk_data_payloads,
     dial_from_body,
+    dial_from_env,
     is_config_hello,
     is_livekit_dial,
     maybe_start_livekit_session,
@@ -438,6 +439,62 @@ class TestDialParsing:
     def test_non_object_config_is_dropped(self) -> None:
         dial = dial_from_body({"transport": "livekit", "url": "u", "token": "t", "config": "x"})
         assert dial.client_config == "{}"
+
+
+class TestDialParentId:
+    """The run a call continues (text → voice) rides the dial — minted by
+    whoever authorized the call — never the browser's data-channel hello."""
+
+    def test_body_dial_carries_it(self) -> None:
+        dial = dial_from_body({"transport": "livekit", "url": "u", "token": "t", "parent_id": " run-1 "})
+        assert dial.parent_id == "run-1"
+
+    def test_absent_means_fresh_thread(self) -> None:
+        assert dial_from_body({"transport": "livekit", "url": "u", "token": "t"}).parent_id == ""
+
+    def test_boot_env_dial_reads_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_PARENT_RUN_ID", "run-2")
+        assert dial_from_env().parent_id == "run-2"
+
+    async def test_driver_passes_it_to_the_session_build(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        room, app = ecs_app
+        seen: dict = {}
+
+        def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
+            seen["parent_run_id"] = kwargs.get("parent_run_id")
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        status, _body = await start_livekit_session(app, dial_from_body(_dial(parent_id="run-3")))
+        assert status == 200
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        _deliver_hello(room, {"sample_rate": 16000})
+        _subscribe_caller(room)
+        await asyncio.wait({live}, timeout=2.0)
+        assert seen["parent_run_id"] == "run-3"
+
+    async def test_a_hello_supplied_parent_id_is_not_the_dials(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The data channel is the browser's: a hello parent_id must not become
+        the seed on this transport."""
+        room, app = ecs_app
+        seen: dict = {}
+
+        def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
+            seen["parent_run_id"] = kwargs.get("parent_run_id")
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        status, _body = await start_livekit_session(app, dial_from_body(_dial()))
+        assert status == 200
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        _deliver_hello(room, {"sample_rate": 16000, "parent_id": "attacker-thread"})
+        _subscribe_caller(room)
+        await asyncio.wait({live}, timeout=2.0)
+        assert seen["parent_run_id"] is None
 
 
 class TestRoomFromToken:

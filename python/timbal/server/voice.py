@@ -207,12 +207,12 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     here — invalid → keep server's.
     """
     updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
-    # ``turn_detector`` and ``call_context`` are read straight off the hello by
-    # the transport, not through VoiceConfig — reporting them as ignored would
-    # be a lie in both directions.
+    # ``turn_detector``, ``call_context`` and ``parent_id`` are read straight
+    # off the hello by the transport, not through VoiceConfig — reporting them
+    # as ignored would be a lie in both directions.
     ignored = sorted(
         k for k, v in client.items()
-        if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k not in ("turn_detector", "call_context")
+        if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k not in ("turn_detector", "call_context", "parent_id")
     )
     if ignored:
         logger.info("voice_client_config_ignored", keys=ignored)
@@ -335,6 +335,30 @@ def client_call_context(config: dict[str, Any]) -> dict[str, str]:
             hint="TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT is a development switch — the caller is setting their own identity",
         )
     return out
+
+
+def client_parent_run_id(config: dict[str, Any]) -> str | None:
+    """Read the hello's ``parent_id``, or ``None`` when the door is shut.
+
+    A parent run id is not a voice knob — it says which conversation this
+    caller is joining, and a browser that can set it can attach itself to
+    somebody else's thread and read its memory. In production it must ride the
+    server-minted dial; the hello path exists for the playground and sits
+    behind the same gate as ``call_context``, deliberately — both are the
+    caller asserting its own identity, and one policy switch is enough.
+    """
+    raw = config.get("parent_id")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    if not client_call_context_allowed():
+        logger.info("voice_client_parent_id_ignored")
+        return None
+    logger.warning(
+        "voice_client_parent_id_accepted",
+        parent_id=raw.strip(),
+        hint="TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT is a development switch — the caller is choosing the thread it joins",
+    )
+    return raw.strip()
 
 
 def voice_warmup_intended(runnable: Any) -> bool:
@@ -592,6 +616,7 @@ def build_voice_session(
     *,
     playback_tracker: Any = None,
     call_context: dict[str, str] | None = None,
+    parent_run_id: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Resolve voice config into a ``VoiceSession`` plus ``session_started`` metadata.
 
@@ -601,6 +626,8 @@ def build_voice_session(
     client-acked estimate. ``call_context`` is per-call identity (``rep_id``,
     ``from``, …) that a callable ``system_prompt`` reads off the session bag —
     deliberately separate from ``client_config``, which is voice knobs only.
+    ``parent_run_id`` is the run this call continues (text → voice): session
+    identity like ``call_context``, minted by whoever authorized the call.
 
     Returns ``(session, meta)`` where ``meta`` holds the resolved identity
     keys (``stt_provider``, ``stt_model``, ``model``, ``turn_detector``) that
@@ -755,6 +782,8 @@ def build_voice_session(
         session_kwargs["playback_tracker"] = playback_tracker
     if call_context:
         session_kwargs["call_context"] = call_context
+    if parent_run_id:
+        session_kwargs["parent_run_id"] = parent_run_id
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).
@@ -816,6 +845,9 @@ def build_voice_session(
         "ambient": ({"source": defaults.ambient.source, "volume": defaults.ambient.volume}
                     if defaults.ambient else None),
     }
+    if session.parent_run_id:
+        # Lets the client confirm which conversation this call joined.
+        meta["parent_run_id"] = session.parent_run_id
     return session, meta
 
 
@@ -879,7 +911,10 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
     if isinstance(event, AgentTextDelta):
         return [{"type": "agent_text_delta", "text": event.text}]
     if isinstance(event, AgentTextDone):
-        return [{"type": "agent_text_done", "text": event.text}]
+        # run_id → parent_id on POST /stream continues this conversation on
+        # another transport. None for text with no run behind it (greeting,
+        # realtime) — kept in the payload so the shape is stable.
+        return [{"type": "agent_text_done", "text": event.text, "run_id": event.run_id}]
     if isinstance(event, AudioOutput):
         return [{"type": "audio", "data": base64.b64encode(event.data).decode("ascii")}]
     if isinstance(event, TurnMetricsEvent):
@@ -997,7 +1032,13 @@ async def _serve_voice_ws(ws: WebSocket, runnable: Any) -> None:
         logger.warning("voice_ws_first_frame_error", error=str(e))
 
     defaults: VoiceConfig = getattr(ws.app.state, "voice_config", None) or VoiceConfig()
-    session, meta = build_voice_session(runnable, defaults, config, call_context=client_call_context(config))
+    session, meta = build_voice_session(
+        runnable,
+        defaults,
+        config,
+        call_context=client_call_context(config),
+        parent_run_id=client_parent_run_id(config),
+    )
     meta = {"playback_acks": "recommended", "transport": "websocket", **meta}
     session.recording_meta = meta
 
