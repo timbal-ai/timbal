@@ -32,7 +32,7 @@ from ..core.agent import Agent
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
 from ..types.content import TextContent, ToolUseContent
-from ..types.events import OutputEvent
+from ..types.events import ApprovalEvent, InteractionEvent, OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
 from ..types.message import Message
 from .config import (
@@ -42,6 +42,8 @@ from .config import (
     coerce_greeting,
 )
 from .events import (
+    AgentApproval,
+    AgentInteraction,
     AgentStatus,
     AgentTextDelta,
     AgentTextDone,
@@ -1612,6 +1614,44 @@ class VoiceSession:
                     await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
                     # Earliest tool-call signal for streaming providers.
                     self._maybe_schedule_filler(event.item.name)
+                    continue
+
+                # The run parked waiting for a value or a decision. Nothing else on
+                # the wire says so — a caller just hears silence — so lift it into a
+                # session event here, at the event, not after the generator drains:
+                # end-of-turn would put it behind the span close-out, the terminal
+                # OutputEvent and a trace save. The run still ends ``cancelled``
+                # (reason ``input_required`` / ``approval_required``); resuming is an
+                # HTTP call against ``run_id``, which is why it is carried.
+                if isinstance(event, InteractionEvent):
+                    turn_phase = "emit_agent_interaction"
+                    await self._emit(
+                        AgentInteraction(
+                            run_id=event.run_id,
+                            interaction_id=event.interaction_id,
+                            kind=event.kind,
+                            payload=event.payload or {},
+                            response_schema=event.response_schema,
+                            tool_call_id=event.tool_call_id,
+                        )
+                    )
+                    continue
+
+                if isinstance(event, ApprovalEvent):
+                    turn_phase = "emit_agent_approval"
+                    await self._emit(
+                        AgentApproval(
+                            run_id=event.run_id,
+                            approval_id=event.approval_id,
+                            kind=event.kind,
+                            prompt=event.prompt,
+                            ui=event.ui,
+                            input=event.input,
+                            input_schema=event.input_schema,
+                            description=event.description,
+                            tool_call_id=event.tool_call_id,
+                        )
+                    )
                     continue
 
                 if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta | Text):

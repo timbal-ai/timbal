@@ -18,6 +18,8 @@ from .eou import (
     TextEouPredictor,
 )
 from .events import (
+    AgentApproval,
+    AgentInteraction,
     AgentStatus,
     AgentTextDelta,
     AgentTextDone,
@@ -106,6 +108,8 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "AgentApproval",
+    "AgentInteraction",
     "AgentStatus",
     "AgentTextDelta",
     "AgentTextDone",

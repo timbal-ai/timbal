@@ -1650,6 +1650,8 @@ let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
 /** WebRTC transport state: the peer connection and the element playing the server's TTS track. */
 let pc = null, remoteAudioEl = null, lkRoom = null;
 let lkTranscriptChunks = null;
+/** In-flight generic `chunk` envelopes, keyed by chunk_id, until all seqs land. */
+let lkChunks = {};
 /** False until WS is open, config frame sent, and AudioContext is running (worklet processes mic). */
 let micAudioToWs = false;
 let nextPlayTime = 0;
@@ -2041,6 +2043,10 @@ navigator.mediaDevices.addEventListener('devicechange', async () => {
   await populateDevices();
 });
 
+function base64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
+
 function playPCM(b64) {
   if (!audioCtx || suppressAssistantAudio) return;
   if (audioCtx.state === 'suspended') void audioCtx.resume();
@@ -2102,6 +2108,7 @@ async function endSession({ userInitiated = false, silent = false } = {}) {
     try { await room.disconnect(); } catch (_) {}
   }
   lkTranscriptChunks = null;
+  lkChunks = {};
   if (remoteAudioEl) {
     try { remoteAudioEl.pause(); remoteAudioEl.srcObject = null; } catch (_) {}
     remoteAudioEl = null;
@@ -2401,6 +2408,24 @@ function handleServerMessage(msg) {
         setStatus(msg.text || '');
         void startThinkingSound(); // a tool is running — mask the dead air
         break;
+      case 'agent_interaction':
+      case 'agent_approval': {
+        // The run is parked waiting for us, so it is not working: drop the
+        // dead-air masking and say what it is waiting on. A real client renders
+        // a card here and resumes over HTTP with parent_id=run_id and
+        // resume={<interaction_id|approval_id>: value} — the playground only
+        // shows that the suspension reached the wire.
+        setStatus(null);
+        stopThinkingSound();
+        const isApproval = msg.type === 'agent_approval';
+        const id = isApproval ? msg.approval_id : msg.interaction_id;
+        const ask = isApproval
+          ? (msg.prompt || msg.ui?.title || msg.description)
+          : (msg.payload?.question || msg.payload?.action);
+        log('status', `${isApproval ? 'Approval' : 'Input'} required${msg.kind ? ` (${msg.kind})` : ''}: ${ask || id}`);
+        console.info('voice suspension', { type: msg.type, run_id: msg.run_id, id, msg });
+        break;
+      }
       case 'filler':
         // Spoken latency-masker. Own bubble, never in _turnBubbles: the
         // interrupted-rewrite must not fold it into the reply text.
@@ -2566,6 +2591,27 @@ async function startLivekit(gen, dial) {
         const startedAt = lkTranscriptChunks[0]?.started_at;
         lkTranscriptChunks = null;
         handleServerMessage({ type: 'session_transcript', entries, ...(startedAt != null ? { started_at: startedAt } : {}) });
+      }
+      return;
+    }
+    // Generic envelope for any other payload over the reliable-data cap
+    // (an approval card carrying a build brief is routinely past it): base64
+    // slices of one message, concatenated by seq.
+    if (msg?.type === 'chunk' && msg.chunk_id && Number.isFinite(msg.seq) && Number.isFinite(msg.total)) {
+      const pending = (lkChunks[msg.chunk_id] = lkChunks[msg.chunk_id] || { parts: [], seen: 0, total: msg.total });
+      // A group that never completes (a lost or duplicated final chunk) would
+      // otherwise sit here for the rest of the call. Keys are in insertion
+      // order, so the oldest incomplete group is the one to drop.
+      const ids = Object.keys(lkChunks);
+      if (ids.length > 8) delete lkChunks[ids[0]];
+      if (pending.parts[msg.seq] === undefined) pending.seen += 1;
+      pending.parts[msg.seq] = msg.data || '';
+      if (pending.seen < pending.total) return;
+      delete lkChunks[msg.chunk_id];
+      try {
+        handleServerMessage(JSON.parse(decoder.decode(base64ToBytes(pending.parts.join('')))));
+      } catch (err) {
+        console.error('voice livekit: bad chunked payload', msg.msg_type, err);
       }
       return;
     }
