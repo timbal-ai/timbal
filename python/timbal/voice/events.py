@@ -59,6 +59,13 @@ class AgentTextDelta(VoiceSessionEvent):
 class AgentTextDone(VoiceSessionEvent):
     type: Literal["agent_text_done"] = "agent_text_done"
     text: str
+    run_id: str | None = None
+    """Id of the run that produced this turn. Pass as ``parent_id`` to continue
+    the conversation on another transport — together with the suspension events
+    this gives a client a current pointer after every turn. ``None`` when no run
+    is behind the text: the greeting (spoken before any turn exists), realtime
+    sessions (provider-held state, no runs), and a turn that timed out before
+    its run started."""
 
 
 class AgentStatus(VoiceSessionEvent):
