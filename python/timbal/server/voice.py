@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import ValidationError
 
 from .. import __version__ as timbal_version
+from .._slots import dump_value
 from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
 from ..voice.config import (
@@ -830,6 +831,8 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
     transport with its own keys (``transport``, ``playback_acks``).
     """
     from ..voice import (
+        AgentApproval,
+        AgentInteraction,
         AgentStatus,
         AgentTextDelta,
         AgentTextDone,
@@ -864,6 +867,13 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         return [payload]
     if isinstance(event, AgentStatus):
         return [{"type": "agent_status", "text": event.text}]
+    if isinstance(event, AgentInteraction | AgentApproval):
+        # ``input``/``payload`` are ``Any`` — the runnable's validated input can hold
+        # a File or any other model. ``dump_value`` in json mode stringifies whatever
+        # json.dumps would choke on, so a transport can never fail to send a
+        # suspension (which would look exactly like not emitting one). Same coercion
+        # the SSE path applies to the underlying run event.
+        return [dump_value(event.model_dump(), mode="json")]
     if isinstance(event, FillerSpoken):
         return [{"type": "filler", "text": event.text}]
     if isinstance(event, AgentTextDelta):

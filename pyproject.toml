@@ -76,6 +76,7 @@ all = [
   "timbal[evals]",
   "timbal[server]",
   "timbal[voice]",
+  "timbal[voice-livekit]",
 ]
 
 [dependency-groups]

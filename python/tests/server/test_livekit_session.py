@@ -43,6 +43,12 @@ def _token_for(room: str, *, identity: str = "agent") -> str:
     return _jwt(json.dumps({"sub": identity, "video": {"room": room, "roomJoin": True}}))
 
 
+def _reassemble(chunks: list[dict]) -> dict:
+    """What a client does with ``chunk`` envelopes: concat by seq, decode, parse."""
+    ordered = sorted(chunks, key=lambda c: c["seq"])
+    return json.loads(base64.b64decode("".join(c["data"] for c in ordered)))
+
+
 class TestMaybeStart:
     def test_off_when_transport_unset(self, monkeypatch) -> None:
         monkeypatch.delenv("TIMBAL_VOICE_TRANSPORT", raising=False)
@@ -91,9 +97,53 @@ class TestChunkDataPayloads:
         rebuilt = [e for c in chunks for e in c["entries"]]
         assert rebuilt == entries
 
-    def test_non_transcript_oversized_is_left_intact(self) -> None:
+    def test_transcript_chunks_keep_their_own_type(self) -> None:
+        """The entry-wise split predates the generic envelope; clients that
+        already reassemble transcripts by seq must not have to change."""
+        entries = [{"role": "user", "text": "z" * 180, "timestamp": float(i)} for i in range(100)]
+        chunks = chunk_data_payloads([{"type": "session_transcript", "entries": entries}])
+        assert {c["type"] for c in chunks} == {"session_transcript"}
+
+    def test_oversized_payload_is_chunked_not_dropped(self) -> None:
+        """Sending an oversized payload whole means the SFU rejects it, which
+        from the client is indistinguishable from never emitting it."""
         payload = {"type": "agent_text_done", "text": "y" * 20_000}
-        assert chunk_data_payloads([payload]) == [payload]
+        chunks = chunk_data_payloads([payload])
+
+        assert len(chunks) > 1
+        assert {c["type"] for c in chunks} == {"chunk"}
+        assert {c["msg_type"] for c in chunks} == {"agent_text_done"}
+        assert len({c["chunk_id"] for c in chunks}) == 1
+        assert [c["seq"] for c in chunks] == list(range(len(chunks)))
+        assert all(c["total"] == len(chunks) for c in chunks)
+        assert _reassemble(chunks) == payload
+
+    def test_every_chunk_fits_under_the_cap(self) -> None:
+        approval = {
+            "type": "agent_approval",
+            "run_id": "r1",
+            "approval_id": "a1",
+            "ui": {"prompt": "schema: " + "s" * 60_000},
+        }
+        chunks = chunk_data_payloads([approval])
+        assert all(len(json.dumps(c, separators=(",", ":")).encode()) <= 12 * 1024 for c in chunks)
+        assert _reassemble(chunks) == approval
+
+    def test_non_ascii_survives_a_chunk_boundary(self) -> None:
+        """Slices are taken over base64, so a cut can never land inside a
+        multi-byte codepoint."""
+        payload = {"type": "agent_approval", "run_id": "r", "prompt": "€ø漢" * 8_000}
+        assert _reassemble(chunk_data_payloads([payload])) == payload
+
+    def test_interleaved_payloads_keep_distinct_chunk_ids(self) -> None:
+        a = {"type": "agent_approval", "approval_id": "a", "ui": {"p": "a" * 20_000}}
+        b = {"type": "agent_approval", "approval_id": "b", "ui": {"p": "b" * 20_000}}
+        chunks = chunk_data_payloads([a, b])
+        by_id: dict[str, list[dict]] = {}
+        for c in chunks:
+            by_id.setdefault(c["chunk_id"], []).append(c)
+        assert len(by_id) == 2
+        assert sorted(_reassemble(g)["approval_id"] for g in by_id.values()) == ["a", "b"]
 
 
 class TestMergeClientConfig:

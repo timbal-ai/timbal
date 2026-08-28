@@ -57,6 +57,7 @@ import base64
 import contextlib
 import json
 import os
+import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
@@ -267,27 +268,67 @@ async def start_livekit_session(
 def chunk_data_payloads(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Split payloads that would exceed LiveKit's ~15 KiB reliable-data cap.
 
-    ``session_transcript`` is the only event that grows without bound. Chunks
-    are ``{"type":"session_transcript","seq":i,"total":n,"entries":[...]}``;
-    a client reassembles by ``seq``. Other oversized payloads are logged and
-    sent as-is — we cannot split them without a protocol change.
+    Two chunkers, because there are two client contracts:
+
+    * ``session_transcript`` keeps its entry-wise split — chunks are
+      ``{"type":"session_transcript","seq":i,"total":n,"entries":[...]}`` and
+      every client that already reassembles by ``seq`` is unaffected.
+    * Anything else is wrapped in a generic
+      ``{"type":"chunk","chunk_id","msg_type","seq","total","data"}`` envelope,
+      where ``data`` is a base64 slice of the whole encoded payload. A client
+      concatenates by ``seq``, base64-decodes and parses one message.
+
+    The generic envelope exists because an ``agent_approval`` carrying a build
+    brief in ``ui``/``input`` blows past 12 KiB routinely, and sending it whole
+    means LiveKit rejects it — indistinguishable, from the client, from never
+    emitting approvals at all. Splitting bytes rather than fields keeps it
+    payload-agnostic: it works for any event we add later.
     """
     out: list[dict[str, Any]] = []
     for payload in payloads:
-        raw_len = len(_dumps(payload))
-        if raw_len <= _MAX_RELIABLE_BYTES:
+        raw = _dumps(payload)
+        if len(raw) <= _MAX_RELIABLE_BYTES:
             out.append(payload)
             continue
-        if payload.get("type") != "session_transcript":
-            logger.warning(
-                "livekit_payload_oversized",
-                msg_type=payload.get("type"),
-                bytes=raw_len,
-            )
-            out.append(payload)
+        if payload.get("type") == "session_transcript":
+            out.extend(_chunk_transcript(payload))
             continue
-        out.extend(_chunk_transcript(payload))
+        out.extend(_chunk_opaque(payload, raw))
     return out
+
+
+def _chunk_opaque(payload: dict[str, Any], raw: bytes) -> list[dict[str, Any]]:
+    """Wrap one oversized payload in ``chunk`` envelopes carrying base64 slices.
+
+    Base64 rather than raw JSON text so a slice boundary can never land inside a
+    multi-byte codepoint or need escaping: the encoded form is ASCII, so byte
+    length is character length and any cut is valid.
+    """
+    chunk_id = uuid.uuid4().hex
+    msg_type = payload.get("type")
+    data = base64.b64encode(raw).decode("ascii")
+
+    def _envelope(seq: int, total: int, body: str) -> dict[str, Any]:
+        return {
+            "type": "chunk",
+            "chunk_id": chunk_id,
+            "msg_type": msg_type,
+            "seq": seq,
+            "total": total,
+            "data": body,
+        }
+
+    # Size the body against a worst-case header (counters far wider than any
+    # real chunk count) so no envelope can overshoot once seq/total are filled in.
+    capacity = _MAX_RELIABLE_BYTES - len(_dumps(_envelope(10**9, 10**9, "")))
+    if capacity <= 0:
+        logger.warning("livekit_payload_unchunkable", msg_type=msg_type, bytes=len(raw))
+        return [payload]
+
+    slices = [data[i : i + capacity] for i in range(0, len(data), capacity)]
+    total = len(slices)
+    logger.debug("livekit_payload_chunked", msg_type=msg_type, bytes=len(raw), chunks=total)
+    return [_envelope(i, total, body) for i, body in enumerate(slices)]
 
 
 def _chunk_transcript(payload: dict[str, Any]) -> list[dict[str, Any]]:

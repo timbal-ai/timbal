@@ -342,6 +342,85 @@ class TestVoiceWsPlaybackAck:
         assert "heard_text" in interrupted[0]
 
 
+_SUSPENDING_AGENT = """
+from timbal import Tool
+from timbal.types.content import ToolUseContent
+from timbal.types.message import Message
+
+
+def wire_money(amount: int) -> str:
+    return f"wired {amount}"
+
+
+agent = Agent(
+    name='voice_test',
+    model=TestModel(responses=[
+        Message(
+            role='assistant',
+            content=[ToolUseContent(id='call_1', name='wire_money', input={'amount': 500})],
+            stop_reason='tool_use',
+        ),
+        'done',
+    ]),
+    tools=[Tool(
+        name='wire_money',
+        handler=wire_money,
+        requires_approval=True,
+        approval_kind='payment',
+        approval_prompt='Wire $500?',
+        approval_ui={'title': 'Wire transfer'},
+    )],
+)
+"""
+
+
+class TestVoiceWsSuspension:
+    """An approval gate must reach the browser. Without this the caller hears
+    silence and the app never learns a decision is pending."""
+
+    def test_approval_reaches_the_browser(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        spec = _write_agent_module(tmp_path, extra=_SUSPENDING_AGENT)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", spec)
+        for k in VOICE_ENV_KEYS:
+            monkeypatch.delenv(k, raising=False)
+
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsRealtimeSTT",
+            _make_stt_class([TranscriptEvent(type="committed", text="wire 500 please")]),
+        )
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", _make_tts_class())
+
+        app = create_app()
+        with TestClient(app) as client:
+            with client.websocket_connect("/voice/ws") as ws:
+                # The injected commit has to start a turn immediately. A holding
+                # detector (the server default) parks unpunctuated text for
+                # seconds, and the scripted STT stream ends well before that —
+                # the turn would never run and there would be nothing to assert.
+                ws.send_json({"turn_detector": "heuristic"})
+                messages = _collect_ws_messages(ws)
+
+        types = [m["type"] for m in messages]
+        approval = next(m for m in messages if m["type"] == "agent_approval")
+
+        assert approval["prompt"] == "Wire $500?"
+        assert approval["kind"] == "payment"
+        assert approval["ui"] == {"title": "Wire transfer"}
+        assert approval["input"] == {"amount": 500}
+        assert approval["tool_call_id"] == "call_1"
+        # run_id is what the client resumes against: POST /stream with
+        # parent_id=run_id and resume={approval_id: True}.
+        assert approval["run_id"]
+        assert approval["approval_id"]
+        # The session still closes normally, so a client that ignores the new
+        # type sees exactly the sequence it saw before.
+        assert types[-2:] == ["session_transcript", "session_ended"]
+
+
 class TestVoiceWsSessionTranscript:
     """Verify session_transcript payload structure and ordering."""
 
