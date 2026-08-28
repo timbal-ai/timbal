@@ -77,12 +77,17 @@ class TestRunIdOnAgentTextDone:
         async def _drive() -> None:
             while not any(isinstance(e, SessionStarted) for e in events):
                 await asyncio.sleep(0.01)
-            for text, want in (("First question", 1), ("Second question", 2)):
+            prev = session._last_run_context
+            for text in ("First question", "Second question"):
                 await stt.inject(TranscriptEvent(type="committed", text=text))
-                while sum(1 for e in events if isinstance(e, AgentTextDone)) < want:
+                # AgentTextDone is emitted *before* the turn's finally assigns
+                # _last_run_context — wait on the assignment itself, or a fast
+                # scheduler (windows CI) reads the previous turn's value.
+                while session._last_run_context is prev:
                     await asyncio.sleep(0.01)
-                run_ids.append(session._last_run_context.id)
-                parent_ids.append(session._last_run_context.parent_id)
+                prev = session._last_run_context
+                run_ids.append(prev.id)
+                parent_ids.append(prev.parent_id)
                 await asyncio.sleep(0.05)
             await stt.finish()
 
@@ -162,11 +167,15 @@ class TestParentRunSeed:
         async def _drive() -> None:
             while not any(isinstance(e, SessionStarted) for e in events):
                 await asyncio.sleep(0.01)
-            for text, want in (("turn one", 1), ("turn two", 2)):
+            prev = session._last_run_context
+            for text in ("turn one", "turn two"):
                 await stt.inject(TranscriptEvent(type="committed", text=text))
-                while sum(1 for e in events if isinstance(e, AgentTextDone)) < want:
+                # Wait on the _last_run_context assignment (turn finally), not
+                # on AgentTextDone, which the turn emits before retiring.
+                while session._last_run_context is prev:
                     await asyncio.sleep(0.01)
-                chain.append((session._last_run_context.id, session._last_run_context.parent_id))
+                prev = session._last_run_context
+                chain.append((prev.id, prev.parent_id))
                 await asyncio.sleep(0.05)
             await stt.finish()
 
