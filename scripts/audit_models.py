@@ -333,7 +333,9 @@ async def _probe_openai_responses(
     payload = {
         "model": api_name,
         "input": "ping",
-        "max_output_tokens": 3,
+        # The Responses API enforces a minimum of 16 — 3 turned every
+        # responses-only model (gpt-5.x-pro) into a false DEAD.
+        "max_output_tokens": 16,
         "store": False,
     }
     return await _post_json(client, f"{base_url.rstrip('/')}/responses", api_key, payload)

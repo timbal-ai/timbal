@@ -502,7 +502,7 @@ class TestLlmRouterChatCompletionsKwargs:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
-                        model="groq/llama-3.3-70b-versatile",
+                        model="groq/openai/gpt-oss-120b",
                         system_prompt="Be concise.",
                     ):
                         pass
@@ -536,7 +536,7 @@ class TestLlmRouterChatCompletionsKwargs:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
-                        model="groq/llama-3.3-70b-versatile",
+                        model="groq/openai/gpt-oss-120b",
                         tools=[mock_tool],
                         provider_params={"tools": [extra_tool]},
                     ):
@@ -580,7 +580,7 @@ class TestLlmRouterChatCompletionsKwargs:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
-                        model="groq/llama-3.3-70b-versatile",
+                        model="groq/openai/gpt-oss-120b",
                         messages=memory,
                     ):
                         pass
@@ -679,7 +679,7 @@ class TestLlmRouterChatCompletionsKwargs:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
-                        model="groq/llama-3.3-70b-versatile",
+                        model="groq/openai/gpt-oss-120b",
                         messages=[prior],
                     ):
                         pass
@@ -747,7 +747,7 @@ class TestLlmRouterChatCompletionsKwargs:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
-                        model="groq/llama-3.3-70b-versatile",
+                        model="groq/openai/gpt-oss-120b",
                         output_model=MyOutput,
                     ):
                         pass
@@ -1233,7 +1233,7 @@ class TestLlmRouterChatCompletionsMore:
                 with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(
-                            model="groq/llama-3.3-70b-versatile",
+                            model="groq/openai/gpt-oss-120b",
                             max_tokens=256,
                         ):
                             pass
@@ -1255,7 +1255,7 @@ class TestLlmRouterChatCompletionsMore:
                 with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(
-                            model="groq/llama-3.3-70b-versatile",
+                            model="groq/openai/gpt-oss-120b",
                             temperature=0.8,
                         ):
                             pass
@@ -1282,7 +1282,7 @@ class TestLlmRouterChatCompletionsMore:
                 with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
                         async for _ in _llm_router(
-                            model="groq/llama-3.3-70b-versatile",
+                            model="groq/openai/gpt-oss-120b",
                             tools=[mock_tool],
                         ):
                             pass
@@ -1304,7 +1304,7 @@ class TestLlmRouterChatCompletionsMore:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
-                        async for _ in _llm_router(model="groq/llama-3.3-70b-versatile"):
+                        async for _ in _llm_router(model="groq/openai/gpt-oss-120b"):
                             pass
                     except (RuntimeError, StopAsyncIteration):
                         pass
@@ -1323,7 +1323,7 @@ class TestLlmRouterChatCompletionsMore:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     try:
-                        async for _ in _llm_router(model="groq/llama-3.3-70b-versatile"):
+                        async for _ in _llm_router(model="groq/openai/gpt-oss-120b"):
                             pass
                     except (RuntimeError, StopAsyncIteration):
                         pass
@@ -1419,7 +1419,7 @@ class TestLlmRouterYieldsChunks:
             with patch.dict(os.environ, {"GROQ_API_KEY": "key"}):
                 with patch("timbal.core.llm.router.TIMBAL_OPENAI_API", "chat_completions"):
                     async for chunk in _llm_router(
-                        model="groq/llama-3.3-70b-versatile",
+                        model="groq/openai/gpt-oss-120b",
                     ):
                         chunks.append(chunk)
 
