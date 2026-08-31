@@ -24,6 +24,7 @@ from timbal.voice.deepgram import (
     stt_provider_id,
 )
 from timbal.voice.elevenlabs import ElevenLabsRealtimeSTT
+from timbal.voice.munsit import MunsitStreamSTT
 
 
 def _drain(stt) -> list:
@@ -305,6 +306,10 @@ class TestResolveStt:
         assert isinstance(resolve_stt("deepgram", model="flux-general-en"), DeepgramFluxSTT)
         # Leftover Scribe model + bare deepgram must NOT silently become Nova.
         assert isinstance(resolve_stt("deepgram", model="scribe_v2_realtime"), DeepgramFluxSTT)
+        assert isinstance(resolve_stt("munsit"), MunsitStreamSTT)
+        assert isinstance(resolve_stt("faseeh"), MunsitStreamSTT)
+        # Label wins over a stale model id from env defaults.
+        assert isinstance(resolve_stt("munsit", model="scribe_v2_realtime"), MunsitStreamSTT)
 
     def test_ui_labels(self) -> None:
         assert isinstance(resolve_stt("deepgram-flux"), DeepgramFluxSTT)
@@ -316,6 +321,8 @@ class TestResolveStt:
     def test_inference_from_model(self) -> None:
         assert isinstance(resolve_stt(None, model="flux-general-multi"), DeepgramFluxSTT)
         assert isinstance(resolve_stt(None, model="nova-3"), DeepgramNovaSTT)
+        assert isinstance(resolve_stt(None, model="munsit-en-ar"), MunsitStreamSTT)
+        assert isinstance(resolve_stt(None, model="munsit"), MunsitStreamSTT)
         assert isinstance(resolve_stt(None, model="scribe_v2_realtime"), ElevenLabsRealtimeSTT)
         assert isinstance(resolve_stt(None, model=None), ElevenLabsRealtimeSTT)
 
@@ -324,9 +331,14 @@ class TestResolveStt:
         assert effective_stt_model(DeepgramFluxSTT(), "flux-general-en") == "flux-general-en"
         assert effective_stt_model(DeepgramNovaSTT(), "scribe_v2_realtime") == DEFAULT_NOVA_MODEL
         assert effective_stt_model(DeepgramNovaSTT(), "nova-3-general") == "nova-3-general"
-        # Unknown-provider fallback → ElevenLabs must not keep a Flux/Nova id.
+        assert effective_stt_model(DeepgramNovaSTT(), "munsit-en-ar") == DEFAULT_NOVA_MODEL
+        assert effective_stt_model(MunsitStreamSTT(), "scribe_v2_realtime") == "munsit-en-ar"
+        assert effective_stt_model(MunsitStreamSTT(), "flux-general-multi") == "munsit-en-ar"
+        assert effective_stt_model(MunsitStreamSTT(), "munsit") == "munsit"
+        # Unknown-provider fallback → ElevenLabs must not keep a foreign id.
         assert effective_stt_model(ElevenLabsRealtimeSTT(), "flux-general-multi") is None
         assert effective_stt_model(ElevenLabsRealtimeSTT(), "nova-3") is None
+        assert effective_stt_model(ElevenLabsRealtimeSTT(), "munsit-en-ar") is None
         assert effective_stt_model(ElevenLabsRealtimeSTT(), "scribe_v2_realtime") == "scribe_v2_realtime"
         assert effective_stt_model(ElevenLabsRealtimeSTT(), None) is None
 
@@ -337,6 +349,7 @@ class TestResolveStt:
     def test_stt_provider_id(self) -> None:
         assert stt_provider_id(DeepgramFluxSTT()) == "deepgram-flux"
         assert stt_provider_id(DeepgramNovaSTT()) == "deepgram-nova"
+        assert stt_provider_id(MunsitStreamSTT()) == "munsit"
         assert stt_provider_id(ElevenLabsRealtimeSTT()) == "elevenlabs"
 
     def test_is_flux_model(self) -> None:

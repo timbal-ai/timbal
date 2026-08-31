@@ -251,6 +251,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
     VAD endpointing off (the server wires both automatically).
     """
 
+    native_eou = True
+
     def _build_uri(self, config: AudioInputConfig) -> str:
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", _DG_HOST))
@@ -436,17 +438,23 @@ def is_flux_model(model: str | None) -> bool:
 
 def effective_stt_model(provider_instance: SpeechToText, requested: str | None) -> str | None:
     """Model id actually sent to the provider (foreign leftovers swapped out)."""
+    from .munsit import MunsitStreamSTT
+    from .munsit import effective_stt_model as munsit_effective_stt_model
+
     if isinstance(provider_instance, DeepgramFluxSTT):
         return requested if is_flux_model(requested) else DEFAULT_FLUX_MODEL
     if isinstance(provider_instance, DeepgramNovaSTT):
         m = requested or ""
-        if not m or is_flux_model(m) or m.startswith(("scribe", "eleven")):
+        if not m or is_flux_model(m) or m.startswith(("scribe", "eleven", "munsit")):
             return DEFAULT_NOVA_MODEL
         return requested
-    # ElevenLabs (and any non-Deepgram STT): never pass flux/nova ids through —
-    # e.g. unknown-provider fallback keeps the merged model string otherwise.
+    if isinstance(provider_instance, MunsitStreamSTT):
+        return munsit_effective_stt_model(requested)
+    # ElevenLabs (and any non-Deepgram STT): never pass flux/nova/munsit ids
+    # through — e.g. unknown-provider fallback keeps the merged model string
+    # otherwise.
     m = (requested or "").strip().lower()
-    if not m or is_flux_model(m) or m.startswith("nova"):
+    if not m or is_flux_model(m) or m.startswith(("nova", "munsit")):
         return None
     return requested
 
@@ -455,12 +463,17 @@ def stt_provider_id(provider_instance: SpeechToText) -> str:
     """Config-style provider id for the running STT instance.
 
     Matches playground / ``voice_config`` values (``elevenlabs``,
-    ``deepgram-flux``, ``deepgram-nova``) — not the Python class name.
+    ``deepgram-flux``, ``deepgram-nova``, ``munsit``) — not the Python class
+    name.
     """
+    from .munsit import MunsitStreamSTT
+
     if isinstance(provider_instance, DeepgramFluxSTT):
         return "deepgram-flux"
     if isinstance(provider_instance, DeepgramNovaSTT):
         return "deepgram-nova"
+    if isinstance(provider_instance, MunsitStreamSTT):
+        return "munsit"
     return "elevenlabs"
 
 
@@ -472,9 +485,10 @@ def resolve_stt(
 ) -> SpeechToText:
     """STT factory for the voice server.
 
-    ``provider`` is ``"elevenlabs"`` / ``"deepgram"`` (case-insensitive; also
-    accepts UI labels like ``"deepgram-flux"`` / ``"deepgram-nova"``). When
-    ``None``, inferred from the model id: ``flux-*`` / ``nova-*`` → Deepgram,
+    ``provider`` is ``"elevenlabs"`` / ``"deepgram"`` / ``"munsit"`` (alias
+    ``"faseeh"``; case-insensitive; also accepts UI labels like
+    ``"deepgram-flux"`` / ``"deepgram-nova"``). When ``None``, inferred from
+    the model id: ``flux-*`` / ``nova-*`` → Deepgram, ``munsit*`` → Munsit,
     anything else (including ``scribe_*``) → ElevenLabs.
 
     Bare ``"deepgram"`` defaults to Flux (voice-agent native EOU). Only an
@@ -484,11 +498,20 @@ def resolve_stt(
     p = (provider or "").strip().lower()
     m = (model or "").strip().lower()
     if not p:
-        p = "deepgram" if (m.startswith("flux") or m.startswith("nova")) else "elevenlabs"
+        if m.startswith(("flux", "nova")):
+            p = "deepgram"
+        elif m.startswith("munsit"):
+            p = "munsit"
+        else:
+            p = "elevenlabs"
     if p in ("elevenlabs", "el", "11labs"):
         from .elevenlabs import ElevenLabsRealtimeSTT
 
         return ElevenLabsRealtimeSTT(api_key=api_key)
+    if p in ("munsit", "faseeh"):
+        from .munsit import MunsitStreamSTT
+
+        return MunsitStreamSTT(api_key=api_key)
     if p.startswith("deepgram") or p == "dg":
         # UI labels win. Bare "deepgram"/"dg" → Flux unless model is clearly nova-*.
         if "nova" in p:

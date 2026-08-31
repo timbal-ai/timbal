@@ -148,11 +148,11 @@ _DETECTOR_PROFILES = {
     "off": "no_eou",
 }
 
-# `resolve_stt` sends both of these to DeepgramFluxSTT, and Flux does its own
-# endpointing: `select_turn_detector_spec` then forces the provider detector and
-# will not let a client escalate back to `local`. So a Flux deployment is in the
-# cheap class no matter what its detector field says.
-_FLUX_STT_PROVIDERS = frozenset({"deepgram", "deepgram-flux"})
+# Provider ids `resolve_stt` sends to a native-EOU STT (Flux; Munsit), which
+# does its own endpointing: `select_turn_detector_spec` then forces the provider
+# detector and will not let a client escalate back to `local`. So such a
+# deployment is in the cheap class no matter what its detector field says.
+_NATIVE_EOU_STT_PROVIDERS = frozenset({"deepgram", "deepgram-flux", "munsit", "faseeh"})
 
 # Below this a cap does more harm than good: one session must always be
 # admissible, and a second lets a caller reconnect before the first has
@@ -238,7 +238,9 @@ def _profile_for(voice_config: Any) -> _Profile:
         return _DEFAULT_PROFILE
     stt = str(getattr(voice_config, "stt_provider", "") or "").strip().lower()
     name = (
-        "no_eou" if stt in _FLUX_STT_PROVIDERS else _detector_profile_name(getattr(voice_config, "turn_detector", None))
+        "no_eou"
+        if stt in _NATIVE_EOU_STT_PROVIDERS
+        else _detector_profile_name(getattr(voice_config, "turn_detector", None))
     )
     profile = _PROFILES.get(name or "", _DEFAULT_PROFILE)
     recording = getattr(voice_config, "recording", None)
@@ -265,9 +267,9 @@ def configure_capacity(voice_config: Any) -> None:
 
     The consequence is worth stating: on a deployment whose *default* detector
     is cheap, a client that asks for ``local`` gets a session costing ~30x what
-    the cap was sized for. Flux STT can't be escalated that way, but the others
-    can — pin the detector server-side, or set the env var explicitly, if that
-    matters to you.
+    the cap was sized for. Native-EOU STT (Flux, Munsit) can't be escalated
+    that way, but the others can — pin the detector server-side, or set the
+    env var explicitly, if that matters to you.
     """
     global _profile
     _profile = _profile_for(voice_config)

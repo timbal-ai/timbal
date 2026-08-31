@@ -135,7 +135,7 @@ def _strip_markdown(text: str) -> str:
 # TTS flush: send text to ElevenLabs when we have a clause boundary so audio tracks the LLM
 # without waiting for huge buffers. ``first_segment`` uses a low threshold so the first
 # sentence (e.g. "Hello!") reaches TTS quickly even if the model omits a space after "!".
-SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?\n;:])\s+")
+SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?\n;:\u061f\u061b])\s+")
 # Minimum chars before flushing to TTS.  Bigger segments = better prosody (ElevenLabs
 # multi-context has no cross-context continuity, so each segment's intonation is
 # independent).  Too small → choppy "final" intonation at every boundary.
@@ -145,8 +145,9 @@ MIN_FLUSH_CHARS = 24
 FIRST_SEGMENT_MIN_CHARS = 6
 MAX_TTS_BUFFER_CHARS = 200
 
-# Clause-ending chars for flush heuristics (ASCII + common Spanish + fullwidth variants).
-_CLAUSE_END_CHARS = frozenset(".!?;\n:\uff1f\uff01")
+# Clause-ending chars for flush heuristics (ASCII + common Spanish + fullwidth variants +
+# Arabic ؟/؛ — Arabic uses the Latin period for full stops, so "." already covers those).
+_CLAUSE_END_CHARS = frozenset(".!?;\n:\uff1f\uff01\u061f\u061b")
 
 
 def _nfc(s: str) -> str:

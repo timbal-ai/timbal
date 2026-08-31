@@ -50,6 +50,18 @@ class SpeechToText(ABC):
     Lifecycle: ``connect`` → push audio / consume ``events`` → ``close``.
     """
 
+    native_eou: bool = False
+    """Provider-native end-of-utterance detection.
+
+    ``True`` when committed transcripts are real turn boundaries decided
+    server-side (Deepgram Flux ``EndOfTurn``, Munsit ``speech_final`` /
+    ``UtteranceEnd``). The voice server then forces the ``provider`` turn
+    detector and disables the local VAD endpointing fast path — stacking
+    Smart Turn HOLD on top of provider EOU is a second turn policy fighting
+    the first, and these providers have no force-commit for the fast path
+    to trigger anyway.
+    """
+
     @abstractmethod
     async def connect(self, config: AudioInputConfig) -> None: ...
 

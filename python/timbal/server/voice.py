@@ -394,15 +394,15 @@ def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:
     """Whether boot should pre-load Smart Turn / Namo / Silero.
 
     Same detector choice the session will make
-    (:func:`select_turn_detector_spec`). Flux forces the provider turn
-    detector, so those ONNX models never run — loading them anyway races
-    the first turn with HuggingFace downloads on a cold box.
+    (:func:`select_turn_detector_spec`). Native-EOU STT (Flux, Munsit) forces
+    the provider turn detector, so those ONNX models never run — loading them
+    anyway races the first turn with HuggingFace downloads on a cold box.
 
     Can be *heavy*: with ``turn_detector=None`` the spec resolution builds the
     default detector, importing onnxruntime/transformers. Call it off the
     event loop (``warmup_voice_stack`` runs it in the import executor).
     """
-    from ..voice.deepgram import DeepgramFluxSTT, resolve_stt
+    from ..voice.deepgram import resolve_stt
     from ..voice.turn_detection import LocalAudioTurnDetector
 
     try:
@@ -412,7 +412,7 @@ def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:
     spec = select_turn_detector_spec(
         voice_config.turn_detector,
         None,
-        stt_is_flux=isinstance(stt, DeepgramFluxSTT),
+        stt_native_eou=bool(getattr(stt, "native_eou", False)),
     )
     if isinstance(spec, LocalAudioTurnDetector):
         return True
@@ -565,7 +565,7 @@ async def _ambient_path(source: str) -> Path:
         raise HTTPException(status_code=502, detail=f"Ambience source unavailable: {e}") from e
 
 
-def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux: bool) -> Any:
+def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_native_eou: bool) -> Any:
     """Choose the turn detector for a session: a mode name, instance, or factory.
 
     ``server_spec`` comes from ``runnable.voice_config`` and may be any of those
@@ -577,6 +577,10 @@ def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux
     :func:`~timbal.voice.turn_detection.resolve_turn_detector` because it turns
     on the STT: whichever mode is best depends on how well the provider
     endpoints, and only the session setup knows which provider is in play.
+
+    ``stt_native_eou`` is the provider's
+    :attr:`~timbal.voice.providers.SpeechToText.native_eou` capability —
+    Deepgram Flux and Munsit today.
     """
     spec = server_spec
     if isinstance(client_spec, str) and client_spec.strip():
@@ -585,15 +589,17 @@ def select_turn_detector_spec(server_spec: Any, client_spec: Any, *, stt_is_flux
         logger.warning("voice_ws_bad_turn_detector", error="client turn_detector must be a mode name string")
 
     mode = spec.strip().lower() if isinstance(spec, str) else None
-    if stt_is_flux:
-        # Flux owns EOU (~260ms). Local/lexical run *after* EndOfTurn and add a
-        # second HOLD tax; they also disable the useful Provider path. Force
-        # provider unless the caller explicitly picked heuristic/raw/provider.
+    if stt_native_eou:
+        # The provider owns EOU (Flux TurnInfo ~260ms; Munsit endpointing +
+        # smart_turn). Local/lexical run *after* the provider's turn end and
+        # add a second HOLD tax; they also disable the useful Provider path.
+        # Force provider unless the caller explicitly picked heuristic/raw/
+        # provider.
         if mode is None or mode in ("local", "audio", "smart_turn", "lexical"):
             if spec is not None:
                 # Includes an instance or factory from voice_config, which this
                 # overrides too — worth saying so rather than silently ignoring.
-                logger.info("voice_ws_flux_overrides_turn_detector", requested=str(spec), using="provider")
+                logger.info("voice_ws_native_eou_overrides_turn_detector", requested=str(spec), using="provider")
             return "provider"
         return spec
     if spec is not None:
@@ -635,7 +641,6 @@ def build_voice_session(
     """
     from ..voice import VoiceSession
     from ..voice.deepgram import (
-        DeepgramFluxSTT,
         effective_stt_model,
         resolve_stt,
         stt_provider_id,
@@ -656,11 +661,12 @@ def build_voice_session(
             requested_provider=stt_provider,
             requested_model=stt_model_requested,
         )
-        # Fallback must not keep a Flux/Nova model id on the ElevenLabs wire,
-        # or the client/config log will claim Deepgram while Scribe runs.
+        # Fallback must not keep a Flux/Nova/Munsit model id on the ElevenLabs
+        # wire, or the client/config log will claim another provider while
+        # Scribe runs.
         stt = resolve_stt("elevenlabs")
         stt_model_requested = None
-    stt_is_flux = isinstance(stt, DeepgramFluxSTT)
+    stt_native_eou = bool(getattr(stt, "native_eou", False))
     # Config id for clients/logs (``deepgram-flux``), not the class name.
     stt_provider = stt_provider_id(stt)
     stt_model = effective_stt_model(stt, stt_model_requested)
@@ -685,8 +691,9 @@ def build_voice_session(
     # non-dict rather than 500-ing the socket.
     stt_extra = dict(merged.stt_extra) if isinstance(merged.stt_extra, dict) else {}
     tts_extra = dict(merged.tts_extra) if isinstance(merged.tts_extra, dict) else {}
-    if stt_is_flux:
-        # Scribe-tuned VAD knobs don't apply to Flux's turn machine.
+    if stt_native_eou:
+        # Scribe-tuned VAD knobs don't apply to a provider-side turn machine
+        # (Flux, Munsit).
         for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
             stt_extra.pop(k, None)
     audio_in = AudioInputConfig(
@@ -709,12 +716,12 @@ def build_voice_session(
     # may additionally select a *mode name* (string only — useful for A/B
     # testing detectors from the playground); instances and factories can never
     # come over the wire. When neither picks one, the server chooses by STT
-    # (Flux → provider; else the resolver default — local / lexical).
+    # (native EOU → provider; else the resolver default — local / lexical).
     turn_detector = None
     raw_td = select_turn_detector_spec(
         defaults.turn_detector,
         client_config.get("turn_detector"),
-        stt_is_flux=stt_is_flux,
+        stt_native_eou=stt_native_eou,
     )
     try:
         # voice_config is process-wide; VoiceSession clones the resolved
@@ -732,21 +739,15 @@ def build_voice_session(
     vad_endpointing = merged.vad_endpointing
     if not isinstance(vad_endpointing, bool):
         vad_endpointing = None
-    if stt_is_flux:
-        # Flux has no force-commit (commit() is a no-op); the Silero fast path
-        # would just burn CPU scoring audio it can never act on.
+    if stt_native_eou:
+        # Flux/Munsit have no force-commit (commit() is a no-op); the Silero
+        # fast path would just burn CPU scoring audio it can never act on.
         vad_endpointing = False
 
     # Playground / client may override the Agent's LLM for this session only.
     raw_model = merged.model
-    model_override = (
-        raw_model.strip()
-        if isinstance(raw_model, str) and "/" in raw_model.strip()
-        else None
-    )
-    llm_model = model_override or (
-        str(runnable.model) if isinstance(getattr(runnable, "model", None), str) else None
-    )
+    model_override = raw_model.strip() if isinstance(raw_model, str) and "/" in raw_model.strip() else None
+    llm_model = model_override or (str(runnable.model) if isinstance(getattr(runnable, "model", None), str) else None)
     logger.info(
         "voice_session_config",
         stt=type(stt).__name__,
@@ -758,11 +759,7 @@ def build_voice_session(
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
-        greeting=(
-            None
-            if merged.greeting is None
-            else ((merged.greeting.text or "")[:80] or "<generated>")
-        ),
+        greeting=(None if merged.greeting is None else ((merged.greeting.text or "")[:80] or "<generated>")),
     )
 
     session_kwargs: dict[str, Any] = {}
@@ -842,8 +839,9 @@ def build_voice_session(
         "turn_detector": turn_detector_label,
         # Server config, not client-settable. Phase 1: the browser mixes this
         # locally (fetch /voice/ambience/current); nothing is mixed server-side.
-        "ambient": ({"source": defaults.ambient.source, "volume": defaults.ambient.volume}
-                    if defaults.ambient else None),
+        "ambient": (
+            {"source": defaults.ambient.source, "volume": defaults.ambient.volume} if defaults.ambient else None
+        ),
     }
     if session.parent_run_id:
         # Lets the client confirm which conversation this call joined.

@@ -275,10 +275,10 @@ class TestProfiles:
         capacity.configure_capacity(self._config(turn_detector=unknown))
         assert capacity._profile.name == "audio_eou"
 
-    @pytest.mark.parametrize("stt", ["deepgram", "deepgram-flux"])
-    def test_flux_stt_is_cheap_whatever_the_detector_says(self, stt: str) -> None:
-        """Flux does its own endpointing, so `select_turn_detector_spec` forces
-        the provider detector and will not let a client escalate back."""
+    @pytest.mark.parametrize("stt", ["deepgram", "deepgram-flux", "munsit", "faseeh"])
+    def test_native_eou_stt_is_cheap_whatever_the_detector_says(self, stt: str) -> None:
+        """Flux/Munsit do their own endpointing, so `select_turn_detector_spec`
+        forces the provider detector and will not let a client escalate back."""
         capacity.configure_capacity(self._config(stt_provider=stt, turn_detector="local"))
         assert capacity._profile.name == "no_eou"
 
