@@ -123,11 +123,7 @@ class TestEmitForeground:
         assert custom.path == "emit_agent.resolve_resource"
         assert custom.item.data["event"] == "trace_ref"
 
-        tool_output = next(
-            e
-            for e in events
-            if isinstance(e, OutputEvent) and e.path == "emit_agent.resolve_resource"
-        )
+        tool_output = next(e for e in events if isinstance(e, OutputEvent) and e.path == "emit_agent.resolve_resource")
         # Attributed to the tool call, ordered before the tool's OUTPUT, and
         # absent from the tool's output itself.
         assert custom.call_id == tool_output.call_id
@@ -353,6 +349,60 @@ class TestEmitBackground:
                 await asyncio.sleep(0.01)
         assert len(emitted) == 1
         assert emitted[0]["item"]["data"] == {"kind": "late-bg-progress", "pct": 100}
+
+    @pytest.mark.asyncio
+    async def test_pre_hook_emit_flushed_when_spawn_never_runs(self):
+        """run_in_background is set at _stream entry; spawn is later.
+
+        A raise from pre_hook (or an early return from approval / guardrails /
+        param resolution) must still flush buffered emits before OUTPUT. The
+        launcher finally must snapshot span._emit_sink unless spawn actually
+        rebound it.
+        """
+
+        def boom():
+            emit({"kind": "pre-spawn-fail"})
+            raise RuntimeError("pre_hook boom")
+
+        tool = Tool(
+            name="bg_prehook_fail",
+            handler=lambda: "never",
+            background_mode="always",
+            pre_hook=boom,
+        )
+        events = [event async for event in tool()]
+
+        output_event = events[-1]
+        assert isinstance(output_event, OutputEvent)
+        assert output_event.status.code == "error"
+        customs = _custom_deltas(events, "kind")
+        assert [c.item.data["kind"] for c in customs] == ["pre-spawn-fail"]
+        assert events.index(customs[0]) < events.index(output_event)
+
+    @pytest.mark.asyncio
+    async def test_approval_early_return_flushes_emit_when_background(self):
+        """Approval gate returns before spawn; buffered emits still flush."""
+
+        def announce() -> str:
+            emit({"kind": "pre-approval"})
+            return "x"
+
+        async def handler(note: str) -> str:
+            return note
+
+        tool = Tool(
+            name="bg_gated",
+            handler=handler,
+            requires_approval=True,
+            background_mode="always",
+            default_params={"note": announce},
+        )
+        events = [event async for event in tool()]
+
+        output_event = next(e for e in events if isinstance(e, OutputEvent))
+        customs = _custom_deltas(events, "kind")
+        assert [c.item.data["kind"] for c in customs] == ["pre-approval"]
+        assert events.index(customs[0]) < events.index(output_event)
 
 
 class TestEmitNoContext:

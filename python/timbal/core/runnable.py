@@ -1907,6 +1907,7 @@ class Runnable(ABC, BaseModel):
         # span._emit_sink to a forwarding sink on the same span; we snapshot
         # first so finally closes *this* object, not the child's.
         emit_sink = None
+        spawned_background = False
         handoff_control = (
             getattr(run_context, "_background_handoff_control", None)
             if self.background_mode == "auto" and self._is_async_gen and not self._is_orchestrator
@@ -1994,6 +1995,7 @@ class Runnable(ABC, BaseModel):
             # Background task
             if run_in_background:
                 emit_sink = span._emit_sink
+                spawned_background = True
                 output = self._spawn_background_task(validated_input, input, run_context, span)
             elif not self._is_async_gen and not self._is_gen:
                 # Fast path: plain sync/coroutine handlers cannot yield events,
@@ -2250,11 +2252,14 @@ class Runnable(ABC, BaseModel):
             raise
 
         finally:
-            # Spawn-at-birth already snapshotted the foreground sink above;
-            # do not pick up the forwarding sink the child just installed.
-            # Handoff snapshots here, before handoff_start.set(), for the
-            # same reason: the continuation rebinds span._emit_sink after.
-            if not run_in_background:
+            # Only skip the snapshot when spawn actually rebound the sink.
+            # run_in_background is set at _stream entry; a raise / early
+            # return from pre_hook, approval, guardrails, or param
+            # resolution never reaches spawn — those buffered emits still
+            # live on span._emit_sink and must flush before OUTPUT.
+            # Handoff snapshots here, before handoff_start.set(), so the
+            # continuation can rebind after.
+            if not spawned_background:
                 emit_sink = span._emit_sink
             if handoff_control is not None and not handed_off:
                 handoff_control.unregister(span.call_id)
