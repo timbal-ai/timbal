@@ -20,7 +20,7 @@ from timbal.server.livekit_sip import (
 def _p(
     identity: str,
     *,
-    kind: str = "PARTICIPANT_KIND_STANDARD",
+    kind: str | int = "PARTICIPANT_KIND_STANDARD",
     reason: str | None = None,
     attributes: dict[str, str] | None = None,
 ) -> SimpleNamespace:
@@ -60,6 +60,16 @@ class TestEligibleCaller:
             local_identity="agent-1",
             caller_hint="caller-",
         )
+
+    def test_proto_int_kind_is_eligible(self) -> None:
+        """The Python FFI exposes STANDARD=0 / SIP=3, not the enum name."""
+        assert is_eligible_caller(_p("caller-abc", kind=0), local_identity="agent-1")
+        assert is_eligible_caller(_p("+34111", kind=3), local_identity="agent-1")
+
+    def test_proto_int_service_and_agent_are_excluded(self) -> None:
+        assert not is_eligible_caller(_p("rec", kind=2), local_identity="agent-1")  # EGRESS
+        assert not is_eligible_caller(_p("ing", kind=1), local_identity="agent-1")  # INGRESS
+        assert not is_eligible_caller(_p("bot", kind=4), local_identity="agent-1")  # AGENT
 
     def test_first_eligible_wins(self) -> None:
         remotes = [

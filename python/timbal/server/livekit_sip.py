@@ -24,6 +24,21 @@ KIND_INGRESS = "PARTICIPANT_KIND_INGRESS"
 SERVICE_KINDS = frozenset({KIND_EGRESS, KIND_INGRESS, "EGRESS", "INGRESS"})
 CALLER_KINDS = frozenset({KIND_STANDARD, KIND_SIP, "STANDARD", "SIP"})
 
+# ``livekit.rtc.ParticipantKind`` is a protobuf enum: the FFI sets
+# ``participant.kind`` to the *number* (STANDARD=0, SIP=3), not the name.
+# ``str(0) == "0"`` is not in ``CALLER_KINDS``, so a browser that joined and
+# published a mic was silently ignored — the driver sat on ``caller_ready``
+# forever. Map the wire numbers here so every kind check sees the name.
+_KIND_BY_NUMBER = {
+    0: KIND_STANDARD,
+    1: KIND_INGRESS,
+    2: KIND_EGRESS,
+    3: KIND_SIP,
+    4: "PARTICIPANT_KIND_AGENT",
+    5: "PARTICIPANT_KIND_CONNECTOR",
+    6: "PARTICIPANT_KIND_BRIDGE",
+}
+
 # §7.1 — definitive inbound BYE / room teardown vs media blip.
 DEFINITIVE_DISCONNECT = frozenset(
     {
@@ -83,6 +98,8 @@ def _kind_label(kind: Any) -> str:
     name = getattr(kind, "name", None)
     if isinstance(name, str) and name:
         return name
+    if isinstance(kind, int) and not isinstance(kind, bool):
+        return _KIND_BY_NUMBER.get(kind, str(kind))
     return str(kind)
 
 
