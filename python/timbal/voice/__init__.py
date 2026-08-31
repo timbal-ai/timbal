@@ -84,10 +84,10 @@ def __getattr__(name: str):
         from .elevenlabs import ElevenLabsRealtimeSTT
 
         return ElevenLabsRealtimeSTT
-    if name == "MunsitStreamTTS":
-        from .munsit import MunsitStreamTTS
+    if name in ("MunsitStreamSTT", "MunsitStreamTTS"):
+        from . import munsit
 
-        return MunsitStreamTTS
+        return getattr(munsit, name)
     if name == "FishAudioStreamTTS":
         from .fish_audio import FishAudioStreamTTS
 
@@ -132,6 +132,7 @@ __all__ = [
     "HeuristicTurnDetector",
     "LexicalTurnDetector",
     "LocalAudioTurnDetector",
+    "MunsitStreamSTT",
     "MunsitStreamTTS",
     "NamoTextEouPredictor",
     "PartialDecision",

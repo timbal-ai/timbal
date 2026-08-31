@@ -128,6 +128,38 @@ def test_flush_segment_inverted_question_not_clause_end():
     assert final_remainder == "¿"
 
 
+def test_flush_segment_arabic_question_mark_is_clause_end():
+    """Short Arabic questions ending in ؟ (U+061F) flush immediately, like Latin ?."""
+    for tail in ("هل تريد؟", " كيف حالك؟"):
+        assert len(tail) < 24  # MIN_FLUSH_CHARS
+        assert _flush_segment(tail, first_segment=False) == tail
+
+
+def test_flush_segment_arabic_sentence_boundary_splits():
+    """A ؟-terminated sentence mid-buffer is a split point — the trailing clause stays buffered."""
+    text = "هل تريد حجز موعد؟ يمكنني مساعدتك في اختيار الوقت المناسب"
+    result = _flush_segment(text, first_segment=False)
+    assert result is not None
+    assert result.rstrip().endswith("موعد؟")
+    assert "يمكنني" not in result
+
+
+def test_flush_segment_arabic_semicolon_is_boundary():
+    """Arabic semicolon ؛ (U+061B) behaves like the Latin one for flush heuristics."""
+    text = "أهلاً وسهلاً بك في عيادتنا؛ يسعدني أن أساعدك اليوم في حجز موعدك"
+    result = _flush_segment(text, first_segment=False)
+    assert result is not None
+    assert result.rstrip().endswith("عيادتنا؛")
+
+
+def test_flush_segment_arabic_first_segment():
+    """First segment of an Arabic reply splits at the earliest qualifying ؟ boundary."""
+    text = "كيف حالك؟ أنا هنا لمساعدتك في كل ما تحتاجه اليوم"
+    result = _flush_segment(text, first_segment=True)
+    assert result is not None
+    assert result.rstrip() == "كيف حالك؟"
+
+
 def test_reconcile_final_assistant_empty_stream():
     merged, suffix = _reconcile_final_assistant_text("", "Hello world")
     assert merged == "Hello world"

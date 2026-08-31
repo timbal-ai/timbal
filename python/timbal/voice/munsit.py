@@ -1,40 +1,68 @@
-"""Munsit (Faseeh) streaming Arabic TTS for :class:`~timbal.voice.VoiceSession`.
+"""Munsit (Faseeh) Arabic voice providers for :class:`~timbal.voice.VoiceSession`.
 
-Uses the HTTP chunked-streaming endpoint:
+Two providers, both authenticated with ``MUNSIT_API_KEY``:
 
-* ``POST /api/v1/text-to-speech/{model_id}`` with ``streaming: true`` —
+* :class:`MunsitStreamSTT` — live streaming STT over
+  ``WSS /api/v1/listen`` (interim results, word timestamps, and
+  provider-native end-of-turn detection via ``endpointing`` + ``smart_turn``).
+* :class:`MunsitStreamTTS` — TTS over the HTTP chunked-streaming endpoint
+  ``POST /api/v1/text-to-speech/{model_id}`` with ``streaming: true`` —
   raw PCM16 chunks are yielded as they are generated.
 
-Munsit also documents a TTS WebSocket (``/websocket/text-to-speech``), but as
-of 2026-08 it accepts ``initConnection``/``text`` frames and never produces
-audio (verified empirically across auth methods, flush flags and long texts),
-so this provider deliberately uses HTTP streaming — which Munsit itself
-recommends when the text of a segment is available upfront. No ``open_stream``
-capability: the session falls back to per-segment ``synthesize``.
+**Why TTS is HTTP and not the WebSocket** (re-verified 2026-08-31 against
+https://docs.munsit.com/reference/websocket): the documented TTS socket
+(``/api/v1/websocket/text-to-speech``) still accepts ``initConnection`` (and
+answers ``connectionInitialized``) and ``text`` frames, but produces **no
+audio** — probed live on 2026-08-31 across query-param / initConnection auth
+and every ``flush`` / ``try_trigger_generation`` combination; the documented
+header and Bearer auth are additionally rejected with error 40101. Even per
+its docs the socket tops out at ``pcm_24000`` while HTTP serves the
+engine-native 48 kHz, and Munsit itself recommends HTTP when the segment text
+is known upfront (our case: the session flushes complete segments).
 
-Requires ``MUNSIT_API_KEY``.
+Decisively: Munsit's own first-party plugins do not use their TTS socket
+either. ``livekit-plugins-munsit`` 0.4.0 implements its incremental
+``stream()`` as a client-side sentence chunker issuing one HTTP
+``streaming: true`` POST per chunk, and ``pipecat-plugins-munsit`` 0.2.0 does
+the same — zero WebSocket code in either TTS module (verified from the PyPI
+sdists, 2026-08-31). There is no prosody-continuous incremental-feed path in
+this API today, so no ``open_stream`` capability: the session falls back to
+per-segment ``synthesize``, which is exactly the transport the vendor's own
+plugins use.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import os
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import urlencode
 
 import structlog
 from pydantic import SecretStr
 
 from .config import DEFAULT_VOICE_ID as _ELEVENLABS_DEFAULT_VOICE_ID
 from .providers import (
+    AudioInputConfig,
     AudioOutputConfig,
+    SpeechToText,
     TextToSpeech,
+    TranscriptEvent,
 )
 
 logger = structlog.get_logger("timbal.voice.munsit")
 
 DEFAULT_TTS_MODEL = "faseeh-v1-preview"
-# Override with MUNSIT_VOICE_ID (cloned/custom voices are account-specific).
-DEFAULT_MUNSIT_VOICE_ID = "ar-najdi-male-2"
+# Munsit's LiveKit examples use this Emirati voice; the docs' own example voice
+# (ar-najdi-male-2) is Najdi Saudi, which surprised the Emirati deployments this
+# provider was added for. Override with MUNSIT_VOICE_ID (cloned/custom voices
+# are account-specific) or set an explicit voice on the session.
+DEFAULT_MUNSIT_VOICE_ID = "ar-uae-male-1"
+
+DEFAULT_STT_MODEL = "munsit-en-ar"
 
 _DEFAULT_HOST = "api.munsit.com"
 _SAMPLE_RATE_MIN = 8_000
@@ -52,12 +80,402 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
     return key
 
 
+# ---------------------------------------------------------------------------
+# Streaming STT — WSS /api/v1/listen
+# ---------------------------------------------------------------------------
+
+# The /listen socket accepts exactly these rates (anything else is a fatal
+# 4002). The session applies one sample_rate to both STT and TTS, and Munsit
+# TTS is engine-native at 48 kHz — so PCM16 sessions at any other rate are
+# resampled client-side down to _STT_WIRE_RATE instead of rejected (same
+# approach as Munsit's own LiveKit plugin, whose 48 kHz tracks feed a 16 kHz
+# wire).
+_STT_SAMPLE_RATES = frozenset({8_000, 16_000})
+_STT_WIRE_RATE = 16_000
+_PCM16_ENCODINGS = ("pcm_s16le", "linear16", "")
+# Munsit is happy with 20-200ms frames; 80ms matches the Deepgram adapters so
+# the session's mic cadence behaves identically across providers.
+_STT_AUDIO_FLUSH_INTERVAL = 0.08
+# 12s with neither audio nor KeepAlive closes the socket with 1011; Munsit's
+# docs say to send KeepAlive during pauses — well inside that window.
+_STT_KEEPALIVE_INTERVAL = 5.0
+# After CloseStream the server finalizes the in-flight turn and sends the
+# billing Metadata before closing with 1000. Closing our side first aborts
+# finalization (documented), so close() waits for the server — but bounded.
+_STT_CLOSE_DRAIN_TIMEOUT = 5.0
+
+# Query params /api/v1/listen accepts (used to filter stt_extra passthrough).
+# `model`, `language`, `encoding`, `sample_rate` are owned by the config.
+_STT_QUERY_KEYS = frozenset(
+    {
+        "channels",
+        "endpointing",
+        "smart_turn",
+        "hotwords",
+        "interim_results",
+        "correlation_id",
+        "metadata",
+    }
+)
+
+
+def is_munsit_stt_model(model: str | None) -> bool:
+    return bool(model) and model.strip().lower().startswith("munsit")
+
+
+def effective_stt_model(requested: str | None) -> str:
+    """Model id actually sent to Munsit (foreign leftovers swapped out).
+
+    Same pattern as :func:`effective_tts_model`: a session that only switched
+    ``stt_provider`` must not put ``scribe_v2_realtime`` / ``flux-*`` on the
+    Munsit wire. Defaults to ``munsit-en-ar`` (code-switching) rather than the
+    raw API's ``munsit`` because the deployments pinning Munsit mix Arabic and
+    English mid-utterance — same default as Munsit's own LiveKit plugin.
+    """
+    return requested.strip() if is_munsit_stt_model(requested) else DEFAULT_STT_MODEL
+
+
+def _stt_wire_rate(config: AudioInputConfig) -> int:
+    """Sample rate actually negotiated on the ``/listen`` socket.
+
+    Rates the socket accepts pass through; any other PCM16 rate resamples
+    client-side to 16 kHz (see :data:`_STT_SAMPLE_RATES`). Compressed
+    encodings can't be resampled here, so those fail at session start rather
+    than let the server kill the socket with a fatal 4002 on the first frame.
+    """
+    if config.sample_rate in _STT_SAMPLE_RATES:
+        return config.sample_rate
+    if config.encoding not in _PCM16_ENCODINGS:
+        raise ValueError(
+            f"Munsit streaming STT accepts 8000/16000 Hz and cannot resample "
+            f"{config.encoding!r} audio client-side; got {config.sample_rate} Hz."
+        )
+    return _STT_WIRE_RATE
+
+
+class MunsitStreamSTT(SpeechToText):
+    """Munsit live streaming STT (``WSS /api/v1/listen``) with native EOU.
+
+    The wire protocol is Deepgram-flavored. Event mapping:
+
+    * interim ``Results`` → ``partial`` (the transcript is the whole turn so
+      far; buffered forced-split segments are prepended)
+    * ``Results`` with ``speech_final: true`` → ``committed`` — Munsit's own
+      endpointing + smart-turn model decided the speaker finished
+    * ``Results`` with ``is_final: true`` but ``speech_final: false`` is the
+      ~60s forced split during unbroken speech: the text is stable but the
+      speaker is still talking, so it is buffered and **never** committed on
+      its own (no ``UtteranceEnd`` fires for it either)
+    * ``UtteranceEnd`` → backup flush of any buffered segments; normally a
+      no-op because the ``speech_final`` frame already committed the turn
+    * ``Gender`` / ``Sentiment`` enrichment and ``SpeechStarted`` → logged only
+    * ``Error`` with ``recoverable: true`` → logged; ``recoverable: false``
+      always precedes a close and surfaces as a session error
+
+    ``commit()`` is a no-op: the Munsit turn machine owns endpointing —
+    ``Configure`` can retune the silence window mid-session but there is no
+    client force-commit (``CloseStream`` ends the whole session). Pair with
+    ``turn_detector="provider"``; the server wires that automatically via
+    :attr:`native_eou`, and disables the VAD endpointing fast path the same
+    way it does for Deepgram Flux.
+
+    The socket accepts only 8/16 kHz, but the session applies one
+    ``sample_rate`` to both STT and TTS and Munsit TTS is engine-native at
+    48 kHz — so PCM16 sessions at other rates get the mic leg resampled
+    client-side to 16 kHz (stateful ``PcmResampler``; no per-chunk edge
+    artifacts) instead of failing at ``connect``.
+
+    ``stt_extra`` passthrough: ``endpointing`` (ms, 100-5000), ``smart_turn``,
+    ``hotwords`` (ignored by ``munsit-en-ar``), ``channels``,
+    ``correlation_id``, ``metadata``, ``interim_results``; plus ``stt_host``
+    for a self-hosted deployment.
+    """
+
+    native_eou = True
+
+    def __init__(self, api_key: str | SecretStr | None = None) -> None:
+        self._api_key_explicit = api_key
+        self._api_key: str | None = None
+        self._ws: Any = None
+        self._buf = bytearray()
+        # Set by connect() when the session rate isn't wire-legal (e.g. 48 kHz).
+        self._resampler: Any = None
+        # Single lock over buffer mutation *and* ws.send — same rationale as
+        # the Deepgram adapters: threshold pushes, the flush loop and control
+        # frames must never interleave frames on the socket.
+        self._wire_lock = asyncio.Lock()
+        self._stop = asyncio.Event()
+        self._flusher: asyncio.Task[None] | None = None
+        self._keepalive: asyncio.Task[None] | None = None
+        self._receiver: asyncio.Task[None] | None = None
+        self._queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
+        self._segments: list[str] = []
+        self._flush_bytes = int(16_000 * _STT_AUDIO_FLUSH_INTERVAL * 2)
+
+    def _build_uri(self, config: AudioInputConfig) -> str:
+        extra = dict(config.extra)
+        host = str(extra.pop("stt_host", _DEFAULT_HOST))
+        encoding = "linear16" if config.encoding in _PCM16_ENCODINGS else config.encoding
+        params: list[tuple[str, str]] = [
+            ("model", effective_stt_model(config.model)),
+            ("encoding", encoding),
+            ("sample_rate", str(_stt_wire_rate(config))),
+        ]
+        # `ar` is the only supported value in v1 and invalid connection params
+        # are fatal — drop foreign language leftovers rather than 4002 the
+        # socket ("ar-AE" style region tags collapse to "ar").
+        lang = (config.language or "").strip().lower()
+        if lang.startswith("ar"):
+            params.append(("language", "ar"))
+        elif lang:
+            logger.debug("munsit_stt_language_dropped", language=config.language)
+        for k, v in extra.items():
+            if v is None or k.startswith("_") or k not in _STT_QUERY_KEYS:
+                continue
+            params.append((k, str(v).lower() if isinstance(v, bool) else str(v)))
+        return f"wss://{host}/api/v1/listen?{urlencode(params)}"
+
+    async def connect(self, config: AudioInputConfig) -> None:
+        self._api_key = _resolve_api_key(self._api_key_explicit)
+        uri = self._build_uri(config)
+        wire_rate = _stt_wire_rate(config)
+        if wire_rate != config.sample_rate:
+            from .telephony import PcmResampler
+
+            self._resampler = PcmResampler(config.sample_rate, wire_rate)
+            logger.debug("munsit_stt_resampling", src_rate=config.sample_rate, wire_rate=wire_rate)
+        else:
+            self._resampler = None
+        self._flush_bytes = int(wire_rate * _STT_AUDIO_FLUSH_INTERVAL * 2)
+        logger.debug("munsit_stt_connecting", uri=uri[:160])
+        from websockets.asyncio.client import connect as ws_connect
+
+        self._ws = await ws_connect(
+            uri,
+            # Server-side x-api-key header — never the api_key query param,
+            # which puts the key in any log that records the URI.
+            additional_headers={"x-api-key": self._api_key},
+        )
+        self._stop.clear()
+        self._flusher = asyncio.create_task(self._flush_loop())
+        self._keepalive = asyncio.create_task(self._keepalive_loop())
+        self._receiver = asyncio.create_task(self._receive_loop())
+
+    async def push_audio(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        from websockets.exceptions import ConnectionClosed
+
+        async with self._wire_lock:
+            # Resample under the lock — the FIR filter carries state across
+            # chunks, so ordering must match the wire.
+            if self._resampler is not None:
+                chunk = self._resampler.process(chunk)
+                if not chunk:
+                    return
+            self._buf.extend(chunk)
+            if len(self._buf) < self._flush_bytes or self._ws is None:
+                return
+            raw = bytes(self._buf)
+            self._buf.clear()
+            try:
+                await self._ws.send(raw)
+            except ConnectionClosed:
+                pass
+
+    async def _flush_audio(self) -> None:
+        from websockets.exceptions import ConnectionClosed
+
+        async with self._wire_lock:
+            if self._ws is None:
+                return
+            raw = bytes(self._buf)
+            self._buf.clear()
+            if not raw:
+                return
+            try:
+                await self._ws.send(raw)
+            except ConnectionClosed:
+                pass
+
+    async def _flush_loop(self) -> None:
+        from websockets.exceptions import ConnectionClosed
+
+        try:
+            while not self._stop.is_set():
+                await asyncio.sleep(_STT_AUDIO_FLUSH_INTERVAL)
+                await self._flush_audio()
+        except asyncio.CancelledError:
+            raise
+        except ConnectionClosed:
+            pass
+
+    async def _keepalive_loop(self) -> None:
+        try:
+            while not self._stop.is_set():
+                await asyncio.sleep(_STT_KEEPALIVE_INTERVAL)
+                await self._send_json({"type": "KeepAlive"})
+        except asyncio.CancelledError:
+            raise
+
+    async def commit(self) -> None:
+        """No-op: Munsit's turn machine owns endpointing (no force-commit API)."""
+
+    async def _handle_message(self, msg: dict[str, Any]) -> None:
+        mt = msg.get("type", "")
+        if mt == "Results":
+            text = (msg.get("transcript") or "").strip()
+            is_final = bool(msg.get("is_final"))
+            speech_final = bool(msg.get("speech_final"))
+            if not is_final:
+                if text:
+                    partial = " ".join((*self._segments, text)) if self._segments else text
+                    await self._queue.put(TranscriptEvent(type="partial", text=partial))
+                return
+            if not speech_final:
+                # Forced ~60s split: stable text, speaker still talking under
+                # the next turn_id. Buffer; committing here would answer a
+                # user who is mid-sentence.
+                if text:
+                    self._segments.append(text)
+                logger.debug("munsit_stt_forced_split", turn_id=msg.get("turn_id"), text_preview=text[:80])
+                return
+            if text:
+                self._segments.append(text)
+            if self._segments:
+                utterance = " ".join(self._segments)
+                self._segments = []
+                await self._queue.put(TranscriptEvent(type="committed", text=utterance))
+            return
+        if mt == "UtteranceEnd":
+            # Fires right after the final Results of a completed turn, so the
+            # speech_final frame has normally already flushed — this is the
+            # backup for a final that carried speech_final: false variants.
+            if self._segments:
+                utterance = " ".join(self._segments)
+                self._segments = []
+                await self._queue.put(TranscriptEvent(type="committed", text=utterance))
+            return
+        if mt == "SpeechStarted":
+            logger.debug("munsit_stt_speech_started", ts=msg.get("ts"))
+            return
+        if mt in ("Gender", "Sentiment"):
+            # Enrichment is out of scope for the voice session; visibility only.
+            logger.debug("munsit_stt_enrichment", enrichment=mt, label=msg.get("label"), score=msg.get("score"))
+            return
+        if mt == "Metadata":
+            if "audio_seconds_billed" in msg:
+                logger.info(
+                    "munsit_stt_session_closed",
+                    session_id=msg.get("session_id"),
+                    audio_seconds_billed=msg.get("audio_seconds_billed"),
+                    turn_count=msg.get("turn_count"),
+                )
+            else:
+                logger.info("munsit_stt_session_started", session_id=msg.get("session_id"), model=msg.get("model"))
+                if msg.get("dropped_hotwords"):
+                    logger.warning("munsit_stt_dropped_hotwords", dropped=msg["dropped_hotwords"])
+            return
+        if mt == "Error":
+            err = msg.get("message") or "Unknown Munsit error"
+            if msg.get("recoverable"):
+                logger.warning("munsit_stt_recoverable_error", error=err, code=msg.get("code"))
+                return
+            logger.error("munsit_stt_fatal", error=err, code=msg.get("code"))
+            await self._queue.put(TranscriptEvent(type="error", text=f"STT fatal: {err}"))
+
+    async def _receive_loop(self) -> None:
+        from websockets.exceptions import ConnectionClosed
+
+        assert self._ws is not None
+        try:
+            async for raw_msg in self._ws:
+                if isinstance(raw_msg, bytes):
+                    continue
+                try:
+                    msg = json.loads(raw_msg)
+                except ValueError:
+                    continue
+                await self._handle_message(msg)
+        except ConnectionClosed as e:
+            if self._stop.is_set():
+                logger.debug("munsit_stt_ws_closed", error=str(e))
+            else:
+                # Provider-initiated hangup is not the user hanging up — same
+                # rule as the Deepgram adapters.
+                logger.warning("munsit_stt_ws_closed_unrequested", error=str(e))
+                await self._queue.put(TranscriptEvent(type="error", text=f"STT connection closed: {e}"))
+        except Exception as e:
+            logger.error("munsit_stt_receive_error", error=str(e), exc_info=True)
+            await self._queue.put(TranscriptEvent(type="error", text=f"STT receive error: {e}"))
+        finally:
+            await self._queue.put(None)
+
+    async def events(self) -> AsyncIterator[TranscriptEvent]:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                break
+            if item.type == "error":
+                raise RuntimeError(item.text)
+            if item.text:
+                yield item
+
+    async def _send_json(self, payload: dict[str, Any]) -> None:
+        async with self._wire_lock:
+            if self._ws is None:
+                return
+            with contextlib.suppress(Exception):
+                await self._ws.send(json.dumps(payload))
+
+    async def close(self) -> None:
+        self._stop.set()
+        for task in (self._flusher, self._keepalive):
+            if task and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._flusher = None
+        self._keepalive = None
+        with contextlib.suppress(Exception):
+            await self._flush_audio()
+        await self._send_json({"type": "CloseStream"})
+        # Wait for the server to finalize and close (1000) — closing our side
+        # first aborts finalization and loses the final Results + billing
+        # Metadata (documented). Bounded so a wedged server can't hang teardown.
+        if self._receiver and not self._receiver.done():
+            with contextlib.suppress(TimeoutError, asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                await asyncio.wait_for(asyncio.shield(self._receiver), timeout=_STT_CLOSE_DRAIN_TIMEOUT)
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+            self._ws = None
+        if self._receiver and not self._receiver.done():
+            self._receiver.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._receiver
+        self._receiver = None
+
+
+# ---------------------------------------------------------------------------
+# Streaming TTS — POST /api/v1/text-to-speech/{model_id} (streaming: true)
+# ---------------------------------------------------------------------------
+
+
 def effective_sample_rate(config: AudioOutputConfig) -> int:
     """Sample rate actually requested (endpoint accepts 8000–48000 Hz).
 
     Out-of-range rates raise instead of remapping: the session clocks playback
     at ``config.sample_rate``, so silently requesting a different rate would
     desync audio (chipmunk/slow-motion speech).
+
+    Munsit's engine-native rate is 48000 — lower rates are downsampled
+    server-side (a quality cost, not a latency one). The session-wide default
+    of 16 kHz is honoured as requested; deployments that want engine-native
+    audio should raise the session ``sample_rate`` (e.g. LiveKit/WebRTC
+    transports, which resample to 48 kHz anyway), not this provider. A 48 kHz
+    session works with Munsit STT too: :class:`MunsitStreamSTT` resamples the
+    mic leg down to its 16 kHz wire client-side.
     """
     sr = config.sample_rate
     if not (_SAMPLE_RATE_MIN <= sr <= _SAMPLE_RATE_MAX):
@@ -95,6 +513,11 @@ class MunsitStreamTTS(TextToSpeech):
 
     A persistent ``httpx.AsyncClient`` keeps connections pooled across
     segments, so per-segment requests skip the TCP+TLS handshake.
+
+    ``tts_extra`` passthrough: ``stability`` (default 0.5), ``speed`` (default
+    1.0), ``dialect`` (``auto`` | ``emirati`` | ``fusha`` — pronunciation hint,
+    unset means the API's ``auto``), and ``tts_host``. An Emirati deployment
+    sets ``tts_extra={"dialect": "emirati"}`` with no code change here.
     """
 
     provider_id = "munsit"
