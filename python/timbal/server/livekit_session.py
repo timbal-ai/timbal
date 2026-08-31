@@ -551,13 +551,15 @@ async def _run_livekit_session(
             pending_disconnect.cancel()
             pending_disconnect = None
 
-    def _abort_before_media() -> None:
-        # Early caller resolution (_note_caller from remote_participants /
-        # participant_connected) can run before a mic track arrives.
-        # Disconnect then never sets caller_ready — unblock the wait so the
-        # driver can release its room key and capacity slot.
-        if not caller_ready.is_set():
-            session_aborted.set()
+    def _abort() -> None:
+        # Single stop flag. Early _note_caller can run before media; a later
+        # BYE / short-abandon must unblock every wait (caller_ready, hello)
+        # and prevent build — even if a late track_subscribed flips caller_ready.
+        session_aborted.set()
+
+    def _release_if_never_connected() -> None:
+        if guard is not None and not caller_ready.is_set():
+            guard.release()
 
     async def _close_session_later(delay: float) -> None:
         await asyncio.sleep(delay)
@@ -565,21 +567,20 @@ async def _run_livekit_session(
         if sess is not None:
             await sess.close()
             return
-        if not caller_ready.is_set():
-            _abort_before_media()
-            return
-        if guard is not None:
-            await guard.finish()
-        else:
-            await room.disconnect()
+        _abort()
 
-    async def _wait_ready_or_abort() -> None:
-        if caller_ready.is_set() or session_aborted.is_set():
+    async def _wait_event_or_abort(
+        event: asyncio.Event,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        if event.is_set() or session_aborted.is_set():
             return
-        ready_task = asyncio.create_task(caller_ready.wait())
+        event_task = asyncio.create_task(event.wait())
         abort_task = asyncio.create_task(session_aborted.wait())
         _done, pending = await asyncio.wait(
-            {ready_task, abort_task},
+            {event_task, abort_task},
+            timeout=timeout,
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
@@ -602,13 +603,8 @@ async def _run_livekit_session(
             sess = session_holder.get("s")
             if sess is not None:
                 asyncio.create_task(sess.close())
-            elif caller_ready.is_set():
-                if guard is not None:
-                    asyncio.create_task(guard.finish())
-                else:
-                    asyncio.create_task(room.disconnect())
             else:
-                _abort_before_media()
+                _abort()
             return
         if action is CallerDisconnectAction.SHORT_ABANDON:
             _cancel_pending_disconnect()
@@ -642,6 +638,8 @@ async def _run_livekit_session(
         )
 
     def _on_sub(track: Any, pub: Any, participant: Any) -> None:
+        if session_aborted.is_set():
+            return
         _note_caller(participant)
         if caller_participant is not participant:
             return
@@ -771,14 +769,14 @@ async def _run_livekit_session(
         # the platform has already answered 200.
         if join is not None:
             join.ok()
-        await _wait_ready_or_abort()
-        if session_aborted.is_set() and not caller_ready.is_set():
-            if guard is not None:
-                guard.release()
+        await _wait_event_or_abort(caller_ready)
+        if session_aborted.is_set():
+            _release_if_never_connected()
             return
-        if not hello_event.is_set():
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(hello_event.wait(), timeout=_HELLO_WAIT_SECS)
+        await _wait_event_or_abort(hello_event, timeout=_HELLO_WAIT_SECS)
+        if session_aborted.is_set():
+            _release_if_never_connected()
+            return
         config = merge_client_config(dial.client_config, hello_holder["hello"])
         if caller_is_sip:
             config = phone_tuned_voice_config(config)
@@ -810,6 +808,11 @@ async def _run_livekit_session(
             # browser's, and a browser must not pick the thread it joins.
             parent_run_id=dial.parent_id or None,
         )
+        session_holder["s"] = session
+        if session_aborted.is_set():
+            with contextlib.suppress(BaseException):
+                await session.close()
+            return
         meta = {
             "playback_acks": "native",
             "transport": "livekit",
@@ -818,7 +821,6 @@ async def _run_livekit_session(
             **meta,
         }
         session.recording_meta = {**(session.recording_meta or {}), **meta}
-        session_holder["s"] = session
 
         track = rtc.LocalAudioTrack.create_audio_track("agent", downlink.source)
         await room.local_participant.publish_track(

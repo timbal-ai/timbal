@@ -546,6 +546,73 @@ class TestSipRuntime:
         assert task in done
         assert isinstance(task.exception(), RuntimeError)
         assert guard.finished
+
+    async def test_sip_blip_during_hello_does_not_build_session(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Short-abandon after media but before session_holder must abort
+        the hello wait — not tear the room and then still build_voice_session."""
+        room, guard, _log, app = driver_env
+        built: list[object] = []
+
+        def _capture(*_args: object, **_kwargs: object) -> None:
+            built.append(True)
+            raise RuntimeError("should not build after short-abandon")
+
+        monkeypatch.setenv("TIMBAL_VOICE_SIP_ABANDON_SECS", "0.05")
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        participant = _subscribe_caller(
+            room,
+            identity="+34111",
+            kind="PARTICIPANT_KIND_SIP",
+        )
+        participant.disconnect_reason = SimpleNamespace(name="STATE_MISMATCH")
+        room.handlers["participant_disconnected"](participant)
+        done, _ = await asyncio.wait({task}, timeout=2.0)
+        assert task in done
+        assert built == []
+        assert guard.finished
+
+    async def test_late_media_after_sip_bye_does_not_build(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """BYE sets session_aborted; a late track_subscribed must not flip
+        caller_ready and sneak past the abort gate."""
+        room, guard, _log, app = driver_env
+        built: list[object] = []
+
+        def _capture(*_args: object, **_kwargs: object) -> None:
+            built.append(True)
+            raise RuntimeError("should not build after BYE")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        sip = SimpleNamespace(
+            identity="+34111",
+            kind="PARTICIPANT_KIND_SIP",
+            attributes={"sip.callID": "c1"},
+            disconnect_reason=SimpleNamespace(name="CLIENT_INITIATED"),
+        )
+        room.remote_participants[sip.identity] = sip
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        room.handlers["participant_disconnected"](sip)
+        _subscribe_caller(room, identity="+34111", kind="PARTICIPANT_KIND_SIP")
+        done, _ = await asyncio.wait({task}, timeout=2.0)
+        assert task in done
+        assert built == []
+        assert guard.released
+        assert not guard.finished
+
+
+class TestDialParsing:
     def test_transport_discriminates_the_body(self) -> None:
         assert is_livekit_dial({"transport": "livekit"})
         assert not is_livekit_dial({"sdp": "v=0...", "type": "offer"})
