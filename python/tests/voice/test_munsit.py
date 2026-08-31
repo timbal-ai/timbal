@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, urlparse
@@ -282,11 +283,18 @@ class TestMunsitSttUri:
         uri = MunsitStreamSTT()._build_uri(_stt_cfg(extra={"stt_host": "munsit.internal"}))
         assert uri.startswith("wss://munsit.internal/api/v1/listen?")
 
-    def test_unsupported_sample_rate_raises(self) -> None:
-        # /listen accepts only 8000/16000 — fail at session start, not with a
-        # fatal 4002 mid-connect.
-        with pytest.raises(ValueError, match="8000 or 16000"):
-            MunsitStreamSTT()._build_uri(_stt_cfg(sample_rate=48_000))
+    def test_unsupported_sample_rate_negotiates_16k_wire(self) -> None:
+        # The session applies one sample_rate to both STT and TTS, and 48 kHz
+        # is the documented rate for engine-native Munsit TTS — the STT leg
+        # must negotiate a legal wire rate and resample, not refuse to start.
+        assert self._parse(_stt_cfg(sample_rate=48_000))["sample_rate"] == ["16000"]
+        assert self._parse(_stt_cfg(sample_rate=8_000))["sample_rate"] == ["8000"]
+
+    def test_unsupported_rate_with_compressed_encoding_raises(self) -> None:
+        # Can't resample a non-PCM16 stream client-side — fail at session
+        # start, not with a fatal 4002 mid-connect.
+        with pytest.raises(ValueError, match="cannot resample"):
+            MunsitStreamSTT()._build_uri(_stt_cfg(sample_rate=48_000, encoding="mulaw"))
 
 
 @pytest.mark.asyncio
@@ -400,6 +408,80 @@ async def test_stt_close_sends_close_stream_and_closes_ws():
     assert [json.loads(m) for m in ws.sent if isinstance(m, str)] == [{"type": "CloseStream"}]
     assert ws.closed
     assert stt._ws is None
+
+
+@pytest.mark.asyncio
+async def test_stt_connect_48k_session_resamples_to_16k_wire(monkeypatch):
+    """A 48 kHz session (the rate engine-native Munsit TTS wants, shared with
+    STT by the session config) must connect and downsample the mic leg
+    client-side instead of failing before the socket opens."""
+    pytest.importorskip("av")
+    monkeypatch.setenv("MUNSIT_API_KEY", "k")
+
+    class _IterFakeWs(_FakeWs):
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            # Behave like the real server: stay open until CloseStream.
+            while not any(isinstance(m, str) and "CloseStream" in m for m in self.sent):
+                await asyncio.sleep(0.005)
+            raise StopAsyncIteration
+
+    ws = _IterFakeWs()
+    captured: dict = {}
+
+    async def fake_connect(uri, **_kwargs):
+        captured["uri"] = uri
+        return ws
+
+    import websockets.asyncio.client as ws_client
+
+    monkeypatch.setattr(ws_client, "connect", fake_connect)
+
+    stt = MunsitStreamSTT()
+    await stt.connect(_stt_cfg(sample_rate=48_000))
+    try:
+        assert "sample_rate=16000" in captured["uri"]
+        assert stt._resampler is not None
+        # Flush cadence sized for the 16 kHz wire, not the 48 kHz session.
+        assert stt._flush_bytes == int(16_000 * 0.08 * 2)
+        for _ in range(10):
+            await stt.push_audio(b"\x00\x00" * 4_800)  # 100ms @ 48 kHz
+    finally:
+        await stt.close()
+    wire = sum(len(m) for m in ws.sent if isinstance(m, (bytes, bytearray)))
+    expected = 10 * 9_600 // 3  # 1s of audio at the 16 kHz wire rate
+    # Tolerance: sub-threshold tail not flushed at close + FIR filter delay.
+    assert expected - 4_096 <= wire <= expected
+
+
+@pytest.mark.asyncio
+async def test_stt_connect_16k_session_has_no_resampler(monkeypatch):
+    monkeypatch.setenv("MUNSIT_API_KEY", "k")
+
+    class _IterFakeWs(_FakeWs):
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            while not any(isinstance(m, str) and "CloseStream" in m for m in self.sent):
+                await asyncio.sleep(0.005)
+            raise StopAsyncIteration
+
+    async def fake_connect(_uri, **_kwargs):
+        return _IterFakeWs()
+
+    import websockets.asyncio.client as ws_client
+
+    monkeypatch.setattr(ws_client, "connect", fake_connect)
+
+    stt = MunsitStreamSTT()
+    await stt.connect(_stt_cfg(sample_rate=16_000))
+    try:
+        assert stt._resampler is None
+    finally:
+        await stt.close()
 
 
 def test_stt_effective_model_helper():

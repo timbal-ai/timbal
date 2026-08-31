@@ -84,8 +84,15 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
 # Streaming STT — WSS /api/v1/listen
 # ---------------------------------------------------------------------------
 
-# The /listen socket accepts exactly these rates (anything else is a fatal 4002).
+# The /listen socket accepts exactly these rates (anything else is a fatal
+# 4002). The session applies one sample_rate to both STT and TTS, and Munsit
+# TTS is engine-native at 48 kHz — so PCM16 sessions at any other rate are
+# resampled client-side down to _STT_WIRE_RATE instead of rejected (same
+# approach as Munsit's own LiveKit plugin, whose 48 kHz tracks feed a 16 kHz
+# wire).
 _STT_SAMPLE_RATES = frozenset({8_000, 16_000})
+_STT_WIRE_RATE = 16_000
+_PCM16_ENCODINGS = ("pcm_s16le", "linear16", "")
 # Munsit is happy with 20-200ms frames; 80ms matches the Deepgram adapters so
 # the session's mic cadence behaves identically across providers.
 _STT_AUDIO_FLUSH_INTERVAL = 0.08
@@ -128,6 +135,24 @@ def effective_stt_model(requested: str | None) -> str:
     return requested.strip() if is_munsit_stt_model(requested) else DEFAULT_STT_MODEL
 
 
+def _stt_wire_rate(config: AudioInputConfig) -> int:
+    """Sample rate actually negotiated on the ``/listen`` socket.
+
+    Rates the socket accepts pass through; any other PCM16 rate resamples
+    client-side to 16 kHz (see :data:`_STT_SAMPLE_RATES`). Compressed
+    encodings can't be resampled here, so those fail at session start rather
+    than let the server kill the socket with a fatal 4002 on the first frame.
+    """
+    if config.sample_rate in _STT_SAMPLE_RATES:
+        return config.sample_rate
+    if config.encoding not in _PCM16_ENCODINGS:
+        raise ValueError(
+            f"Munsit streaming STT accepts 8000/16000 Hz and cannot resample "
+            f"{config.encoding!r} audio client-side; got {config.sample_rate} Hz."
+        )
+    return _STT_WIRE_RATE
+
+
 class MunsitStreamSTT(SpeechToText):
     """Munsit live streaming STT (``WSS /api/v1/listen``) with native EOU.
 
@@ -154,6 +179,12 @@ class MunsitStreamSTT(SpeechToText):
     :attr:`native_eou`, and disables the VAD endpointing fast path the same
     way it does for Deepgram Flux.
 
+    The socket accepts only 8/16 kHz, but the session applies one
+    ``sample_rate`` to both STT and TTS and Munsit TTS is engine-native at
+    48 kHz — so PCM16 sessions at other rates get the mic leg resampled
+    client-side to 16 kHz (stateful ``PcmResampler``; no per-chunk edge
+    artifacts) instead of failing at ``connect``.
+
     ``stt_extra`` passthrough: ``endpointing`` (ms, 100-5000), ``smart_turn``,
     ``hotwords`` (ignored by ``munsit-en-ar``), ``channels``,
     ``correlation_id``, ``metadata``, ``interim_results``; plus ``stt_host``
@@ -167,6 +198,8 @@ class MunsitStreamSTT(SpeechToText):
         self._api_key: str | None = None
         self._ws: Any = None
         self._buf = bytearray()
+        # Set by connect() when the session rate isn't wire-legal (e.g. 48 kHz).
+        self._resampler: Any = None
         # Single lock over buffer mutation *and* ws.send — same rationale as
         # the Deepgram adapters: threshold pushes, the flush loop and control
         # frames must never interleave frames on the socket.
@@ -182,15 +215,11 @@ class MunsitStreamSTT(SpeechToText):
     def _build_uri(self, config: AudioInputConfig) -> str:
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", _DEFAULT_HOST))
-        if config.sample_rate not in _STT_SAMPLE_RATES:
-            # Fail at session start rather than let the server kill the socket
-            # with a fatal 4002 on the first frame.
-            raise ValueError(f"Munsit streaming STT supports 8000 or 16000 Hz; got {config.sample_rate}.")
-        encoding = "linear16" if config.encoding in ("pcm_s16le", "linear16", "") else config.encoding
+        encoding = "linear16" if config.encoding in _PCM16_ENCODINGS else config.encoding
         params: list[tuple[str, str]] = [
             ("model", effective_stt_model(config.model)),
             ("encoding", encoding),
-            ("sample_rate", str(config.sample_rate)),
+            ("sample_rate", str(_stt_wire_rate(config))),
         ]
         # `ar` is the only supported value in v1 and invalid connection params
         # are fatal — drop foreign language leftovers rather than 4002 the
@@ -209,7 +238,15 @@ class MunsitStreamSTT(SpeechToText):
     async def connect(self, config: AudioInputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         uri = self._build_uri(config)
-        self._flush_bytes = int(config.sample_rate * _STT_AUDIO_FLUSH_INTERVAL * 2)
+        wire_rate = _stt_wire_rate(config)
+        if wire_rate != config.sample_rate:
+            from .telephony import PcmResampler
+
+            self._resampler = PcmResampler(config.sample_rate, wire_rate)
+            logger.debug("munsit_stt_resampling", src_rate=config.sample_rate, wire_rate=wire_rate)
+        else:
+            self._resampler = None
+        self._flush_bytes = int(wire_rate * _STT_AUDIO_FLUSH_INTERVAL * 2)
         logger.debug("munsit_stt_connecting", uri=uri[:160])
         from websockets.asyncio.client import connect as ws_connect
 
@@ -230,6 +267,12 @@ class MunsitStreamSTT(SpeechToText):
         from websockets.exceptions import ConnectionClosed
 
         async with self._wire_lock:
+            # Resample under the lock — the FIR filter carries state across
+            # chunks, so ordering must match the wire.
+            if self._resampler is not None:
+                chunk = self._resampler.process(chunk)
+                if not chunk:
+                    return
             self._buf.extend(chunk)
             if len(self._buf) < self._flush_bytes or self._ws is None:
                 return
@@ -430,7 +473,9 @@ def effective_sample_rate(config: AudioOutputConfig) -> int:
     server-side (a quality cost, not a latency one). The session-wide default
     of 16 kHz is honoured as requested; deployments that want engine-native
     audio should raise the session ``sample_rate`` (e.g. LiveKit/WebRTC
-    transports, which resample to 48 kHz anyway), not this provider.
+    transports, which resample to 48 kHz anyway), not this provider. A 48 kHz
+    session works with Munsit STT too: :class:`MunsitStreamSTT` resamples the
+    mic leg down to its 16 kHz wire client-side.
     """
     sr = config.sample_rate
     if not (_SAMPLE_RATE_MIN <= sr <= _SAMPLE_RATE_MAX):
