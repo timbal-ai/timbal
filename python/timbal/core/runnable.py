@@ -1903,6 +1903,10 @@ class Runnable(ABC, BaseModel):
         handoff_start: asyncio.Event | None = None
         handoff_result: dict[str, Any] | None = None
         handoff_record = None
+        # Foreground sink this _stream owns. Spawn-at-birth rebinds
+        # span._emit_sink to a forwarding sink on the same span; we snapshot
+        # first so finally closes *this* object, not the child's.
+        emit_sink = None
         handoff_control = (
             getattr(run_context, "_background_handoff_control", None)
             if self.background_mode == "auto" and self._is_async_gen and not self._is_orchestrator
@@ -1989,6 +1993,7 @@ class Runnable(ABC, BaseModel):
 
             # Background task
             if run_in_background:
+                emit_sink = span._emit_sink
                 output = self._spawn_background_task(validated_input, input, run_context, span)
             elif not self._is_async_gen and not self._is_gen:
                 # Fast path: plain sync/coroutine handlers cannot yield events,
@@ -2245,9 +2250,12 @@ class Runnable(ABC, BaseModel):
             raise
 
         finally:
-            # Snapshot before handoff_start.set(): the continuation may rebind
-            # span._emit_sink to a forwarding sink. Close/drain *this* object.
-            emit_sink = span._emit_sink
+            # Spawn-at-birth already snapshotted the foreground sink above;
+            # do not pick up the forwarding sink the child just installed.
+            # Handoff snapshots here, before handoff_start.set(), for the
+            # same reason: the continuation rebinds span._emit_sink after.
+            if not run_in_background:
+                emit_sink = span._emit_sink
             if handoff_control is not None and not handed_off:
                 handoff_control.unregister(span.call_id)
             t1 = int(time.time() * 1000)

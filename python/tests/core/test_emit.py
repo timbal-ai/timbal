@@ -292,6 +292,68 @@ class TestEmitBackground:
         assert emitted[0]["item"]["data"] == {"kind": "bg-progress", "pct": 50}
         await asyncio.sleep(0.1)
 
+    @pytest.mark.asyncio
+    async def test_emit_after_spawn_placeholder_reaches_transcript(self):
+        """Spawn-at-birth must not close the forwarding sink in the launcher's finally.
+
+        The launching span yields a placeholder OUTPUT and exits while the child
+        is still running. Emits after that cutover have to keep reaching the
+        background log — not walk to a parent or drop because the sink was
+        closed / t1 was set.
+        """
+        released = asyncio.Event()
+
+        async def bg_task() -> str:
+            await released.wait()
+            emit({"kind": "late-bg-progress", "pct": 100})
+            return "bg done"
+
+        agent = Agent(
+            name="late_bg_emit_agent",
+            model=TestModel(
+                responses=[
+                    _tool_call("bg_task", {}, run_in_background=True),
+                    "Started in the background.",
+                ]
+            ),
+            tools=[
+                Tool(
+                    name="bg_task",
+                    description="Emit late from background",
+                    handler=bg_task,
+                    background_mode="auto",
+                )
+            ],
+        )
+
+        parent_events = [event async for event in agent(prompt="run it")]
+        assert_has_output_event(parent_events[-1])
+        assert _custom_deltas(parent_events, "kind") == []
+
+        listed = list_background_tasks()
+        assert len(listed) == 1
+        task_id = listed[0]["task_id"]
+        # Parent stream is fully drained — launcher _stream finally has run.
+        released.set()
+
+        deadline = time.monotonic() + 5
+        emitted = []
+        while time.monotonic() < deadline and not emitted:
+            transcript = read_background_transcript(task_id)
+            emitted = [
+                event
+                for event in transcript["events"]
+                if isinstance(event, dict)
+                and event.get("type") == "DELTA"
+                and event.get("item", {}).get("type") == "custom"
+                and isinstance(event["item"].get("data"), dict)
+                and event["item"]["data"].get("kind") == "late-bg-progress"
+            ]
+            if not emitted:
+                await asyncio.sleep(0.01)
+        assert len(emitted) == 1
+        assert emitted[0]["item"]["data"] == {"kind": "late-bg-progress", "pct": 100}
+
 
 class TestEmitNoContext:
     """No-op outside a run: tools stay unit-testable without a context harness."""
