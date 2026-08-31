@@ -35,6 +35,7 @@ import contextlib
 import hmac
 import json
 import os
+import secrets
 from contextlib import aclosing
 from typing import Any
 
@@ -236,10 +237,7 @@ async def voice_rtc(request: Request) -> JSONResponse:
             guard.release()
         return JSONResponse(
             status_code=503,
-            content={
-                "error": f"Server is at its voice session capacity "
-                f"({max_concurrent_sessions()} concurrent)."
-            },
+            content={"error": f"Server is at its voice session capacity ({max_concurrent_sessions()} concurrent)."},
         )
 
     pc: Any = None
