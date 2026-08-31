@@ -455,8 +455,12 @@ async def warmup_voice_stack(voice_config: VoiceConfig, *, livekit: bool | None 
         if livekit:
             try:
                 importlib.import_module("livekit.rtc")
-            except ImportError:
-                pass  # timbal[voice-livekit] not installed — the dial will 501
+            except Exception:  # noqa: BLE001
+                # ImportError: timbal[voice-livekit] not installed — the dial
+                # will 501. Anything else (OSError from a broken native lib):
+                # equally best-effort, and it must not knock out the ONNX
+                # model-warmup tier below.
+                pass
         # The detector-choice probe can itself import onnxruntime/transformers
         # (default turn_detector resolution) — must stay in this executor, off
         # the event loop and under the caller's except.
