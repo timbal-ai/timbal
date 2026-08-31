@@ -20,10 +20,11 @@ from timbal.state import (
     get_run_context,
     list_background_tasks,
     read_background_transcript,
+    wait_for_background,
 )
 from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
-from timbal.types.events.delta import DeltaEvent
+from timbal.types.events.delta import DeltaEvent, TextDelta
 from timbal.types.message import Message
 
 from ..conftest import assert_has_output_event
@@ -403,6 +404,64 @@ class TestEmitBackground:
         customs = _custom_deltas(events, "kind")
         assert [c.item.data["kind"] for c in customs] == ["pre-approval"]
         assert events.index(customs[0]) < events.index(output_event)
+
+    @pytest.mark.asyncio
+    async def test_emit_after_handoff_cutover_reaches_transcript(self):
+        """collector.background() rebinds the sink after start.wait().
+
+        _stream's finally must snapshot span._emit_sink before handoff_start.set().
+        If it snapshots after, it closes the forwarding sink and post-cutover
+        emits drop (or walk to a parent) instead of reaching the background log.
+        """
+        released = asyncio.Event()
+
+        async def streaming():
+            emit({"kind": "pre-handoff"})
+            yield TextDelta(id="s", text_delta="before")
+            await released.wait()
+            # Resumed by _continue_in_background after start.wait() + rebind.
+            emit({"kind": "post-handoff"})
+            yield TextDelta(id="s", text_delta="after")
+
+        stream = Tool(
+            name="streaming",
+            handler=streaming,
+            background_mode="auto",
+            tracing_provider=None,
+        )()
+        parent_events = []
+        handoff = None
+
+        async for event in stream:
+            parent_events.append(event)
+            if (
+                isinstance(event, DeltaEvent)
+                and isinstance(event.item, TextDelta)
+                and event.item.text_delta == "before"
+            ):
+                handoff = stream.background()
+                released.set()
+
+        assert handoff is not None
+        placeholder = await handoff
+        assert_has_output_event(parent_events[-1])
+
+        parent_customs = _custom_deltas(parent_events, "kind")
+        assert [c.item.data["kind"] for c in parent_customs] == ["pre-handoff"]
+
+        await wait_for_background(placeholder["task_id"], timeout=2.0)
+        transcript = read_background_transcript(placeholder["task_id"])
+        post = [
+            event
+            for event in transcript["events"]
+            if isinstance(event, dict)
+            and event.get("type") == "DELTA"
+            and event.get("item", {}).get("type") == "custom"
+            and isinstance(event["item"].get("data"), dict)
+            and event["item"]["data"].get("kind") == "post-handoff"
+        ]
+        assert len(post) == 1
+        assert post[0]["item"]["data"] == {"kind": "post-handoff"}
 
 
 class TestEmitNoContext:
