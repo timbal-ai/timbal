@@ -210,9 +210,7 @@ class TestVoiceRtcRoundTrip:
 
 
 class TestVoiceRtcSingleSession:
-    async def test_one_call_then_exit_zero_then_409(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    async def test_one_call_then_exit_zero_then_409(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """TIMBAL_VOICE_SINGLE_SESSION: serve the call, exit 0, refuse a second offer."""
         _setup_env(monkeypatch, tmp_path, responses=["Hi there!"])
         monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
@@ -243,14 +241,10 @@ class TestVoiceRtcSingleSession:
             assert exits == [0]
 
             # One process = one session: the 409 fires before any SDP work.
-            resp = await asyncio.to_thread(
-                client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"}
-            )
+            resp = await asyncio.to_thread(client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"})
             assert resp.status_code == 409
 
-    async def test_409_while_a_session_is_live(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    async def test_409_while_a_session_is_live(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _setup_env(monkeypatch, tmp_path)
         monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
         exits: list[int] = []
@@ -259,15 +253,11 @@ class TestVoiceRtcSingleSession:
         app = create_app()
         with TestClient(app) as client:
             assert app.state.single_session_guard.claim()  # a session is live
-            resp = await asyncio.to_thread(
-                client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"}
-            )
+            resp = await asyncio.to_thread(client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"})
         assert resp.status_code == 409
         assert exits == []
 
-    async def test_setup_crash_releases_the_slot(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    async def test_setup_crash_releases_the_slot(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """A 500 between claim() and the driver task must not park the box in a
         claimed state: the slot reopens and the idle timer bounds the lifetime."""
         _setup_env(monkeypatch, tmp_path)
@@ -282,16 +272,12 @@ class TestVoiceRtcSingleSession:
 
         app = create_app()
         with TestClient(app, raise_server_exceptions=False) as client:
-            resp = await asyncio.to_thread(
-                client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"}
-            )
+            resp = await asyncio.to_thread(client.post, "/voice/rtc", json={"sdp": "v=0", "type": "offer"})
             assert resp.status_code == 500
             assert app.state.single_session_guard.claim()
         assert exits == []
 
-    async def test_rejected_offer_releases_the_slot(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    async def test_rejected_offer_releases_the_slot(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """A 400 offer never became a session — the slot must reopen."""
         _setup_env(monkeypatch, tmp_path)
         monkeypatch.setenv("TIMBAL_VOICE_SINGLE_SESSION", "1")
@@ -300,9 +286,7 @@ class TestVoiceRtcSingleSession:
 
         app = create_app()
         with TestClient(app) as client:
-            resp = await asyncio.to_thread(
-                client.post, "/voice/rtc", json={"sdp": "not sdp at all", "type": "offer"}
-            )
+            resp = await asyncio.to_thread(client.post, "/voice/rtc", json={"sdp": "not sdp at all", "type": "offer"})
             assert resp.status_code == 400
             assert app.state.single_session_guard.claim()
         assert exits == []
@@ -316,9 +300,7 @@ class TestVoiceRtcSignalingErrors:
             resp = client.post("/voice/rtc", json={"type": "offer"})
         assert resp.status_code == 400
 
-    async def test_rejects_offer_without_an_audio_track(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    async def test_rejects_offer_without_an_audio_track(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _setup_env(monkeypatch, tmp_path)
         app = create_app()
 
@@ -356,9 +338,7 @@ class TestVoiceRtcLivekitFork:
     """The same route also takes a LiveKit dial — how a long-lived deployment
     (ECS / on-premise) serves LiveKit calls without a per-call process."""
 
-    def test_livekit_dial_joins_without_aiortc(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_livekit_dial_joins_without_aiortc(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """The dial is sniffed before the aiortc import: a deployment pinned to
         timbal[voice-livekit] only must not be told the transport is missing."""
         import sys
@@ -408,9 +388,7 @@ class TestVoiceRtcLivekitFork:
             live = app.state.livekit_sessions["v1_1_2_3_abc"]
             live.get_loop().call_soon_threadsafe(live.cancel)
 
-    def test_livekit_dial_without_credentials_is_a_400(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_livekit_dial_without_credentials_is_a_400(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _setup_env(monkeypatch, tmp_path)
         app = create_app()
         with TestClient(app) as client:
@@ -418,9 +396,29 @@ class TestVoiceRtcLivekitFork:
         assert resp.status_code == 400
         assert "token" in resp.json()["error"]
 
-    def test_livekit_extra_missing_is_a_501(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_livekit_dial_requires_deployment_secret(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_VOICE_DIAL_SECRET", "dial-secret")
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/voice/rtc",
+                json={"transport": "livekit", "url": "ws://sfu:7880", "token": "jwt"},
+            )
+        assert resp.status_code == 401
+
+    def test_livekit_dial_enforces_pinned_sfu_url(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _setup_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("TIMBAL_LIVEKIT_URL", "ws://private-sfu:7880")
+        app = create_app()
+        with TestClient(app) as client:
+            resp = client.post(
+                "/voice/rtc",
+                json={"transport": "livekit", "url": "ws://attacker:7880", "token": "jwt"},
+            )
+        assert resp.status_code == 403
+
+    def test_livekit_extra_missing_is_a_501(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         import sys
 
         _setup_env(monkeypatch, tmp_path)

@@ -19,7 +19,10 @@ Env contract for the boot-env path (all platform-owned):
 * ``TIMBAL_LIVEKIT_URL`` — ``ws://<sfu-private-ip>:7880``
 * ``TIMBAL_LIVEKIT_TOKEN`` — agent join token (the room is already pinned)
 * ``TIMBAL_LIVEKIT_ROOM`` — informational; the token already pins it
-* ``TIMBAL_LIVEKIT_CALLER_IDENTITY`` — identity prefix treated as the human
+* ``TIMBAL_LIVEKIT_CALLER_IDENTITY`` — logging hint only; the human is the
+  first eligible remote participant (STANDARD/SIP), not a prefix match
+* ``TIMBAL_LIVEKIT_AGENT_IDENTITY`` — this box's identity (exclude from caller resolution)
+* ``TIMBAL_VOICE_CALL_ID`` — platform call id for SIP transfer API paths
 * ``TIMBAL_VOICE_CLIENT_CONFIG`` — JSON, same keys as the WS hello / rtc config.
   Overlay: after the caller publishes a mic, the driver waits up to 2s for an
   untyped data-message hello (playground dropdowns) and merges it on top.
@@ -95,6 +98,10 @@ class LivekitDial:
     token: str
     room: str = ""
     caller_identity: str = ""
+    agent_identity: str = ""
+    call_id: str = ""
+    call_control_url: str = ""
+    call_control_token: str = ""
     # JSON string (not a dict) so the env and body paths share one type.
     client_config: str = "{}"
     # Run id this call continues (text → voice). Session identity, not a voice
@@ -110,6 +117,10 @@ def dial_from_env() -> LivekitDial:
         token=os.environ.get("TIMBAL_LIVEKIT_TOKEN", "").strip(),
         room=os.environ.get("TIMBAL_LIVEKIT_ROOM", "").strip(),
         caller_identity=os.environ.get("TIMBAL_LIVEKIT_CALLER_IDENTITY", "").strip(),
+        agent_identity=os.environ.get("TIMBAL_LIVEKIT_AGENT_IDENTITY", "").strip(),
+        call_id=os.environ.get("TIMBAL_VOICE_CALL_ID", "").strip(),
+        call_control_url=os.environ.get("TIMBAL_VOICE_CALL_CONTROL_URL", "").strip(),
+        call_control_token=os.environ.get("TIMBAL_VOICE_CALL_CONTROL_TOKEN", "").strip(),
         client_config=os.environ.get("TIMBAL_VOICE_CLIENT_CONFIG") or "{}",
         parent_id=os.environ.get("TIMBAL_VOICE_PARENT_RUN_ID", "").strip(),
     )
@@ -154,6 +165,10 @@ def dial_from_body(body: dict[str, Any]) -> LivekitDial:
         token=str(body.get("token") or "").strip(),
         room=str(body.get("room") or "").strip(),
         caller_identity=str(body.get("caller_identity") or "").strip(),
+        agent_identity=str(body.get("agent_identity") or "").strip(),
+        call_id=str(body.get("call_id") or "").strip(),
+        call_control_url=str(body.get("call_control_url") or "").strip(),
+        call_control_token=str(body.get("call_control_token") or "").strip(),
         client_config=json.dumps(config) if isinstance(config, dict) else "{}",
         parent_id=str(body.get("parent_id") or "").strip(),
     )
@@ -404,10 +419,28 @@ def merge_client_config(env_raw: str, hello: dict[str, Any] | None) -> dict[str,
     return config
 
 
-def _is_caller(identity: str, prefix: str) -> bool:
-    if not prefix:
-        return True
-    return identity.startswith(prefix)
+def _local_identity(room: Any, dial: LivekitDial) -> str:
+    if dial.agent_identity:
+        return dial.agent_identity
+    local = getattr(room, "local_participant", None)
+    if local is None:
+        return ""
+    return getattr(local, "identity", "") or ""
+
+
+def _resolve_call_id(dial: LivekitDial, sip_attributes: dict[str, str] | None) -> str:
+    if dial.call_id:
+        return dial.call_id
+    from .livekit_sip import SIP_ATTR_CALL_ID, call_id_from_env
+
+    env = call_id_from_env()
+    if env:
+        return env
+    if sip_attributes:
+        val = sip_attributes.get(SIP_ATTR_CALL_ID)
+        if isinstance(val, str) and val:
+            return val
+    return ""
 
 
 async def _run_livekit_session(
@@ -436,6 +469,20 @@ async def _run_livekit_session(
     from ..core.agent import Agent
     from ..voice import AudioOutput
     from ..voice.livekit import LkPacedSource, audio_stream_to_pcm
+    from .livekit_call_control import LivekitCallControl, livekit_call_control_tools, with_call_tools
+    from .livekit_sip import (
+        CallerDisconnectAction,
+        caller_disconnect_action,
+        dtmf_code,
+        dtmf_event_payload,
+        find_eligible_caller,
+        is_eligible_caller,
+        is_sip_participant,
+        phone_tuned_voice_config,
+        sip_abandon_secs,
+        sip_call_context,
+        sip_recording_meta,
+    )
 
     url = dial.url
     token = dial.token
@@ -460,20 +507,25 @@ async def _run_livekit_session(
         _reject("single-session server: a voice session was already served", 409)
         return
 
-    caller_prefix = dial.caller_identity
+    caller_hint = dial.caller_identity
     room_name = dial.room
+    local_identity = dial.agent_identity
 
     # Room constructed on this loop — see voice/livekit.py docstring.
     # Session + paced source wait until the caller is in (and the config hello
     # window closes) so playground STT/TTS/turn-detector dropdowns apply.
     room = rtc.Room()
     session_holder: dict[str, Any] = {}
+    caller_participant: Any | None = None
     caller_identity: str | None = None
+    caller_is_sip = False
     mic_tracks: asyncio.Queue[Any] = asyncio.Queue()
     caller_ready = asyncio.Event()
     hello_holder: dict[str, Any] = {"hello": None}
     hello_event = asyncio.Event()
     send_q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+    call_control_holder: dict[str, LivekitCallControl | None] = {"c": None}
+    pending_disconnect: asyncio.Task | None = None
 
     async def _send(payload: dict[str, Any]) -> None:
         dest = [caller_identity] if caller_identity else None
@@ -492,16 +544,77 @@ async def _run_livekit_session(
                 return
             await _send(payload)
 
+    def _cancel_pending_disconnect() -> None:
+        nonlocal pending_disconnect
+        if pending_disconnect is not None:
+            pending_disconnect.cancel()
+            pending_disconnect = None
+
+    async def _close_session_later(delay: float) -> None:
+        await asyncio.sleep(delay)
+        sess = session_holder.get("s")
+        if sess is not None:
+            await sess.close()
+
+    def _arm_caller_disconnect(participant: Any) -> None:
+        nonlocal pending_disconnect
+        action = caller_disconnect_action(participant)
+        logger.info(
+            "voice_livekit_caller_disconnected",
+            identity=getattr(participant, "identity", ""),
+            kind=getattr(participant, "kind", None),
+            reason=getattr(participant, "disconnect_reason", None),
+            action=action.value,
+        )
+        if action is CallerDisconnectAction.CLOSE:
+            _cancel_pending_disconnect()
+            sess = session_holder.get("s")
+            if sess is not None:
+                asyncio.create_task(sess.close())
+            elif guard is not None:
+                asyncio.create_task(guard.finish())
+            else:
+                asyncio.create_task(room.disconnect())
+            return
+        if action is CallerDisconnectAction.SHORT_ABANDON:
+            _cancel_pending_disconnect()
+            pending_disconnect = asyncio.create_task(
+                _close_session_later(sip_abandon_secs()),
+                name="voice-livekit-sip-abandon",
+            )
+            return
+        if guard is not None:
+            guard.mark_disconnected(on_abandon=_close_session_if_any)
+
+    def _note_caller(participant: Any) -> None:
+        nonlocal caller_participant, caller_identity, caller_is_sip
+        if caller_participant is not None:
+            return
+        local_id = _local_identity(room, dial) or local_identity
+        if not is_eligible_caller(participant, local_identity=local_id, caller_hint=caller_hint):
+            return
+        caller_participant = participant
+        caller_identity = getattr(participant, "identity", "") or ""
+        caller_is_sip = is_sip_participant(participant)
+        attrs = dict(getattr(participant, "attributes", None) or {})
+        call_control_holder["c"] = LivekitCallControl(
+            room=room,
+            room_name=room_name or getattr(room, "name", "") or "",
+            caller_identity=caller_identity,
+            call_id=_resolve_call_id(dial, attrs),
+            is_sip=caller_is_sip,
+            call_control_url=dial.call_control_url,
+            call_control_token=dial.call_control_token,
+        )
+
     def _on_sub(track: Any, pub: Any, participant: Any) -> None:
-        nonlocal caller_identity
-        identity = getattr(participant, "identity", "") or ""
-        if not _is_caller(identity, caller_prefix):
+        _note_caller(participant)
+        if caller_participant is not participant:
             return
         kind = getattr(track, "kind", None)
         audio_kind = getattr(rtc.TrackKind, "KIND_AUDIO", 1)
         if kind != audio_kind:
             return
-        caller_identity = identity
         mic_tracks.put_nowait(track)
         if guard is not None:
             guard.mark_connected()
@@ -515,17 +628,14 @@ async def _run_livekit_session(
     def _on_participant_disconnected(participant: Any) -> None:
         identity = getattr(participant, "identity", "") or ""
         if caller_identity and identity == caller_identity:
-            logger.info("voice_livekit_caller_disconnected", identity=identity)
-            if guard is not None:
-                # Can fire during the hello wait / session build, before the
-                # session exists — the abandon window must arm regardless, and
-                # the closure closes whichever session exists at abandon time.
-                guard.mark_disconnected(on_abandon=_close_session_if_any)
+            _arm_caller_disconnect(participant)
 
     def _on_participant_connected(participant: Any) -> None:
         identity = getattr(participant, "identity", "") or ""
+        _note_caller(participant)
         if caller_identity and identity == caller_identity:
             logger.info("voice_livekit_caller_reconnected", identity=identity)
+            _cancel_pending_disconnect()
             if guard is not None:
                 guard.mark_reconnected()
 
@@ -542,6 +652,33 @@ async def _run_livekit_session(
             return
         if not isinstance(data, dict):
             return
+        if (
+            getattr(pkt, "topic", "") == "timbal.sip.control"
+            and getattr(pkt, "participant", None) is None
+            and data.get("type") == "timbal.sip.send_dtmf"
+        ):
+            digits = str(data.get("digits") or "").strip().upper()
+            target = str(data.get("participant_identity") or "")
+            if (
+                caller_is_sip
+                and caller_identity
+                and target == caller_identity
+                and 0 < len(digits) <= 32
+                and all(ch in "0123456789*#ABCD" for ch in digits)
+            ):
+
+                async def _publish_control_dtmf() -> None:
+                    publish = getattr(room.local_participant, "publish_dtmf", None)
+                    if publish is None:
+                        logger.error("voice_livekit_publish_dtmf_unavailable")
+                        return
+                    for digit in digits:
+                        await publish(code=dtmf_code(digit), digit=digit)
+
+                asyncio.create_task(_publish_control_dtmf(), name="voice-livekit-control-dtmf")
+            else:
+                logger.warning("voice_livekit_rejected_dtmf_control")
+            return
         if is_config_hello(data):
             hello_holder["hello"] = data
             hello_event.set()
@@ -554,20 +691,46 @@ async def _run_livekit_session(
             except (KeyError, TypeError, ValueError):
                 logger.debug("voice_livekit_bad_playback_ack", data=str(data)[:120])
 
+    def _on_sip_dtmf(dtmf: Any) -> None:
+        digit = getattr(dtmf, "digit", "") or ""
+        code = getattr(dtmf, "code", None)
+        identity = getattr(getattr(dtmf, "participant", None), "identity", "") or caller_identity or ""
+        if not digit:
+            return
+        logger.info("voice_livekit_dtmf_received", digit=digit, identity=identity)
+        payload = dtmf_event_payload(
+            digit=str(digit),
+            code=int(code) if code is not None else 0,
+            identity=identity,
+        )
+        asyncio.create_task(send_q.put(payload))
+
     room.on("track_subscribed", _on_sub)
     room.on("participant_disconnected", _on_participant_disconnected)
     room.on("participant_connected", _on_participant_connected)
     room.on("disconnected", _on_disconnected)
     room.on("data_received", _on_data)
+    if hasattr(room, "on"):
+        with contextlib.suppress(Exception):
+            room.on("sip_dtmf_received", _on_sip_dtmf)
 
     sender_task = asyncio.create_task(_sender(), name="voice-livekit-sender")
     downlink = None
     try:
         await room.connect(url, token)
+        local_identity = _local_identity(room, dial) or local_identity
+        remotes = getattr(room, "remote_participants", None)
+        if remotes is not None:
+            values = remotes.values() if hasattr(remotes, "values") else remotes
+            found = find_eligible_caller(values, local_identity=local_identity, caller_hint=caller_hint)
+            if found is not None:
+                _note_caller(found)
         logger.info(
             "voice_livekit_joined",
             url=url,
             room=room_name or getattr(room, "name", None),
+            caller_identity=caller_identity,
+            caller_is_sip=caller_is_sip,
         )
         # In the room — this is the readiness proof a per-request caller waits
         # on. Everything below (caller mic, hello, session build) happens after
@@ -579,21 +742,42 @@ async def _run_livekit_session(
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(hello_event.wait(), timeout=_HELLO_WAIT_SECS)
         config = merge_client_config(dial.client_config, hello_holder["hello"])
+        if caller_is_sip:
+            config = phone_tuned_voice_config(config)
+        sip_ctx: dict[str, str] = {}
+        sip_meta: dict[str, str] = {}
+        if caller_participant is not None:
+            attrs = dict(getattr(caller_participant, "attributes", None) or {})
+            sip_ctx = sip_call_context(attrs)
+            sip_meta = sip_recording_meta(attrs)
         defaults = getattr(app.state, "voice_config", None) or VoiceConfig()
         sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
 
         downlink = LkPacedSource(sample_rate=sample_rate)
+        session_runnable = runnable
+        if caller_is_sip and isinstance(runnable, Agent):
+            session_runnable = with_call_tools(
+                runnable,
+                livekit_call_control_tools(call_control_holder["c"]),
+            )
         session, meta = build_voice_session(
-            runnable,
+            session_runnable,
             defaults,
             config,
             playback_tracker=downlink.tracker,
+            call_context=sip_ctx or None,
             # From the dial only — server-minted. The data-channel hello is the
             # browser's, and a browser must not pick the thread it joins.
             parent_run_id=dial.parent_id or None,
         )
-        meta = {"playback_acks": "native", "transport": "livekit", **meta}
-        session.recording_meta = meta
+        meta = {
+            "playback_acks": "native",
+            "transport": "livekit",
+            "caller_is_sip": caller_is_sip,
+            **sip_meta,
+            **meta,
+        }
+        session.recording_meta = {**(session.recording_meta or {}), **meta}
         session_holder["s"] = session
 
         track = rtc.LocalAudioTrack.create_audio_track("agent", downlink.source)
