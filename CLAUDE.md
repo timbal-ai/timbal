@@ -537,6 +537,24 @@ get_run_context().update_usage("my_api:calls", 1)
 
 Propagates up the call stack. Usage accumulates in `OutputEvent.usage`.
 
+### `emit(data)` — fire-and-forget custom DELTA events
+
+```python
+from timbal.state import emit  # no-op without a run context (unit tests)
+
+get_run_context().emit({"kind": "ui-event", "event": "preview_ready", "url": "..."})
+emit({"kind": "progress", "pct": 50})  # module-level convenience
+```
+
+Out-of-band event channel from anywhere inside a handler (including helpers deep in the call stack): wraps `data` in a `Custom` delta item (`item.type == "custom"`, `item.id` = current call id) and interleaves it with the current call's processed events. Foreground calls surface emissions on the parent event stream; detached background children surface them in their background log/transcript. Always ordered before that call's OUTPUT.
+
+- Never passes through the collector — unlike a generator `yield`, it cannot alter the call's output or the persisted span.
+- Thread-safe from `offload_blocking` / sync-generator executor threads (marshalled onto the owning loop).
+- Fire-and-forget: no await, no backpressure, never raises; outside a run it's a silent no-op (`emit` module function) or log-and-drop (`RunContext.emit`).
+- Zero cost when unused: the per-call sink is allocated on first `emit()`, not on every runnable invocation.
+- Generator handlers: emits between yields surface at the next chunk boundary (or at completion, still before OUTPUT).
+- Plain (non-generator) handlers: emits flush when the handler returns, still before OUTPUT. Not raced against the handler — Task-wrapping every tool/step would show up in the framework-overhead benches.
+
 ---
 
 ## Types

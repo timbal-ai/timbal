@@ -1,4 +1,7 @@
+import asyncio
 import os
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,101 @@ class _NoDefault:
 
 
 _NO_DEFAULT = _NoDefault()
+
+
+def _emit_sink_unpickle() -> None:
+    """Unpickle target for :class:`_EmitSink` — a sink never survives serialization."""
+    return None
+
+
+class _EmitSink:
+    """INTERNAL: per-call delivery channel for :meth:`RunContext.emit`.
+
+    Attached to a span (``span._emit_sink``) for the duration of one runnable
+    invocation, pointing wherever that call's processed handler events go:
+
+    - Buffered (foreground): emitted events accumulate here and the owning
+      ``Runnable._stream`` drains them at yield boundaries, interleaving them
+      with the handler's own events. They never pass through the collector, so
+      they cannot alter the call's output.
+    - Forwarding (detached background child): events go straight to the
+      child's background record log, which after detach is the only copy of
+      its stream.
+
+    Thread-safe: handlers may run off-loop (``offload_blocking`` /
+    ``sync_to_async_gen`` executor threads). The owning loop is captured at
+    creation; off-loop puts are marshalled with ``call_soon_threadsafe``.
+    Fire-and-forget: no backpressure, no await, never raises — the same
+    durability contract as the background ``put_nowait`` path.
+    """
+
+    __slots__ = ("_loop", "_forward", "_buffer", "closed")
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        forward: Callable[[Any], None] | None = None,
+    ) -> None:
+        self._loop = loop
+        self._forward = forward
+        # Lazily allocated on first emit — most calls never emit.
+        self._buffer: deque[Any] | None = None
+        self.closed = False
+
+    def put(self, event: Any) -> None:
+        """Deliver one event. Safe to call from any thread; never raises."""
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            self._put_on_loop(event)
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._put_on_loop, event)
+        except RuntimeError:
+            # Owning loop already closed — accepted fire-and-forget loss.
+            _get_logger().debug("emit() after the owning event loop closed; event dropped.")
+
+    def _put_on_loop(self, event: Any) -> None:
+        if self.closed:
+            _get_logger().debug("emit() after the call's stream closed; event dropped.", path=event.path)
+            return
+        if self._forward is not None:
+            self._forward(event)
+            return
+        if self._buffer is None:
+            self._buffer = deque()
+        self._buffer.append(event)
+
+    def has_pending(self) -> bool:
+        return bool(self._buffer)
+
+    def drain(self) -> list[Any]:
+        """Take all buffered events. Loop-thread only; atomic (no await points)."""
+        buffer = self._buffer
+        if not buffer:
+            return []
+        drained = list(buffer)
+        buffer.clear()
+        return drained
+
+    def close(self) -> None:
+        """Stop accepting events. Already-buffered events remain drainable."""
+        self.closed = True
+
+    # A sink lives on its span (``span._emit_sink``) and holds the event loop
+    # and possibly futures. Serializing providers snapshot traces via
+    # deepcopy/pickle; the copy has no live stream to deliver to, so the sink
+    # collapses to None instead of dragging asyncio internals along.
+    def __copy__(self) -> None:
+        return None
+
+    def __deepcopy__(self, memo: dict) -> None:
+        return None
+
+    def __reduce__(self) -> tuple:
+        return (_emit_sink_unpickle, ())
 
 
 class RunContext(BaseModel):
@@ -195,6 +293,9 @@ class RunContext(BaseModel):
         # Plain instance attributes (see NOTE above).
         self._base_path: Path | None = None
         self._session_data: dict[str, Any] | None = None
+        # Captured once per run so off-loop emit() can marshal onto it.
+        # None until the first Runnable._stream on this context.
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._resume_values: dict[str, Any] = {}
         self._used_resume_ids: set[str] = set()
         self._trace = Trace()
@@ -397,6 +498,90 @@ class RunContext(BaseModel):
         if isinstance(default, _NoDefault):
             raise SpanNotFound(name)
         return default
+
+    def emit(self, data: Any) -> None:
+        """Broadcast a custom DELTA event on the current call's event stream.
+
+        Fire-and-forget, ambient, out-of-band: the event is interleaved with
+        the current call's processed handler events — on the parent event
+        stream for a foreground call, or in the background log/transcript for
+        a detached background child — always ordered before that call's
+        OUTPUT. It never passes through the handler's collector, so unlike a
+        generator ``yield`` it cannot alter the call's output or the persisted
+        span. The per-call sink is created on first emit, not on every
+        invocation (the no-emit path is a slot check). Plain handlers flush
+        at completion; generator handlers drain at chunk boundaries.
+
+        Works from any handler shape (plain sync/coroutine, sync/async
+        generator) and from any thread the framework runs handlers on
+        (``offload_blocking``, ``sync_to_async_gen``). Never raises and never
+        blocks: when the current call cannot be resolved or no live stream
+        exists, the event is logged and dropped.
+
+        Args:
+            data: JSON-serializable payload. Wrapped in a
+                :class:`~timbal.types.events.delta.Custom` item
+                (``item.type == "custom"``) whose ``id`` is the current call id.
+        """
+        from ..types.events.delta import Custom, DeltaEvent
+        from . import get_call_id
+
+        call_id = get_call_id()
+        span = self._trace.get(call_id) if call_id else None
+        if span is None:
+            _get_logger().debug("emit() outside an active call; event dropped.", run_id=self.id)
+            return
+        event = DeltaEvent(
+            run_id=self.id,
+            parent_run_id=self.parent_id,
+            path=span.path,
+            call_id=span.call_id,
+            parent_call_id=span.parent_call_id,
+            item=Custom(id=span.call_id, data=data),
+        )
+        # 1. This span already has a live sink — use it even if t1 is set.
+        #    Background spawn finalizes the launching span, then rebinds
+        #    ``_emit_sink`` to a forwarding sink; those emits must not drop.
+        # 2. Still in-flight, no sink yet — create on THIS span. Do not walk
+        #    parents here: a parent that already emitted would steal the
+        #    child's first emit (ids would be the child's, drain would not).
+        # 3. Finished, no live sink — walk parents (stale call id / hooks).
+        sink = span._emit_sink
+        if sink is not None and not sink.closed:
+            sink.put(event)
+            return
+        if span.t1 is None:
+            sink = self._ensure_emit_sink(span)
+            if sink is not None:
+                sink.put(event)
+                return
+        parent_id = span.parent_call_id
+        while parent_id:
+            parent = self._trace.get(parent_id)
+            if parent is None:
+                break
+            sink = parent._emit_sink
+            if sink is not None and not sink.closed:
+                sink.put(event)
+                return
+            parent_id = parent.parent_call_id
+        _get_logger().debug("emit() found no live event stream; event dropped.", run_id=self.id, path=event.path)
+
+    def _ensure_emit_sink(self, span: Any) -> Any:
+        """INTERNAL: attach a buffered sink to ``span`` if it does not have a live one."""
+        sink = span._emit_sink
+        if sink is not None and not sink.closed:
+            return sink
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return None
+            self._loop = loop
+        sink = _EmitSink(loop)
+        span._emit_sink = sink
+        return sink
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics for the current call and all parent calls.
