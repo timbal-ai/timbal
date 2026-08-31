@@ -413,6 +413,64 @@ class TestGuardLifetimeAroundSessionBuild:
         assert guard.on_abandon() is None  # no session yet — closure is a no-op
         await asyncio.wait({task}, timeout=2.0)
 
+    async def test_hello_window_is_anchored_at_caller_connect_not_mic(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The window opens when the caller *connects*; their mic setup time
+        counts against it. A hello-less caller whose mic lands after the window
+        closed must not pay the full wait again on top (that flat tax on every
+        hello-less call is what this anchoring removed)."""
+        room, _guard, _log, app = driver_env
+        monkeypatch.setattr("timbal.server.livekit_session._HELLO_WAIT_SECS", 0.5)
+
+        def _stop(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("stop at build")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _stop)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        participant = SimpleNamespace(
+            identity="playground",
+            kind="PARTICIPANT_KIND_STANDARD",
+            attributes={},
+            disconnect_reason=None,
+        )
+        room.handlers["participant_connected"](participant)
+        # No hello ever, and the mic takes longer than the whole window.
+        await asyncio.sleep(0.6)
+        room.handlers["track_subscribed"](SimpleNamespace(kind=1), None, participant)
+        # Build follows the subscribe immediately — the window was already spent.
+        done, _ = await asyncio.wait({task}, timeout=0.25)
+        assert task in done
+        assert isinstance(task.exception(), RuntimeError)
+
+    async def test_hello_after_mic_within_the_window_still_applies(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A prompt mic must not shrink the window to nothing: a hello arriving
+        after the subscribe but inside the window is still merged."""
+        room, _guard, _log, app = driver_env
+        seen: dict = {}
+
+        def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
+            seen["config"] = config
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _subscribe_caller(room)
+        await asyncio.sleep(0.1)
+        _deliver_hello(room, {"sample_rate": 16000, "stt_provider": "deepgram-flux"})
+        await asyncio.wait({task}, timeout=2.0)
+        assert seen["config"]["stt_provider"] == "deepgram-flux"
+
     async def test_hello_before_subscribe_is_applied_to_the_session(
         self,
         driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],

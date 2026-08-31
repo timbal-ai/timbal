@@ -24,8 +24,9 @@ Env contract for the boot-env path (all platform-owned):
 * ``TIMBAL_LIVEKIT_AGENT_IDENTITY`` — this box's identity (exclude from caller resolution)
 * ``TIMBAL_VOICE_CALL_ID`` — platform call id for SIP transfer API paths
 * ``TIMBAL_VOICE_CLIENT_CONFIG`` — JSON, same keys as the WS hello / rtc config.
-  Overlay: after the caller publishes a mic, the driver waits up to 2s for an
-  untyped data-message hello (playground dropdowns) and merges it on top.
+  Overlay: the driver accepts an untyped data-message hello (playground
+  dropdowns) for up to 2s after the caller connects and merges it on top; the
+  session is still built only once their mic is subscribed.
 * ``TIMBAL_VOICE_PARENT_RUN_ID`` — run id this call continues (text → voice).
   Session identity, not a voice knob: it is read here (and off the dial body
   on the per-request path), never off the data-channel hello.
@@ -63,6 +64,7 @@ import base64
 import contextlib
 import json
 import os
+import time
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -78,6 +80,11 @@ logger = structlog.get_logger("timbal.server.livekit_session")
 
 _MAX_RELIABLE_BYTES = 12 * 1024
 _EVENTS_TOPIC = "timbal.events"
+# The hello window opens when the caller *connects* (they can't send data
+# before that), not when their mic track lands. Browsers send the hello
+# immediately after joining, so the window usually elapses while the mic is
+# still being published — anchoring it after the mic subscribe instead would
+# put a flat 2s on top of every hello-less call's setup.
 _HELLO_WAIT_SECS = 2.0
 
 # How long a per-request join may take before the caller gets a 504. The SFU is
@@ -519,6 +526,9 @@ async def _run_livekit_session(
     caller_participant: Any | None = None
     caller_identity: str | None = None
     caller_is_sip = False
+    # When the caller was first seen in the room — the hello window is
+    # measured from here (see _HELLO_WAIT_SECS).
+    caller_seen_at: dict[str, float] = {}
     mic_tracks: asyncio.Queue[Any] = asyncio.Queue()
     caller_ready = asyncio.Event()
     session_aborted = asyncio.Event()
@@ -626,6 +636,7 @@ async def _run_livekit_session(
         caller_participant = participant
         caller_identity = getattr(participant, "identity", "") or ""
         caller_is_sip = is_sip_participant(participant)
+        caller_seen_at["t"] = time.monotonic()
         attrs = dict(getattr(participant, "attributes", None) or {})
         call_control_holder["c"] = LivekitCallControl(
             room=room,
@@ -773,7 +784,17 @@ async def _run_livekit_session(
         if session_aborted.is_set():
             _release_if_never_connected()
             return
-        await _wait_event_or_abort(hello_event, timeout=_HELLO_WAIT_SECS)
+        # Only the part of the hello window the caller's own mic setup didn't
+        # already consume is waited out here — usually nothing, because the
+        # hello rides the data channel the moment the caller connects while
+        # the mic subscribe takes a getUserMedia + publish round trip.
+        seen_at = caller_seen_at.get("t")
+        hello_wait = (
+            max(0.0, _HELLO_WAIT_SECS - (time.monotonic() - seen_at))
+            if seen_at is not None
+            else _HELLO_WAIT_SECS
+        )
+        await _wait_event_or_abort(hello_event, timeout=hello_wait)
         if session_aborted.is_set():
             _release_if_never_connected()
             return
