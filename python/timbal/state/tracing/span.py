@@ -39,6 +39,7 @@ class Span(SlotModel):
         "_memory_dump",
         "_prev_memory_dump",
         "_session_dump",
+        "_emit_sink",
         "_extra",
     )
 
@@ -101,6 +102,10 @@ class Span(SlotModel):
         # INTERNAL: accepted on construction for deserialization support.
         # Do not access directly; use RunContext.get_session() instead.
         self.session = session
+        # Per-call emit sink. None until the first RunContext.emit() (or a
+        # background spawn rebinds it). Must be initialized so the streaming
+        # hot path can do `span._emit_sink is not None` without AttributeError.
+        self._emit_sink = None
 
     @property
     def elapsed(self) -> int | None:

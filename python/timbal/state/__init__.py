@@ -6,6 +6,7 @@ Public API:
     - RunContext: The data model for the run context.
     - get_run_context(): Retrieves the current run context.
     - get_or_create_run_context(): Retrieves the current run context, creating a new one if necessary.
+    - emit(): Fire-and-forget custom DELTA event on the current call's stream.
     - get_background_task / list_background_tasks / cancel_background_task /
       read_background_transcript / wait_for_background: session-scoped background children.
 
@@ -66,6 +67,20 @@ def set_run_context(context: RunContext | None) -> None:
     context can lead to unexpected behavior if not handled correctly.
     """
     _run_context_var.set(context)
+
+
+def emit(data: Any) -> None:
+    """Fire-and-forget: broadcast a custom DELTA event on the current call's stream.
+
+    Convenience wrapper over :meth:`RunContext.emit` that swallows the call
+    when no run context is active, so handlers (and helpers deep inside them)
+    stay unit-testable without a context harness. See :meth:`RunContext.emit`
+    for delivery and ordering semantics.
+    """
+    run_context = get_run_context()
+    if run_context is None:
+        return
+    run_context.emit(data)
 
 
 # INTERNAL: This variables hold the call ids. Do not access directly.

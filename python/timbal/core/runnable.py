@@ -43,7 +43,7 @@ from ..state import (
     set_parent_call_id,
     set_run_context,
 )
-from ..state.context import RunContext
+from ..state.context import RunContext, _EmitSink
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
@@ -1575,6 +1575,13 @@ class Runnable(ABC, BaseModel):
         async def _bg_handler_execution():
             token = set_background_depth(depth + 1)
             record = record_box[0]
+            # Ambient emits from the detached child must reach its background
+            # log — after detach the only copy of its stream — not the finished
+            # foreground call. Nested runnables inside the child attach their
+            # own per-call sinks whose drained events reach the record via
+            # process_event; only this root frame needs the forwarding sink.
+            bg_emit_sink = _EmitSink(asyncio.get_running_loop(), forward=record.put_nowait)
+            span._emit_sink = bg_emit_sink
             output = None
             try:
                 async for _, final_output, _handler_collector in self._execute_handler(
@@ -1596,6 +1603,7 @@ class Runnable(ABC, BaseModel):
             except asyncio.CancelledError:
                 raise
             finally:
+                bg_emit_sink.close()
                 reset_background_depth(token)
                 record.log.close()
             return output
@@ -1648,9 +1656,15 @@ class Runnable(ABC, BaseModel):
         async def _continue_in_background() -> Any:
             token = set_background_depth(depth + 1)
             output = None
+            bg_emit_sink = None
             try:
                 await start.wait()
                 record = record_box[0]
+                # After cutover the record log is the only copy of the child's
+                # stream: rebind ambient RunContext.emit() delivery to it (the
+                # foreground sink was drained and closed by _stream's finally).
+                bg_emit_sink = _EmitSink(asyncio.get_running_loop(), forward=record.put_nowait)
+                span._emit_sink = bg_emit_sink
                 record.schedule_stall_watchdog()
                 async for event, final_output, _handler_collector in handler_events:
                     if event is not None:
@@ -1689,6 +1703,8 @@ class Runnable(ABC, BaseModel):
                 }
                 raise
             finally:
+                if bg_emit_sink is not None:
+                    bg_emit_sink.close()
                 span.t1 = int(time.time() * 1000)
                 try:
                     await run_context._save_trace()
@@ -1854,6 +1870,11 @@ class Runnable(ABC, BaseModel):
             runnable=self,
         )
         run_context._trace[_new_call_id] = span
+        # Capture the loop once per run so off-thread emit() can marshal onto
+        # it. The per-call sink itself is allocated lazily on first emit() —
+        # benches never emit, so this is a pointer compare, not an object.
+        if run_context._loop is None:
+            run_context._loop = asyncio.get_running_loop()
 
         def _restore_context():
             """Restore this invocation's context vars.
@@ -1882,6 +1903,11 @@ class Runnable(ABC, BaseModel):
         handoff_start: asyncio.Event | None = None
         handoff_result: dict[str, Any] | None = None
         handoff_record = None
+        # Foreground sink this _stream owns. Spawn-at-birth rebinds
+        # span._emit_sink to a forwarding sink on the same span; we snapshot
+        # first so finally closes *this* object, not the child's.
+        emit_sink = None
+        spawned_background = False
         handoff_control = (
             getattr(run_context, "_background_handoff_control", None)
             if self.background_mode == "auto" and self._is_async_gen and not self._is_orchestrator
@@ -1968,10 +1994,16 @@ class Runnable(ABC, BaseModel):
 
             # Background task
             if run_in_background:
+                emit_sink = span._emit_sink
+                spawned_background = True
                 output = self._spawn_background_task(validated_input, input, run_context, span)
             elif not self._is_async_gen and not self._is_gen:
                 # Fast path: plain sync/coroutine handlers cannot yield events,
                 # so skip the async-generator/tuple protocol entirely.
+                # RunContext.emit() during the handler is buffered on the span
+                # and flushed in finally, still before OUTPUT. We deliberately
+                # do NOT Task-wrap this await: that extra schedule hop shows up
+                # in the framework-overhead benches (trivial `return a + b`).
                 try:
                     output = await self._execute_simple(validated_input)
                 except Suspend as susp:
@@ -1984,6 +2016,16 @@ class Runnable(ABC, BaseModel):
                         # Update collector immediately so it's available for interruption handling
                         if handler_collector is not None:
                             collector = handler_collector
+                        # Interleave ambient RunContext.emit() events at chunk
+                        # boundaries. The sink is None until the first emit —
+                        # the `is not None` check is a slot load, not an alloc.
+                        emit_sink = span._emit_sink
+                        if emit_sink is not None and emit_sink.has_pending():
+                            for emitted in emit_sink.drain():
+                                if emitted.type in self._log_events and _events_logging_enabled():
+                                    _get_logger().info(emitted.type, **emitted.model_dump())
+                                yield emitted
+                                _restore_context()
                         if event is not None:
                             # If a child gates/suspends, set our own status BEFORE the
                             # yield so that a consumer breaking the stream right after
@@ -2210,6 +2252,15 @@ class Runnable(ABC, BaseModel):
             raise
 
         finally:
+            # Only skip the snapshot when spawn actually rebound the sink.
+            # run_in_background is set at _stream entry; a raise / early
+            # return from pre_hook, approval, guardrails, or param
+            # resolution never reaches spawn — those buffered emits still
+            # live on span._emit_sink and must flush before OUTPUT.
+            # Handoff snapshots here, before handoff_start.set(), so the
+            # continuation can rebind after.
+            if not spawned_background:
+                emit_sink = span._emit_sink
             if handoff_control is not None and not handed_off:
                 handoff_control.unregister(span.call_id)
             t1 = int(time.time() * 1000)
@@ -2302,6 +2353,17 @@ class Runnable(ABC, BaseModel):
                 # (entry call id None) deliberately leave their context set so
                 # sequential same-task runs chain sessions implicitly.
                 set_run_context(_entry_run_context)
+            # Flush any still-buffered RunContext.emit() events (post_hook,
+            # error paths, plain handlers) so every emission is ordered
+            # before this call's OUTPUT. Close first: a racing off-loop emit
+            # either lands in this drain or is dropped, never stranded.
+            if emit_sink is not None:
+                emit_sink.close()
+                if not _generator_closed:
+                    for emitted in emit_sink.drain():
+                        if emitted.type in self._log_events and _events_logging_enabled():
+                            _get_logger().info(emitted.type, **emitted.model_dump())
+                        yield emitted
             if output_event.type in self._log_events and _events_logging_enabled():
                 _get_logger().info(output_event.type, **output_event.model_dump())
             if not _generator_closed:
