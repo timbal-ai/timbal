@@ -421,18 +421,30 @@ def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:
     return False
 
 
-async def warmup_voice_stack(voice_config: VoiceConfig) -> None:
+async def warmup_voice_stack(voice_config: VoiceConfig, *, livekit: bool | None = None) -> None:
     """Background warmup at server boot so the first voice session starts fast.
 
-    Two tiers, both best-effort:
+    Three tiers, all best-effort:
 
     * **Imports** (always): voice adapters (ElevenLabs + Deepgram). The
       ``timbal[voice]`` extra (numpy/onnxruntime + Smart Turn/Namo/Silero)
       is imported only when those ONNX models will actually run.
+    * **LiveKit FFI**: ``livekit.rtc`` loads a native library on first import,
+      which otherwise lands inside the first dial's join budget (see
+      ``_JOIN_TIMEOUT_SECS`` in :mod:`timbal.server.livekit_session`).
+      ``livekit=None`` auto-detects from the env: ``TIMBAL_VOICE_TRANSPORT``
+      (serverless boot-env dials) or ``TIMBAL_LIVEKIT_URL`` (long-lived
+      servers pin the dialable URL — the composer sidecar gets it from the
+      monolith supervisor). Pass a bool to override either way.
     * **Models**: load Smart Turn + Namo + Silero when the session's turn
       detector is local. Skipped for Flux / ``provider`` EOU — see
       :func:`voice_onnx_warmup_intended`.
     """
+    if livekit is None:
+        livekit = (
+            os.environ.get("TIMBAL_VOICE_TRANSPORT", "").strip().lower() == "livekit"
+            or bool(os.environ.get("TIMBAL_LIVEKIT_URL", "").strip())
+        )
     loop = asyncio.get_running_loop()
 
     def _import_stack() -> bool:
@@ -440,6 +452,11 @@ async def warmup_voice_stack(voice_config: VoiceConfig) -> None:
 
         importlib.import_module("timbal.voice.elevenlabs")
         importlib.import_module("timbal.voice.deepgram")
+        if livekit:
+            try:
+                importlib.import_module("livekit.rtc")
+            except ImportError:
+                pass  # timbal[voice-livekit] not installed — the dial will 501
         # The detector-choice probe can itself import onnxruntime/transformers
         # (default turn_detector resolution) — must stay in this executor, off
         # the event loop and under the caller's except.
