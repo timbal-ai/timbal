@@ -116,7 +116,7 @@ def _call_control_token() -> str:
 
 
 def _control_endpoint(base: str, call_id: str, operation: str) -> str | None:
-    if not base:
+    if not base or not str(call_id).strip():
         return None
     expanded = base.format(call_id=call_id) if "{call_id}" in base else base
     return f"{expanded.rstrip('/')}/{operation}"

@@ -93,6 +93,11 @@ class TestSipMetadata:
         assert meta["transport_detail"] == "livekit_sip"
         assert meta["sip_call_id"] == "x"
 
+    def test_recording_meta_ignores_non_sip_attributes(self) -> None:
+        assert sip_recording_meta({"lk.theme": "dark", "user.id": "u1"}) == {}
+        assert sip_recording_meta({}) == {}
+        assert sip_recording_meta(None) == {}
+
 
 class TestPhoneTunedConfig:
     def test_explicit_stt_extra_wins(self) -> None:

@@ -163,10 +163,14 @@ def sip_call_context(attributes: dict[str, str] | None) -> dict[str, str]:
 
 
 def sip_recording_meta(attributes: dict[str, str] | None) -> dict[str, str]:
-    """Extra manifest ``meta`` keys from SIP attributes."""
+    """Extra manifest ``meta`` keys from SIP attributes.
+
+    Returns empty unless at least one ``sip.*`` attribute is present — a
+    browser participant with unrelated attributes must not be tagged SIP.
+    """
     if not attributes:
         return {}
-    out: dict[str, str] = {"transport_detail": "livekit_sip"}
+    out: dict[str, str] = {}
     for attr, key in (
         (SIP_ATTR_CALL_ID, "sip_call_id"),
         (SIP_ATTR_PHONE, "sip_phone_number"),
@@ -175,6 +179,8 @@ def sip_recording_meta(attributes: dict[str, str] | None) -> dict[str, str]:
         val = attributes.get(attr)
         if isinstance(val, str) and val:
             out[key] = val
+    if out:
+        out["transport_detail"] = "livekit_sip"
     return out
 
 

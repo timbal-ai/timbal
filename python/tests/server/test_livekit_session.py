@@ -439,6 +439,31 @@ class TestGuardLifetimeAroundSessionBuild:
 
 
 class TestSipRuntime:
+    async def test_sip_bye_before_media_releases_guard(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+    ) -> None:
+        """_note_caller from remotes already in the room, then a SIP BYE
+        before the mic track — must not stay parked on caller_ready."""
+        room, guard, _log, app = driver_env
+        sip = SimpleNamespace(
+            identity="+34111",
+            kind="PARTICIPANT_KIND_SIP",
+            attributes={"sip.callID": "c1"},
+            disconnect_reason=SimpleNamespace(name="CLIENT_INITIATED"),
+        )
+        room.remote_participants[sip.identity] = sip
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert not task.done()
+        room.handlers["participant_disconnected"](sip)
+        done, _ = await asyncio.wait({task}, timeout=2.0)
+        assert task in done
+        assert guard.released
+        assert not guard.finished
+        assert room.disconnected
+
     async def test_sip_bye_finishes_guard_when_session_not_built(
         self,
         driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
@@ -498,8 +523,29 @@ class TestSipRuntime:
         assert seen["config"]["stt_extra"]["vad_threshold"] == 0.55
         assert guard.finished
 
+    async def test_browser_caller_does_not_invoke_sip_recording_meta(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _boom(*_args: object, **_kwargs: object) -> dict:
+            raise AssertionError("sip_recording_meta must not run for browser callers")
 
-class TestDialParsing:
+        monkeypatch.setattr("timbal.server.livekit_sip.sip_recording_meta", _boom)
+
+        def _stop(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _stop)
+        room, guard, _log, app = driver_env
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        _deliver_hello(room, {"sample_rate": 16000})
+        _subscribe_caller(room, attributes={"lk.theme": "dark"})
+        done, _ = await asyncio.wait({task}, timeout=2.0)
+        assert task in done
+        assert isinstance(task.exception(), RuntimeError)
+        assert guard.finished
     def test_transport_discriminates_the_body(self) -> None:
         assert is_livekit_dial({"transport": "livekit"})
         assert not is_livekit_dial({"sdp": "v=0...", "type": "offer"})
@@ -926,6 +972,61 @@ class TestStartLivekitSession:
         _subscribe_caller(room)
         await asyncio.wait({live}, timeout=2.0)
         assert seen["config"]["stt_provider"] == "deepgram-flux"
+
+    async def test_sip_bye_before_media_releases_the_slot(
+        self,
+        ecs_app: tuple[_FakeRoom, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Per-request path: early SIP note + BYE before media must free the
+        room key and capacity slot, not sit on caller_ready.wait()."""
+        room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        capacity.reset_for_tests()
+
+        sip = SimpleNamespace(
+            identity="+34111",
+            kind="PARTICIPANT_KIND_SIP",
+            attributes={"sip.callID": "c1"},
+            disconnect_reason=SimpleNamespace(name="CLIENT_INITIATED"),
+        )
+        room.remote_participants[sip.identity] = sip
+
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        assert capacity.active_sessions() == 1
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        assert not live.done()
+
+        room.handlers["participant_disconnected"](sip)
+        done, _ = await asyncio.wait({live}, timeout=2.0)
+        assert live in done
+        assert capacity.active_sessions() == 0
+        assert "v1_1_2_3_abc" not in app.state.livekit_sessions
+
+    async def test_sip_blip_before_media_aborts_after_short_window(
+        self,
+        ecs_app: tuple[_FakeRoom, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_SIP_ABANDON_SECS", "0.05")
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        capacity.reset_for_tests()
+
+        sip = SimpleNamespace(
+            identity="+34111",
+            kind="PARTICIPANT_KIND_SIP",
+            attributes={},
+            disconnect_reason=SimpleNamespace(name="STATE_MISMATCH"),
+        )
+        room.remote_participants[sip.identity] = sip
+
+        assert (await start_livekit_session(app, dial_from_body(_dial())))[0] == 200
+        live = app.state.livekit_sessions["v1_1_2_3_abc"]
+        room.handlers["participant_disconnected"](sip)
+        done, _ = await asyncio.wait({live}, timeout=2.0)
+        assert live in done
+        assert capacity.active_sessions() == 0
 
     async def test_server_control_packet_publishes_dtmf_to_sip_leg(self, ecs_app: tuple[_FakeRoom, object]) -> None:
         room, app = ecs_app

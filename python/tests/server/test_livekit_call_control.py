@@ -57,6 +57,30 @@ async def test_transfer_posts_to_platform(monkeypatch: pytest.MonkeyPatch) -> No
     assert posted["json"]["participant_identity"] == "sip-1"
 
 
+@pytest.mark.asyncio
+async def test_transfer_requires_a_call_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    posted: dict = {}
+
+    async def _req(url: str, _token: str, _body: dict) -> None:
+        posted["url"] = url
+
+    monkeypatch.setenv("TIMBAL_VOICE_CALL_CONTROL_URL", "https://api.test/voice/calls/{call_id}")
+    monkeypatch.setenv("TIMBAL_VOICE_CALL_CONTROL_TOKEN", "jwt-call-9")
+    monkeypatch.delenv("TIMBAL_VOICE_CALL_ID", raising=False)
+    monkeypatch.setattr("timbal.server.livekit_call_control._call_control_request", _req)
+
+    ctrl = LivekitCallControl(
+        room=SimpleNamespace(local_participant=SimpleNamespace()),
+        room_name="room-1",
+        caller_identity="sip-1",
+        call_id="",
+        is_sip=True,
+    )
+    with pytest.raises(RuntimeError, match="call id"):
+        await ctrl.transfer_call("tel:+15550100")
+    assert posted == {}
+
+
 def test_tools_only_for_sip() -> None:
     assert livekit_call_control_tools(None) == []
     browser = LivekitCallControl(

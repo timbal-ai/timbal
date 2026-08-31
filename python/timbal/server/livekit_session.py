@@ -521,6 +521,7 @@ async def _run_livekit_session(
     caller_is_sip = False
     mic_tracks: asyncio.Queue[Any] = asyncio.Queue()
     caller_ready = asyncio.Event()
+    session_aborted = asyncio.Event()
     hello_holder: dict[str, Any] = {"hello": None}
     hello_event = asyncio.Event()
     send_q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -550,11 +551,41 @@ async def _run_livekit_session(
             pending_disconnect.cancel()
             pending_disconnect = None
 
+    def _abort_before_media() -> None:
+        # Early caller resolution (_note_caller from remote_participants /
+        # participant_connected) can run before a mic track arrives.
+        # Disconnect then never sets caller_ready — unblock the wait so the
+        # driver can release its room key and capacity slot.
+        if not caller_ready.is_set():
+            session_aborted.set()
+
     async def _close_session_later(delay: float) -> None:
         await asyncio.sleep(delay)
         sess = session_holder.get("s")
         if sess is not None:
             await sess.close()
+            return
+        if not caller_ready.is_set():
+            _abort_before_media()
+            return
+        if guard is not None:
+            await guard.finish()
+        else:
+            await room.disconnect()
+
+    async def _wait_ready_or_abort() -> None:
+        if caller_ready.is_set() or session_aborted.is_set():
+            return
+        ready_task = asyncio.create_task(caller_ready.wait())
+        abort_task = asyncio.create_task(session_aborted.wait())
+        _done, pending = await asyncio.wait(
+            {ready_task, abort_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def _arm_caller_disconnect(participant: Any) -> None:
         nonlocal pending_disconnect
@@ -571,10 +602,13 @@ async def _run_livekit_session(
             sess = session_holder.get("s")
             if sess is not None:
                 asyncio.create_task(sess.close())
-            elif guard is not None:
-                asyncio.create_task(guard.finish())
+            elif caller_ready.is_set():
+                if guard is not None:
+                    asyncio.create_task(guard.finish())
+                else:
+                    asyncio.create_task(room.disconnect())
             else:
-                asyncio.create_task(room.disconnect())
+                _abort_before_media()
             return
         if action is CallerDisconnectAction.SHORT_ABANDON:
             _cancel_pending_disconnect()
@@ -737,7 +771,11 @@ async def _run_livekit_session(
         # the platform has already answered 200.
         if join is not None:
             join.ok()
-        await caller_ready.wait()
+        await _wait_ready_or_abort()
+        if session_aborted.is_set() and not caller_ready.is_set():
+            if guard is not None:
+                guard.release()
+            return
         if not hello_event.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(hello_event.wait(), timeout=_HELLO_WAIT_SECS)
@@ -746,10 +784,12 @@ async def _run_livekit_session(
             config = phone_tuned_voice_config(config)
         sip_ctx: dict[str, str] = {}
         sip_meta: dict[str, str] = {}
-        if caller_participant is not None:
-            attrs = dict(getattr(caller_participant, "attributes", None) or {})
-            sip_ctx = sip_call_context(attrs)
-            sip_meta = sip_recording_meta(attrs)
+        if caller_is_sip:
+            sip_meta["transport_detail"] = "livekit_sip"
+            if caller_participant is not None:
+                attrs = dict(getattr(caller_participant, "attributes", None) or {})
+                sip_ctx = sip_call_context(attrs)
+                sip_meta.update(sip_recording_meta(attrs))
         defaults = getattr(app.state, "voice_config", None) or VoiceConfig()
         sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
 
@@ -830,6 +870,7 @@ async def _run_livekit_session(
         # Never leave a per-request caller waiting on a handshake that can no
         # longer complete (cancelled task, driver returned early).
         _reject("livekit session ended before the agent joined")
+        _cancel_pending_disconnect()
         # Every await below is a cancellation point: a (re-)delivered
         # CancelledError is not an Exception, and letting it out of any step
         # would skip the rest — room left connected, guard.finish never runs.
