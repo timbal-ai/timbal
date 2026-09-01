@@ -479,6 +479,38 @@ class VoiceSession:
 
     # -- Public API ---------------------------------------------------------
 
+    async def submit_user_text(
+        self,
+        text: str,
+        *,
+        interaction_id: str | None = None,
+        run_id: str | None = None,
+    ) -> bool:
+        """Start a user turn as if STT committed ``text``.
+
+        The LiveKit / WS ``interaction_answer`` path (tap an ``ask_user``
+        option) lands here so it shares interrupt + turn-begin with speech.
+        A runnable that implements ``answer_interaction`` can bind the
+        value to the exact parked id; otherwise the text is the utterance.
+
+        Returns whether a turn was started.
+        """
+        text = (text or "").strip()
+        if self._closed or not text:
+            return False
+        if self.started_at is None:
+            logger.info("interaction_answer_dropped", reason="session_not_started")
+            return False
+        answer = getattr(self.agent, "answer_interaction", None)
+        if callable(answer) and interaction_id:
+            answer(interaction_id=interaction_id, value=text, run_id=run_id)
+        await self.interrupt()
+        if self._closed:
+            return False
+        self._cancel_turn.clear()
+        await self._begin_user_turn(text, replace_user_entry=False)
+        return True
+
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
         try:

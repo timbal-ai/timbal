@@ -412,6 +412,24 @@ def is_config_hello(data: dict[str, Any]) -> bool:
     return data.get("type") is None
 
 
+def parse_interaction_answer(data: dict[str, Any]) -> tuple[str, str, str | None] | None:
+    """Client tap on a parked ``ask_user`` (``timbal.events`` / ``interaction_answer``).
+
+    Returns ``(interaction_id, value, run_id)`` or ``None`` when the frame is
+    not this event or is missing the fields a resume needs. ``run_id`` may
+    be ``None`` — the parked run on the session is the source of truth.
+    """
+    if data.get("type") != "interaction_answer":
+        return None
+    interaction_id = str(data.get("interaction_id") or "").strip()
+    value = str(data.get("value") or "").strip()
+    if not interaction_id or not value:
+        return None
+    raw_run = data.get("run_id")
+    run_id = str(raw_run).strip() if raw_run else ""
+    return interaction_id, value, run_id or None
+
+
 def merge_client_config(env_raw: str, hello: dict[str, Any] | None) -> dict[str, Any]:
     """Env JSON is the base; the data-message hello overlays it."""
     config: dict[str, Any] = {}
@@ -733,6 +751,33 @@ async def _run_livekit_session(
                 sess.playback.on_playback_ack(float(data["played_ms"]))
             except (KeyError, TypeError, ValueError):
                 logger.debug("voice_livekit_bad_playback_ack", data=str(data)[:120])
+            return
+        parsed = parse_interaction_answer(data)
+        if parsed is not None:
+            interaction_id, value, run_id = parsed
+            if caller_identity:
+                ident = getattr(getattr(pkt, "participant", None), "identity", "") or ""
+                if ident and ident != caller_identity:
+                    logger.debug("voice_livekit_interaction_answer_ignored", reason="not_caller")
+                    return
+            if sess is None:
+                logger.info("voice_livekit_interaction_answer_dropped", reason="no_session")
+                return
+
+            async def _submit_tap() -> None:
+                try:
+                    ok = await sess.submit_user_text(
+                        value, interaction_id=interaction_id, run_id=run_id
+                    )
+                except Exception as e:  # noqa: BLE001 — a tap must not kill the call
+                    logger.warning("voice_livekit_interaction_answer_failed", error=str(e))
+                    return
+                if ok:
+                    await send_q.put(
+                        {"type": "interaction_answer_ack", "interaction_id": interaction_id}
+                    )
+
+            asyncio.create_task(_submit_tap(), name="voice-livekit-interaction-answer")
 
     def _on_sip_dtmf(dtmf: Any) -> None:
         digit = getattr(dtmf, "digit", "") or ""

@@ -10,6 +10,7 @@ over HTTP.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import aclosing
@@ -24,6 +25,7 @@ from timbal.voice import (
     AgentApproval,
     AgentInteraction,
     AgentTextDone,
+    TranscriptCommitted,
     AudioInputConfig,
     AudioOutputConfig,
     SpeechToText,
@@ -281,3 +283,83 @@ class TestSuspensionsOverAFullTurn:
             "session_transcript",
             "session_ended",
         }
+
+
+class _HangSTT(SpeechToText):
+    """Never commits — turns only start via ``submit_user_text``."""
+
+    def __init__(self) -> None:
+        self._closed = asyncio.Event()
+
+    async def connect(self, config: AudioInputConfig) -> None:
+        pass
+
+    async def push_audio(self, chunk: bytes) -> None:
+        pass
+
+    async def commit(self) -> None:
+        pass
+
+    async def events(self) -> AsyncIterator[TranscriptEvent]:
+        await self._closed.wait()
+        return
+        yield
+
+    async def close(self) -> None:
+        self._closed.set()
+
+
+class TestSubmitUserText:
+    async def test_tap_starts_the_same_turn_speech_would(self) -> None:
+        queued: dict = {}
+
+        class _Agent(Agent):
+            def answer_interaction(self, *, interaction_id, value, run_id=None):
+                queued.update(interaction_id=interaction_id, value=value, run_id=run_id)
+
+        agent = _Agent(name="plain", model=TestModel(responses=["Heard you."]), tools=[])
+        session = VoiceSession(
+            agent=agent, stt=_HangSTT(), tts=_TTS(), turn_detector="heuristic"
+        )
+
+        async def _mic() -> AsyncIterator[bytes]:
+            yield b"\x00" * 320
+            await asyncio.sleep(30)
+
+        events: list[VoiceSessionEvent] = []
+
+        async def _collect() -> None:
+            async with aclosing(session.run(_mic())) as stream:
+                async for ev in stream:
+                    events.append(ev)
+
+        task = asyncio.create_task(_collect())
+        for _ in range(50):
+            if session.started_at is not None:
+                break
+            await asyncio.sleep(0.02)
+        assert session.started_at is not None
+
+        assert await session.submit_user_text(
+            "A spreadsheet", interaction_id="i1", run_id="r1"
+        )
+        for _ in range(50):
+            if any(isinstance(e, AgentTextDone) for e in events):
+                break
+            await asyncio.sleep(0.05)
+        await session.close()
+        await task
+
+        assert queued == {"interaction_id": "i1", "value": "A spreadsheet", "run_id": "r1"}
+        assert any(
+            isinstance(e, TranscriptCommitted) and e.text == "A spreadsheet" for e in events
+        )
+        assert any(isinstance(e, AgentTextDone) for e in events)
+
+    async def test_empty_or_unstarted_is_a_no_op(self) -> None:
+        agent = Agent(name="plain", model=TestModel(responses=["x"]), tools=[])
+        session = VoiceSession(
+            agent=agent, stt=_HangSTT(), tts=_TTS(), turn_detector="heuristic"
+        )
+        assert await session.submit_user_text("") is False
+        assert await session.submit_user_text("hi") is False
