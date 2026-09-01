@@ -43,6 +43,7 @@ def get_context_window(model_id: str) -> int | None:
 # ---------------------------------------------------------------------------
 # Model type with provider prefixes
 Model = Literal[
+    "anthropic/claude-fable-5-1",
     "anthropic/claude-fable-5",
     "anthropic/claude-opus-5",
     "anthropic/claude-opus-4-8",

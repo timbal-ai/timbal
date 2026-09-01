@@ -9,11 +9,23 @@
 #   notes: "..."              — required when either flag is set (shown in UI/docs)
 
 models:
+- id: anthropic/claude-fable-5-1
+  provider: anthropic
+  display_name: Claude Fable 5.1
+  description: Anthropic's most capable generally available model — successor to Fable 5 for long-running agentic coding,
+    knowledge work, and research, with fewer false-positive safety refusals in multi-turn agent loops.
+  notes: Adaptive thinking is always on. Cache reads are $0.25 per 1M tokens (0.025x input, vs 0.1x on other models).
+    `tool_choice` any/tool return 400 — use strict tools or structured outputs instead. Requires 30-day data retention;
+    not available under ZDR.
+  input_price: 10.0
+  output_price: 50.0
+  context_window: 1000000
+  capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-fable-5
   provider: anthropic
   display_name: Claude Fable 5
-  description: Anthropic's most capable widely released model for long-horizon agentic work, complex reasoning, and ambitious
-    coding tasks.
+  description: Previous Fable generation for long-horizon agentic work, complex reasoning, and ambitious coding tasks.
+    Superseded by Fable 5.1 at the same price.
   notes: Includes safety classifiers; blocked requests return stop_reason refusal. Configure Opus 5 fallback for production
     workloads.
   input_price: 10.0
@@ -79,7 +91,7 @@ models:
   provider: anthropic
   display_name: Claude Opus 4.1
   description: Previous-generation Opus model with high intelligence for complex reasoning tasks.
-  notes: Deprecated; retires August 5, 2026. Prefer claude-opus-5 or claude-fable-5.
+  notes: Deprecated; retires August 5, 2026. Prefer claude-opus-5 or claude-fable-5-1.
   input_price: 15.0
   output_price: 75.0
   context_window: 200000

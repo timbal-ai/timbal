@@ -1,27 +1,28 @@
 ---
 title: "Anthropic"
-description: "Claude Fable 5, Opus 5, Sonnet 5, and Haiku models with specs, pricing, and capabilities"
+description: "Claude Fable 5.1, Opus 5, Sonnet 5, and Haiku models with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [Anthropic model docs](https://docs.anthropic.com/en/docs/about-claude/models) · [What's new in Opus 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-opus-5) · [Pricing](https://docs.anthropic.com/en/about-claude/pricing)</Note>
+<Note>Source: [Anthropic model docs](https://platform.claude.com/docs/en/about-claude/models/overview) · [Release notes](https://platform.claude.com/docs/en/release-notes/overview) · [Pricing](https://platform.claude.com/docs/en/about-claude/pricing)</Note>
 
 ## Latest
 
 <CardGroup cols={2}>
-  <Card title="claude-fable-5">
+  <Card title="claude-fable-5-1">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
 
-  `anthropic/claude-fable-5`
+  `anthropic/claude-fable-5-1`
 
-  Anthropic's most capable widely released model for long-horizon agentic work, complex reasoning, and ambitious multi-day coding tasks.
+  Anthropic's most capable generally available model. Successor to Fable 5 for long-running agentic coding, knowledge work, and research, with fewer false-positive safety refusals in multi-turn agent loops. Same price as Fable 5; cache reads are 75% cheaper.
 
-  - &#36;10 / &#36;50 per 1M tokens (input / output)
+  - &#36;10 / &#36;50 per 1M tokens (input / output); cache reads &#36;0.25 (0.025x input); batch &#36;5 / &#36;25
   - <Icon icon="window-maximize" size={14} /> 1M context
   - <Icon icon="right-from-bracket" size={14} /> 128K max output
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Adaptive thinking (always on)
   - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2026
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2026
+  - <Icon icon="triangle-exclamation" size={14} /> `tool_choice` `any` / `tool` not supported (400); requires 30-day data retention (no ZDR)
   </Card>
 
   <Card title="claude-opus-5">
@@ -126,6 +127,22 @@ description: "Claude Fable 5, Opus 5, Sonnet 5, and Haiku models with specs, pri
 ## Legacy
 
 <CardGroup cols={2}>
+  <Card title="claude-fable-5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-fable-5`
+
+  Previous Fable generation for long-horizon agentic work, complex reasoning, and ambitious multi-day coding tasks. Superseded by Fable 5.1 at the same price.
+
+  - &#36;10 / &#36;50 per 1M tokens (input / output)
+  - <Icon icon="window-maximize" size={14} /> 1M context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Adaptive thinking (always on)
+  - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2026
+  </Card>
+
   <Card title="claude-opus-4-5">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
