@@ -1989,6 +1989,132 @@ class TestBackgroundLimits:
         assert current_background_store().max_concurrent is None
 
 
+class TestRegisterBackgroundTaskOn:
+    """Out-of-band registration on an explicit store — no ambient RunContext.
+
+    The seam for panel-initiated children (e.g. a follow-up POST that resolves
+    a session via ``store_for_run`` and spawns a continuation outside any turn).
+    """
+
+    @pytest.mark.asyncio
+    async def test_registers_without_run_context(self):
+        from timbal.state.background import BackgroundTaskStore, register_background_task_on
+
+        set_run_context(None)
+        store = BackgroundTaskStore()
+
+        async def child() -> str:
+            await asyncio.sleep(0.02)
+            return "done"
+
+        task = asyncio.create_task(child())
+        record = register_background_task_on(
+            store,
+            name="builder",
+            input={"prompt": "tighten the header"},
+            task=task,
+            title="Follow-up: landing page",
+        )
+        assert store.get(record.task_id) is record
+        assert record.title == "Follow-up: landing page"
+        assert [t["task_id"] for t in store.list()] == [record.task_id]
+
+        await task
+        assert record.status_code() == "completed"
+        assert store.list()[0]["title"] == "Follow-up: landing page"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cap_enforced_on_explicit_store(self):
+        from timbal.state.background import (
+            BackgroundLimitError,
+            BackgroundTaskStore,
+            register_background_task_on,
+        )
+
+        store = BackgroundTaskStore(max_concurrent=1)
+        gate = asyncio.Event()
+
+        async def gated() -> str:
+            await gate.wait()
+            return "ok"
+
+        first = asyncio.create_task(gated())
+        register_background_task_on(store, name="builder", input={}, task=first)
+
+        second = asyncio.create_task(gated())
+        with pytest.raises(BackgroundLimitError, match="Concurrent"):
+            register_background_task_on(store, name="builder", input={}, task=second)
+        # On rejection the caller owns the orphan task.
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        assert len(store.list()) == 1
+
+        gate.set()
+        await first
+
+    @pytest.mark.asyncio
+    async def test_ambient_variant_still_requires_run_context(self):
+        from timbal.state.background import register_background_task
+
+        set_run_context(None)
+
+        async def child() -> str:
+            return "x"
+
+        task = asyncio.create_task(child())
+        with pytest.raises(RuntimeError, match="without a RunContext"):
+            register_background_task(name="builder", input={}, task=task)
+        await task
+
+    @pytest.mark.asyncio
+    async def test_follow_up_joins_session_bag_via_store_for_run(self):
+        """Spawn one child through a real turn, then attach a follow-up out-of-band."""
+        from timbal.state.background import register_background_task_on, store_for_run
+
+        async def quick(tag: str) -> str:
+            await asyncio.sleep(0.02)
+            return tag
+
+        agent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call("quick", {"tag": "A"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name="quick", handler=quick, background_mode="auto")],
+        )
+        result = await agent(prompt="go").collect()
+        assert_has_output_event(result)
+        store = store_for_run(result.run_id)
+        assert store is not None
+        original = store.list()
+        assert len(original) == 1
+        await _wait_until_terminal(original[0]["task_id"])
+
+        # Panel-shaped follow-up: same bag, fresh task row, no ambient context.
+        set_run_context(None)
+
+        async def follow_up() -> str:
+            await asyncio.sleep(0.02)
+            return "follow-up done"
+
+        task = asyncio.create_task(follow_up())
+        record = register_background_task_on(
+            store,
+            name="builder",
+            input={"prompt": "one more thing"},
+            task=task,
+            title=f"Follow-up: {original[0]['title']}",
+        )
+        await task
+        listed = {t["task_id"] for t in store.list()}
+        assert listed == {original[0]["task_id"], record.task_id}
+        assert store.get(record.task_id).status_code() == "completed"
+
+
 class TestBackgroundLogRetention:
     """Ring-buffer logs + finished-task retention on the session bag."""
 
