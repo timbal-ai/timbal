@@ -344,6 +344,10 @@ class VoiceSession:
         self._held_user_text: str | None = None
         self._hold_task: asyncio.Task | None = None
         self._hold_armed_timeout_secs: float | None = None
+        # Serializes interrupt + _begin_user_turn. Speech commits run on the
+        # STT loop (one at a time); taps arrive as fire-and-forget tasks and
+        # would otherwise both pass interrupt() and orphan the first turn.
+        self._user_turn_lock = asyncio.Lock()
 
         # Tracks the RunContext from the last completed turn so the agent's
         # __call__ auto-chains parent_id for multi-turn memory.
@@ -478,6 +482,46 @@ class VoiceSession:
         return self._is_speaking or self._assistant_audio_playing
 
     # -- Public API ---------------------------------------------------------
+
+    async def submit_user_text(
+        self,
+        text: str,
+        *,
+        interaction_id: str | None = None,
+        run_id: str | None = None,
+    ) -> bool:
+        """Start a user turn as if STT committed ``text``.
+
+        The LiveKit / WS ``interaction_answer`` path (tap an ``ask_user``
+        option) lands here so it shares interrupt + turn-begin with speech.
+        A runnable that implements ``answer_interaction`` can bind the
+        value to the exact parked id; otherwise the text is the utterance.
+
+        Returns whether a turn was started.
+        """
+        text = (text or "").strip()
+        if self._closed or not text:
+            return False
+        if self.started_at is None:
+            logger.info("interaction_answer_dropped", reason="session_not_started")
+            return False
+        answer = getattr(self.agent, "answer_interaction", None)
+        if callable(answer) and interaction_id:
+            answer(interaction_id=interaction_id, value=text, run_id=run_id)
+        async with self._user_turn_lock:
+            if self._closed:
+                return False
+            # Same disarm as a real STT accept — a pending HOLD expiry would
+            # otherwise interrupt() this tap and start a turn on leftover speech.
+            self._cancel_hold()
+            self._held_user_text = None
+            self._hold_armed_timeout_secs = None
+            await self.interrupt()
+            if self._closed:
+                return False
+            self._cancel_turn.clear()
+            await self._begin_user_turn(text, replace_user_entry=False)
+            return True
 
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
@@ -1258,12 +1302,17 @@ class VoiceSession:
             # A refine/re-arm may have replaced us — do not wipe the new hold.
             if self._hold_task is not me:
                 return
-            held = self._held_user_text
-            self._held_user_text = None
-            self._hold_armed_timeout_secs = None
-            if self._hold_task is me:
+            async with self._user_turn_lock:
+                # Re-check under the lock: a tap/commit can cancel us after we
+                # woke and before we claim the turn.
+                if self._hold_task is not me or self._closed:
+                    return
+                held = self._held_user_text
+                self._held_user_text = None
+                self._hold_armed_timeout_secs = None
                 self._hold_task = None
-            if held and not self._closed:
+                if not held:
+                    return
                 # A HOLD exists because the fragment looked incomplete. If it is
                 # still just a dangling token ("I", "the", "and") when the timer
                 # fires, promoting it to a user turn invents ghost replies
@@ -1455,33 +1504,38 @@ class VoiceSession:
         # A real accept cancels any pending HOLD, then interrupts so truncation
         # can append a heard assistant fragment *before* we rewrite the user
         # entry (CONTINUE_TURN must see that fragment to pop it).
-        self._cancel_hold()
-        self._held_user_text = None
-        self._hold_armed_timeout_secs = None
-        await self.interrupt()
-        self._cancel_turn.clear()
+        async with self._user_turn_lock:
+            if self._closed:
+                return
+            self._cancel_hold()
+            self._held_user_text = None
+            self._hold_armed_timeout_secs = None
+            await self.interrupt()
+            if self._closed:
+                return
+            self._cancel_turn.clear()
 
-        replace = False
-        if decision.action is CommitAction.CONTINUE_TURN:
-            # interrupt() may have recorded the heard fragment of the aborted
-            # reply right after the fragment's user entry (interruption
-            # truncation). A continuation merges the fragment into a single
-            # utterance, so that reply is superseded — drop it so the merge
-            # below updates the fragment user entry instead of appending a
-            # duplicate user line around a stray assistant fragment.
-            if (
-                len(self._transcript) >= 2
-                and self._transcript[-1].role == "assistant"
-                and self._transcript[-2].role == "user"
-                and self._transcript[-2].text == state.active_user_text
-            ):
-                self._transcript.pop()
-            replace = bool(self._transcript and self._transcript[-1].role == "user")
-            # Transcript cleanup alone is not enough — parent-chain memory still
-            # has user:fragment + assistant:heard unless we mirror the rewrite.
-            await self._align_continue_memory(fragment_user_text=state.active_user_text)
+            replace = False
+            if decision.action is CommitAction.CONTINUE_TURN:
+                # interrupt() may have recorded the heard fragment of the aborted
+                # reply right after the fragment's user entry (interruption
+                # truncation). A continuation merges the fragment into a single
+                # utterance, so that reply is superseded — drop it so the merge
+                # below updates the fragment user entry instead of appending a
+                # duplicate user line around a stray assistant fragment.
+                if (
+                    len(self._transcript) >= 2
+                    and self._transcript[-1].role == "assistant"
+                    and self._transcript[-2].role == "user"
+                    and self._transcript[-2].text == state.active_user_text
+                ):
+                    self._transcript.pop()
+                replace = bool(self._transcript and self._transcript[-1].role == "user")
+                # Transcript cleanup alone is not enough — parent-chain memory still
+                # has user:fragment + assistant:heard unless we mirror the rewrite.
+                await self._align_continue_memory(fragment_user_text=state.active_user_text)
 
-        await self._begin_user_turn(final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed)
+            await self._begin_user_turn(final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed)
 
     # -- Internal: agent turn → TTS ----------------------------------------
 

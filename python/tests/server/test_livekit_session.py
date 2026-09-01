@@ -24,6 +24,7 @@ from timbal.server.livekit_session import (
     dial_from_body,
     dial_from_env,
     is_config_hello,
+    parse_interaction_answer,
     is_livekit_dial,
     maybe_start_livekit_session,
     merge_client_config,
@@ -175,6 +176,23 @@ class TestConfigHello:
 
     def test_null_type_is_hello(self) -> None:
         assert is_config_hello({"type": None, "sample_rate": 16000})
+
+
+class TestInteractionAnswer:
+    def test_parse_requires_id_and_value(self) -> None:
+        assert parse_interaction_answer({"type": "playback"}) is None
+        assert parse_interaction_answer({"type": "interaction_answer"}) is None
+        assert parse_interaction_answer(
+            {"type": "interaction_answer", "interaction_id": "i1", "value": ""}
+        ) is None
+        assert parse_interaction_answer(
+            {
+                "type": "interaction_answer",
+                "interaction_id": "i1",
+                "run_id": None,
+                "value": "A spreadsheet",
+            }
+        ) == ("i1", "A spreadsheet", None)
 
 
 class _FakeParticipant:
