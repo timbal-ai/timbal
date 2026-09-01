@@ -1818,31 +1818,39 @@ class Runnable(ABC, BaseModel):
             run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
             _call_id = None
-        elif "." not in self._path and run_context._trace:
-            # Top-level runnable sees an existing context with traces.
-            # If the root span has completed (t1 is set), this is a finished
-            # previous run — chain session data via parent_id.
-            # If the root span is still running (t1 is None), this context
-            # belongs to a concurrent sibling — create a fresh context.
-            # Inherit the parent's platform_config: a forked child run (linked
-            # by parent_id, same process/deployment) shares it. Without this, the
-            # fresh context re-resolves from env only and an explicitly-injected
-            # platform_config is lost — breaking platform API calls (e.g. a
-            # standalone Agent instantiated inside a step body).
-            _inherited_platform_config = run_context.platform_config
-            root = run_context.root_span()
-            if root is not None and root.t1 is not None:
-                run_context = RunContext(
-                    parent_id=explicit_parent_id or run_context.id,
-                    tracing_provider=self.tracing_provider,
-                    platform_config=_inherited_platform_config,
-                )
-            else:
-                run_context = RunContext(
-                    parent_id=explicit_parent_id,
-                    tracing_provider=self.tracing_provider,
-                    platform_config=_inherited_platform_config,
-                )
+        elif "." not in self._path:
+            if run_context._trace:
+                # Top-level runnable sees an existing context with traces.
+                # If the root span has completed (t1 is set), this is a finished
+                # previous run — chain session data via parent_id.
+                # If the root span is still running (t1 is None), this context
+                # belongs to a concurrent sibling — create a fresh context.
+                # Inherit the parent's platform_config: a forked child run (linked
+                # by parent_id, same process/deployment) shares it. Without this, the
+                # fresh context re-resolves from env only and an explicitly-injected
+                # platform_config is lost — breaking platform API calls (e.g. a
+                # standalone Agent instantiated inside a step body).
+                _inherited_platform_config = run_context.platform_config
+                root = run_context.root_span()
+                if root is not None and root.t1 is not None:
+                    run_context = RunContext(
+                        parent_id=explicit_parent_id or run_context.id,
+                        tracing_provider=self.tracing_provider,
+                        platform_config=_inherited_platform_config,
+                    )
+                else:
+                    run_context = RunContext(
+                        parent_id=explicit_parent_id,
+                        tracing_provider=self.tracing_provider,
+                        platform_config=_inherited_platform_config,
+                    )
+            # Whether we forked above or kept a caller-provided context whose
+            # trace is still empty (e.g. `set_run_context(RunContext(...))`
+            # inside a handler, a common platform-bootstrap pattern), the
+            # ambient call ids belong to the *previous* context on this task.
+            # A top-level invoke always mints the first span of its context,
+            # and that span must be a root: carrying the stale ids over would
+            # produce an orphan parent_call_id that trace validation rejects.
             _parent_call_id = None
             _call_id = None
         # Session data is loaded once per run; nested calls see it already set.
@@ -1856,6 +1864,26 @@ class Runnable(ABC, BaseModel):
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
+        if _new_parent_call_id is not None and _new_parent_call_id not in run_context._trace:
+            # The ambient parent id doesn't resolve within this context: the
+            # call ids leaked from another context (e.g. a caller swapped in a
+            # RunContext mid-handler). An unresolvable parent is fatal — usage
+            # propagation asserts trace closure and platform trace validation
+            # rejects the whole run — so repair to the only in-trace answer:
+            # the current root (None on an empty trace, making this span the
+            # root; the existing root otherwise, keeping the trace closed and
+            # single-rooted).
+            _repaired_parent_call_id = run_context._trace._root_call_id
+            _get_logger().warning(
+                "Ambient parent call id not found in the current run context; reparenting the "
+                "span to the context's root so the trace stays closed. This usually means call "
+                "ids leaked across a manual set_run_context() swap.",
+                runnable_path=self._path,
+                orphan_parent_call_id=_new_parent_call_id,
+                repaired_parent_call_id=_repaired_parent_call_id,
+                run_id=run_context.id,
+            )
+            _new_parent_call_id = _repaired_parent_call_id
         _new_call_id: str = uuid7(as_type="hex")  # type: ignore
         set_parent_call_id(_new_parent_call_id)
         set_call_id(_new_call_id)
