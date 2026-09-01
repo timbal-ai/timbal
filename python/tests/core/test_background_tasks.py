@@ -2054,6 +2054,45 @@ class TestRegisterBackgroundTaskOn:
         await first
 
     @pytest.mark.asyncio
+    async def test_does_not_ride_a_racing_turns_reservation(self):
+        """A foreign ``begin_spawn`` reservation is neither a free pass nor consumed.
+
+        Regression: the guard inherited from the ambient path skipped the cap
+        check whenever ``_pending_spawns > 0`` and ``add()`` decremented it —
+        an out-of-band registration racing a parent turn's spawn would both
+        bypass the cap and eat the turn's reserved slot.
+        """
+        from timbal.state.background import (
+            BackgroundLimitError,
+            BackgroundTaskStore,
+            register_background_task_on,
+        )
+
+        store = BackgroundTaskStore(max_concurrent=1)
+        store.begin_spawn()  # a parent turn mid-spawn holds the only slot
+        assert store._pending_spawns == 1
+
+        async def follow_up() -> str:
+            return "late"
+
+        task = asyncio.create_task(follow_up())
+        with pytest.raises(BackgroundLimitError, match="Concurrent"):
+            register_background_task_on(store, name="builder", input={}, task=task)
+        # The turn's reservation survives the rejected registration.
+        assert store._pending_spawns == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # A caller that owns the reservation registers against it: no
+        # re-check, and registration consumes exactly that slot.
+        owned = asyncio.create_task(follow_up())
+        record = register_background_task_on(store, name="builder", input={}, task=owned, reserved=True)
+        assert store._pending_spawns == 0
+        assert store.get(record.task_id) is record
+        await owned
+
+    @pytest.mark.asyncio
     async def test_ambient_variant_still_requires_run_context(self):
         from timbal.state.background import register_background_task
 
@@ -2113,6 +2152,16 @@ class TestRegisterBackgroundTaskOn:
         listed = {t["task_id"] for t in store.list()}
         assert listed == {original[0]["task_id"], record.task_id}
         assert store.get(record.task_id).status_code() == "completed"
+
+        # The done-callback wired by store.add() enqueues a completion notice
+        # for the out-of-band child — the same inbox the parent agent drains at
+        # the start of its next turn. Callbacks run on the next loop tick.
+        await asyncio.sleep(0)
+        notices = store.drain_completions()
+        by_id = {n["task_id"]: n for n in notices}
+        assert record.task_id in by_id
+        assert by_id[record.task_id]["status"] == "completed"
+        assert by_id[record.task_id]["title"] == f"Follow-up: {original[0]['title']}"
 
 
 class TestBackgroundLogRetention:

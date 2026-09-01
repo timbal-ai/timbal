@@ -962,8 +962,8 @@ class BackgroundTaskStore:
         if self._pending_spawns > 0:
             self._pending_spawns -= 1
 
-    def add(self, record: BackgroundTask) -> None:
-        if self._pending_spawns > 0:
+    def add(self, record: BackgroundTask, *, consume_reservation: bool = True) -> None:
+        if consume_reservation and self._pending_spawns > 0:
             self._pending_spawns -= 1
         self._tasks[record.task_id] = record
         # Enqueue when the asyncio.Task reaches a terminal state. Done callbacks
@@ -1353,6 +1353,7 @@ def register_background_task_on(
     started_at: int | None = None,
     timeout: float | None = None,
     stall_timeout: float | None = None,
+    reserved: bool = False,
 ) -> BackgroundTask:
     """Register a running child on an explicit session bag.
 
@@ -1362,13 +1363,17 @@ def register_background_task_on(
     child for it. Slot caps apply exactly as in the ambient variant; on
     :class:`BackgroundLimitError` the caller owns cancelling ``task``.
 
+    ``reserved`` declares slot ownership: pass True only if *this caller*
+    already holds a :meth:`BackgroundTaskStore.begin_spawn` reservation, which
+    registration then consumes (the cap was checked at reserve time). When
+    False (the default for out-of-band callers) the cap is checked here and
+    no reservation is consumed — a racing turn's ``begin_spawn`` stays intact.
+
     ``timeout`` is seconds until the child is cancelled as ``timed_out``.
     ``stall_timeout`` is seconds without log events until ``stalled``.
     Raises :class:`BackgroundLimitError` if concurrent/depth caps would be exceeded.
     """
-    # Slot already reserved by Runnable._spawn_background_task via begin_spawn;
-    # direct callers must begin_spawn (or accept check_can_spawn here without reserve).
-    if store._pending_spawns == 0:
+    if not reserved:
         store.check_can_spawn()
     record = BackgroundTask(
         _new_task_id(),
@@ -1383,7 +1388,7 @@ def register_background_task_on(
         log_max_events=store.max_log_events,
         log_max_bytes=store.max_log_bytes,
     )
-    store.add(record)
+    store.add(record, consume_reservation=reserved)
     return record
 
 
@@ -1410,6 +1415,8 @@ def register_background_task(
     if run_context is None:
         raise RuntimeError("Cannot register a background task without a RunContext.")
     store = ensure_background_store(run_context)
+    # Slot already reserved by Runnable._spawn_background_task via begin_spawn;
+    # direct callers must begin_spawn (or accept check_can_spawn here without reserve).
     return register_background_task_on(
         store,
         name=name,
@@ -1420,6 +1427,7 @@ def register_background_task(
         started_at=started_at,
         timeout=timeout,
         stall_timeout=stall_timeout,
+        reserved=store._pending_spawns > 0,
     )
 
 
