@@ -2,6 +2,7 @@
 
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -85,3 +86,105 @@ class TestLoad:
     def test_missing_target_raises(self, workforce: Path):
         with pytest.raises(ValueError, match="has no target"):
             ImportSpec.from_fqn("main.py::nope", base_path=workforce).load()
+
+
+class TestSysModulesRegistration:
+    def test_entry_module_is_registered_under_its_stem(self, workforce: Path):
+        handler = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        assert sys.modules["main"].handler is handler
+
+    def test_sibling_import_of_entry_does_not_reexecute_it(self, workforce: Path):
+        """``from main import X`` inside a sibling must hit the cached module.
+
+        Without registration it re-runs the entry file: a second Agent built,
+        tools/tracing set up twice, isinstance failing across the two copies.
+        """
+        (workforce / "exec_log.py").write_text("RUNS: list[str] = []\n")
+        (workforce / "main.py").write_text(
+            textwrap.dedent(
+                """
+                import exec_log
+
+                exec_log.RUNS.append("main")
+                CONST = object()
+
+
+                def handler():
+                    from helper import get_const
+
+                    return get_const()
+                """
+            )
+        )
+        (workforce / "helper.py").write_text(
+            textwrap.dedent(
+                """
+                def get_const():
+                    from main import CONST
+
+                    return CONST
+                """
+            )
+        )
+        try:
+            handler = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+            assert handler() is sys.modules["main"].CONST
+            assert sys.modules["exec_log"].RUNS == ["main"]
+        finally:
+            sys.modules.pop("exec_log", None)
+
+    def test_dataclass_with_future_annotations_in_entry(self, workforce: Path):
+        """Registration must happen *before* exec, not after.
+
+        ``dataclasses`` resolves string annotations through
+        ``sys.modules[cls.__module__].__dict__`` at class-creation time; with
+        the entry module unregistered that is ``None.__dict__`` — an
+        AttributeError on every supported Python for any ``@dataclass`` in an
+        entry file using ``from __future__ import annotations``.
+        """
+        (workforce / "main.py").write_text(
+            textwrap.dedent(
+                """
+                from __future__ import annotations
+
+                from dataclasses import dataclass
+
+
+                @dataclass
+                class Point:
+                    x: int
+
+
+                def handler():
+                    return Point(1)
+                """
+            )
+        )
+        handler = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        assert handler().x == 1
+
+    def test_reload_replaces_own_registration(self, workforce: Path):
+        first = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        second = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        assert first is not second
+        assert sys.modules["main"].handler is second
+
+    def test_never_clobbers_a_foreign_module(self, workforce: Path, monkeypatch: pytest.MonkeyPatch):
+        foreign = types.ModuleType("main")
+        monkeypatch.setitem(sys.modules, "main", foreign)
+        handler = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        assert callable(handler)
+        assert sys.modules["main"] is foreign
+
+    def test_failed_exec_leaves_no_registration(self, workforce: Path):
+        (workforce / "broken.py").write_text("raise RuntimeError('boom')\n")
+        with pytest.raises(RuntimeError, match="boom"):
+            ImportSpec.from_fqn("broken.py::x", base_path=workforce).load()
+        assert "broken" not in sys.modules
+
+    def test_failed_reload_restores_previous_registration(self, workforce: Path):
+        good = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        (workforce / "main.py").write_text("raise RuntimeError('boom')\n")
+        with pytest.raises(RuntimeError, match="boom"):
+            ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        assert sys.modules["main"].handler is good

@@ -1,9 +1,17 @@
 import importlib.util
 import sys
+import weakref
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from pydantic import BaseModel
+
+# Modules ``load()`` has registered in ``sys.modules``. Lets a re-load of the
+# same entry replace its own earlier registration while never displacing a
+# module somebody else imported (an entry file named ``types.py`` or
+# ``timbal.py`` must not clobber the real one).
+_owned_modules: "weakref.WeakSet[ModuleType]" = weakref.WeakSet()
 
 
 class ImportSpec(BaseModel):
@@ -41,6 +49,14 @@ class ImportSpec(BaseModel):
         ("existing files update, new files never arrive") when it was
         really the import path vanishing under the running code. Locally
         the cwd masked it; in a sandbox with a different cwd it didn't.
+
+        The module is also registered in ``sys.modules`` under its stem
+        before it runs, exactly like a regular import. Without that, a
+        sibling doing ``from main import CONST`` finds nothing cached and
+        re-executes the entry file — a second ``Agent`` built, tools and
+        tracing set up twice, and ``isinstance`` failing between the two
+        copies of every class it defines. Registration is skipped when the
+        name is already taken by a module we didn't create.
         """
         spec = importlib.util.spec_from_file_location(self.path.stem, self.path.as_posix())
         if spec and spec.loader:
@@ -48,7 +64,20 @@ class ImportSpec(BaseModel):
             module_dir = str(self.path.parent)
             if module_dir not in sys.path:
                 sys.path.insert(0, module_dir)
-            spec.loader.exec_module(module)
+            existing = sys.modules.get(spec.name)
+            registered = existing is None or existing in _owned_modules
+            if registered:
+                sys.modules[spec.name] = module
+                _owned_modules.add(module)
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                if registered:
+                    if existing is None:
+                        sys.modules.pop(spec.name, None)
+                    else:
+                        sys.modules[spec.name] = existing
+                raise
 
             if self.target:
                 if hasattr(module, self.target):
