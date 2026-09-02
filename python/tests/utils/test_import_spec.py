@@ -66,6 +66,17 @@ class TestLoad:
         assert "helper" not in sys.modules
         assert handler() == "top:from-helper"
 
+    def test_lazy_sibling_import_fails_once_module_dir_leaves_sys_path(self, workforce: Path):
+        """Negative control reproducing the pre-fix behaviour, where load()
+        removed the module dir in a `finally`. Proves the fixture is not
+        rescued by cwd / '' on sys.path — the lookup really rides on the
+        entry it leaves behind."""
+        handler = ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()
+        if str(workforce) in sys.path:
+            sys.path.remove(str(workforce))
+        with pytest.raises(ModuleNotFoundError, match="No module named 'helper'"):
+            handler()
+
     def test_does_not_duplicate_existing_sys_path_entry(self, workforce: Path):
         sys.path.insert(0, str(workforce))
         ImportSpec.from_fqn("main.py::handler", base_path=workforce).load()

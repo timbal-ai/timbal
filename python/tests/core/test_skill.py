@@ -219,8 +219,15 @@ price_tool = Tool(name="price_car", handler=price_car)
         result = await price_tool(model="911").collect()
         assert result.output == "911 is expensive"
 
+        # Negative control: with tools/ off sys.path (the pre-fix state) the
+        # same lazy import fails — so the assertion above is not being
+        # rescued by cwd / '' on sys.path.
         sys.path.remove(str(tools_dir))
         sys.modules.pop("cars_pricing_helper", None)
+        result = await price_tool(model="911").collect()
+        assert result.status.code == "error"
+        assert result.error["type"] == "ModuleNotFoundError"
+        assert "cars_pricing_helper" in result.error["message"]
 
     def test_skill_get_reference(self, skills_dir):
         """Test getting a reference file from skill."""
