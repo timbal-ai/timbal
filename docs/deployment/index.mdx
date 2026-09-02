@@ -74,6 +74,31 @@ Restart services (`r` in the `timbal start` terminal, or quit and re-run) after 
 Vite and Bun may also read `ui/.env` and `api/.env` from those directories at dev time. Project-root `.env` is still the usual place for secrets shared across the stack (model API keys, integration tokens).
 </Tip>
 
+### Syncing with the platform: `timbal env pull` / `push`
+
+For projects connected to the [Timbal Platform](/deployment/platform), `timbal env` keeps the local files above in sync with the project's variables for one environment (the env tracking your current branch, `--rev <branch>`, or `--default`).
+
+```bash
+timbal env pull                 # platform → <project>/.env (+ TIMBAL_APP_ID per member)
+timbal env push                 # <project>/.env → platform (upsert only)
+timbal env push --dry-run       # show the plan, send nothing
+timbal env push --secret DB_URL --plain LOG_LEVEL
+```
+
+What lands where:
+
+| Var | Written to | Why |
+|-----|-----------|-----|
+| Your project vars (`OPENAI_API_KEY`, ...) | `<project>/.env` | Loaded into every service by `timbal start` |
+| `TIMBAL_APP_ID` | `workforce/<name>/.env` | Per workforce member; matched via the `_id` in that member's `timbal.yaml`. Merged into the file — other lines are untouched |
+| Platform runtime vars (`TIMBAL_*`, `VITE_TIMBAL_*`) | `<project>/.env`, **commented out** (`--include-platform-vars` writes them active) | The platform resolves these before every deploy/preview. Active locally, `TIMBAL_PROJECT_ENV_ID` reroutes service calls to the deployed gateway instead of localhost. **Push never sends `TIMBAL_*` vars**, whatever the file or flags say |
+
+Secrets vs plain: a `# type: secret` (or `# secret`) comment directly above a var marks it as a secret, `# type: plain` (or `# plain`) as plain. A var without a comment keeps its current type on the platform; a brand-new var is inferred from its name and value (`*_KEY`, `*_TOKEN`, `*_PASSWORD`, `sk-...`, `user:pass@` URLs → secret). `--secret NAME` / `--plain NAME` override everything. The platform fixes a var's type when it is created — pushing an existing var only updates its value — so change types in the platform UI. Push refuses a file that marks a platform secret as plain unless you pass `--plain NAME` explicitly. The push plan always lists every var with its resolved type and where that decision came from.
+
+<Warning>
+Pulled files contain secrets in plaintext — keep `.env` files gitignored (`timbal create` does this). `PORT`, `TIMBAL_PROJECT_SECRET`, and `TIMBAL_APP_ID` are never pushed as project vars.
+</Warning>
+
 ## Production
 
 For production you have two paths:
