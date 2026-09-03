@@ -57,6 +57,9 @@ With `name=` set, a tool declared as `list_files` on the `filesystem` server app
 | `env` | stdio | Environment variables for the spawned process |
 | `url` | http | Server URL |
 | `headers` | http | HTTP headers sent with every request |
+| `approval` | both | Gate tools through the [approval flow](/human-in-the-loop/approval-gates): `"destructive"`, `"all"`, or a callable. See [Approval from annotations](#approval-from-annotations). |
+| `elicitation` | both | Advertise the elicitation capability and bridge server questions to `suspend()`. Default `True`. See [Elicitation](#elicitation). |
+| `sampling_model` | both | Timbal model string used to answer the server's `sampling/createMessage` requests. Default `None` (unsupported). |
 
 ### Authentication
 
@@ -90,9 +93,67 @@ MCP tool results are converted so the LLM always receives something useful:
 - **Structured content** is returned as-is when the server sends no text representation
 - **Errors** (`isError`) raise inside the tool call, so the model receives a proper error tool result and can self-correct
 
+## Approval from Annotations
+
+MCP tools carry [`ToolAnnotations`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) such as `readOnlyHint` and `destructiveHint`. `approval=` turns them into a client-side gate that runs through Timbal's normal approval flow — a server cannot skip it:
+
+```python
+MCPServer(
+    name="timbal",
+    transport="http",
+    url="https://api.timbal.ai/mcp",
+    approval="destructive",  # or "all", or lambda tool: tool.name in {"delete_project"}
+)
+```
+
+- `"destructive"` gates tools whose annotations mark them destructive (`destructiveHint` not `false` and `readOnlyHint` not `true`). Tools with **no annotations at all are not gated** — gating them would mean gating every tool of every server that never annotated.
+- `"all"` gates every tool.
+- A callable receives the server's `mcp.types.Tool` and returns `True` to gate it.
+
+Gated tools emit an `ApprovalEvent` with `kind="mcp_tool"`, the server's input schema as `input_schema`, and `ui={"server", "tool", "title", "annotations"}`. Resume exactly like any other approval: `resume={approval_id: True}`.
+
+## Elicitation
+
+Servers can ask the user a question mid tool call ([elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation)) — for example, "Swap KB 1069 → 1586 (562 agents → 3)?" before a destructive operation. Timbal advertises the capability by default and bridges each request to [`suspend()`](/human-in-the-loop/suspend): the run ends with status `input_required` and an `InteractionEvent` of `kind="mcp_elicitation"`.
+
+```python
+async for event in agent(prompt="Swap the KB to 1586"):
+    if isinstance(event, InteractionEvent) and event.kind == "mcp_elicitation":
+        print(event.payload["message"])            # the server's question
+        print(event.payload["requested_schema"])   # flat JSON schema of primitives
+        interaction_id = event.interaction_id
+
+# Render the form, then resume with the answer:
+result = await agent(
+    prompt="Swap the KB to 1586",
+    parent_id=paused_run_id,
+    resume={interaction_id: {"confirm": True}},
+).collect()
+```
+
+Resume values:
+
+| Value | Sent to the server |
+|-------|--------------------|
+| `{"confirm": True, ...}` (a content dict) | `accept` with that content — checked against `requested_schema` first |
+| `True` | `accept` with empty content (pure confirmations) |
+| `False` / `None` | `decline` |
+| `{"action": "accept" \| "decline" \| "cancel", "content": {...}}` | explicit |
+| `Cancel(reason=...)` | `cancel`, and the whole run stops |
+
+Because the tool is **re-invoked on resume**, the server's tool must be idempotent up to the `elicit()` call and its message deterministic for identical input — the suspension id is a hash of the tool path, the server's message and schema, and the LLM's tool-call id. Two elicit-capable tools running in parallel on the same session cannot be told apart (the protocol carries no correlation), so both fail with an error asking the model to call the tool on its own. URL-mode elicitations surface `payload["url"]`; resume with `True` once the out-of-band flow is complete.
+
+Set `elicitation=False` to hide the capability. Servers should then fail closed on tools that need confirmation rather than proceeding silently.
+
+## Server Notifications
+
+- **`tools/list_changed`** marks the cached tool list stale. It is refetched at the **next run**, never mid-run — swapping tools under the model's feet would also invalidate the prompt cache.
+- **Log messages** (`notifications/message`) are forwarded to structlog as `"MCP server log"` with `server`, `level`, `logger`, and `data`.
+- **Sampling** (`sampling/createMessage`) is served with `sampling_model=` when set. The call runs as an `mcp_sampling` LLM span under the in-flight tool call, so its usage shows up in the trace.
+
 ## Connection Lifecycle
 
-Connections are **lazy**: nothing is spawned or contacted until the agent first needs the server's tools. The tool list is fetched once and cached for the life of the connection.
+Connections are **lazy**: nothing is spawned or contacted until the agent first needs the server's tools. The tool list is fetched once, sorted by name (so the LLM's tools prefix stays stable for prompt caching), and cached for the life of the connection.
 
 Close the connection when you're done:
 
@@ -108,6 +169,8 @@ await server.close()
 <Warning>
 For long-running processes (servers, bots), create the `MCPServer` once and reuse it across runs — reconnecting per request adds latency, especially for stdio servers that spawn a subprocess.
 </Warning>
+
+Each connection is owned by a dedicated task, so `close()` can be called from any task and in any order across servers. If the transport dies on its own (server process exits, HTTP session dropped), the connection is forgotten and the next tool call reconnects; the cached tools stay valid.
 
 ## Dynamic Resolution
 
