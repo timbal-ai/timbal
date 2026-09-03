@@ -224,6 +224,10 @@ class _InflightCall:
     tool_call_id: str | None
     run_context: Any
     ctx: contextvars.Context
+    abort: asyncio.Future
+    """Resolved with an exception by a callback that knows the call can never complete
+    (e.g. the server asked us something on a connection that cannot carry the answer).
+    The handler races ``call_tool`` against it instead of waiting forever."""
     pending_payload: dict[str, Any] | None = None
     pending_schema: dict[str, Any] | None = None
     cancel: Cancel | None = None
@@ -340,6 +344,7 @@ class MCPServer(ToolSet):
     _session: Any | None = PrivateAttr(default=None)
     _session_task: asyncio.Task | None = PrivateAttr(default=None)
     _session_closed: asyncio.Event | None = PrivateAttr(default=None)
+    _get_session_id: Callable[[], str | None] | None = PrivateAttr(default=None)
     _tools_cache: list[Runnable] | None = PrivateAttr(default=None)
     _tools_cache_run_id: str | None = PrivateAttr(default=None)
     _tools_stale: bool = PrivateAttr(default=False)
@@ -405,11 +410,40 @@ class MCPServer(ToolSet):
     async def _connect_http(self):
         assert self.url is not None
         async with httpx.AsyncClient(headers=self.headers if self.headers else None) as http_client:
-            async with streamable_http_client(self.url, http_client=http_client) as (read, write, _):
+            async with streamable_http_client(self.url, http_client=http_client) as (read, write, get_session_id):
                 async with self._client_session(read, write) as session:
                     await session.initialize()
+                    self._get_session_id = get_session_id
                     logger.info("Connected to MCP server via http", url=self.url)
+                    if self._stateless_http() and (self.elicitation or self.sampling_model):
+                        logger.warning(
+                            "MCP server is stateless (no Mcp-Session-Id): it cannot receive answers to "
+                            "server-initiated requests (elicitation, sampling) on this protocol version. "
+                            "Tools that use them will fail fast instead of hanging; use approval= for "
+                            "confirmations or wait for MRTR (2026-07-28).",
+                            server=self.name,
+                            url=self.url,
+                        )
                     yield session
+
+    def _stateless_http(self) -> bool:
+        """An HTTP server that issued no ``Mcp-Session-Id`` treats every POST as independent,
+        so our reply to a server-initiated request lands on a transport that has no idea
+        who asked. The server's ``elicit()`` / ``create_message()`` then waits forever."""
+        return self.transport == "http" and self._get_session_id is not None and self._get_session_id() is None
+
+    def _abort_inflight_for_stateless(self, calls: list["_InflightCall"], kind: str) -> None:
+        """Fail every in-flight call fast: the server is blocked on an answer it can never get."""
+        for call in calls:
+            if not call.abort.done():
+                call.abort.set_exception(
+                    RuntimeError(
+                        f"MCP server '{self._label}' asked the client for {kind} during '{call.tool_name}', "
+                        "but the server is stateless (no Mcp-Session-Id) so the answer cannot be delivered "
+                        "and the call would never complete. Use approval= for confirmations, or a "
+                        "sessionful server."
+                    )
+                )
 
     async def _run_session(self, ready: asyncio.Future, closed: asyncio.Event) -> None:
         """Own the transport for its whole life.
@@ -446,6 +480,7 @@ class MCPServer(ToolSet):
         self._session = None
         self._session_task = None
         self._session_closed = None
+        self._get_session_id = None
 
     def _on_session_task_done(self, task: asyncio.Task) -> None:
         """Forget a session whose owner task ended on its own (transport died).
@@ -551,6 +586,7 @@ class MCPServer(ToolSet):
         *,
         what: str,
         idempotent: bool = False,
+        abort: asyncio.Future | None = None,
     ) -> T:
         """Run one request against the live session, with the failure modes the SDK leaves to us.
 
@@ -562,6 +598,8 @@ class MCPServer(ToolSet):
           Safe for any request — a 404 means the server never saw it.
         - **No answer within** ``timeout`` (server alive, never replies): ``TimeoutError``.
           The session stays up; the server may still be running the tool.
+        - ``abort``: a future a callback may fail when it learns the call can never complete
+          (stateless server asked us something); raised here instead of waiting.
         - ``idempotent=True`` also retries once after a mid-request connection loss
           (``tools/list``); ``tools/call`` never does, the tool may have run.
         """
@@ -570,12 +608,18 @@ class MCPServer(ToolSet):
             owner = self._session_task
             request: asyncio.Future = asyncio.ensure_future(send(session))
             try:
-                waiting = {request, owner} if owner is not None else {request}
+                waiting: set[asyncio.Future] = {request}
+                if owner is not None:
+                    waiting.add(owner)
+                if abort is not None:
+                    waiting.add(abort)
                 done, _ = await asyncio.wait(waiting, timeout=self.timeout, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 if not request.done():
                     request.cancel()
             if request not in done:
+                if abort is not None and abort in done:
+                    raise abort.exception()  # type: ignore[misc]
                 if not done:
                     raise TimeoutError(f"MCP server '{self._label}': {what} timed out after {self.timeout}s")
                 if idempotent and attempt == 1:
@@ -654,6 +698,13 @@ class MCPServer(ToolSet):
         server unwinds; the handler then raises ``Suspend`` once ``call_tool`` returns.
         """
         calls = list(self._inflight.values())
+        if self._stateless_http():
+            # Whatever we answer cannot reach the handler that asked; don't let it hang.
+            self._abort_inflight_for_stateless(calls, "elicitation")
+            return mcp_types.ErrorData(
+                code=mcp_types.INVALID_REQUEST,
+                message="Client cannot answer server-initiated requests on a stateless connection",
+            )
         if len(calls) != 1:
             # Elicitation requests carry nothing that ties them to a tools/call, so with
             # several calls in flight on one session we cannot know which one asked.
@@ -704,6 +755,12 @@ class MCPServer(ToolSet):
         if not self.sampling_model:
             return mcp_types.ErrorData(code=mcp_types.INVALID_REQUEST, message="Sampling not supported")
         calls = list(self._inflight.values())
+        if self._stateless_http():
+            self._abort_inflight_for_stateless(calls, "sampling")
+            return mcp_types.ErrorData(
+                code=mcp_types.INVALID_REQUEST,
+                message="Client cannot answer server-initiated requests on a stateless connection",
+            )
         ctx = calls[0].ctx if len(calls) == 1 else None
         try:
             coro = self._sample(params)
@@ -778,6 +835,7 @@ class MCPServer(ToolSet):
             tool_call_id=tool_call_id,
             run_context=run_context,
             ctx=contextvars.copy_context(),
+            abort=asyncio.get_running_loop().create_future(),
         )
         self._inflight[call.key] = call
         return call
@@ -825,6 +883,7 @@ class MCPServer(ToolSet):
                 result = await self._request(
                     lambda session: session.call_tool(bare_name, arguments=kwargs),
                     what=f"tools/call {bare_name}",
+                    abort=call.abort,
                 )
             finally:
                 self._end_call(call)
