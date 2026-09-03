@@ -3,7 +3,6 @@ import contextvars
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import timedelta
 from functools import cached_property
 from typing import Any, Literal, TypeVar
 
@@ -306,10 +305,16 @@ class MCPServer(ToolSet):
     headers: dict[str, str] = Field(default_factory=dict)
 
     timeout: float | None = None
-    """Seconds to wait for the server to answer any request (``initialize``, ``tools/list``,
-    ``tools/call``). ``None`` (default) waits forever, which is what MCP tools that legitimately
-    run for minutes need; set it for servers that may accept a request and never answer.
-    A dead transport is detected independently of this and fails the call immediately."""
+    """Seconds to wait for the server to answer a request on an established session
+    (``tools/list``, ``tools/call``). ``None`` (default) waits forever, which is what MCP
+    tools that legitimately run for minutes need; set it for servers that may accept a
+    request and never answer. A dead transport is detected independently of this and
+    fails the call immediately. Does not cover connecting — see ``connect_timeout``."""
+
+    connect_timeout: float | None = None
+    """Seconds to wait for the transport to come up and ``initialize`` to complete. Kept
+    separate from ``timeout`` because a stdio server's cold start (interpreter + imports)
+    is routinely longer than a sensible per-request bound. ``None`` (default) waits forever."""
 
     elicitation: bool = True
     """Advertise the ``elicitation`` capability and bridge server ``elicit()`` calls to
@@ -376,7 +381,6 @@ class MCPServer(ToolSet):
         return ClientSession(
             read,
             write,
-            read_timeout_seconds=timedelta(seconds=self.timeout) if self.timeout is not None else None,
             elicitation_callback=self._on_elicitation if self.elicitation else None,
             sampling_callback=self._on_sampling if self.sampling_model else None,
             logging_callback=self._on_log,
@@ -499,6 +503,16 @@ class MCPServer(ToolSet):
             context=contextvars.Context(),
         )
         try:
+            if self.connect_timeout is not None:
+                done, _ = await asyncio.wait({ready}, timeout=self.connect_timeout)
+                if not done:
+                    # The owner is still inside the transport / initialize(); only cancelling
+                    # it can unwind that. _run_session() turns the cancel into ready.cancel().
+                    task.cancel()
+                    await asyncio.wait({task})
+                    raise ConnectionError(
+                        f"MCP server '{self._label}' failed to connect: timed out after {self.connect_timeout}s"
+                    )
             session = await ready
         except BaseException:
             closed.set()
@@ -546,6 +560,8 @@ class MCPServer(ToolSet):
         - **Stale session** (``Session terminated``: the server 404s our ``Mcp-Session-Id``
           after a restart or expiry): the session is reset and the request retried once.
           Safe for any request — a 404 means the server never saw it.
+        - **No answer within** ``timeout`` (server alive, never replies): ``TimeoutError``.
+          The session stays up; the server may still be running the tool.
         - ``idempotent=True`` also retries once after a mid-request connection loss
           (``tools/list``); ``tools/call`` never does, the tool may have run.
         """
@@ -555,11 +571,13 @@ class MCPServer(ToolSet):
             request: asyncio.Future = asyncio.ensure_future(send(session))
             try:
                 waiting = {request, owner} if owner is not None else {request}
-                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(waiting, timeout=self.timeout, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 if not request.done():
                     request.cancel()
             if request not in done:
+                if not done:
+                    raise TimeoutError(f"MCP server '{self._label}': {what} timed out after {self.timeout}s")
                 if idempotent and attempt == 1:
                     logger.warning("MCP connection lost; retrying", server=self.name, what=what)
                     continue

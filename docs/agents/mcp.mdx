@@ -57,7 +57,8 @@ With `name=` set, a tool declared as `list_files` on the `filesystem` server app
 | `env` | stdio | Environment variables for the spawned process |
 | `url` | http | Server URL |
 | `headers` | http | HTTP headers sent with every request |
-| `timeout` | both | Seconds to wait for any server answer (`initialize`, `tools/list`, `tools/call`). Default `None` = wait forever, for tools that legitimately run long. A dead transport fails the call immediately regardless. |
+| `timeout` | both | Seconds to wait for a request on an established session (`tools/list`, `tools/call`). Default `None` = wait forever, for tools that legitimately run long. A dead transport fails the call immediately regardless. |
+| `connect_timeout` | both | Seconds to wait for the transport to come up and `initialize` to complete. Separate from `timeout` because a stdio server's cold start is routinely longer than a sensible per-request bound. Default `None`. |
 | `approval` | both | Gate tools through the [approval flow](/human-in-the-loop/approval-gates): `"destructive"`, `"all"`, or a callable. See [Approval from annotations](#approval-from-annotations). |
 | `elicitation` | both | Advertise the elicitation capability and bridge server questions to `suspend()`. Default `True`. See [Elicitation](#elicitation). |
 | `sampling_model` | both | Timbal model string used to answer the server's `sampling/createMessage` requests. Default `None` (unsupported). |
@@ -176,7 +177,7 @@ Each connection is owned by a dedicated task, so `close()` can be called from an
 - **Transport dies mid-call** (server process exits, HTTP connection refused): the in-flight call fails immediately with `connection lost during tools/call ...` instead of hanging, the connection is forgotten, and the next call reconnects. The cached tools stay valid.
 - **Stale session** (an HTTP server restarted or expired the session while you were idle, so it 404s your `Mcp-Session-Id` with `Session terminated`): the session is reset and the request retried once, transparently. Safe for any request — a 404 means the server never saw it.
 - **Server unreachable**: `ConnectionError("MCP server 'name' failed to connect: ConnectError: ...")` with the real cause, not anyio's `unhandled errors in a TaskGroup`.
-- **Server accepts but never answers**: only `timeout=` covers this; the default waits forever.
+- **Server accepts but never answers**: only `timeout=` (requests) / `connect_timeout=` (handshake) cover this; both default to waiting forever.
 
 A `tools/call` that loses its connection mid-flight is never retried automatically — the tool may already have run. `tools/list` is.
 

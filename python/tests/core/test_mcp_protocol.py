@@ -536,6 +536,8 @@ class TestConnectionLifecycle:
         assert server._session_task is None
 
     async def test_timeout_fails_slow_request(self, make_server):
+        """``timeout`` bounds requests on the live session only — a cold stdio start on a slow
+        CI runner takes longer than any sensible per-request bound and must not trip it."""
         server = make_server(timeout=0.5)
         try:
             slow = {t.name: t for t in await server.resolve()}["slow"]
@@ -543,11 +545,26 @@ class TestConnectionLifecycle:
             result = await slow(seconds=5).collect()
             assert asyncio.get_running_loop().time() - t0 < 3
             assert result.status.code == "error"
-            assert "Timed out" in result.error["message"]
+            assert "timed out after 0.5s" in result.error["message"]
             # The session is still usable afterwards.
             assert (await {t.name: t for t in await server.resolve()}["plain"]().collect()).output == "plain"
         finally:
             await server.close()
+
+    async def test_connect_timeout_bounds_a_hung_handshake(self):
+        # A "server" that reads stdin forever and never answers initialize.
+        server = MCPServer(
+            name="mute",
+            transport="stdio",
+            command=sys.executable,
+            args=["-c", "import sys; sys.stdin.read()"],
+            connect_timeout=0.5,
+        )
+        t0 = asyncio.get_running_loop().time()
+        with pytest.raises(ConnectionError, match="failed to connect: timed out after 0.5s"):
+            await server.resolve()
+        assert asyncio.get_running_loop().time() - t0 < 5
+        assert server._session is None and server._session_task is None
 
     async def test_no_timeout_by_default_waits(self, make_server):
         server = make_server()
