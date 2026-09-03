@@ -191,6 +191,44 @@ Content
         assert skill.name == "bikes"
         assert len(skill.tools) == 0
 
+    async def test_skill_tool_lazy_sibling_import(self, skills_dir, monkeypatch):
+        """A tool that imports a sibling helper only inside its handler must
+        still resolve it after loading (tools/ stays on sys.path)."""
+        import sys
+
+        tools_dir = skills_dir / "cars" / "tools"
+        (tools_dir / "cars_pricing_helper.py").write_text('PRICE = "expensive"\n')
+        (tools_dir / "price.py").write_text("""from timbal import Tool
+
+def price_car(model: str) -> str:
+    from cars_pricing_helper import PRICE  # lazy sibling import
+
+    return f"{model} is {PRICE}"
+
+price_tool = Tool(name="price_car", handler=price_car)
+""")
+        # Make sure cwd can't mask the lookup via an implicit '' path entry.
+        monkeypatch.chdir(skills_dir.parent)
+        sys.modules.pop("cars_pricing_helper", None)
+
+        skill = Skill(path=skills_dir / "cars")
+        price_tool = next(t for t in skill.tools if t.name == "price_car")
+
+        assert str(tools_dir) in sys.path
+        assert "cars_pricing_helper" not in sys.modules
+        result = await price_tool(model="911").collect()
+        assert result.output == "911 is expensive"
+
+        # Negative control: with tools/ off sys.path (the pre-fix state) the
+        # same lazy import fails — so the assertion above is not being
+        # rescued by cwd / '' on sys.path.
+        sys.path.remove(str(tools_dir))
+        sys.modules.pop("cars_pricing_helper", None)
+        result = await price_tool(model="911").collect()
+        assert result.status.code == "error"
+        assert result.error["type"] == "ModuleNotFoundError"
+        assert "cars_pricing_helper" in result.error["message"]
+
     def test_skill_get_reference(self, skills_dir):
         """Test getting a reference file from skill."""
         skill = Skill(path=skills_dir / "cars")

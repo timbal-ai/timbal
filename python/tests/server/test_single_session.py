@@ -223,7 +223,12 @@ class TestAbandonWindow:
             pass  # finish() never comes
 
         guard.mark_disconnected(on_abandon=_close)
-        await asyncio.sleep(0.3)
+        # Same lesson as the teardown test above: 0.05 + 0.05 + drain is not
+        # guaranteed to land inside a fixed sleep on a loaded runner. Wait for
+        # the abandon task itself; _exit_process runs before it returns.
+        abandon_task = guard._abandon_task
+        assert abandon_task is not None
+        await asyncio.wait_for(abandon_task, timeout=2.0)
         assert exits == [0]
 
     async def test_mark_reconnected_cancels_abandon(self, exits: list[int]) -> None:
@@ -247,7 +252,9 @@ class TestAbandonWindow:
             await guard.finish()
 
         guard.mark_disconnected(on_abandon=_close_and_finish)
-        await asyncio.sleep(0.3)
+        abandon_task = guard._abandon_task
+        assert abandon_task is not None
+        await asyncio.wait_for(abandon_task, timeout=2.0)
         assert exits == [0]  # finish() once, not twice from abandon
 
     async def test_abandon_secs_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:

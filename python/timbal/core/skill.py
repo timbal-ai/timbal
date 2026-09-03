@@ -68,6 +68,12 @@ class Skill(ToolSet):
         tools_dir = self.path / "tools"
         if not tools_dir.exists() or not tools_dir.is_dir():
             return self
+        # Same contract as `ImportSpec.load()`: the directory a user module
+        # lives in stays on `sys.path` so sibling imports resolve — including
+        # ones that only run later, inside a handler.
+        tools_dir_str = str(tools_dir)
+        if tools_dir_str not in sys.path:
+            sys.path.insert(0, tools_dir_str)
         for tool_path in tools_dir.iterdir():
             if not tool_path.is_file() or tool_path.suffix != ".py":
                 continue
