@@ -57,6 +57,7 @@ With `name=` set, a tool declared as `list_files` on the `filesystem` server app
 | `env` | stdio | Environment variables for the spawned process |
 | `url` | http | Server URL |
 | `headers` | http | HTTP headers sent with every request |
+| `timeout` | both | Seconds to wait for any server answer (`initialize`, `tools/list`, `tools/call`). Default `None` = wait forever, for tools that legitimately run long. A dead transport fails the call immediately regardless. |
 | `approval` | both | Gate tools through the [approval flow](/human-in-the-loop/approval-gates): `"destructive"`, `"all"`, or a callable. See [Approval from annotations](#approval-from-annotations). |
 | `elicitation` | both | Advertise the elicitation capability and bridge server questions to `suspend()`. Default `True`. See [Elicitation](#elicitation). |
 | `sampling_model` | both | Timbal model string used to answer the server's `sampling/createMessage` requests. Default `None` (unsupported). |
@@ -170,7 +171,14 @@ await server.close()
 For long-running processes (servers, bots), create the `MCPServer` once and reuse it across runs — reconnecting per request adds latency, especially for stdio servers that spawn a subprocess.
 </Warning>
 
-Each connection is owned by a dedicated task, so `close()` can be called from any task and in any order across servers. If the transport dies on its own (server process exits, HTTP session dropped), the connection is forgotten and the next tool call reconnects; the cached tools stay valid.
+Each connection is owned by a dedicated task, so `close()` can be called from any task and in any order across servers. Failure handling on top of the SDK:
+
+- **Transport dies mid-call** (server process exits, HTTP connection refused): the in-flight call fails immediately with `connection lost during tools/call ...` instead of hanging, the connection is forgotten, and the next call reconnects. The cached tools stay valid.
+- **Stale session** (an HTTP server restarted or expired the session while you were idle, so it 404s your `Mcp-Session-Id` with `Session terminated`): the session is reset and the request retried once, transparently. Safe for any request — a 404 means the server never saw it.
+- **Server unreachable**: `ConnectionError("MCP server 'name' failed to connect: ConnectError: ...")` with the real cause, not anyio's `unhandled errors in a TaskGroup`.
+- **Server accepts but never answers**: only `timeout=` covers this; the default waits forever.
+
+A `tools/call` that loses its connection mid-flight is never retried automatically — the tool may already have run. `tools/list` is.
 
 ## Dynamic Resolution
 

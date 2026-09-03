@@ -1,10 +1,11 @@
 import asyncio
 import contextvars
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import cached_property
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -18,6 +19,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp import types as mcp_types
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import McpError
 from pydantic import Field, PrivateAttr, computed_field, model_validator
 
 from ..errors import RunCancelled
@@ -37,6 +39,13 @@ ELICITATION_KIND = "mcp_elicitation"
 """``InteractionEvent.kind`` used when an MCP server elicits input mid tool call."""
 
 _ELICIT_ACTIONS = frozenset({"accept", "decline", "cancel"})
+
+# The SDK's streamable HTTP client turns a 404 on a request (server no longer knows our
+# Mcp-Session-Id — restarted, or the session expired) into this JSON-RPC error. Not a
+# standard code: mcp.types.INVALID_REQUEST is -32600, this is the positive twin.
+_SESSION_TERMINATED_CODE = 32600
+
+T = TypeVar("T")
 
 # MCP log levels (RFC 5424) -> structlog method names.
 _MCP_LOG_LEVELS = {
@@ -108,6 +117,14 @@ def _describe_error(error: BaseException) -> str:
             leaves.append(_describe_error(sub))
         return "; ".join(leaves) or str(error)
     return f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+
+
+def _is_session_terminated(error: BaseException) -> bool:
+    return (
+        isinstance(error, McpError)
+        and error.error is not None
+        and (error.error.code == _SESSION_TERMINATED_CODE or error.error.message == "Session terminated")
+    )
 
 
 def _is_destructive(mcp_tool: mcp_types.Tool) -> bool:
@@ -288,6 +305,12 @@ class MCPServer(ToolSet):
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
+    timeout: float | None = None
+    """Seconds to wait for the server to answer any request (``initialize``, ``tools/list``,
+    ``tools/call``). ``None`` (default) waits forever, which is what MCP tools that legitimately
+    run for minutes need; set it for servers that may accept a request and never answer.
+    A dead transport is detected independently of this and fails the call immediately."""
+
     elicitation: bool = True
     """Advertise the ``elicitation`` capability and bridge server ``elicit()`` calls to
     ``suspend()``. Set False to hide the capability (servers then must fail closed
@@ -316,14 +339,26 @@ class MCPServer(ToolSet):
     _tools_cache_run_id: str | None = PrivateAttr(default=None)
     _tools_stale: bool = PrivateAttr(default=False)
     _lock: asyncio.Lock | None = PrivateAttr(default=None)
+    _tools_lock: asyncio.Lock | None = PrivateAttr(default=None)
     _inflight: dict[int, _InflightCall] = PrivateAttr(default_factory=dict)
     _inflight_seq: int = PrivateAttr(default=0)
 
     def _get_lock(self) -> asyncio.Lock:
+        """Session lock: guards open/reset/close of the transport."""
         # Lazily create so model construction doesn't require a running loop.
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _get_tools_lock(self) -> asyncio.Lock:
+        """Tool-cache lock: one ``tools/list`` per refresh. Always taken *before* the session lock."""
+        if self._tools_lock is None:
+            self._tools_lock = asyncio.Lock()
+        return self._tools_lock
+
+    @property
+    def _label(self) -> str:
+        return self.name or self.url or self.command or self.transport
 
     @model_validator(mode="after")
     def _validate_transport_fields(self) -> "MCPServer":
@@ -341,6 +376,7 @@ class MCPServer(ToolSet):
         return ClientSession(
             read,
             write,
+            read_timeout_seconds=timedelta(seconds=self.timeout) if self.timeout is not None else None,
             elicitation_callback=self._on_elicitation if self.elicitation else None,
             sampling_callback=self._on_sampling if self.sampling_model else None,
             logging_callback=self._on_log,
@@ -393,9 +429,19 @@ class MCPServer(ToolSet):
                 if isinstance(e, asyncio.CancelledError):
                     ready.cancel()
                 else:
-                    ready.set_exception(e)
+                    # The raw failure is an anyio ExceptionGroup whose str() is
+                    # "unhandled errors in a TaskGroup" — useless to the LLM and to logs.
+                    wrapped = ConnectionError(f"MCP server '{self._label}' failed to connect: {_describe_error(e)}")
+                    wrapped.__cause__ = e
+                    ready.set_exception(wrapped)
                 return
             raise
+
+    def _forget_session(self) -> None:
+        """Drop references to the current session without closing anything (the owner is already done)."""
+        self._session = None
+        self._session_task = None
+        self._session_closed = None
 
     def _on_session_task_done(self, task: asyncio.Task) -> None:
         """Forget a session whose owner task ended on its own (transport died).
@@ -408,15 +454,36 @@ class MCPServer(ToolSet):
             return
         error = None if task.cancelled() else task.exception()
         if self._session_closed is not None and self._session_closed.is_set():
-            return  # close() drives the state reset on the normal path
+            return  # close() / _reset_session() drive the state reset on that path
         logger.warning(
             "MCP session ended unexpectedly; reconnecting on next use",
             server=self.name,
             error=_describe_error(error) if error else None,
         )
-        self._session = None
-        self._session_task = None
-        self._session_closed = None
+        self._forget_session()
+
+    async def _shutdown_owner(self, task: asyncio.Task, closed: asyncio.Event) -> None:
+        closed.set()
+        # wait() rather than await: the owner task's own cancellation must not
+        # surface here as if the caller itself had been cancelled.
+        await asyncio.wait({task})
+        error = None if task.cancelled() else task.exception()
+        if error is not None:
+            logger.error("Error closing MCP connection", server=self.name, error=_describe_error(error))
+
+    async def _reset_session(self, task: asyncio.Task | None) -> None:
+        """Tear down the session owned by ``task`` (if it is still current) so the next ``_connect()`` reopens.
+
+        Used when the server tells us it no longer knows our session: the owner task is
+        alive and healthy, the transport is fine, but every request would 404 forever.
+        """
+        async with self._get_lock():
+            if task is None or self._session_task is not task:
+                return  # somebody else already replaced or dropped it
+            closed = self._session_closed
+            self._forget_session()
+            if closed is not None:
+                await self._shutdown_owner(task, closed)
 
     async def _open_session(self) -> ClientSession:
         """Open the transport in its own owner task. Caller must hold ``_get_lock()`` and check ``_session`` first."""
@@ -443,19 +510,73 @@ class MCPServer(ToolSet):
         task.add_done_callback(self._on_session_task_done)
         return session
 
+    def _session_alive(self) -> bool:
+        return self._session is not None and self._session_task is not None and not self._session_task.done()
+
     async def _connect(self) -> ClientSession:
         """Establish connection and store session for reuse.
 
         Synchronized so parallel tool calls (agent multiplexing) don't each
         open a duplicate stdio subprocess / HTTP session and orphan the first.
+        A session whose owner task has already finished (transport died, done
+        callback not yet run) counts as absent and is reopened.
         """
-        if self._session is not None:
-            return self._session
+        if self._session_alive():
+            return self._session  # type: ignore[return-value]
 
         async with self._get_lock():
-            if self._session is not None:
-                return self._session
+            if self._session_alive():
+                return self._session  # type: ignore[return-value]
+            if self._session_task is not None and self._session_task.done():
+                self._forget_session()
             return await self._open_session()
+
+    async def _request(
+        self,
+        send: Callable[[ClientSession], Awaitable[T]],
+        *,
+        what: str,
+        idempotent: bool = False,
+    ) -> T:
+        """Run one request against the live session, with the failure modes the SDK leaves to us.
+
+        - **Dead transport mid-request**: the SDK never fails the pending future when the
+          receive loop dies, so the request is raced against the owner task and turned
+          into a ``ConnectionError`` instead of hanging forever.
+        - **Stale session** (``Session terminated``: the server 404s our ``Mcp-Session-Id``
+          after a restart or expiry): the session is reset and the request retried once.
+          Safe for any request — a 404 means the server never saw it.
+        - ``idempotent=True`` also retries once after a mid-request connection loss
+          (``tools/list``); ``tools/call`` never does, the tool may have run.
+        """
+        for attempt in (1, 2):
+            session = await self._connect()
+            owner = self._session_task
+            request: asyncio.Future = asyncio.ensure_future(send(session))
+            try:
+                waiting = {request, owner} if owner is not None else {request}
+                done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                if not request.done():
+                    request.cancel()
+            if request not in done:
+                if idempotent and attempt == 1:
+                    logger.warning("MCP connection lost; retrying", server=self.name, what=what)
+                    continue
+                raise ConnectionError(f"MCP server '{self._label}': connection lost during {what}")
+            try:
+                return request.result()
+            except McpError as e:
+                if attempt == 1 and _is_session_terminated(e):
+                    logger.warning(
+                        "MCP server no longer knows our session; reconnecting",
+                        server=self.name,
+                        what=what,
+                    )
+                    await self._reset_session(owner)
+                    continue
+                raise
+        raise AssertionError("unreachable")  # pragma: no cover
 
     # ---------------------------------------------------------- server callbacks
 
@@ -681,10 +802,12 @@ class MCPServer(ToolSet):
         title = mcp_tool.title or (annotations or {}).get("title")
 
         async def _handler(**kwargs: Any) -> Any:
-            session = await self._connect()
             call = self._begin_call(bare_name)
             try:
-                result = await session.call_tool(bare_name, arguments=kwargs)
+                result = await self._request(
+                    lambda session: session.call_tool(bare_name, arguments=kwargs),
+                    what=f"tools/call {bare_name}",
+                )
             finally:
                 self._end_call(call)
 
@@ -746,16 +869,12 @@ class MCPServer(ToolSet):
             assert self._tools_cache is not None
             return self._tools_cache
 
-        async with self._get_lock():
+        async with self._get_tools_lock():
             if not self._tools_refresh_due(run_id):
                 assert self._tools_cache is not None
                 return self._tools_cache
 
-            if self._session is None:
-                await self._open_session()
-            assert self._session is not None
-
-            result = await self._session.list_tools()
+            result = await self._request(lambda session: session.list_tools(), what="tools/list", idempotent=True)
             mcp_tools = sorted(result.tools, key=lambda t: t.name)
             tools: list[Runnable] = [self._make_tool(mcp_tool) for mcp_tool in mcp_tools]
             logger.info("Resolved MCP tools", server=self.name, tools=[t.name for t in tools])
@@ -766,19 +885,11 @@ class MCPServer(ToolSet):
 
     async def close(self) -> None:
         """Close the MCP server connection. Safe from any task, in any order."""
-        async with self._get_lock():
+        async with self._get_tools_lock(), self._get_lock():
             task, closed = self._session_task, self._session_closed
+            self._forget_session()
             if task is not None and closed is not None:
-                closed.set()
-                # wait() rather than await: the owner task's own cancellation must not
-                # surface here as if close() itself had been cancelled.
-                await asyncio.wait({task})
-                error = None if task.cancelled() else task.exception()
-                if error is not None:
-                    logger.error("Error closing MCP connection", server=self.name, error=_describe_error(error))
-            self._session = None
-            self._session_task = None
-            self._session_closed = None
+                await self._shutdown_owner(task, closed)
             self._tools_cache = None
             self._tools_cache_run_id = None
             self._tools_stale = False

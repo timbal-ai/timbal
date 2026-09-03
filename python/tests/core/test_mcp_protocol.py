@@ -93,6 +93,15 @@ async def add_tool(ctx: Context) -> str:
 
 
 @mcp.tool()
+async def slow(seconds: float) -> str:
+    """Sleep, then answer."""
+    import anyio
+
+    await anyio.sleep(seconds)
+    return "done"
+
+
+@mcp.tool()
 async def ask_llm(question: str, ctx: Context) -> str:
     """Sample from the client's LLM."""
     result = await ctx.session.create_message(
@@ -518,11 +527,35 @@ class TestConnectionLifecycle:
             await server.close()
 
     async def test_connect_failure_propagates_and_leaves_no_session(self):
-        server = MCPServer(transport="stdio", command=sys.executable, args=["-c", "import sys; sys.exit(3)"])
-        with pytest.raises((RuntimeError, OSError, ExceptionGroup)):
+        server = MCPServer(
+            name="dead", transport="stdio", command=sys.executable, args=["-c", "import sys; sys.exit(3)"]
+        )
+        with pytest.raises(ConnectionError, match="MCP server 'dead' failed to connect"):
             await server.resolve()
         assert server._session is None
         assert server._session_task is None
+
+    async def test_timeout_fails_slow_request(self, make_server):
+        server = make_server(timeout=0.5)
+        try:
+            slow = {t.name: t for t in await server.resolve()}["slow"]
+            t0 = asyncio.get_running_loop().time()
+            result = await slow(seconds=5).collect()
+            assert asyncio.get_running_loop().time() - t0 < 3
+            assert result.status.code == "error"
+            assert "Timed out" in result.error["message"]
+            # The session is still usable afterwards.
+            assert (await {t.name: t for t in await server.resolve()}["plain"]().collect()).output == "plain"
+        finally:
+            await server.close()
+
+    async def test_no_timeout_by_default_waits(self, make_server):
+        server = make_server()
+        try:
+            slow = {t.name: t for t in await server.resolve()}["slow"]
+            assert (await slow(seconds=0.7).collect()).output == "done"
+        finally:
+            await server.close()
 
     async def test_dead_transport_resets_session_and_reconnects(self):
         """If the owner task dies (transport error), the next call reopens instead of failing forever."""
