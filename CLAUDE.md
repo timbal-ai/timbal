@@ -175,15 +175,26 @@ agent = Agent(
     model="...",
     tools=[
         MCPServer(transport="stdio", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "."]),
-        MCPServer(name="timbal", transport="http", url="https://api.timbal.ai/mcp", headers={"Authorization": "Bearer ..."}),
+        MCPServer(
+            name="timbal", transport="http", url="https://api.timbal.ai/mcp", headers={"Authorization": "Bearer ..."},
+            approval="destructive",                   # gate tools the server annotates as destructive
+            sampling_model="anthropic/claude-haiku-4-5",  # answer sampling/createMessage with this model
+        ),
     ],
 )
 ```
 
 - `transport` — `"stdio"` (spawns `command` + `args` with optional `env`) or `"http"` (streamable HTTP at `url` with optional `headers`)
 - `name` — optional identifier; when set, tools are exposed as `{name}__{tool}` (bare name still used for `call_tool`). Required for codegen (`remove-tool --name`) and whenever multiple servers might share tool names
-- Connections are lazy; the tool list is cached until `await server.close()`
+- Connections are lazy and each lives in its own owner task (`close()` works from any task, any order). Failure handling: a transport that dies mid-call fails the call immediately (`connection lost`) and reconnects on the next call; a stale HTTP session (`Session terminated` 404 after a server restart) is reset and the request retried once; connect failures surface as `ConnectionError("MCP server 'x' failed to connect: <real cause>")`. `timeout=` (seconds, default `None` = forever) bounds `tools/list`/`tools/call` on a live session; `connect_timeout=` bounds the handshake separately (stdio cold starts are slow). `tools/call` is never retried after a mid-flight loss; `tools/list` is. The tool list is cached until `await server.close()`. Tools are sorted by name (stable LLM tools prefix → prompt-cache friendly)
+- Pinned `mcp>=1.26,<2`: SDK 2.x (2026-07-28 protocol) renames `FastMCP`→`MCPServer`, replaces the `ClientSession` layering with `Client`, and changes `streamable_http_client`'s yield — migration is a separate effort
 - Results: text → str, images/audio/blobs → `File`s in a `Message`, `structuredContent` fallback, `isError` → raised so the LLM sees an error tool result
+- `MCPTool` carries `input_schema`, `title`, `tool_annotations` (server `ToolAnnotations` as a dict)
+- **`approval=`** — client-side policy routed through the normal approval gate (`ApprovalEvent`, `kind="mcp_tool"`, `ui={server, tool, title, annotations}`, `input_schema` = server schema). `"destructive"` gates tools whose annotations say destructive (`destructiveHint` not false and `readOnlyHint` not true; unannotated tools are *not* gated), `"all"` gates everything, a callable receives the `mcp.types.Tool`. Default `None`
+- **Elicitation** (`elicitation=True`, default) — the client advertises the capability and a server `elicit()` mid tool call becomes a `suspend()`: the run ends `input_required` with an `InteractionEvent` of `kind="mcp_elicitation"`, `payload={server, tool, mode, message, requested_schema | url + elicitation_id}`, `response_schema=requested_schema`. Resume with `{interaction_id: value}` where `value` is a content dict (→ accept), `True` (accept, empty content), `False`/`None` (decline), `{"action": "accept"|"decline"|"cancel", "content": {...}}`, or `Cancel(...)`. Content is checked against `requested_schema` (required keys, primitive types, enums) before it is sent. Constraints: the tool is re-invoked on resume, so the server's tool must be idempotent up to the `elicit()` point and its message deterministic for identical input (the suspension id hashes `(path, payload, tool_call_id)`). Two elicit-capable calls in flight on one session cannot be attributed (the protocol carries no correlation), so both get an error telling the LLM to call the tool on its own. URL mode is best-effort: resume `True` once the out-of-band flow is done. `elicitation=False` hides the capability — servers should then fail closed on tools that need confirmation. **Stateless HTTP servers** (no `Mcp-Session-Id`) cannot receive our answers: detected at connect (warning), and a server-initiated request fails the tool call fast (`...server is stateless...`) instead of hanging; requests a server sends without `related_request_id` never leave it — only `timeout=` covers those
+- **`tools/list_changed`** — marks the cached list stale; it is refetched at the next run boundary (different run id), never mid-run
+- **Logging** — server `notifications/message` are emitted through structlog (`"MCP server log"`, with `server`, `level`, `logger`, `data`)
+- **`sampling_model=`** — model string (or `TestModel`) used to serve `sampling/createMessage`; runs as an `mcp_sampling` LLM span under the in-flight tool call. The SDK answers server requests inline on the receive loop, so other traffic on that session waits while the LLM call runs
 - Codegen: `python -m timbal.codegen add-mcp --name x --url ... --headers '{"Authorization": "Bearer $API_KEY"}'` ($VAR placeholders become `os.environ` lookups; also supports `--command/--args/--env` and `--from-json` with standard `mcpServers` configs)
 
 ---
