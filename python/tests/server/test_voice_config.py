@@ -308,6 +308,127 @@ class TestMergeClientVoiceOverrides:
         assert "recording" not in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
 
 
+_HOSTILE_HELLO = {
+    "stt_extra": {"stt_host": "evil.example", "callback": "https://evil.example/t", "eot_threshold": 0.9},
+    "tts_extra": {"tts_host": "evil.example", "speed": 1.1},
+}
+
+
+class TestClientExtrasAllowlist:
+    """A caller must never pick the provider WebSocket host.
+
+    The adapters read ``stt_host`` / ``tts_host`` off the extras and send the
+    API key in that handshake; Deepgram Nova and ElevenLabs forward any other
+    key into the query string. Client extras are therefore allow-listed to
+    tuning knobs and layered *over* the server's extras, never replacing them.
+    """
+
+    def test_hostile_hello_loses_host_and_callback(self) -> None:
+        out = voice_routes.merge_client_voice_overrides(VoiceConfig(), _HOSTILE_HELLO)
+        assert "stt_host" not in out.stt_extra
+        assert "callback" not in out.stt_extra
+        assert "tts_host" not in out.tts_extra
+        # The tuning knobs on the same hello still apply.
+        assert out.stt_extra["eot_threshold"] == 0.9
+        assert out.tts_extra["speed"] == 1.1
+
+    def test_adapters_resolve_their_default_host_after_the_merge(self) -> None:
+        from urllib.parse import urlparse
+
+        from timbal.voice import AudioInputConfig, AudioOutputConfig
+        from timbal.voice.deepgram import DeepgramFluxSTT, DeepgramNovaSTT
+        from timbal.voice.fish_audio import _DEFAULT_HOST as FISH_HOST
+        from timbal.voice.munsit import _DEFAULT_HOST as MUNSIT_HOST
+        from timbal.voice.munsit import MunsitStreamSTT
+
+        out = voice_routes.merge_client_voice_overrides(VoiceConfig(), _HOSTILE_HELLO)
+        stt_cfg = AudioInputConfig(extra=out.stt_extra)
+        for stt in (DeepgramFluxSTT(), DeepgramNovaSTT()):
+            assert urlparse(stt._build_uri(stt_cfg)).hostname == "api.deepgram.com"
+        assert urlparse(MunsitStreamSTT()._build_uri(stt_cfg)).hostname == MUNSIT_HOST
+        # No Nova query param may carry the callback either.
+        assert "callback" not in urlparse(DeepgramNovaSTT()._build_uri(stt_cfg)).query
+        tts_cfg = AudioOutputConfig(extra=out.tts_extra)
+        assert tts_cfg.extra.get("tts_host", MUNSIT_HOST) == MUNSIT_HOST
+        assert tts_cfg.extra.get("tts_host", FISH_HOST) == FISH_HOST
+
+    def test_server_pin_survives_client_tuning(self) -> None:
+        base = VoiceConfig(tts_extra={"dialect": "emirati"}, stt_extra={"hotwords": "Timbal"})
+        out = voice_routes.merge_client_voice_overrides(
+            base, {"tts_extra": {"speed": 1.1}, "stt_extra": {"endpointing": 400}}
+        )
+        assert out.tts_extra == {"dialect": "emirati", "speed": 1.1}
+        assert out.stt_extra == {"hotwords": "Timbal", "endpointing": 400}
+
+    def test_server_set_host_still_works(self) -> None:
+        """Self-hosted Munsit / on-prem Deepgram: the *server* keeps choosing the host."""
+        base = VoiceConfig(stt_extra={"stt_host": "munsit.internal"}, tts_extra={"tts_host": "munsit.internal"})
+        out = voice_routes.merge_client_voice_overrides(base, {"stt_extra": {"endpointing": 400}, "tts_extra": {}})
+        assert out.stt_extra["stt_host"] == "munsit.internal"
+        assert out.tts_extra["tts_host"] == "munsit.internal"
+        # And a client cannot move it either.
+        out = voice_routes.merge_client_voice_overrides(base, _HOSTILE_HELLO)
+        assert out.stt_extra["stt_host"] == "munsit.internal"
+        assert out.tts_extra["tts_host"] == "munsit.internal"
+
+    def test_client_cannot_clear_a_server_key(self) -> None:
+        base = VoiceConfig(tts_extra={"dialect": "emirati"})
+        out = voice_routes.merge_client_voice_overrides(base, {"tts_extra": {"dialect": None}})
+        assert out.tts_extra["dialect"] == "emirati"
+
+    @pytest.mark.parametrize("bad", ["stt_host=evil", 7, ["stt_host", "evil"]])
+    def test_non_object_extra_keeps_servers(self, bad) -> None:
+        base = VoiceConfig(stt_extra={"vad_threshold": 0.9})
+        out = voice_routes.merge_client_voice_overrides(base, {"stt_extra": bad})
+        assert out.stt_extra == {"vad_threshold": 0.9}
+
+    def test_allowlists_carry_no_host_url_or_callback(self) -> None:
+        for allowed in (voice_routes.CLIENT_TUNING_STT_EXTRA, voice_routes.CLIENT_TUNING_TTS_EXTRA):
+            for key in allowed:
+                assert not key.endswith(("_host", "_url")), key
+                assert key not in ("callback", "metadata", "correlation_id"), key
+
+    def test_phone_tuned_sip_extras_are_allowlisted(self) -> None:
+        """The LiveKit SIP path injects its PSTN VAD tuning as *client* extras."""
+        from timbal.server.livekit_sip import _PHONE_TUNED_STT_EXTRA
+
+        assert set(_PHONE_TUNED_STT_EXTRA) <= voice_routes.CLIENT_TUNING_STT_EXTRA
+
+    def test_livekit_hello_path(self) -> None:
+        """Dial ``client_config`` (browser config forwarded by the platform) + data-channel hello."""
+        from timbal.server.livekit_session import merge_client_config
+
+        base = VoiceConfig(tts_extra={"dialect": "emirati"})
+        config = merge_client_config(
+            json.dumps({"stt_extra": {"stt_host": "evil.example"}}),
+            {"tts_extra": {"tts_host": "evil.example", "speed": 1.1}},
+        )
+        out = voice_routes.merge_client_voice_overrides(base, config)
+        assert "stt_host" not in out.stt_extra
+        assert out.tts_extra == {"dialect": "emirati", "speed": 1.1}
+
+    def test_telephony_parameters_cannot_carry_extras(self) -> None:
+        """``<Parameter>`` values are strings; the start-frame allowlist has no extras at all."""
+        from timbal.server.telephony import _CONFIG_PARAM_KEYS
+
+        assert "stt_extra" not in _CONFIG_PARAM_KEYS
+        assert "tts_extra" not in _CONFIG_PARAM_KEYS
+
+    def test_build_voice_session_hostile_hello(self) -> None:
+        """End to end through the WS/RTC entry point: the session's adapter configs carry no host."""
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+
+        agent = Agent(name="voice_test", model=TestModel(responses=["hi"]), tools=[])
+        defaults = VoiceConfig(turn_detector="heuristic", tts_extra={"dialect": "emirati"})
+        session, _ = voice_routes.build_voice_session(agent, defaults, _HOSTILE_HELLO)
+        assert "stt_host" not in session.audio_input.extra
+        assert "callback" not in session.audio_input.extra
+        assert "tts_host" not in session.audio_output.extra
+        assert session.audio_output.extra["dialect"] == "emirati"
+        assert session.audio_output.extra["speed"] == 1.1
+
+
 class TestLifespanVoiceState:
     @pytest.mark.asyncio
     async def test_lifespan_sets_voice_config_from_runnable(

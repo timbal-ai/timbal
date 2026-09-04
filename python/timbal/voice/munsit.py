@@ -188,7 +188,10 @@ class MunsitStreamSTT(SpeechToText):
     ``stt_extra`` passthrough: ``endpointing`` (ms, 100-5000), ``smart_turn``,
     ``hotwords`` (ignored by ``munsit-en-ar``), ``channels``,
     ``correlation_id``, ``metadata``, ``interim_results``; plus ``stt_host``
-    for a self-hosted deployment.
+    for a self-hosted deployment. ``stt_host`` (and ``correlation_id`` /
+    ``metadata``) are server-side config only — the ``/voice`` hello merge
+    drops them from client extras, since the API key rides the handshake to
+    whatever host is named here.
     """
 
     native_eou = True
@@ -518,6 +521,8 @@ class MunsitStreamTTS(TextToSpeech):
     1.0), ``dialect`` (``auto`` | ``emirati`` | ``fusha`` — pronunciation hint,
     unset means the API's ``auto``), and ``tts_host``. An Emirati deployment
     sets ``tts_extra={"dialect": "emirati"}`` with no code change here.
+    ``tts_host`` is server-side config only (never honored from a client
+    hello — the key goes with the request).
     """
 
     provider_id = "munsit"

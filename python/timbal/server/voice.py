@@ -194,6 +194,78 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "greeting",
 })
 
+# Keys a client may set *inside* ``stt_extra`` / ``tts_extra``. Tuning only.
+#
+# The adapters read the provider WebSocket host off these dicts (``stt_host``
+# / ``tts_host``) and put the API key in that handshake, and Deepgram Nova /
+# ElevenLabs forward any other key straight into the query string
+# (``callback`` makes Deepgram POST transcripts wherever it says). A caller
+# who can pick the host receives the key — on the composer sidecar that is the
+# *platform's* key. So client extras are allow-listed to knobs the adapters
+# consume as tuning, and merged *over* the server's extras rather than
+# replacing them (a client sending ``{"speed": 1.1}`` must not wipe an org
+# pin like ``dialect: emirati``). Server-side config (``runnable.voice_config``,
+# env, org overrides) is unaffected and can still point at a self-hosted
+# Munsit, on-prem Deepgram or a residency endpoint.
+CLIENT_TUNING_STT_EXTRA = frozenset({
+    # Deepgram Flux / Nova
+    "eot_timeout_ms",
+    "eot_threshold",
+    "eager_eot_threshold",
+    "endpointing",
+    "smart_format",
+    "punctuate",
+    "interim_results",
+    "keyterm",
+    "keywords",
+    # ElevenLabs Scribe + local VAD knobs (build_voice_session pops these for native-EOU providers)
+    "commit_strategy",
+    "audio_format",
+    "min_speech_duration_ms",
+    "vad_silence_threshold_secs",
+    "vad_threshold",
+    # Munsit
+    "smart_turn",
+    "hotwords",
+    "channels",
+})
+CLIENT_TUNING_TTS_EXTRA = frozenset({
+    # ElevenLabs
+    "output_format",
+    "audio_format",
+    "auto_mode",
+    "inactivity_timeout",
+    "tts_keepalive_interval",
+    "apply_text_normalization",
+    # Munsit / Fish
+    "stability",
+    "speed",
+    "dialect",
+    "latency",
+    "volume",
+    "condition_on_previous_chunks",
+})
+
+_CLIENT_TUNING_EXTRA = {"stt_extra": CLIENT_TUNING_STT_EXTRA, "tts_extra": CLIENT_TUNING_TTS_EXTRA}
+
+
+def _merge_client_extra(field: str, server_extra: Any, client_extra: Any) -> dict[str, Any]:
+    """Allow-listed client keys layered over the server's ``{stt,tts}_extra``."""
+    base = dict(server_extra) if isinstance(server_extra, dict) else {}
+    if not isinstance(client_extra, dict):
+        logger.info("voice_client_config_ignored", field=field, reason="not an object", value=repr(client_extra)[:120])
+        return base
+    allowed = _CLIENT_TUNING_EXTRA[field]
+    safe = {str(k): v for k, v in client_extra.items() if k in allowed and v is not None}
+    dropped = sorted(str(k) for k in client_extra if k not in allowed)
+    if dropped:
+        # ``*_host`` / ``*_url`` / ``callback`` here is somebody probing for the
+        # key, not a typo — worth a warning rather than the usual info line.
+        hostile = [k for k in dropped if k.endswith(("_host", "_url")) or k == "callback"]
+        log = logger.warning if hostile else logger.info
+        log("voice_client_config_ignored", field=field, keys=dropped)
+    return {**base, **safe}
+
 
 def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str, Any]) -> VoiceConfig:
     """Apply the optional first WebSocket JSON message over the server config.
@@ -204,7 +276,9 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     ``filler`` and ``greeting`` are the exceptions: they're nested models, so
     they are deep-merged over the server default (a client tweaking
     ``delay_secs`` keeps the server's custom ``system_prompt``) and validated
-    here — invalid → keep server's.
+    here — invalid → keep server's. ``stt_extra`` / ``tts_extra`` are likewise
+    deep-merged, through :data:`CLIENT_TUNING_STT_EXTRA` /
+    :data:`CLIENT_TUNING_TTS_EXTRA` — a caller never picks the provider host.
     """
     updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
     # ``turn_detector``, ``call_context`` and ``parent_id`` are read straight
@@ -216,6 +290,9 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     )
     if ignored:
         logger.info("voice_client_config_ignored", keys=ignored)
+    for field in ("stt_extra", "tts_extra"):
+        if field in updates:
+            updates[field] = _merge_client_extra(field, getattr(server_defaults, field), updates[field])
     if "filler" in updates:
         base = server_defaults.filler
         merged_filler = {
@@ -708,8 +785,9 @@ def build_voice_session(
     # Config id for clients/logs (``fishaudio``), not the class name.
     tts_provider = tts.provider_id
 
-    # Client extras are unvalidated (model_copy in the merge): tolerate a
-    # non-dict rather than 500-ing the socket.
+    # The merge allow-lists client extras over the server's (never the host);
+    # ``model_copy`` ran no validators, so still tolerate a non-dict rather
+    # than 500-ing the socket.
     stt_extra = dict(merged.stt_extra) if isinstance(merged.stt_extra, dict) else {}
     tts_extra = dict(merged.tts_extra) if isinstance(merged.tts_extra, dict) else {}
     if stt_native_eou:
