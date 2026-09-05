@@ -1,9 +1,46 @@
 ---
 title: "OpenAI"
-description: "GPT-5, GPT-4, and o-series models with specs, pricing, and capabilities"
+description: "GPT-6, GPT-5, GPT-4, and o-series models with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [OpenAI model docs](https://platform.openai.com/docs/models) · [API pricing](https://developers.openai.com/api/docs/pricing) (GPT-5.6 Sol promo at least through Nov 21, 2026)</Note>
+<Note>Source: [OpenAI model docs](https://platform.openai.com/docs/models) · [API pricing](https://developers.openai.com/api/docs/pricing) (GPT-5.6 Sol promo at least through Nov 21, 2026). Prices are Standard tier; Batch/Flex are 50%, Fast mode (`service_tier: "fast"`) is 2x.</Note>
+
+## GPT-6 Series
+
+<CardGroup cols={2}>
+  <Card title="gpt-6-astra">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `openai/gpt-6-astra`
+
+  OpenAI's most capable model, built for the hardest end-to-end work: complex reasoning, agentic coding, computer use, research, and document creation. Successor to GPT-5.6 Sol. `reasoning.effort` accepts `low`, `medium`, `high`, `xhigh`, and `max` (API default `low`).
+
+  - &#36;10 / &#36;50 per 1M tokens (input / output); cached input &#36;1 / 1M; cache writes &#36;12.50 / 1M
+  - <Icon icon="triangle-exclamation" size={14} /> Prompts over 272K input tokens bill the **full request** at long-context rates: &#36;20 / &#36;75, cached &#36;2, cache writes &#36;25
+  - <Icon icon="triangle-exclamation" size={14} /> Function tools require the Responses API (Timbal's default). With `TIMBAL_OPENAI_API=chat_completions`, tool calls return 400 and `reasoning_effort: "none"` is rejected
+  - <Icon icon="window-maximize" size={14} /> 1.05M context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Extended thinking
+  - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Apr 30, 2026
+  </Card>
+</CardGroup>
+
+<Note>GPT-6 Astra was released September 3, 2026 in a staged rollout. Verified reachable on a standard API key via both `/v1/responses` and `/v1/chat/completions` on September 5, 2026; if your org still gets `model_not_found`, the rollout hasn't reached it yet.</Note>
+
+### How long-context and cache pricing is tracked
+
+GPT-6 Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro bill the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. (GPT-5.5 Pro's model card publishes no long-context tier and no cached-input discount, so it is billed flat.) Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
+
+| Request | Usage keys on `OutputEvent.usage` |
+| --- | --- |
+| ≤ 272K input | `input_text_tokens`, `input_cached_tokens`, `input_cache_write_tokens`, `output_text_tokens` |
+| > 272K input | the same units suffixed `_long_context`, e.g. `openai/gpt-6-astra:output_text_tokens_long_context` |
+
+`input_cache_write_tokens` is split out only for models whose catalog entry has a `cache_write_price` (OpenAI bills prompt-cache writes at 1.25x the input rate); on any other model those tokens stay in `input_text_tokens` so they are still billed. Reasoning tokens are folded into `output_text_tokens` (they are billed as output). Eval usage assertions (`output_text_tokens` etc.) and the TUI token summary treat both tiers as the same tokens. The per-model thresholds and tier rates live in `python/timbal/models.yaml` (`cached_input_price`, `cache_write_price`, `long_context`); `get_long_context_threshold()` in `timbal.core.models` exposes the threshold at runtime.
+
+---
 
 ## GPT-5 Series
 

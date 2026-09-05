@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 from timbal.evals.models import EvalSummary
 from timbal.evals.runner import run_eval
-from timbal.evals.utils import discover_config, discover_eval_files, dump_summary, parse_eval_file
+from timbal.evals.utils import (
+    _resolve_usage_key,
+    discover_config,
+    discover_eval_files,
+    dump_summary,
+    parse_eval_file,
+)
 
 AGENT_MODULE = """\
 from timbal import Agent
@@ -179,3 +185,84 @@ class TestDiscoverConfig:
 
     def test_returns_empty_when_missing(self, tmp_path):
         assert discover_config(tmp_path) == {}
+
+
+class TestResolveUsageKey:
+    def test_exact_key(self):
+        usage = {"openai/gpt-4o:input_text_tokens": 100}
+        assert _resolve_usage_key(usage, "openai/gpt-4o:input_text_tokens") == 100
+
+    def test_metric_only_sums_across_models(self):
+        usage = {"openai/gpt-4o:output_text_tokens": 10, "openai/gpt-5.5:output_text_tokens": 5}
+        assert _resolve_usage_key(usage, "output_text_tokens") == 15
+
+    def test_model_prefix_sums_snapshots(self):
+        usage = {"anthropic/claude-haiku-4-5-20251001:input_tokens": 100, "anthropic/claude-haiku-4-5-20241120:input_tokens": 50}
+        assert _resolve_usage_key(usage, "anthropic/claude-haiku-4-5:input_tokens") == 150
+
+    def test_unsuffixed_metric_matches_long_context_tier(self):
+        """A request billed at the long-context tier is still the same tokens for an eval assertion."""
+        usage = {
+            "openai/gpt-6-astra:input_text_tokens_long_context": 300_000,
+            "openai/gpt-6-astra:output_text_tokens_long_context": 40,
+        }
+        assert _resolve_usage_key(usage, "output_text_tokens") == 40
+        assert _resolve_usage_key(usage, "input_text_tokens") == 300_000
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 40
+
+    def test_unsuffixed_metric_sums_both_tiers(self):
+        """Multi-step runs can cross the threshold mid-run: short and long buckets add up."""
+        usage = {
+            "openai/gpt-6-astra:output_text_tokens": 10,
+            "openai/gpt-6-astra:output_text_tokens_long_context": 40,
+        }
+        assert _resolve_usage_key(usage, "output_text_tokens") == 50
+
+    def test_explicit_long_context_metric_matches_only_that_tier(self):
+        usage = {
+            "openai/gpt-6-astra:output_text_tokens": 10,
+            "openai/gpt-6-astra:output_text_tokens_long_context": 40,
+        }
+        assert _resolve_usage_key(usage, "output_text_tokens_long_context") == 40
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens_long_context") == 40
+
+    def test_exact_model_key_sums_long_context_sibling(self):
+        """Exact `model:metric` hit must still add the `_long_context` bucket from the same run."""
+        usage = {
+            "openai/gpt-6-astra:output_text_tokens": 10,
+            "openai/gpt-6-astra:output_text_tokens_long_context": 40,
+            "openai/gpt-6-astra-other:output_text_tokens": 999,  # exact match must NOT widen to prefix
+        }
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 50
+
+    def test_exact_key_without_sibling_is_unchanged(self):
+        usage = {"openai/gpt-6-astra:output_text_tokens": 10}
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 10
+
+    def test_resolve_target_uses_resolver_even_when_exact_key_exists(self):
+        """The `usage.<key>` path in resolve_target must not bypass the resolver on an exact hit."""
+        from timbal.evals.utils import resolve_target
+        from timbal.state.tracing.span import Span
+        from timbal.state.tracing.trace import Trace
+
+        span = Span(
+            path="agent.llm",
+            call_id="c1",
+            t0=0,
+            t1=1,
+            usage={
+                "openai/gpt-6-astra:output_text_tokens": 10,
+                "openai/gpt-6-astra:output_text_tokens_long_context": 40,
+            },
+        )
+        trace = Trace()
+        trace["c1"] = span
+        _, value = resolve_target(trace, "agent.llm.usage.openai/gpt-6-astra:output_text_tokens")
+        assert value == 50
+        _, value = resolve_target(trace, "agent.llm.usage.output_text_tokens")
+        assert value == 50
+        _, value = resolve_target(trace, "agent.llm.usage.openai/gpt-6-astra:output_text_tokens_long_context")
+        assert value == 40
+
+    def test_missing_returns_none(self):
+        assert _resolve_usage_key({"openai/gpt-4o:input_text_tokens": 1}, "output_text_tokens") is None

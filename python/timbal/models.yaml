@@ -7,6 +7,16 @@
 #   requires_activation: true  — model exists but must be enabled in the provider console first
 #   dedicated_only: true       — not serverless; requires a dedicated deployment/endpoint
 #   notes: "..."              — required when either flag is set (shown in UI/docs)
+#
+# Optional pricing detail (USD per 1M tokens; omit when the provider does not publish it):
+#   cached_input_price  — prompt-cache read rate (usage unit `input_cached_tokens`)
+#   cache_write_price   — prompt-cache write rate (usage unit `input_cache_write_tokens`)
+#   long_context:       — tier applied to the FULL request once input tokens exceed `threshold`.
+#     threshold: 272000   Collectors emit `<unit>_long_context` usage keys (e.g. `input_text_tokens_long_context`)
+#     input_price: 20.0   for these requests so cost tables can bill each tier at its own rate.
+#     output_price: 75.0
+#     cached_input_price: 2.0
+#     cache_write_price: 25.0
 
 models:
 - id: anthropic/claude-fable-5-1
@@ -121,18 +131,49 @@ models:
   output_price: 5.0
   context_window: 200000
   capabilities: [vision, tools]
+- id: openai/gpt-6-astra
+  provider: openai
+  display_name: GPT-6 Astra
+  description: OpenAI's most capable model, built for the hardest end-to-end work — complex reasoning, agentic coding, computer
+    use, research, and document creation. Successor to GPT-5.6 Sol.
+  notes: 'Standard short-context pricing is $10/$50 per 1M tokens; cached input $1 (0.1x), cache writes $12.50 (1.25x). Prompts
+    over 272K input tokens bill the full request at long-context rates ($20/$75, cached $2, cache writes $25). Batch/Flex are
+    50% of Standard; Fast mode (`service_tier: "fast"`) is 2x. `reasoning.effort` accepts low|medium|high|xhigh|max (API
+    default low). Function tools require the Responses API (Timbal default) — /v1/chat/completions returns 400 for tools
+    with any reasoning_effort and does not accept `none`. 128K max output, Apr 30, 2026 knowledge cutoff. Supports ZDR
+    for eligible API customers.'
+  input_price: 10.0
+  output_price: 50.0
+  cached_input_price: 1.0
+  cache_write_price: 12.5
+  long_context:
+    threshold: 272000
+    input_price: 20.0
+    output_price: 75.0
+    cached_input_price: 2.0
+    cache_write_price: 25.0
+  context_window: 1050000
+  capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.5
   provider: openai
   display_name: GPT-5.5
   description: OpenAI frontier model for coding, knowledge work, and research.
+  notes: Prompts over 272K input tokens bill the full request at 2x input / 1.5x output ($10/$60).
   input_price: 5.0
   output_price: 30.0
+  cached_input_price: 0.5
+  long_context:
+    threshold: 272000
+    input_price: 10.0
+    output_price: 60.0
+    cached_input_price: 1.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.5-pro
   provider: openai
   display_name: GPT-5.5 Pro
   description: OpenAI GPT-5.5 Pro tier for the hardest coding, agentic, and research workloads via the Responses API.
+  notes: Flat $30/$180 — the model card publishes no cached-input discount and no long-context tier.
   input_price: 30.0
   output_price: 180.0
   context_window: 1050000
@@ -141,42 +182,82 @@ models:
   provider: openai
   display_name: GPT-5.6 Sol
   description: OpenAI GPT-5.6 flagship tier for the hardest coding, agentic, and long-horizon tasks.
-  notes: Promotional short-context API pricing ($4/$20 per 1M tokens, cached input $0.40) available at least through November
-    21, 2026. Long-context rates are $8/$30.
+  notes: Promotional short-context API pricing ($4/$20 per 1M tokens, cached input $0.40, cache writes $5) available at
+    least through November 21, 2026. Prompts over 272K input tokens bill the full request at long-context rates ($8/$30,
+    cached $0.80, cache writes $10).
   input_price: 4.0
   output_price: 20.0
+  cached_input_price: 0.4
+  cache_write_price: 5.0
+  long_context:
+    threshold: 272000
+    input_price: 8.0
+    output_price: 30.0
+    cached_input_price: 0.8
+    cache_write_price: 10.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.6-terra
   provider: openai
   display_name: GPT-5.6 Terra
   description: OpenAI GPT-5.6 balanced tier for everyday production work at roughly half the cost of Sol.
+  notes: Prompts over 272K input tokens bill the full request at long-context rates ($4/$18, cached $0.40, cache writes $5).
   input_price: 2.0
   output_price: 12.0
+  cached_input_price: 0.2
+  cache_write_price: 2.5
+  long_context:
+    threshold: 272000
+    input_price: 4.0
+    output_price: 18.0
+    cached_input_price: 0.4
+    cache_write_price: 5.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.6-luna
   provider: openai
   display_name: GPT-5.6 Luna
   description: OpenAI GPT-5.6 fast, cost-efficient tier for high-volume and latency-sensitive workloads.
+  notes: Prompts over 272K input tokens bill the full request at long-context rates ($0.40/$1.80, cached $0.04, cache writes
+    $0.50).
   input_price: 0.2
   output_price: 1.2
+  cached_input_price: 0.02
+  cache_write_price: 0.25
+  long_context:
+    threshold: 272000
+    input_price: 0.4
+    output_price: 1.8
+    cached_input_price: 0.04
+    cache_write_price: 0.5
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.4
   provider: openai
   display_name: GPT-5.4
   description: OpenAI's most capable and efficient frontier model for professional work, with native computer-use abilities.
+  notes: Prompts over 272K input tokens bill the full request at 2x input / 1.5x output ($5/$22.50).
   input_price: 2.5
   output_price: 15.0
+  cached_input_price: 0.25
+  long_context:
+    threshold: 272000
+    input_price: 5.0
+    output_price: 22.5
+    cached_input_price: 0.5
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.4-pro
   provider: openai
   display_name: GPT-5.4 Pro
   description: OpenAI GPT-5.4 Pro tier for maximum capability coding and agent workloads via the Responses API.
+  notes: Prompts over 272K input tokens bill the full request at 2x input / 1.5x output ($60/$270).
   input_price: 30.0
   output_price: 180.0
+  long_context:
+    threshold: 272000
+    input_price: 60.0
+    output_price: 270.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.4-mini
@@ -360,8 +441,15 @@ models:
   provider: openai
   display_name: GPT-5.5 (2026-04-23)
   description: Dated snapshot of GPT-5.5 for reproducible runs; same capabilities as gpt-5.5 per OpenAI API docs.
+  notes: Prompts over 272K input tokens bill the full request at 2x input / 1.5x output ($10/$60).
   input_price: 5.0
   output_price: 30.0
+  cached_input_price: 0.5
+  long_context:
+    threshold: 272000
+    input_price: 10.0
+    output_price: 60.0
+    cached_input_price: 1.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo
@@ -698,6 +786,10 @@ models:
   notes: Long-context surcharge applies above 200k tokens ($4/$12 per 1M).
   input_price: 2.0
   output_price: 6.0
+  long_context:
+    threshold: 200000
+    input_price: 4.0
+    output_price: 12.0
   context_window: 500000
   capabilities: [vision, tools, reasoning]
 - id: xai/grok-4.5
@@ -707,6 +799,10 @@ models:
   notes: Long-context surcharge applies above 200k tokens ($4/$12 per 1M).
   input_price: 2.0
   output_price: 6.0
+  long_context:
+    threshold: 200000
+    input_price: 4.0
+    output_price: 12.0
   context_window: 500000
   capabilities: [vision, tools, reasoning]
 - id: xai/grok-4.3
@@ -717,6 +813,10 @@ models:
   notes: Long-context surcharge applies above 200k tokens ($2.50/$5.00 per 1M).
   input_price: 1.25
   output_price: 2.5
+  long_context:
+    threshold: 200000
+    input_price: 2.5
+    output_price: 5.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: groq/qwen/qwen3.6-27b
@@ -825,6 +925,10 @@ models:
   notes: Long-context surcharge applies above 128k tokens ($0.50/$4.00 per 1M).
   input_price: 0.25
   output_price: 2.0
+  long_context:
+    threshold: 128000
+    input_price: 0.5
+    output_price: 4.0
   context_window: 256000
   capabilities: [vision, tools, video]
 - id: byteplus/seed-2-0-mini-260215
@@ -863,6 +967,10 @@ models:
   requires_activation: true
   input_price: 0.5
   output_price: 3.0
+  long_context:
+    threshold: 128000
+    input_price: 1.0
+    output_price: 6.0
   context_window: 256000
   capabilities: [vision, tools, reasoning, video]
 - id: byteplus/kimi-k2-250905

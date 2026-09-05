@@ -166,6 +166,57 @@ def _offline_audit(models: list[dict]) -> list[str]:
         if m.get("requires_activation") and m.get("dedicated_only"):
             errors.append(f"model has both requires_activation and dedicated_only: {mid}")
 
+        errors.extend(_check_pricing_fields(m))
+
+    return errors
+
+
+_PRICE_FIELDS = ("input_price", "output_price", "cached_input_price", "cache_write_price")
+
+
+def _check_pricing_fields(m: dict) -> list[str]:
+    """Validate optional cache / long-context pricing so collectors and cost tables can trust it."""
+    errors: list[str] = []
+    mid = m["id"]
+
+    for field in _PRICE_FIELDS:
+        value = m.get(field)
+        if value is not None and (not isinstance(value, (int, float)) or value < 0):
+            errors.append(f"{field} must be a non-negative number on {mid}: {value!r}")
+
+    long_context = m.get("long_context")
+    if long_context is None:
+        return errors
+    if not isinstance(long_context, dict):
+        return [*errors, f"long_context must be a mapping on {mid}"]
+
+    threshold = long_context.get("threshold")
+    if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold <= 0:
+        errors.append(f"long_context.threshold must be a positive int on {mid}: {threshold!r}")
+    context_window = m.get("context_window")
+    if isinstance(threshold, int) and isinstance(context_window, int) and threshold >= context_window:
+        errors.append(f"long_context.threshold ({threshold}) must be below context_window ({context_window}) on {mid}")
+
+    for field in ("input_price", "output_price"):
+        if long_context.get(field) is None:
+            errors.append(f"long_context.{field} is required on {mid}")
+    # Collectors split cache writes into their own unit whenever the base tier prices them,
+    # and that unit carries the tier suffix over the threshold — so the long tier must price it too.
+    if m.get("cache_write_price") is not None and long_context.get("cache_write_price") is None:
+        errors.append(f"long_context.cache_write_price is required on {mid} because cache_write_price is set")
+    for field in _PRICE_FIELDS:
+        value = long_context.get(field)
+        if value is not None and (not isinstance(value, (int, float)) or value < 0):
+            errors.append(f"long_context.{field} must be a non-negative number on {mid}: {value!r}")
+        # A long-context tier that is cheaper than the base tier is almost certainly a typo.
+        base = m.get(field)
+        if isinstance(value, (int, float)) and isinstance(base, (int, float)) and value < base:
+            errors.append(f"long_context.{field} ({value}) is below base {field} ({base}) on {mid}")
+
+    unknown = set(long_context) - {"threshold", *_PRICE_FIELDS}
+    if unknown:
+        errors.append(f"unknown long_context keys on {mid}: {sorted(unknown)}")
+
     return errors
 
 

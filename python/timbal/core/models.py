@@ -12,6 +12,22 @@ from typing import Any, Literal
 
 import yaml
 
+# Suffix collectors append to every token usage unit of a request billed at a provider's
+# long-context tier (e.g. ``openai/gpt-6-astra:output_text_tokens_long_context``).
+LONG_CONTEXT_USAGE_SUFFIX = "_long_context"
+
+
+def base_usage_metric(metric: str) -> str:
+    """Strip the long-context tier suffix from a usage metric name.
+
+    ``output_text_tokens_long_context`` -> ``output_text_tokens``. Use this wherever usage
+    is aggregated for display or assertions rather than for billing, so a request that
+    crossed the tier threshold still counts as the same tokens.
+    """
+    if metric.endswith(LONG_CONTEXT_USAGE_SUFFIX):
+        return metric[: -len(LONG_CONTEXT_USAGE_SUFFIX)]
+    return metric
+
 
 @lru_cache(maxsize=1)
 def _load_models() -> dict[str, dict[str, Any]]:
@@ -40,6 +56,45 @@ def get_context_window(model_id: str) -> int | None:
     return model.get("context_window")
 
 
+def get_long_context_threshold(model_id: str) -> int | None:
+    """Get the input-token threshold above which a model bills the full request at long-context rates.
+
+    Providers such as OpenAI (>272K on 1.05M-context models) and xAI (>200K) reprice the
+    *entire* request — not just the overflow — once the prompt exceeds this many input tokens.
+    Collectors use it to emit ``<unit>_long_context`` usage keys so cost tables can bill each
+    tier at its own rate.
+
+    Args:
+        model_id: Model identifier (e.g., 'openai/gpt-6-astra').
+
+    Returns:
+        Threshold in input tokens, or None if the model has no long-context tier (or is unknown).
+    """
+    models = _load_models()
+    model = models.get(model_id)
+    if model is None:
+        return None
+    long_context = model.get("long_context")
+    if not isinstance(long_context, dict):
+        return None
+    threshold = long_context.get("threshold")
+    return int(threshold) if threshold is not None else None
+
+
+def has_cache_write_pricing(model_id: str) -> bool:
+    """Whether the catalog prices prompt-cache writes separately for a model.
+
+    Collectors only split ``cache_write_tokens`` into their own usage unit when this is
+    True; otherwise those tokens stay in ``input_text_tokens`` (billed at the input rate)
+    rather than landing in a unit no cost table can price.
+    """
+    models = _load_models()
+    model = models.get(model_id)
+    if model is None:
+        return False
+    return model.get("cache_write_price") is not None
+
+
 # ---------------------------------------------------------------------------
 # Model type with provider prefixes
 Model = Literal[
@@ -55,6 +110,7 @@ Model = Literal[
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-sonnet-4-5",
     "anthropic/claude-haiku-4-5",
+    "openai/gpt-6-astra",
     "openai/gpt-5.5",
     "openai/gpt-5.5-pro",
     "openai/gpt-5.6-sol",
