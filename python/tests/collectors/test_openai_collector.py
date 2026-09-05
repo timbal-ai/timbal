@@ -856,6 +856,115 @@ class TestChatCompletionCollectorHandleUsage:
         assert span.usage.get("openai/gpt-4o:output_text_tokens") == 6  # 10 - 4
 
 
+def _cc_usage_chunk(*, model: str, prompt_tokens: int, completion_tokens: int, cached: int = 0, cache_write: int = 0):
+    """Build a usage-only chunk; ``cache_write_tokens`` is a pydantic extra (SDK does not declare it yet)."""
+    from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
+
+    usage = CompletionUsage(
+        completion_tokens=completion_tokens,
+        prompt_tokens=prompt_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=cached, audio_tokens=None, cache_write_tokens=cache_write),
+        completion_tokens_details=CompletionTokensDetails(audio_tokens=None, reasoning_tokens=0),
+    )
+    return ChatCompletionChunk(
+        id="chatcmpl_usage_tier",
+        choices=[],
+        created=int(time.time()),
+        model=model,
+        object="chat.completion.chunk",
+        usage=usage,
+    )
+
+
+class TestChatCompletionCollectorPricingTiers:
+    """Cache-write accounting and long-context repricing on the chat-completions path."""
+
+    def _run(self, billing_id: str, **usage_kwargs):
+        ctx = _make_context()
+        set_billing_id(billing_id)
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        collector.process(_make_cc_chunk(content="hi"))
+        collector.process(_cc_usage_chunk(model=billing_id.split("/", 1)[1], **usage_kwargs))
+        collector.result()
+        return ctx._trace["test_call"].usage
+
+    def test_cache_write_tokens_are_split_out_of_input(self):
+        """Cache writes bill at 1.25x input on OpenAI — they must not be folded into plain input."""
+        usage = self._run("openai/gpt-6-astra", prompt_tokens=100, completion_tokens=5, cached=20, cache_write=30)
+        assert usage["openai/gpt-6-astra:input_cache_write_tokens"] == 30
+        assert usage["openai/gpt-6-astra:input_cached_tokens"] == 20
+        assert usage["openai/gpt-6-astra:input_text_tokens"] == 50  # 100 - 20 - 30
+        assert usage["openai/gpt-6-astra:output_text_tokens"] == 5
+
+    def test_missing_cache_write_field_is_tolerated(self):
+        """Older SDK payloads / other providers do not send cache_write_tokens at all."""
+        from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
+
+        ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        collector.process(_make_cc_chunk(content="hi"))
+        usage = CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=20,
+            total_tokens=25,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=None, audio_tokens=None),
+            completion_tokens_details=CompletionTokensDetails(audio_tokens=None, reasoning_tokens=0),
+        )
+        collector.process(
+            ChatCompletionChunk(
+                id="chatcmpl_plain", choices=[], created=int(time.time()), model="gpt-4o",
+                object="chat.completion.chunk", usage=usage,
+            )
+        )
+        collector.result()
+        span_usage = ctx._trace["test_call"].usage
+        assert "openai/gpt-4o:input_cache_write_tokens" not in span_usage
+        assert span_usage["openai/gpt-4o:input_text_tokens"] == 20
+
+    def test_short_context_uses_base_units(self):
+        usage = self._run("openai/gpt-6-astra", prompt_tokens=200_000, completion_tokens=10)
+        assert usage["openai/gpt-6-astra:input_text_tokens"] == 200_000
+        assert usage["openai/gpt-6-astra:output_text_tokens"] == 10
+        assert not any(k.endswith("_long_context") for k in usage)
+
+    def test_exactly_at_threshold_is_still_short_context(self):
+        """OpenAI reprices prompts *over* 272K — 272K itself is short context."""
+        usage = self._run("openai/gpt-6-astra", prompt_tokens=272_000, completion_tokens=10)
+        assert usage["openai/gpt-6-astra:input_text_tokens"] == 272_000
+        assert not any(k.endswith("_long_context") for k in usage)
+
+    def test_over_threshold_reprices_every_bucket(self):
+        """One token over the threshold moves input, cache reads, cache writes AND output to the long tier."""
+        usage = self._run(
+            "openai/gpt-6-astra", prompt_tokens=272_001, completion_tokens=500, cached=1_000, cache_write=2_000
+        )
+        assert usage["openai/gpt-6-astra:input_text_tokens_long_context"] == 272_001 - 1_000 - 2_000
+        assert usage["openai/gpt-6-astra:input_cached_tokens_long_context"] == 1_000
+        assert usage["openai/gpt-6-astra:input_cache_write_tokens_long_context"] == 2_000
+        assert usage["openai/gpt-6-astra:output_text_tokens_long_context"] == 500
+        assert "openai/gpt-6-astra:input_text_tokens" not in usage
+        assert "openai/gpt-6-astra:output_text_tokens" not in usage
+
+    def test_threshold_is_measured_on_raw_prompt_including_cache_hits(self):
+        """A 300K prompt that is 290K cached is still a 300K prompt to the provider."""
+        usage = self._run("openai/gpt-6-astra", prompt_tokens=300_000, completion_tokens=1, cached=290_000)
+        assert usage["openai/gpt-6-astra:input_cached_tokens_long_context"] == 290_000
+        assert usage["openai/gpt-6-astra:input_text_tokens_long_context"] == 10_000
+
+    def test_models_without_a_tier_never_reprice(self):
+        usage = self._run("openai/gpt-4o", prompt_tokens=120_000, completion_tokens=10)
+        assert usage["openai/gpt-4o:input_text_tokens"] == 120_000
+        assert not any(k.endswith("_long_context") for k in usage)
+
+    def test_byteplus_tier_via_chat_completions(self):
+        """BytePlus (OpenAI-compatible) surcharges above 128K and flows through this collector."""
+        usage = self._run("byteplus/seed-2-0-pro-260328", prompt_tokens=130_000, completion_tokens=10)
+        assert usage["byteplus/seed-2-0-pro-260328:input_text_tokens_long_context"] == 130_000
+        assert usage["byteplus/seed-2-0-pro-260328:output_text_tokens_long_context"] == 10
+
+
 class TestChatCompletionCollectorGoogleThoughtSignature:
     """Lines 196-198: Google Gemini thought_signature stored in tool call extra_content."""
 
@@ -1414,6 +1523,99 @@ class TestResponseCollectorHandleCompleted:
         span = ctx._trace["test_call"]
         assert span.usage.get("openai/gpt-4o:output_audio_tokens") == 3
         assert span.usage.get("openai/gpt-4o:output_text_tokens") == 7  # 10 - 3
+
+
+class TestResponseCollectorPricingTiers:
+    """Cache-write accounting and long-context repricing on the Responses path."""
+
+    def _run(self, billing_id: str, *, input_tokens: int, output_tokens: int, cached: int = 0, cache_write: int = 0):
+        api_model = billing_id.split("/", 1)[1]
+        ctx = _make_context()
+        set_billing_id(billing_id)
+        collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        collector.process(ResponseCreatedEvent(
+            type="response.created", response=_make_response(model=api_model), sequence_number=0,
+        ))
+        item_id = "tier_item_001"
+        collector.process(ResponseContentPartAddedEvent(
+            type="response.content_part.added",
+            item_id=item_id, output_index=0, content_index=0,
+            part=ResponseOutputText(type="output_text", text="", annotations=[]), sequence_number=1,
+        ))
+        collector.process(ResponseTextDeltaEvent(
+            type="response.output_text.delta",
+            item_id=item_id, output_index=0, content_index=0, delta="hi", logprobs=[], sequence_number=2,
+        ))
+        usage = ResponseUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            # cache_write_tokens is a pydantic extra — the SDK does not declare it yet.
+            input_tokens_details=InputTokensDetails(cached_tokens=cached, cache_write_tokens=cache_write),
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        )
+        completed = _make_response(model=api_model, status="completed").model_copy(update={"usage": usage})
+        collector.process(ResponseCompletedEvent(type="response.completed", response=completed, sequence_number=3))
+        return ctx._trace["test_call"].usage
+
+    def test_cache_write_tokens_are_split_out_of_input(self):
+        usage = self._run("openai/gpt-6-astra", input_tokens=100, output_tokens=5, cached=20, cache_write=30)
+        assert usage["openai/gpt-6-astra:input_cache_write_tokens"] == 30
+        assert usage["openai/gpt-6-astra:input_cached_tokens"] == 20
+        assert usage["openai/gpt-6-astra:input_text_tokens"] == 50
+        assert usage["openai/gpt-6-astra:output_text_tokens"] == 5
+
+    def test_exactly_at_threshold_is_still_short_context(self):
+        usage = self._run("openai/gpt-6-astra", input_tokens=272_000, output_tokens=10)
+        assert usage["openai/gpt-6-astra:input_text_tokens"] == 272_000
+        assert not any(k.endswith("_long_context") for k in usage)
+
+    def test_over_threshold_reprices_every_bucket(self):
+        usage = self._run("openai/gpt-6-astra", input_tokens=272_001, output_tokens=500, cached=1_000, cache_write=2_000)
+        assert usage["openai/gpt-6-astra:input_text_tokens_long_context"] == 272_001 - 1_000 - 2_000
+        assert usage["openai/gpt-6-astra:input_cached_tokens_long_context"] == 1_000
+        assert usage["openai/gpt-6-astra:input_cache_write_tokens_long_context"] == 2_000
+        assert usage["openai/gpt-6-astra:output_text_tokens_long_context"] == 500
+        assert "openai/gpt-6-astra:input_text_tokens" not in usage
+
+    def test_xai_tier_via_responses(self):
+        """xAI runs through the Responses collector and surcharges above 200K."""
+        usage = self._run("xai/grok-4.6", input_tokens=200_001, output_tokens=10)
+        assert usage["xai/grok-4.6:input_text_tokens_long_context"] == 200_001
+        assert usage["xai/grok-4.6:output_text_tokens_long_context"] == 10
+        usage = self._run("xai/grok-4.6", input_tokens=200_000, output_tokens=10)
+        assert usage["xai/grok-4.6:input_text_tokens"] == 200_000
+
+    def test_reasoning_tokens_follow_output_into_long_tier(self):
+        """Hidden reasoning is billed as output; it must move tiers with the rest of the request."""
+        ctx = _make_context()
+        set_billing_id("openai/gpt-6-astra")
+        collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        collector.process(ResponseCreatedEvent(
+            type="response.created", response=_make_response(model="gpt-6-astra"), sequence_number=0,
+        ))
+        item_id = "tier_reasoning_001"
+        collector.process(ResponseContentPartAddedEvent(
+            type="response.content_part.added",
+            item_id=item_id, output_index=0, content_index=0,
+            part=ResponseOutputText(type="output_text", text="", annotations=[]), sequence_number=1,
+        ))
+        collector.process(ResponseTextDeltaEvent(
+            type="response.output_text.delta",
+            item_id=item_id, output_index=0, content_index=0, delta="hi", logprobs=[], sequence_number=2,
+        ))
+        usage = ResponseUsage(
+            input_tokens=300_000,
+            output_tokens=1_200,  # 200 visible + 1_000 reasoning, all billed as output
+            total_tokens=301_200,
+            input_tokens_details=InputTokensDetails(cached_tokens=0),
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=1_000),
+        )
+        completed = _make_response(model="gpt-6-astra", status="completed").model_copy(update={"usage": usage})
+        collector.process(ResponseCompletedEvent(type="response.completed", response=completed, sequence_number=3))
+        span_usage = ctx._trace["test_call"].usage
+        assert span_usage["openai/gpt-6-astra:output_text_tokens_long_context"] == 1_200
+        assert span_usage["openai/gpt-6-astra:input_text_tokens_long_context"] == 300_000
 
 
 class TestResponseCollectorResult:

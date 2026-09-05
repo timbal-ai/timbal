@@ -29,6 +29,17 @@ description: "GPT-6, GPT-5, GPT-4, and o-series models with specs, pricing, and 
 
 <Note>GPT-6 Astra was released September 3, 2026 in a staged rollout. Verified reachable on a standard API key via both `/v1/responses` and `/v1/chat/completions` on September 5, 2026; if your org still gets `model_not_found`, the rollout hasn't reached it yet.</Note>
 
+### How long-context and cache pricing is tracked
+
+Every 1.05M-context OpenAI model (GPT-6 Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, GPT-5.4 Pro) bills the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
+
+| Request | Usage keys on `OutputEvent.usage` |
+| --- | --- |
+| ≤ 272K input | `input_text_tokens`, `input_cached_tokens`, `input_cache_write_tokens`, `output_text_tokens` |
+| > 272K input | the same units suffixed `_long_context`, e.g. `openai/gpt-6-astra:output_text_tokens_long_context` |
+
+`input_cache_write_tokens` is split out because OpenAI bills prompt-cache writes at 1.25x the input rate. Reasoning tokens are folded into `output_text_tokens` (they are billed as output). The per-model thresholds and tier rates live in `python/timbal/models.yaml` (`cached_input_price`, `cache_write_price`, `long_context`); `get_long_context_threshold()` in `timbal.core.models` exposes the threshold at runtime.
+
 ---
 
 ## GPT-5 Series

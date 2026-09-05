@@ -44,6 +44,7 @@ from openai.types.responses import (
 )
 from uuid_extensions import uuid7
 
+from ...core.models import get_long_context_threshold
 from ...state import get_billing_id, get_run_context
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
@@ -72,6 +73,33 @@ from ...types.events.delta import (
 from ...types.message import Message
 from .. import register_collector
 from ..base import BaseCollector
+
+LONG_CONTEXT_SUFFIX = "_long_context"
+
+
+def _usage_tier_suffix(billing_id: str, input_tokens: int) -> str:
+    """Return the usage-key suffix for this request's pricing tier.
+
+    OpenAI (>272K on 1.05M-context models), xAI (>200K) and BytePlus (>128K) reprice
+    the *entire* request — input, cache reads/writes and output — once the prompt
+    exceeds the model's threshold. Emitting distinct units (``input_text_tokens_long_context``
+    etc.) lets cost tables bill each tier at its own rate instead of silently applying
+    the short-context rate.
+
+    ``input_tokens`` must be the raw prompt size as reported by the provider (cached and
+    cache-write tokens included) — that is the number the threshold is defined against.
+    """
+    threshold = get_long_context_threshold(billing_id)
+    if threshold is not None and input_tokens > threshold:
+        return LONG_CONTEXT_SUFFIX
+    return ""
+
+
+def _optional_int(obj: Any, attr: str) -> int:
+    """Read an optional integer usage detail, tolerating missing attributes and ``None``."""
+    value = getattr(obj, attr, None) if obj is not None else None
+    return int(value) if value else 0
+
 
 # Create type aliases for OpenAI events
 ChatCompletionEvent = ChatCompletionChunk
@@ -230,20 +258,27 @@ class ChatCompletionCollector(BaseCollector):
         raw_input = int(openai_usage.prompt_tokens)
         raw_output = int(openai_usage.completion_tokens)
         total_tokens = int(getattr(openai_usage, "total_tokens", 0) or 0)
+        # Long-context tier is decided on the raw prompt size (cache hits included)
+        # and applies to every token bucket of this request.
+        tier = _usage_tier_suffix(billing_id, raw_input)
 
         input_tokens = raw_input
         input_tokens_details = openai_usage.prompt_tokens_details
-        if hasattr(input_tokens_details, "cached_tokens") and input_tokens_details.cached_tokens is not None:
-            input_cached_tokens = int(input_tokens_details.cached_tokens)
-            if input_cached_tokens:
-                input_tokens -= input_cached_tokens
-                run_context.update_usage(f"{billing_id}:input_cached_tokens", input_cached_tokens)
-        if hasattr(input_tokens_details, "audio_tokens") and input_tokens_details.audio_tokens is not None:
-            input_audio_tokens = int(input_tokens_details.audio_tokens)
-            if input_audio_tokens:
-                input_tokens -= input_audio_tokens
-                run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
-        run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
+        input_cached_tokens = _optional_int(input_tokens_details, "cached_tokens")
+        if input_cached_tokens:
+            input_tokens -= input_cached_tokens
+            run_context.update_usage(f"{billing_id}:input_cached_tokens{tier}", input_cached_tokens)
+        # Prompt-cache writes are billed at a premium (1.25x input on OpenAI). The SDK
+        # does not declare this field yet; it arrives as a pydantic extra.
+        input_cache_write_tokens = _optional_int(input_tokens_details, "cache_write_tokens")
+        if input_cache_write_tokens:
+            input_tokens -= input_cache_write_tokens
+            run_context.update_usage(f"{billing_id}:input_cache_write_tokens{tier}", input_cache_write_tokens)
+        input_audio_tokens = _optional_int(input_tokens_details, "audio_tokens")
+        if input_audio_tokens:
+            input_tokens -= input_audio_tokens
+            run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
+        run_context.update_usage(f"{billing_id}:input_text_tokens{tier}", input_tokens)
 
         # Total-derived output: visible completion + OpenAI o-series
         # reasoning (already inside completion_tokens) + Gemini hidden
@@ -252,13 +287,11 @@ class ChatCompletionCollector(BaseCollector):
         # inconsistently.
         output_tokens = max(total_tokens - raw_input, raw_output) if total_tokens > 0 else raw_output
         self._output_tokens += output_tokens
-        output_tokens_details = openai_usage.completion_tokens_details
-        if hasattr(output_tokens_details, "audio_tokens") and output_tokens_details.audio_tokens is not None:
-            output_audio_tokens = int(output_tokens_details.audio_tokens)
-            if output_audio_tokens:
-                output_tokens -= output_audio_tokens
-                run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
-        run_context.update_usage(f"{billing_id}:output_text_tokens", output_tokens)
+        output_audio_tokens = _optional_int(openai_usage.completion_tokens_details, "audio_tokens")
+        if output_audio_tokens:
+            output_tokens -= output_audio_tokens
+            run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
+        run_context.update_usage(f"{billing_id}:output_text_tokens{tier}", output_tokens)
 
     def _handle_tool_calls(self, event: ChatCompletionEvent) -> TimbalToolUse | TimbalToolUseDelta | None:
         """Handle tool call events from OpenAI."""
@@ -692,33 +725,38 @@ class ResponseCollector(BaseCollector):
         raw_input = int(usage.input_tokens)
         raw_output = int(usage.output_tokens)
         total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        # Long-context tier is decided on the raw prompt size (cache hits included)
+        # and applies to every token bucket of this request.
+        tier = _usage_tier_suffix(billing_id, raw_input)
 
         input_tokens = raw_input
         input_tokens_details = usage.input_tokens_details
-        if hasattr(input_tokens_details, "cached_tokens"):
-            input_cached_tokens = int(input_tokens_details.cached_tokens)
-            if input_cached_tokens:
-                input_tokens -= input_cached_tokens
-                run_context.update_usage(f"{billing_id}:input_cached_tokens", input_cached_tokens)
-        if hasattr(input_tokens_details, "audio_tokens"):
-            input_audio_tokens = int(input_tokens_details.audio_tokens)
-            if input_audio_tokens:
-                input_tokens -= input_audio_tokens
-                run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
-        run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
+        input_cached_tokens = _optional_int(input_tokens_details, "cached_tokens")
+        if input_cached_tokens:
+            input_tokens -= input_cached_tokens
+            run_context.update_usage(f"{billing_id}:input_cached_tokens{tier}", input_cached_tokens)
+        # Prompt-cache writes are billed at a premium (1.25x input on OpenAI). The SDK
+        # does not declare this field yet; it arrives as a pydantic extra.
+        input_cache_write_tokens = _optional_int(input_tokens_details, "cache_write_tokens")
+        if input_cache_write_tokens:
+            input_tokens -= input_cache_write_tokens
+            run_context.update_usage(f"{billing_id}:input_cache_write_tokens{tier}", input_cache_write_tokens)
+        input_audio_tokens = _optional_int(input_tokens_details, "audio_tokens")
+        if input_audio_tokens:
+            input_tokens -= input_audio_tokens
+            run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
+        run_context.update_usage(f"{billing_id}:input_text_tokens{tier}", input_tokens)
 
         # See `_handle_usage` in ChatCompletionCollector: collapse all
         # billed-as-output tokens (visible + reasoning + hidden thinking)
         # into a single bucket via `total - raw_input`.
         output_tokens = max(total_tokens - raw_input, raw_output) if total_tokens > 0 else raw_output
         self._output_tokens += output_tokens
-        output_tokens_details = usage.output_tokens_details
-        if hasattr(output_tokens_details, "audio_tokens"):
-            output_audio_tokens = int(output_tokens_details.audio_tokens)
-            if output_audio_tokens:
-                output_tokens -= output_audio_tokens
-                run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
-        run_context.update_usage(f"{billing_id}:output_text_tokens", output_tokens)
+        output_audio_tokens = _optional_int(usage.output_tokens_details, "audio_tokens")
+        if output_audio_tokens:
+            output_tokens -= output_audio_tokens
+            run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
+        run_context.update_usage(f"{billing_id}:output_text_tokens{tier}", output_tokens)
 
     @override
     def result(self) -> Message:

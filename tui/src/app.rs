@@ -1288,9 +1288,17 @@ asyncio.run(main())
                                             let mut output_tokens: u64 = 0;
                                             for (key, val) in usage_obj {
                                                 let count = val.as_u64().unwrap_or(0);
-                                                if key.ends_with(":input_tokens") || key.ends_with(":input_text_tokens") {
+                                                // Requests over a provider's long-context threshold are emitted
+                                                // under `<unit>_long_context` so they can be billed at their own
+                                                // rate; they are still the same tokens for display purposes.
+                                                let unit = key
+                                                    .rsplit_once(':')
+                                                    .map(|(_, unit)| unit)
+                                                    .unwrap_or(key.as_str())
+                                                    .trim_end_matches("_long_context");
+                                                if unit == "input_tokens" || unit == "input_text_tokens" {
                                                     input_tokens += count;
-                                                } else if key.ends_with(":output_tokens") || key.ends_with(":output_text_tokens") {
+                                                } else if unit == "output_tokens" || unit == "output_text_tokens" {
                                                     output_tokens += count;
                                                 }
                                             }

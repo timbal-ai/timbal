@@ -3,7 +3,7 @@ title: "Overview"
 description: "Specs, pricing, and capabilities for every supported model"
 ---
 
-Every model supported by Timbal with full specs, pricing, capability scores, and short descriptions. **Price** = per 1M tokens (input / output). All models support tool/function calling unless noted.
+Every model supported by Timbal with full specs, pricing, capability scores, and short descriptions. **Price** = per 1M tokens (input / output) at the provider's standard short-context tier. Models with a long-context surcharge (OpenAI &gt;272K, xAI &gt;200K, BytePlus &gt;128K input tokens) reprice the whole request; Timbal reports those requests under `<unit>_long_context` usage keys so they can be billed at the higher rate — see the [OpenAI page](/models/openai#how-long-context-and-cache-pricing-is-tracked). All models support tool/function calling unless noted.
 
 <CardGroup cols={3}>
   <Card title="Anthropic" icon="https://timbalusercontent.com/assets/claude_favicon.svg" href="/models/anthropic">

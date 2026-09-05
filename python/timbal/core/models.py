@@ -40,6 +40,31 @@ def get_context_window(model_id: str) -> int | None:
     return model.get("context_window")
 
 
+def get_long_context_threshold(model_id: str) -> int | None:
+    """Get the input-token threshold above which a model bills the full request at long-context rates.
+
+    Providers such as OpenAI (>272K on 1.05M-context models) and xAI (>200K) reprice the
+    *entire* request — not just the overflow — once the prompt exceeds this many input tokens.
+    Collectors use it to emit ``<unit>_long_context`` usage keys so cost tables can bill each
+    tier at its own rate.
+
+    Args:
+        model_id: Model identifier (e.g., 'openai/gpt-6-astra').
+
+    Returns:
+        Threshold in input tokens, or None if the model has no long-context tier (or is unknown).
+    """
+    models = _load_models()
+    model = models.get(model_id)
+    if model is None:
+        return None
+    long_context = model.get("long_context")
+    if not isinstance(long_context, dict):
+        return None
+    threshold = long_context.get("threshold")
+    return int(threshold) if threshold is not None else None
+
+
 # ---------------------------------------------------------------------------
 # Model type with provider prefixes
 Model = Literal[
