@@ -31,14 +31,14 @@ description: "GPT-6, GPT-5, GPT-4, and o-series models with specs, pricing, and 
 
 ### How long-context and cache pricing is tracked
 
-Every 1.05M-context OpenAI model (GPT-6 Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, GPT-5.4 Pro) bills the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
+GPT-6 Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro bill the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. (GPT-5.5 Pro's model card publishes no long-context tier and no cached-input discount, so it is billed flat.) Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
 
 | Request | Usage keys on `OutputEvent.usage` |
 | --- | --- |
 | ≤ 272K input | `input_text_tokens`, `input_cached_tokens`, `input_cache_write_tokens`, `output_text_tokens` |
 | > 272K input | the same units suffixed `_long_context`, e.g. `openai/gpt-6-astra:output_text_tokens_long_context` |
 
-`input_cache_write_tokens` is split out because OpenAI bills prompt-cache writes at 1.25x the input rate. Reasoning tokens are folded into `output_text_tokens` (they are billed as output). The per-model thresholds and tier rates live in `python/timbal/models.yaml` (`cached_input_price`, `cache_write_price`, `long_context`); `get_long_context_threshold()` in `timbal.core.models` exposes the threshold at runtime.
+`input_cache_write_tokens` is split out only for models whose catalog entry has a `cache_write_price` (OpenAI bills prompt-cache writes at 1.25x the input rate); on any other model those tokens stay in `input_text_tokens` so they are still billed. Reasoning tokens are folded into `output_text_tokens` (they are billed as output). Eval usage assertions (`output_text_tokens` etc.) and the TUI token summary treat both tiers as the same tokens. The per-model thresholds and tier rates live in `python/timbal/models.yaml` (`cached_input_price`, `cache_write_price`, `long_context`); `get_long_context_threshold()` in `timbal.core.models` exposes the threshold at runtime.
 
 ---
 

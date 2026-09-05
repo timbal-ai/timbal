@@ -200,6 +200,10 @@ def _check_pricing_fields(m: dict) -> list[str]:
     for field in ("input_price", "output_price"):
         if long_context.get(field) is None:
             errors.append(f"long_context.{field} is required on {mid}")
+    # Collectors split cache writes into their own unit whenever the base tier prices them,
+    # and that unit carries the tier suffix over the threshold — so the long tier must price it too.
+    if m.get("cache_write_price") is not None and long_context.get("cache_write_price") is None:
+        errors.append(f"long_context.cache_write_price is required on {mid} because cache_write_price is set")
     for field in _PRICE_FIELDS:
         value = long_context.get(field)
         if value is not None and (not isinstance(value, (int, float)) or value < 0):

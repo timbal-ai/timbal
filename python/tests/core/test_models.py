@@ -1,7 +1,13 @@
 """Tests for core/models.py — get_context_window and model metadata."""
 
 import pytest
-from timbal.core.models import get_context_window, get_long_context_threshold
+from timbal.core.models import (
+    LONG_CONTEXT_USAGE_SUFFIX,
+    base_usage_metric,
+    get_context_window,
+    get_long_context_threshold,
+    has_cache_write_pricing,
+)
 
 
 class TestGetContextWindow:
@@ -70,3 +76,22 @@ class TestGetLongContextThreshold:
             window = get_context_window(model_id)
             assert threshold is not None and window is not None
             assert threshold < window
+
+
+class TestCacheWritePricing:
+    @pytest.mark.parametrize("model_id", ["openai/gpt-6-astra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna"])
+    def test_models_with_published_cache_write_rate(self, model_id: str):
+        assert has_cache_write_pricing(model_id) is True
+
+    @pytest.mark.parametrize("model_id", ["openai/gpt-5.5", "openai/gpt-4o", "xai/grok-4.6", "fake/nope"])
+    def test_models_without_cache_write_rate(self, model_id: str):
+        assert has_cache_write_pricing(model_id) is False
+
+
+class TestBaseUsageMetric:
+    def test_strips_long_context_suffix(self):
+        assert base_usage_metric(f"output_text_tokens{LONG_CONTEXT_USAGE_SUFFIX}") == "output_text_tokens"
+
+    def test_leaves_other_metrics_alone(self):
+        assert base_usage_metric("output_text_tokens") == "output_text_tokens"
+        assert base_usage_metric("web_search_requests") == "web_search_requests"

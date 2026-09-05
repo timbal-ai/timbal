@@ -44,7 +44,11 @@ from openai.types.responses import (
 )
 from uuid_extensions import uuid7
 
-from ...core.models import get_long_context_threshold
+from ...core.models import (
+    LONG_CONTEXT_USAGE_SUFFIX,
+    get_long_context_threshold,
+    has_cache_write_pricing,
+)
 from ...state import get_billing_id, get_run_context
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
@@ -74,8 +78,6 @@ from ...types.message import Message
 from .. import register_collector
 from ..base import BaseCollector
 
-LONG_CONTEXT_SUFFIX = "_long_context"
-
 
 def _usage_tier_suffix(billing_id: str, input_tokens: int) -> str:
     """Return the usage-key suffix for this request's pricing tier.
@@ -91,7 +93,7 @@ def _usage_tier_suffix(billing_id: str, input_tokens: int) -> str:
     """
     threshold = get_long_context_threshold(billing_id)
     if threshold is not None and input_tokens > threshold:
-        return LONG_CONTEXT_SUFFIX
+        return LONG_CONTEXT_USAGE_SUFFIX
     return ""
 
 
@@ -99,6 +101,20 @@ def _optional_int(obj: Any, attr: str) -> int:
     """Read an optional integer usage detail, tolerating missing attributes and ``None``."""
     value = getattr(obj, attr, None) if obj is not None else None
     return int(value) if value else 0
+
+
+def _cache_write_tokens(billing_id: str, input_tokens_details: Any) -> int:
+    """Cache-write tokens to split out of plain input, or 0 when the catalog cannot price them.
+
+    OpenAI bills prompt-cache writes at a premium (1.25x input). The SDK does not declare
+    ``cache_write_tokens`` yet, so it arrives as a pydantic extra. Only models with a
+    ``cache_write_price`` get a dedicated unit — for anything else the tokens must stay in
+    ``input_text_tokens`` so they are still billed (at the input rate) instead of vanishing
+    into a unit with no cost row.
+    """
+    if not has_cache_write_pricing(billing_id):
+        return 0
+    return _optional_int(input_tokens_details, "cache_write_tokens")
 
 
 # Create type aliases for OpenAI events
@@ -268,9 +284,7 @@ class ChatCompletionCollector(BaseCollector):
         if input_cached_tokens:
             input_tokens -= input_cached_tokens
             run_context.update_usage(f"{billing_id}:input_cached_tokens{tier}", input_cached_tokens)
-        # Prompt-cache writes are billed at a premium (1.25x input on OpenAI). The SDK
-        # does not declare this field yet; it arrives as a pydantic extra.
-        input_cache_write_tokens = _optional_int(input_tokens_details, "cache_write_tokens")
+        input_cache_write_tokens = _cache_write_tokens(billing_id, input_tokens_details)
         if input_cache_write_tokens:
             input_tokens -= input_cache_write_tokens
             run_context.update_usage(f"{billing_id}:input_cache_write_tokens{tier}", input_cache_write_tokens)
@@ -735,9 +749,7 @@ class ResponseCollector(BaseCollector):
         if input_cached_tokens:
             input_tokens -= input_cached_tokens
             run_context.update_usage(f"{billing_id}:input_cached_tokens{tier}", input_cached_tokens)
-        # Prompt-cache writes are billed at a premium (1.25x input on OpenAI). The SDK
-        # does not declare this field yet; it arrives as a pydantic extra.
-        input_cache_write_tokens = _optional_int(input_tokens_details, "cache_write_tokens")
+        input_cache_write_tokens = _cache_write_tokens(billing_id, input_tokens_details)
         if input_cache_write_tokens:
             input_tokens -= input_cache_write_tokens
             run_context.update_usage(f"{billing_id}:input_cache_write_tokens{tier}", input_cache_write_tokens)

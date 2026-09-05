@@ -173,6 +173,7 @@ models:
   provider: openai
   display_name: GPT-5.5 Pro
   description: OpenAI GPT-5.5 Pro tier for the hardest coding, agentic, and research workloads via the Responses API.
+  notes: Flat $30/$180 — the model card publishes no cached-input discount and no long-context tier.
   input_price: 30.0
   output_price: 180.0
   context_window: 1050000

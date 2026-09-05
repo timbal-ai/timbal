@@ -12,6 +12,22 @@ from typing import Any, Literal
 
 import yaml
 
+# Suffix collectors append to every token usage unit of a request billed at a provider's
+# long-context tier (e.g. ``openai/gpt-6-astra:output_text_tokens_long_context``).
+LONG_CONTEXT_USAGE_SUFFIX = "_long_context"
+
+
+def base_usage_metric(metric: str) -> str:
+    """Strip the long-context tier suffix from a usage metric name.
+
+    ``output_text_tokens_long_context`` -> ``output_text_tokens``. Use this wherever usage
+    is aggregated for display or assertions rather than for billing, so a request that
+    crossed the tier threshold still counts as the same tokens.
+    """
+    if metric.endswith(LONG_CONTEXT_USAGE_SUFFIX):
+        return metric[: -len(LONG_CONTEXT_USAGE_SUFFIX)]
+    return metric
+
 
 @lru_cache(maxsize=1)
 def _load_models() -> dict[str, dict[str, Any]]:
@@ -63,6 +79,20 @@ def get_long_context_threshold(model_id: str) -> int | None:
         return None
     threshold = long_context.get("threshold")
     return int(threshold) if threshold is not None else None
+
+
+def has_cache_write_pricing(model_id: str) -> bool:
+    """Whether the catalog prices prompt-cache writes separately for a model.
+
+    Collectors only split ``cache_write_tokens`` into their own usage unit when this is
+    True; otherwise those tokens stay in ``input_text_tokens`` (billed at the input rate)
+    rather than landing in a unit no cost table can price.
+    """
+    models = _load_models()
+    model = models.get(model_id)
+    if model is None:
+        return False
+    return model.get("cache_write_price") is not None
 
 
 # ---------------------------------------------------------------------------

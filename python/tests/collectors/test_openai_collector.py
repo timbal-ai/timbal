@@ -897,6 +897,14 @@ class TestChatCompletionCollectorPricingTiers:
         assert usage["openai/gpt-6-astra:input_text_tokens"] == 50  # 100 - 20 - 30
         assert usage["openai/gpt-6-astra:output_text_tokens"] == 5
 
+    def test_cache_writes_stay_in_input_when_catalog_cannot_price_them(self):
+        """gpt-5.5 has no cache_write_price: splitting would leave the tokens in a unit with no cost
+        row (unbilled). They must stay in input_text_tokens and bill at the input rate instead."""
+        usage = self._run("openai/gpt-5.5", prompt_tokens=100, completion_tokens=5, cached=20, cache_write=30)
+        assert "openai/gpt-5.5:input_cache_write_tokens" not in usage
+        assert usage["openai/gpt-5.5:input_cached_tokens"] == 20
+        assert usage["openai/gpt-5.5:input_text_tokens"] == 80  # 100 - 20; cache writes NOT removed
+
     def test_missing_cache_write_field_is_tolerated(self):
         """Older SDK payloads / other providers do not send cache_write_tokens at all."""
         from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
@@ -1564,6 +1572,11 @@ class TestResponseCollectorPricingTiers:
         assert usage["openai/gpt-6-astra:input_cached_tokens"] == 20
         assert usage["openai/gpt-6-astra:input_text_tokens"] == 50
         assert usage["openai/gpt-6-astra:output_text_tokens"] == 5
+
+    def test_cache_writes_stay_in_input_when_catalog_cannot_price_them(self):
+        usage = self._run("openai/gpt-5.4", input_tokens=100, output_tokens=5, cache_write=30)
+        assert "openai/gpt-5.4:input_cache_write_tokens" not in usage
+        assert usage["openai/gpt-5.4:input_text_tokens"] == 100
 
     def test_exactly_at_threshold_is_still_short_context(self):
         usage = self._run("openai/gpt-6-astra", input_tokens=272_000, output_tokens=10)
