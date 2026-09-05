@@ -5,7 +5,7 @@ from typing import Any
 import structlog
 import yaml
 
-from ..core.models import base_usage_metric
+from ..core.models import LONG_CONTEXT_USAGE_SUFFIX, base_usage_metric
 from ..core.runnable import Runnable
 from ..state.tracing.span import Span
 from ..state.tracing.trace import Trace
@@ -83,6 +83,9 @@ def resolve_target(trace: Trace, target: str, path_key: str = "") -> tuple[Span 
         2. If not found and there's only one model in usage, return that model's metric
         3. If multiple models exist, sum the metric across all models
         4. You can still use full keys like "anthropic/claude-haiku-4-5:input_tokens" for specific models
+        5. A metric without the "_long_context" suffix also absorbs the long-context tier bucket of the
+           same metric (requests over a provider's threshold are the same tokens); a suffixed metric
+           selects only that tier
 
     Args:
         trace: The trace to search in.
@@ -140,13 +143,12 @@ def resolve_target(trace: Trace, target: str, path_key: str = "") -> tuple[Span 
             # Check if this dict is a usage dict (previous part was "usage")
             is_usage_dict = idx > 0 and prop_parts[idx - 1] == "usage"
 
-            # Smart usage resolution: handle model-prefixed keys
-            if part not in value and is_usage_dict:
-                resolved = _resolve_usage_key(value, part)
-                if resolved is not None:
-                    value = resolved
-                else:
-                    value = None
+            # Smart usage resolution: model-prefixed keys, snapshot prefixes, and the
+            # long-context tier sibling — always go through the resolver, even when the
+            # exact key exists, so `model:output_text_tokens` also picks up
+            # `model:output_text_tokens_long_context` from a run that crossed the threshold.
+            if is_usage_dict:
+                value = _resolve_usage_key(value, part)
             else:
                 value = value.get(part)
         elif isinstance(value, list):
@@ -193,9 +195,13 @@ def _resolve_usage_key(usage: dict[str, int], key: str) -> int | None:
     Returns:
         The resolved value, or None if not found
     """
-    # If exact key exists, return it
+    # Exact key: return it, plus its long-context sibling when the caller did not ask
+    # for a specific tier (a multi-step run can cross the threshold mid-run and leave
+    # tokens in both buckets). An explicitly suffixed key stays tier-specific.
     if key in usage:
-        return usage[key]
+        if key.endswith(LONG_CONTEXT_USAGE_SUFFIX):
+            return usage[key]
+        return usage[key] + usage.get(f"{key}{LONG_CONTEXT_USAGE_SUFFIX}", 0)
 
     def _metric_matches(usage_metric: str, wanted: str) -> bool:
         return usage_metric == wanted or base_usage_metric(usage_metric) == wanted

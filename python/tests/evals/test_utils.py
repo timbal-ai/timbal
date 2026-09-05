@@ -226,5 +226,43 @@ class TestResolveUsageKey:
         assert _resolve_usage_key(usage, "output_text_tokens_long_context") == 40
         assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens_long_context") == 40
 
+    def test_exact_model_key_sums_long_context_sibling(self):
+        """Exact `model:metric` hit must still add the `_long_context` bucket from the same run."""
+        usage = {
+            "openai/gpt-6-astra:output_text_tokens": 10,
+            "openai/gpt-6-astra:output_text_tokens_long_context": 40,
+            "openai/gpt-6-astra-other:output_text_tokens": 999,  # exact match must NOT widen to prefix
+        }
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 50
+
+    def test_exact_key_without_sibling_is_unchanged(self):
+        usage = {"openai/gpt-6-astra:output_text_tokens": 10}
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 10
+
+    def test_resolve_target_uses_resolver_even_when_exact_key_exists(self):
+        """The `usage.<key>` path in resolve_target must not bypass the resolver on an exact hit."""
+        from timbal.evals.utils import resolve_target
+        from timbal.state.tracing.span import Span
+        from timbal.state.tracing.trace import Trace
+
+        span = Span(
+            path="agent.llm",
+            call_id="c1",
+            t0=0,
+            t1=1,
+            usage={
+                "openai/gpt-6-astra:output_text_tokens": 10,
+                "openai/gpt-6-astra:output_text_tokens_long_context": 40,
+            },
+        )
+        trace = Trace()
+        trace["c1"] = span
+        _, value = resolve_target(trace, "agent.llm.usage.openai/gpt-6-astra:output_text_tokens")
+        assert value == 50
+        _, value = resolve_target(trace, "agent.llm.usage.output_text_tokens")
+        assert value == 50
+        _, value = resolve_target(trace, "agent.llm.usage.openai/gpt-6-astra:output_text_tokens_long_context")
+        assert value == 40
+
     def test_missing_returns_none(self):
         assert _resolve_usage_key({"openai/gpt-4o:input_text_tokens": 1}, "output_text_tokens") is None
