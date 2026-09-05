@@ -16,6 +16,7 @@ NEW_MODEL_IDS = [
     "fireworks/accounts/fireworks/models/qwen3p7-plus",
     "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
     "fireworks/accounts/fireworks/models/kimi-k2p7-code",
+    "openai/gpt-6-astra",
     "openai/gpt-5.6-sol",
     "openai/gpt-5.6-terra",
     "openai/gpt-5.6-luna",
