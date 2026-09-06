@@ -56,6 +56,9 @@ def prepare_messages_request(
     # instead of letting dict.update clobber the generated list.
     provider_params = dict(provider_params)
     extra_tools = provider_params.pop("tools", None)
+    # Caller headers (e.g. `anthropic-beta: fast-mode-2026-02-01` for `speed: "fast"`)
+    # are merged under Timbal's own tracing headers instead of colliding with them.
+    extra_headers = {**(provider_params.pop("extra_headers", None) or {}), **request_headers}
     anthropic_kwargs.update(provider_params)
     if extra_tools:
         anthropic_kwargs["tools"] = [*anthropic_kwargs.get("tools", []), *extra_tools]
@@ -70,7 +73,7 @@ def prepare_messages_request(
                     "schema": transform_schema(output_model),
                 }
             }
-        res = await client.messages.create(extra_headers=request_headers, **anthropic_kwargs)
+        res = await client.messages.create(extra_headers=extra_headers, **anthropic_kwargs)
         async for chunk in res:
             yield chunk
 

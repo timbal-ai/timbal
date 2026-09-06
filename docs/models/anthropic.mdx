@@ -5,6 +5,22 @@ description: "Claude Fable 5.1, Opus 5, Sonnet 5, and Haiku models with specs, p
 
 <Note>Source: [Anthropic model docs](https://platform.claude.com/docs/en/about-claude/models/overview) · [Release notes](https://platform.claude.com/docs/en/release-notes/overview) · [Pricing](https://platform.claude.com/docs/en/about-claude/pricing)</Note>
 
+### How cache and fast-mode pricing is tracked
+
+Every 1M-context Claude model bills the full window at standard rates — there is no long-context tier. The pricing modifiers Anthropic does apply are all reported in the response `usage`, and Timbal's collector emits one unit per disjoint bucket:
+
+| Anthropic `usage` field | Usage key on `OutputEvent.usage` | Rate |
+| --- | --- | --- |
+| `input_tokens` | `input_tokens` | 1x |
+| `cache_read_input_tokens` | `cache_read_input_tokens` | 0.1x (0.025x on Fable 5.1) |
+| `cache_creation.ephemeral_5m_input_tokens` | `ephemeral_5m_input_tokens` | 1.25x |
+| `cache_creation.ephemeral_1h_input_tokens` | `ephemeral_1h_input_tokens` | 2x |
+| `cache_creation_input_tokens` (only when no per-TTL breakdown is reported) | `cache_creation_input_tokens` | 1.25x |
+| `output_tokens` | `output_tokens` | output rate |
+| `server_tool_use.*_requests` | e.g. `web_search_requests` | per call |
+
+`output_tokens_details.thinking_tokens` is a subset of `output_tokens` and is **not** emitted as a separate unit (it would be billed twice). On Opus 5 / Opus 4.8, `usage.speed == "fast"` ([fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), 2x) suffixes every token unit with `_fast`, e.g. `anthropic/claude-opus-5:output_tokens_fast`; pass `model_params={"extra_body": {"speed": "fast"}, "extra_headers": {"anthropic-beta": "fast-mode-2026-02-01"}}` to opt in. If a stream is interrupted before the final `message_delta`, the prompt-side units are still recorded from `message_start` (Anthropic charges them regardless); output is left unbilled.
+
 ## Latest
 
 <CardGroup cols={2}>

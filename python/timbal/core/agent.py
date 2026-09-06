@@ -66,7 +66,7 @@ from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
-from .models import Model, get_context_window
+from .models import Model, base_usage_metric, get_context_window
 from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
 from .tool import Tool
@@ -99,6 +99,34 @@ def _content_chars(c: TextContent | ToolUseContent | ToolResultContent) -> int:
 def _estimate_tokens_from_memory(memory: list[Message]) -> int:
     """Rough token estimate from message content. 1 token ≈ 4 chars (standard approximation)."""
     return max(1, sum(_content_chars(c) for msg in memory for c in msg.content) // 4)
+
+
+# Anthropic cache buckets that sit in the context window but do not start with "input".
+_CONTEXT_CACHE_UNITS = frozenset(
+    {
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "ephemeral_5m_input_tokens",
+        "ephemeral_1h_input_tokens",
+    }
+)
+
+
+def _usage_unit(key: str) -> str:
+    """``provider/model:unit_long_context`` -> ``unit``."""
+    unit = key.rsplit(":", 1)[1] if ":" in key else key
+    return base_usage_metric(unit)
+
+
+def _is_context_input_unit(key: str) -> bool:
+    """Prompt-side token buckets that occupy the context window (any provider)."""
+    unit = _usage_unit(key)
+    return (unit.startswith("input") and "token" in unit) or unit in _CONTEXT_CACHE_UNITS
+
+
+def _is_context_output_unit(key: str) -> bool:
+    unit = _usage_unit(key)
+    return unit.startswith("output") and "token" in unit
 
 
 def _coerce_model_to_str(model: Any) -> str:
@@ -958,17 +986,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 should_compact = True
             elif prev_usage:
                 # Anthropic's input_tokens excludes cached tokens: full context =
-                # input_tokens + cache_creation_input_tokens + cache_read_input_tokens
-                # (disjoint totals). Count the two cache totals explicitly — not via a
-                # loose "input" match, which would double-count the flattened per-TTL
-                # breakdown keys (e.g. ephemeral_5m_input_tokens).
-                prev_input_tokens = sum(
-                    v
-                    for k, v in prev_usage.items()
-                    if (":input" in k and "token" in k)
-                    or k.endswith((":cache_creation_input_tokens", ":cache_read_input_tokens"))
-                )
-                prev_output_tokens = sum(v for k, v in prev_usage.items() if ":output" in k and "token" in k)
+                # input_tokens + cache reads + cache writes (disjoint buckets). The
+                # collector emits cache writes either as the aggregate
+                # `cache_creation_input_tokens` or as the per-TTL `ephemeral_*` units —
+                # never both — so every cache unit is counted exactly once. Pricing-tier
+                # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
+                prev_input_tokens = sum(v for k, v in prev_usage.items() if _is_context_input_unit(k))
+                prev_output_tokens = sum(v for k, v in prev_usage.items() if _is_context_output_unit(k))
                 utilization = (prev_input_tokens + prev_output_tokens) / context_window
                 should_compact = utilization >= self.memory_compaction_ratio
             else:

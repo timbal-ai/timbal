@@ -51,18 +51,25 @@ models:
   display_name: Claude Opus 5
   description: Anthropic's latest Opus — near-frontier intelligence at half the price of Fable 5, with step-change gains in
     deep reasoning, agentic coding, and long-horizon tasks.
-  notes: Thinking is on by default; effort defaults to high and `thinking.type=disabled` is rejected at xhigh/max effort.
-    Fast mode (~2.5x speed) is $10/$50 per 1M tokens on the Claude API only.
+  notes: 'Thinking is on by default; effort defaults to high and `thinking.type=disabled` is rejected at xhigh/max effort.
+    Fast mode (~2.5x speed, `speed: "fast"` + `fast-mode-2026-02-01` beta) is $10/$50 per 1M tokens on the Claude API only;
+    cache multipliers stack on top. Reported as `usage.speed` and metered with `_fast` units.'
   input_price: 5.0
   output_price: 25.0
+  service_tiers:
+    fast: 2.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-8
   provider: anthropic
   display_name: Claude Opus 4.8
   description: Previous-generation Opus for coding, agents, and long-context reasoning. Superseded by Opus 5 at the same price.
+  notes: 'Fast mode (`speed: "fast"` + `fast-mode-2026-02-01` beta) is $10/$50 per 1M tokens on the Claude API only; cache
+    multipliers stack on top. Reported as `usage.speed` and metered with `_fast` units.'
   input_price: 5.0
   output_price: 25.0
+  service_tiers:
+    fast: 2.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-sonnet-5

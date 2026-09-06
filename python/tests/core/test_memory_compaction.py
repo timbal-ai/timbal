@@ -1661,6 +1661,57 @@ class TestContextWindowTriggering:
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
+    async def test_per_ttl_cache_write_units_count_toward_utilization(self, monkeypatch) -> None:
+        """The Anthropic collector emits cache writes as `ephemeral_5m/1h_input_tokens` (per-TTL
+        pricing) instead of the aggregate; they occupy the context window all the same."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(),
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+
+        # 90% utilization: 1k input + 40k 5m-write + 45k 1h-write + 4k output.
+        root1 = ctx1.root_span()
+        root1.usage["anthropic/claude-opus-5:input_tokens_fast"] = 1_000
+        root1.usage["anthropic/claude-opus-5:ephemeral_5m_input_tokens_fast"] = 40_000
+        root1.usage["anthropic/claude-opus-5:ephemeral_1h_input_tokens_fast"] = 45_000
+        root1.usage["anthropic/claude-opus-5:output_tokens_fast"] = 4_000
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "Per-TTL cache write units must count toward context utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
     async def test_compaction_skipped_at_low_utilization(self, monkeypatch) -> None:
         """When previous run used only 10% of context window, compactors should NOT fire."""
         from timbal.core.agent import Agent
