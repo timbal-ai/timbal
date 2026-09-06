@@ -5,7 +5,7 @@ from typing import Any
 import structlog
 import yaml
 
-from ..core.models import LONG_CONTEXT_USAGE_SUFFIX, base_usage_metric
+from ..core.models import base_usage_metric
 from ..core.runnable import Runnable
 from ..state.tracing.span import Span
 from ..state.tracing.trace import Trace
@@ -195,13 +195,21 @@ def _resolve_usage_key(usage: dict[str, int], key: str) -> int | None:
     Returns:
         The resolved value, or None if not found
     """
-    # Exact key: return it, plus its long-context sibling when the caller did not ask
-    # for a specific tier (a multi-step run can cross the threshold mid-run and leave
-    # tokens in both buckets). An explicitly suffixed key stays tier-specific.
+    # Exact key: a caller asking for a base metric gets every pricing-tier variant
+    # for that exact model. An explicitly suffixed key stays tier-specific.
     if key in usage:
-        if key.endswith(LONG_CONTEXT_USAGE_SUFFIX):
+        if ":" not in key:
             return usage[key]
-        return usage[key] + usage.get(f"{key}{LONG_CONTEXT_USAGE_SUFFIX}", 0)
+        model, metric = key.rsplit(":", 1)
+        if base_usage_metric(metric) != metric:
+            return usage[key]
+        return sum(
+            value
+            for usage_key, value in usage.items()
+            if ":" in usage_key
+            and usage_key.rsplit(":", 1)[0] == model
+            and base_usage_metric(usage_key.rsplit(":", 1)[1]) == metric
+        )
 
     def _metric_matches(usage_metric: str, wanted: str) -> bool:
         return usage_metric == wanted or base_usage_metric(usage_metric) == wanted

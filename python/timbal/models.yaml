@@ -17,6 +17,10 @@
 #     output_price: 75.0
 #     cached_input_price: 2.0
 #     cache_write_price: 25.0
+#     inclusive: true      Optional; use `>= threshold` instead of the default `> threshold`.
+#   service_tiers:         Multipliers for provider-reported processing tiers.
+#     flex: 0.5             Collectors append `_flex` / `_fast` to every priced token unit.
+#     fast: 2.0
 
 models:
 - id: anthropic/claude-fable-5-1
@@ -152,6 +156,9 @@ models:
     output_price: 75.0
     cached_input_price: 2.0
     cache_write_price: 25.0
+  service_tiers:
+    flex: 0.5
+    fast: 2.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.5
@@ -783,26 +790,32 @@ models:
   provider: xai
   display_name: Grok 4.6
   description: xAI's August 2026 flagship for coding, long-running agents, and ambitious interactive work.
-  notes: Long-context surcharge applies above 200k tokens ($4/$12 per 1M).
+  notes: Long-context surcharge applies at 200k tokens ($4/$12 per 1M; cached $1).
   input_price: 2.0
   output_price: 6.0
+  cached_input_price: 0.5
   long_context:
     threshold: 200000
+    inclusive: true
     input_price: 4.0
     output_price: 12.0
+    cached_input_price: 1.0
   context_window: 500000
   capabilities: [vision, tools, reasoning]
 - id: xai/grok-4.5
   provider: xai
   display_name: Grok 4.5
   description: xAI's July 2026 flagship for coding, agentic tool use, and knowledge work with configurable reasoning effort.
-  notes: Long-context surcharge applies above 200k tokens ($4/$12 per 1M).
+  notes: Long-context surcharge applies at 200k tokens ($4/$12 per 1M; cached $0.60).
   input_price: 2.0
   output_price: 6.0
+  cached_input_price: 0.3
   long_context:
     threshold: 200000
+    inclusive: true
     input_price: 4.0
     output_price: 12.0
+    cached_input_price: 0.6
   context_window: 500000
   capabilities: [vision, tools, reasoning]
 - id: xai/grok-4.3
@@ -810,13 +823,16 @@ models:
   display_name: Grok 4.3
   description: xAI production mid-tier for coding, agents, and general workloads; replacement for retired Grok 4 Fast / 4.1
     Fast slugs.
-  notes: Long-context surcharge applies above 200k tokens ($2.50/$5.00 per 1M).
+  notes: Long-context surcharge applies at 200k tokens ($2.50/$5.00 per 1M; cached $0.40).
   input_price: 1.25
   output_price: 2.5
+  cached_input_price: 0.2
   long_context:
     threshold: 200000
+    inclusive: true
     input_price: 2.5
     output_price: 5.0
+    cached_input_price: 0.4
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: groq/qwen/qwen3.6-27b
@@ -925,18 +941,27 @@ models:
   notes: Long-context surcharge applies above 128k tokens ($0.50/$4.00 per 1M).
   input_price: 0.25
   output_price: 2.0
+  cached_input_price: 0.05
   long_context:
     threshold: 128000
     input_price: 0.5
     output_price: 4.0
+    cached_input_price: 0.1
   context_window: 256000
   capabilities: [vision, tools, video]
 - id: byteplus/seed-2-0-mini-260215
   provider: byteplus
   display_name: Seed 2.0 Mini
   description: Lightweight Seed 2.0 model designed for edge deployments and cost-sensitive scenarios requiring fast responses.
+  notes: Long-context surcharge applies above 128k tokens ($0.20/$0.80 per 1M; cached $0.04).
   input_price: 0.1
   output_price: 0.4
+  cached_input_price: 0.02
+  long_context:
+    threshold: 128000
+    input_price: 0.2
+    output_price: 0.8
+    cached_input_price: 0.04
   context_window: 256000
   capabilities: [tools, reasoning]
 - id: byteplus/seed-1-8-251228
@@ -944,8 +969,13 @@ models:
   display_name: Seed 1.8
   description: Advanced multimodal model with deep thinking and strong agent capabilities supporting text, image, video, and
     document understanding.
+  notes: Long-context surcharge applies above 128k tokens ($0.50/$4.00 per 1M).
   input_price: 0.25
   output_price: 2.0
+  long_context:
+    threshold: 128000
+    input_price: 0.5
+    output_price: 4.0
   context_window: 256000
   capabilities: [vision, tools, reasoning, video]
 - id: byteplus/seed-1-6-250915
@@ -967,10 +997,12 @@ models:
   requires_activation: true
   input_price: 0.5
   output_price: 3.0
+  cached_input_price: 0.1
   long_context:
     threshold: 128000
     input_price: 1.0
     output_price: 6.0
+    cached_input_price: 0.2
   context_window: 256000
   capabilities: [vision, tools, reasoning, video]
 - id: byteplus/kimi-k2-250905

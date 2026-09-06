@@ -12,20 +12,27 @@ from typing import Any, Literal
 
 import yaml
 
-# Suffix collectors append to every token usage unit of a request billed at a provider's
-# long-context tier (e.g. ``openai/gpt-6-astra:output_text_tokens_long_context``).
+# Suffixes collectors append to token usage units for non-standard pricing.
 LONG_CONTEXT_USAGE_SUFFIX = "_long_context"
+FAST_USAGE_SUFFIX = "_fast"
+FLEX_USAGE_SUFFIX = "_flex"
+_PRICING_USAGE_SUFFIXES = (FAST_USAGE_SUFFIX, FLEX_USAGE_SUFFIX, LONG_CONTEXT_USAGE_SUFFIX)
 
 
 def base_usage_metric(metric: str) -> str:
-    """Strip the long-context tier suffix from a usage metric name.
+    """Strip all pricing-tier suffixes from a usage metric name.
 
-    ``output_text_tokens_long_context`` -> ``output_text_tokens``. Use this wherever usage
-    is aggregated for display or assertions rather than for billing, so a request that
-    crossed the tier threshold still counts as the same tokens.
+    ``output_text_tokens_long_context_fast`` -> ``output_text_tokens``. Use this wherever
+    usage is aggregated for display or assertions rather than billing.
     """
-    if metric.endswith(LONG_CONTEXT_USAGE_SUFFIX):
-        return metric[: -len(LONG_CONTEXT_USAGE_SUFFIX)]
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _PRICING_USAGE_SUFFIXES:
+            if metric.endswith(suffix):
+                metric = metric[: -len(suffix)]
+                changed = True
+                break
     return metric
 
 
@@ -59,10 +66,8 @@ def get_context_window(model_id: str) -> int | None:
 def get_long_context_threshold(model_id: str) -> int | None:
     """Get the input-token threshold above which a model bills the full request at long-context rates.
 
-    Providers such as OpenAI (>272K on 1.05M-context models) and xAI (>200K) reprice the
-    *entire* request — not just the overflow — once the prompt exceeds this many input tokens.
-    Collectors use it to emit ``<unit>_long_context`` usage keys so cost tables can bill each
-    tier at its own rate.
+    Providers such as OpenAI (>272K on 1.05M-context models) and xAI (>=200K) reprice
+    the *entire* request — not just the overflow — at a model-specific boundary.
 
     Args:
         model_id: Model identifier (e.g., 'openai/gpt-6-astra').
@@ -79,6 +84,38 @@ def get_long_context_threshold(model_id: str) -> int | None:
         return None
     threshold = long_context.get("threshold")
     return int(threshold) if threshold is not None else None
+
+
+def uses_long_context_pricing(model_id: str, input_tokens: int) -> bool:
+    """Whether this prompt falls in the model's long-context pricing tier."""
+    model = _load_models().get(model_id)
+    if model is None:
+        return False
+    long_context = model.get("long_context")
+    if not isinstance(long_context, dict):
+        return False
+    threshold = long_context.get("threshold")
+    if threshold is None:
+        return False
+    if long_context.get("inclusive", False):
+        return input_tokens >= int(threshold)
+    return input_tokens > int(threshold)
+
+
+def service_tier_usage_suffix(model_id: str, service_tier: str | None) -> str:
+    """Return the priced usage suffix for the actual provider service tier."""
+    if not service_tier:
+        return ""
+    tier = "fast" if service_tier == "priority" else service_tier
+    model = _load_models().get(model_id)
+    tiers = model.get("service_tiers") if model is not None else None
+    if not isinstance(tiers, dict) or tier not in tiers:
+        return ""
+    if tier == "fast":
+        return FAST_USAGE_SUFFIX
+    if tier == "flex":
+        return FLEX_USAGE_SUFFIX
+    return ""
 
 
 def has_cache_write_pricing(model_id: str) -> bool:

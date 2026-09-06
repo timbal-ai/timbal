@@ -38,7 +38,7 @@ GPT-6 Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro bill the *
 | ≤ 272K input | `input_text_tokens`, `input_cached_tokens`, `input_cache_write_tokens`, `output_text_tokens` |
 | > 272K input | the same units suffixed `_long_context`, e.g. `openai/gpt-6-astra:output_text_tokens_long_context` |
 
-`input_cache_write_tokens` is split out only for models whose catalog entry has a `cache_write_price` (OpenAI bills prompt-cache writes at 1.25x the input rate); on any other model those tokens stay in `input_text_tokens` so they are still billed. Reasoning tokens are folded into `output_text_tokens` (they are billed as output). Eval usage assertions (`output_text_tokens` etc.) and the TUI token summary treat both tiers as the same tokens. The per-model thresholds and tier rates live in `python/timbal/models.yaml` (`cached_input_price`, `cache_write_price`, `long_context`); `get_long_context_threshold()` in `timbal.core.models` exposes the threshold at runtime.
+`input_cache_write_tokens` is split out only for models whose catalog entry has a `cache_write_price` (OpenAI bills prompt-cache writes at 1.25x the input rate); on any other model those tokens stay in `input_text_tokens` so they are still billed. Reasoning tokens are folded into `output_text_tokens` (they are billed as output). Astra responses served by Flex or Fast processing additionally use `_flex` or `_fast` (for example, `output_text_tokens_long_context_fast`) so the processing multiplier is preserved. Eval usage assertions treat all pricing tiers as the same underlying tokens. The per-model thresholds and tier rates live in `python/timbal/models.yaml` (`cached_input_price`, `cache_write_price`, `long_context`, `service_tiers`).
 
 ---
 

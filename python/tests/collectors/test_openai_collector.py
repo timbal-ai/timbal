@@ -856,7 +856,15 @@ class TestChatCompletionCollectorHandleUsage:
         assert span.usage.get("openai/gpt-4o:output_text_tokens") == 6  # 10 - 4
 
 
-def _cc_usage_chunk(*, model: str, prompt_tokens: int, completion_tokens: int, cached: int = 0, cache_write: int = 0):
+def _cc_usage_chunk(
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached: int = 0,
+    cache_write: object = 0,
+    service_tier: str | None = None,
+):
     """Build a usage-only chunk; ``cache_write_tokens`` is a pydantic extra (SDK does not declare it yet)."""
     from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
@@ -873,6 +881,7 @@ def _cc_usage_chunk(*, model: str, prompt_tokens: int, completion_tokens: int, c
         created=int(time.time()),
         model=model,
         object="chat.completion.chunk",
+        service_tier=service_tier,
         usage=usage,
     )
 
@@ -931,6 +940,29 @@ class TestChatCompletionCollectorPricingTiers:
         assert "openai/gpt-4o:input_cache_write_tokens" not in span_usage
         assert span_usage["openai/gpt-4o:input_text_tokens"] == 20
 
+    @pytest.mark.parametrize("cache_write", ["bad", -5, None])
+    def test_malformed_cache_write_tokens_stay_in_plain_input(self, cache_write):
+        usage = self._run(
+            "openai/gpt-6-astra",
+            prompt_tokens=100,
+            completion_tokens=5,
+            cache_write=cache_write,
+        )
+        assert "openai/gpt-6-astra:input_cache_write_tokens" not in usage
+        assert usage["openai/gpt-6-astra:input_text_tokens"] == 100
+
+    def test_usage_details_cannot_make_plain_input_negative(self):
+        usage = self._run(
+            "openai/gpt-6-astra",
+            prompt_tokens=100,
+            completion_tokens=5,
+            cached=80,
+            cache_write=80,
+        )
+        assert usage["openai/gpt-6-astra:input_cached_tokens"] == 80
+        assert usage["openai/gpt-6-astra:input_cache_write_tokens"] == 20
+        assert usage["openai/gpt-6-astra:input_text_tokens"] == 0
+
     def test_short_context_uses_base_units(self):
         usage = self._run("openai/gpt-6-astra", prompt_tokens=200_000, completion_tokens=10)
         assert usage["openai/gpt-6-astra:input_text_tokens"] == 200_000
@@ -965,6 +997,35 @@ class TestChatCompletionCollectorPricingTiers:
         usage = self._run("openai/gpt-4o", prompt_tokens=120_000, completion_tokens=10)
         assert usage["openai/gpt-4o:input_text_tokens"] == 120_000
         assert not any(k.endswith("_long_context") for k in usage)
+
+    def test_xai_threshold_is_inclusive(self):
+        usage = self._run("xai/grok-4.6", prompt_tokens=200_000, completion_tokens=10, cached=50_000)
+        assert usage["xai/grok-4.6:input_cached_tokens_long_context"] == 50_000
+        assert usage["xai/grok-4.6:input_text_tokens_long_context"] == 150_000
+
+    @pytest.mark.parametrize(
+        "service_tier,suffix",
+        [("priority", "_fast"), ("flex", "_flex")],
+    )
+    def test_astra_service_tier_uses_priced_units(self, service_tier, suffix):
+        usage = self._run(
+            "openai/gpt-6-astra",
+            prompt_tokens=100,
+            completion_tokens=5,
+            service_tier=service_tier,
+        )
+        assert usage[f"openai/gpt-6-astra:input_text_tokens{suffix}"] == 100
+        assert usage[f"openai/gpt-6-astra:output_text_tokens{suffix}"] == 5
+
+    def test_service_tier_combines_with_long_context(self):
+        usage = self._run(
+            "openai/gpt-6-astra",
+            prompt_tokens=300_000,
+            completion_tokens=5,
+            service_tier="priority",
+        )
+        assert usage["openai/gpt-6-astra:input_text_tokens_long_context_fast"] == 300_000
+        assert usage["openai/gpt-6-astra:output_text_tokens_long_context_fast"] == 5
 
     def test_byteplus_tier_via_chat_completions(self):
         """BytePlus (OpenAI-compatible) surcharges above 128K and flows through this collector."""
@@ -1536,7 +1597,16 @@ class TestResponseCollectorHandleCompleted:
 class TestResponseCollectorPricingTiers:
     """Cache-write accounting and long-context repricing on the Responses path."""
 
-    def _run(self, billing_id: str, *, input_tokens: int, output_tokens: int, cached: int = 0, cache_write: int = 0):
+    def _run(
+        self,
+        billing_id: str,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cached: int = 0,
+        cache_write: object = 0,
+        service_tier: str | None = None,
+    ):
         api_model = billing_id.split("/", 1)[1]
         ctx = _make_context()
         set_billing_id(billing_id)
@@ -1562,7 +1632,9 @@ class TestResponseCollectorPricingTiers:
             input_tokens_details=InputTokensDetails(cached_tokens=cached, cache_write_tokens=cache_write),
             output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
         )
-        completed = _make_response(model=api_model, status="completed").model_copy(update={"usage": usage})
+        completed = _make_response(model=api_model, status="completed").model_copy(
+            update={"usage": usage, "service_tier": service_tier}
+        )
         collector.process(ResponseCompletedEvent(type="response.completed", response=completed, sequence_number=3))
         return ctx._trace["test_call"].usage
 
@@ -1592,12 +1664,22 @@ class TestResponseCollectorPricingTiers:
         assert "openai/gpt-6-astra:input_text_tokens" not in usage
 
     def test_xai_tier_via_responses(self):
-        """xAI runs through the Responses collector and surcharges above 200K."""
+        """xAI runs through the Responses collector and surcharges at 200K."""
         usage = self._run("xai/grok-4.6", input_tokens=200_001, output_tokens=10)
         assert usage["xai/grok-4.6:input_text_tokens_long_context"] == 200_001
         assert usage["xai/grok-4.6:output_text_tokens_long_context"] == 10
         usage = self._run("xai/grok-4.6", input_tokens=200_000, output_tokens=10)
-        assert usage["xai/grok-4.6:input_text_tokens"] == 200_000
+        assert usage["xai/grok-4.6:input_text_tokens_long_context"] == 200_000
+
+    def test_service_tier_via_responses(self):
+        usage = self._run(
+            "openai/gpt-6-astra",
+            input_tokens=300_000,
+            output_tokens=10,
+            service_tier="priority",
+        )
+        assert usage["openai/gpt-6-astra:input_text_tokens_long_context_fast"] == 300_000
+        assert usage["openai/gpt-6-astra:output_text_tokens_long_context_fast"] == 10
 
     def test_reasoning_tokens_follow_output_into_long_tier(self):
         """Hidden reasoning is billed as output; it must move tiers with the rest of the request."""

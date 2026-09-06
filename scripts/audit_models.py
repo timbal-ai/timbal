@@ -184,6 +184,22 @@ def _check_pricing_fields(m: dict) -> list[str]:
         if value is not None and (not isinstance(value, (int, float)) or value < 0):
             errors.append(f"{field} must be a non-negative number on {mid}: {value!r}")
 
+    service_tiers = m.get("service_tiers")
+    if service_tiers is not None:
+        if not isinstance(service_tiers, dict):
+            errors.append(f"service_tiers must be a mapping on {mid}")
+        else:
+            unknown_tiers = set(service_tiers) - {"fast", "flex"}
+            if unknown_tiers:
+                errors.append(f"unknown service_tiers on {mid}: {sorted(unknown_tiers)}")
+            for tier, multiplier in service_tiers.items():
+                if (
+                    not isinstance(multiplier, (int, float))
+                    or isinstance(multiplier, bool)
+                    or multiplier <= 0
+                ):
+                    errors.append(f"service_tiers.{tier} must be a positive number on {mid}: {multiplier!r}")
+
     long_context = m.get("long_context")
     if long_context is None:
         return errors
@@ -204,6 +220,8 @@ def _check_pricing_fields(m: dict) -> list[str]:
     # and that unit carries the tier suffix over the threshold — so the long tier must price it too.
     if m.get("cache_write_price") is not None and long_context.get("cache_write_price") is None:
         errors.append(f"long_context.cache_write_price is required on {mid} because cache_write_price is set")
+    if m.get("cached_input_price") is not None and long_context.get("cached_input_price") is None:
+        errors.append(f"long_context.cached_input_price is required on {mid} because cached_input_price is set")
     for field in _PRICE_FIELDS:
         value = long_context.get(field)
         if value is not None and (not isinstance(value, (int, float)) or value < 0):
@@ -213,7 +231,11 @@ def _check_pricing_fields(m: dict) -> list[str]:
         if isinstance(value, (int, float)) and isinstance(base, (int, float)) and value < base:
             errors.append(f"long_context.{field} ({value}) is below base {field} ({base}) on {mid}")
 
-    unknown = set(long_context) - {"threshold", *_PRICE_FIELDS}
+    inclusive = long_context.get("inclusive")
+    if inclusive is not None and not isinstance(inclusive, bool):
+        errors.append(f"long_context.inclusive must be a bool on {mid}: {inclusive!r}")
+
+    unknown = set(long_context) - {"threshold", "inclusive", *_PRICE_FIELDS}
     if unknown:
         errors.append(f"unknown long_context keys on {mid}: {sorted(unknown)}")
 

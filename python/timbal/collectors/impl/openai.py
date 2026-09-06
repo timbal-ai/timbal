@@ -46,8 +46,9 @@ from uuid_extensions import uuid7
 
 from ...core.models import (
     LONG_CONTEXT_USAGE_SUFFIX,
-    get_long_context_threshold,
     has_cache_write_pricing,
+    service_tier_usage_suffix,
+    uses_long_context_pricing,
 )
 from ...state import get_billing_id, get_run_context
 from ...types.content.text import TextContent
@@ -79,10 +80,10 @@ from .. import register_collector
 from ..base import BaseCollector
 
 
-def _usage_tier_suffix(billing_id: str, input_tokens: int) -> str:
+def _usage_tier_suffix(billing_id: str, input_tokens: int, service_tier: str | None = None) -> str:
     """Return the usage-key suffix for this request's pricing tier.
 
-    OpenAI (>272K on 1.05M-context models), xAI (>200K) and BytePlus (>128K) reprice
+    OpenAI (>272K on 1.05M-context models), xAI (>=200K) and BytePlus (>128K) reprice
     the *entire* request — input, cache reads/writes and output — once the prompt
     exceeds the model's threshold. Emitting distinct units (``input_text_tokens_long_context``
     etc.) lets cost tables bill each tier at its own rate instead of silently applying
@@ -91,16 +92,25 @@ def _usage_tier_suffix(billing_id: str, input_tokens: int) -> str:
     ``input_tokens`` must be the raw prompt size as reported by the provider (cached and
     cache-write tokens included) — that is the number the threshold is defined against.
     """
-    threshold = get_long_context_threshold(billing_id)
-    if threshold is not None and input_tokens > threshold:
-        return LONG_CONTEXT_USAGE_SUFFIX
-    return ""
+    suffix = LONG_CONTEXT_USAGE_SUFFIX if uses_long_context_pricing(billing_id, input_tokens) else ""
+    return f"{suffix}{service_tier_usage_suffix(billing_id, service_tier)}"
 
 
 def _optional_int(obj: Any, attr: str) -> int:
-    """Read an optional integer usage detail, tolerating missing attributes and ``None``."""
+    """Read a non-negative optional integer, tolerating malformed provider extras."""
     value = getattr(obj, attr, None) if obj is not None else None
-    return int(value) if value else 0
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _bounded_usage_detail(obj: Any, attr: str, remaining: int) -> int:
+    """Read a usage detail without allowing malformed telemetry to make a bucket negative."""
+    return min(_optional_int(obj, attr), max(remaining, 0))
 
 
 def _cache_write_tokens(billing_id: str, input_tokens_details: Any) -> int:
@@ -276,19 +286,19 @@ class ChatCompletionCollector(BaseCollector):
         total_tokens = int(getattr(openai_usage, "total_tokens", 0) or 0)
         # Long-context tier is decided on the raw prompt size (cache hits included)
         # and applies to every token bucket of this request.
-        tier = _usage_tier_suffix(billing_id, raw_input)
+        tier = _usage_tier_suffix(billing_id, raw_input, getattr(event, "service_tier", None))
 
         input_tokens = raw_input
         input_tokens_details = openai_usage.prompt_tokens_details
-        input_cached_tokens = _optional_int(input_tokens_details, "cached_tokens")
+        input_cached_tokens = _bounded_usage_detail(input_tokens_details, "cached_tokens", input_tokens)
         if input_cached_tokens:
             input_tokens -= input_cached_tokens
             run_context.update_usage(f"{billing_id}:input_cached_tokens{tier}", input_cached_tokens)
-        input_cache_write_tokens = _cache_write_tokens(billing_id, input_tokens_details)
+        input_cache_write_tokens = min(_cache_write_tokens(billing_id, input_tokens_details), max(input_tokens, 0))
         if input_cache_write_tokens:
             input_tokens -= input_cache_write_tokens
             run_context.update_usage(f"{billing_id}:input_cache_write_tokens{tier}", input_cache_write_tokens)
-        input_audio_tokens = _optional_int(input_tokens_details, "audio_tokens")
+        input_audio_tokens = _bounded_usage_detail(input_tokens_details, "audio_tokens", input_tokens)
         if input_audio_tokens:
             input_tokens -= input_audio_tokens
             run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
@@ -301,7 +311,7 @@ class ChatCompletionCollector(BaseCollector):
         # inconsistently.
         output_tokens = max(total_tokens - raw_input, raw_output) if total_tokens > 0 else raw_output
         self._output_tokens += output_tokens
-        output_audio_tokens = _optional_int(openai_usage.completion_tokens_details, "audio_tokens")
+        output_audio_tokens = _bounded_usage_detail(openai_usage.completion_tokens_details, "audio_tokens", output_tokens)
         if output_audio_tokens:
             output_tokens -= output_audio_tokens
             run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
@@ -741,19 +751,19 @@ class ResponseCollector(BaseCollector):
         total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
         # Long-context tier is decided on the raw prompt size (cache hits included)
         # and applies to every token bucket of this request.
-        tier = _usage_tier_suffix(billing_id, raw_input)
+        tier = _usage_tier_suffix(billing_id, raw_input, getattr(event.response, "service_tier", None))
 
         input_tokens = raw_input
         input_tokens_details = usage.input_tokens_details
-        input_cached_tokens = _optional_int(input_tokens_details, "cached_tokens")
+        input_cached_tokens = _bounded_usage_detail(input_tokens_details, "cached_tokens", input_tokens)
         if input_cached_tokens:
             input_tokens -= input_cached_tokens
             run_context.update_usage(f"{billing_id}:input_cached_tokens{tier}", input_cached_tokens)
-        input_cache_write_tokens = _cache_write_tokens(billing_id, input_tokens_details)
+        input_cache_write_tokens = min(_cache_write_tokens(billing_id, input_tokens_details), max(input_tokens, 0))
         if input_cache_write_tokens:
             input_tokens -= input_cache_write_tokens
             run_context.update_usage(f"{billing_id}:input_cache_write_tokens{tier}", input_cache_write_tokens)
-        input_audio_tokens = _optional_int(input_tokens_details, "audio_tokens")
+        input_audio_tokens = _bounded_usage_detail(input_tokens_details, "audio_tokens", input_tokens)
         if input_audio_tokens:
             input_tokens -= input_audio_tokens
             run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
@@ -764,7 +774,7 @@ class ResponseCollector(BaseCollector):
         # into a single bucket via `total - raw_input`.
         output_tokens = max(total_tokens - raw_input, raw_output) if total_tokens > 0 else raw_output
         self._output_tokens += output_tokens
-        output_audio_tokens = _optional_int(usage.output_tokens_details, "audio_tokens")
+        output_audio_tokens = _bounded_usage_detail(usage.output_tokens_details, "audio_tokens", output_tokens)
         if output_audio_tokens:
             output_tokens -= output_audio_tokens
             run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)

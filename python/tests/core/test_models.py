@@ -2,11 +2,15 @@
 
 import pytest
 from timbal.core.models import (
+    FAST_USAGE_SUFFIX,
+    FLEX_USAGE_SUFFIX,
     LONG_CONTEXT_USAGE_SUFFIX,
     base_usage_metric,
     get_context_window,
     get_long_context_threshold,
     has_cache_write_pricing,
+    service_tier_usage_suffix,
+    uses_long_context_pricing,
 )
 
 
@@ -69,6 +73,12 @@ class TestGetLongContextThreshold:
     def test_unknown_model_returns_none(self):
         assert get_long_context_threshold("fake/nonexistent-model-xyz") is None
 
+    def test_provider_specific_boundary_semantics(self):
+        assert uses_long_context_pricing("openai/gpt-6-astra", 272_000) is False
+        assert uses_long_context_pricing("openai/gpt-6-astra", 272_001) is True
+        assert uses_long_context_pricing("xai/grok-4.6", 199_999) is False
+        assert uses_long_context_pricing("xai/grok-4.6", 200_000) is True
+
     def test_threshold_is_below_context_window(self):
         """The tier must be reachable: threshold strictly inside the advertised window."""
         for model_id in ("openai/gpt-6-astra", "xai/grok-4.6", "byteplus/seed-2-0-lite-260228"):
@@ -92,6 +102,21 @@ class TestBaseUsageMetric:
     def test_strips_long_context_suffix(self):
         assert base_usage_metric(f"output_text_tokens{LONG_CONTEXT_USAGE_SUFFIX}") == "output_text_tokens"
 
+    def test_strips_combined_pricing_suffixes(self):
+        metric = f"output_text_tokens{LONG_CONTEXT_USAGE_SUFFIX}{FAST_USAGE_SUFFIX}"
+        assert base_usage_metric(metric) == "output_text_tokens"
+
     def test_leaves_other_metrics_alone(self):
         assert base_usage_metric("output_text_tokens") == "output_text_tokens"
         assert base_usage_metric("web_search_requests") == "web_search_requests"
+
+
+class TestServiceTierUsageSuffix:
+    def test_astra_tiers(self):
+        assert service_tier_usage_suffix("openai/gpt-6-astra", "fast") == FAST_USAGE_SUFFIX
+        assert service_tier_usage_suffix("openai/gpt-6-astra", "priority") == FAST_USAGE_SUFFIX
+        assert service_tier_usage_suffix("openai/gpt-6-astra", "flex") == FLEX_USAGE_SUFFIX
+
+    def test_unpriced_tier_is_ignored(self):
+        assert service_tier_usage_suffix("openai/gpt-4o", "fast") == ""
+        assert service_tier_usage_suffix("openai/gpt-6-astra", "default") == ""

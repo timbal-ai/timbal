@@ -235,6 +235,18 @@ class TestResolveUsageKey:
         }
         assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 50
 
+    def test_exact_model_key_sums_all_pricing_tiers(self):
+        usage = {
+            "openai/gpt-6-astra:output_text_tokens": 10,
+            "openai/gpt-6-astra:output_text_tokens_fast": 20,
+            "openai/gpt-6-astra:output_text_tokens_flex": 30,
+            "openai/gpt-6-astra:output_text_tokens_long_context_fast": 40,
+            "openai/gpt-6-astra-other:output_text_tokens_fast": 999,
+        }
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 100
+        assert _resolve_usage_key(usage, "output_text_tokens") == 1099
+        assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens_fast") == 20
+
     def test_exact_key_without_sibling_is_unchanged(self):
         usage = {"openai/gpt-6-astra:output_text_tokens": 10}
         assert _resolve_usage_key(usage, "openai/gpt-6-astra:output_text_tokens") == 10
