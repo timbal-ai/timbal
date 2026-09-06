@@ -456,6 +456,65 @@ def test_reasoning_only_assistant_turn_replays_as_just_the_reasoning_item() -> N
     ]
 
 
+# --- assistant `phase` and wire order (GPT-5.4+ preambles) ----------------------------
+
+
+def test_assistant_text_phase_rides_on_the_message_item() -> None:
+    message = Message(role="assistant", content=[TextContent(text="Done.", phase="final_answer")])
+    assert message.to_openai_responses_input() == [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "Done."}], "phase": "final_answer"}
+    ]
+
+
+def test_user_text_never_carries_a_phase() -> None:
+    message = Message(role="user", content=[TextContent(text="hi", phase="final_answer")])
+    assert message.to_openai_responses_input() == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
+def test_preamble_replays_before_the_function_call_it_introduced() -> None:
+    """Wire order is content order: `message(commentary) → reasoning → function_call →
+    message(final_answer)`, not "all function_calls, then one message with every text"."""
+    message = Message(
+        role="assistant",
+        content=[
+            TextContent(text="Checking the schema first.", phase="commentary"),
+            ThinkingContent(thinking="", id="rs_1", encrypted_content="enc-1"),
+            ToolUseContent(id="call_1", name="get_schema", input={}),
+            TextContent(text="Here is the schema.", phase="final_answer"),
+        ],
+    )
+    items = message.to_openai_responses_input()
+    assert [i.get("type") or i.get("phase") for i in items] == ["commentary", "reasoning", "function_call", "final_answer"]
+    assert items[0] == {"role": "assistant", "content": [{"type": "output_text", "text": "Checking the schema first."}], "phase": "commentary"}
+    assert items[3] == {"role": "assistant", "content": [{"type": "output_text", "text": "Here is the schema."}], "phase": "final_answer"}
+
+
+def test_adjacent_text_with_the_same_phase_shares_one_message() -> None:
+    message = Message(
+        role="assistant",
+        content=[TextContent(text="a", phase="final_answer"), TextContent(text="b", phase="final_answer")],
+    )
+    assert message.to_openai_responses_input() == [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "a"}, {"type": "output_text", "text": "b"}], "phase": "final_answer"}
+    ]
+
+
+def test_adjacent_text_with_different_phases_splits_into_two_messages() -> None:
+    message = Message(
+        role="assistant",
+        content=[TextContent(text="one sec", phase="commentary"), TextContent(text="done", phase="final_answer")],
+    )
+    items = message.to_openai_responses_input()
+    assert [i["phase"] for i in items] == ["commentary", "final_answer"]
+
+
+def test_text_without_phase_replays_as_before() -> None:
+    message = Message(role="assistant", content=[TextContent(text="plain"), ToolUseContent(id="c", name="t", input={})])
+    items = message.to_openai_responses_input()
+    assert items[0] == {"role": "assistant", "content": [{"type": "output_text", "text": "plain"}]}
+    assert items[1]["type"] == "function_call"
+
+
 def test_server_tool_blocks_preserved_in_anthropic_input() -> None:
     result = _anthropic_server_tool_message().to_anthropic_input()
     assert result["content"][0] == {

@@ -478,8 +478,9 @@ class TestResponseCollectorText:
             part=text_part,
             sequence_number=1,
         ))
-        assert isinstance(item, Text)
-        assert item.id == item_id
+        # An empty part is held until the first characters show it is prose, not a
+        # leaked `to=functions.…` call (see TestResponseCollectorLeakedToolCalls).
+        assert item is None
 
         item = collector.process(ResponseTextDeltaEvent(
             type="response.output_text.delta",
@@ -490,8 +491,21 @@ class TestResponseCollectorText:
             logprobs=[],
             sequence_number=2,
         ))
+        assert isinstance(item, Text)
+        assert item.id == item_id
+        assert item.text == "Hello"
+
+        item = collector.process(ResponseTextDeltaEvent(
+            type="response.output_text.delta",
+            item_id=item_id,
+            output_index=0,
+            content_index=0,
+            delta=" there",
+            logprobs=[],
+            sequence_number=2,
+        ))
         assert isinstance(item, TimbalTextDelta)
-        assert item.text_delta == "Hello"
+        assert item.text_delta == " there"
 
         result = collector.process(ResponseTextDoneEvent(
             type="response.output_text.done",
@@ -2040,3 +2054,193 @@ class TestResponseCollectorEncryptedReasoning:
             ("reasoning", "rs_1"), ("function_call", "call_1"), ("reasoning", "rs_2"), ("function_call", "call_2"),
         ]
         assert [i["encrypted_content"] for i in items if i["type"] == "reasoning"] == ["enc-1", "enc-2"]
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses: assistant `phase` and leaked tool-call recovery
+# ---------------------------------------------------------------------------
+
+def _msg_item(item_id: str, *, phase: str | None = None, status: str = "in_progress", text: str | None = None):
+    content = [ResponseOutputText(type="output_text", text=text, annotations=[])] if text is not None else []
+    kwargs = {"phase": phase} if phase else {}
+    return ResponseOutputMessage(id=item_id, type="message", role="assistant", content=content, status=status, **kwargs)
+
+
+def _part_added(item_id: str, seq: int):
+    return ResponseContentPartAddedEvent(
+        type="response.content_part.added", item_id=item_id, output_index=0, content_index=0,
+        part=ResponseOutputText(type="output_text", text="", annotations=[]), sequence_number=seq,
+    )
+
+
+def _delta(item_id: str, delta: str, seq: int):
+    return ResponseTextDeltaEvent(
+        type="response.output_text.delta", item_id=item_id, output_index=0, content_index=0,
+        delta=delta, logprobs=[], sequence_number=seq,
+    )
+
+
+class TestResponseCollectorPhase:
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_phase_from_added_lands_on_text_content(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1", phase="commentary"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", "Checking first.", 3))
+        c.process(_done(_msg_item("msg_1", phase="commentary", status="completed", text="Checking first."), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["TextContent"]
+        assert msg.content[0].phase == "commentary"
+        assert msg.to_openai_responses_input()[0]["phase"] == "commentary"
+
+    def test_phase_only_on_done_is_still_captured(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", "Done.", 3))
+        c.process(_done(_msg_item("msg_1", phase="final_answer", status="completed", text="Done."), 0, 4))
+        c.process(_completed(5))
+        assert c.result().content[0].phase == "final_answer"
+
+    def test_no_phase_means_none(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", "Hello", 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text="Hello"), 0, 4))
+        c.process(_completed(5))
+        assert c.result().content[0].phase is None
+
+
+class TestResponseCollectorLeakedToolCalls:
+    """A `message` whose text is a Harmony-form tool call becomes the tool call."""
+
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_prose_is_held_until_decided_then_released_with_what_accumulated(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        assert c.process(_part_added("msg_1", 2)) is None            # empty: undecided
+        assert c.process(_delta("msg_1", "t", 3)) is None            # prefix of `to=functions.`
+        assert c.process(_delta("msg_1", "o", 4)) is None
+        started = c.process(_delta("msg_1", "morrow", 5))            # diverged: prose
+        assert isinstance(started, Text) and started.id == "msg_1" and started.text == "tomorrow"
+        nxt = c.process(_delta("msg_1", " then", 6))
+        assert isinstance(nxt, TimbalTextDelta) and nxt.text_delta == " then"
+        assert isinstance(c.process(_done(_msg_item("msg_1", status="completed", text="tomorrow then"), 0, 7)), ContentBlockStop)
+        c.process(_completed(8))
+        assert c.result().content[0].text == "tomorrow then"
+
+    def test_clean_text_releases_on_the_first_delta(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        started = c.process(_delta("msg_1", "Hello", 3))
+        assert isinstance(started, Text) and started.text == "Hello"
+
+    def test_short_undecided_text_is_released_at_done_with_its_stop(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        assert c.process(_delta("msg_1", "to", 3)) is None
+        first = c.process(_done(_msg_item("msg_1", status="completed", text="to"), 0, 4))
+        assert isinstance(first, Text) and first.text == "to"
+        assert isinstance(c.pop_pending_stream_item(), ContentBlockStop)
+        c.process(_completed(5))
+        assert c.result().content[0].text == "to"
+
+    def test_leak_is_never_streamed_and_becomes_a_tool_call(self):
+        leak = ' to=functions.timbal__get_preview_logs  (json 恒一\n{"service":"ui"}ંалда'
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1", phase="final_answer"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        emitted = [c.process(_delta("msg_1", ch, 3 + i)) for i, ch in enumerate(leak)]
+        assert all(e is None for e in emitted), "leaked text must not reach the stream"
+        assert c.process(_done(_msg_item("msg_1", phase="final_answer", status="completed", text=leak), 0, 99)) is None
+        c.process(_completed(100))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        call = msg.content[0]
+        assert call.name == "timbal__get_preview_logs"
+        assert call.input == {"service": "ui"}
+        assert call.id.startswith("call_leak_")
+        assert msg.to_openai_responses_input()[0]["type"] == "function_call"
+
+    def test_repeated_leaked_calls_collapse_and_the_fake_summary_is_dropped(self):
+        leak = (
+            ' to=functions.wait_for_background_tasks  code:\n{"task_ids":["x"],"timeout_seconds":120}\n\n'
+            ' to=functions.wait_for_background_tasks  code:\n{"task_ids":["x"],"timeout_seconds":120}\n\n'
+            "Invoice Triage is built.\n- Knowledge base: 5 vendors"
+        )
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", leak, 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.content[0].input == {"task_ids": ["x"], "timeout_seconds": 120}
+        assert "Invoice Triage" not in msg.collect_text()
+
+    def test_leak_after_prose_keeps_the_prose_and_recovers_the_call(self):
+        text = 'Wave 3 dependency check:\n- UI → ready.\n\n\n to=functions.builder  code:\n{"title":"UI","run_in_background":true}'
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1", phase="commentary"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", text, 3))  # streams (it starts as prose) — history is still cleaned
+        c.process(_done(_msg_item("msg_1", phase="commentary", status="completed", text=text), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["TextContent", "ToolUseContent"]
+        assert msg.content[0].text == "Wave 3 dependency check:\n- UI → ready."
+        assert msg.content[0].phase == "commentary"
+        assert msg.content[1].name == "builder"
+
+    def test_leak_next_to_a_structured_call_is_dropped_not_duplicated(self):
+        c = self._collector()
+        c.process(_added(_fn_call("fc_1", "call_1", name="search"), 0, 1))
+        c.process(_done(_fn_call("fc_1", "call_1", name="search", arguments='{"q":"x"}', status="completed"), 0, 2))
+        leak = ' to=functions.search json\n{"q":"x"}'
+        c.process(_added(_msg_item("msg_1"), 1, 3))
+        c.process(_part_added("msg_1", 4))
+        c.process(_delta("msg_1", leak, 5))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 1, 6))
+        c.process(_completed(7))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.content[0].id == "call_1"
+
+    def test_unparseable_leak_is_dropped_leaving_no_garbage(self):
+        leak = " to=functions.wait_for_background_tasks  code: 亚洲AV"
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", leak, 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_completed(5))
+        assert c.result().content == []
+
+    def test_recovered_count_is_recorded_in_usage(self):
+        ctx = _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        leak = ' to=functions.a json\n{}\n to=functions.b json\n{"k":1}'
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", leak, 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [b.name for b in msg.content] == ["a", "b"]
+        assert ctx.current_span().usage.get("recovered_tool_calls") == 2

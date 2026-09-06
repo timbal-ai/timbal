@@ -52,6 +52,7 @@ from ...core.models import (
 )
 from ...state import get_billing_id, get_run_context
 from ...types.content.text import TextContent
+from ..harmony_leak import contains_leak, leak_state, parse_leaked_tool_calls
 from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
 from ...types.events.delta import (
@@ -488,11 +489,35 @@ class ResponseCollector(BaseCollector):
         self._stop_reason: str | None = None
         self.content_blocks: set[str] = set()
         self.content: dict[str, dict[str, Any]] = {}
+        # `phase` per message item id (`commentary` / `final_answer`), from the
+        # item's `.added` / `.done`; the text block is keyed by the same id.
+        self._message_phase: dict[str, str | None] = {}
+        # A `.done` that has to flush held text emits two items; see `_emit_stream_items`.
+        self._pending_stream_items: deque[Any] = deque()
 
     @classmethod
     @override
     def can_handle(cls, event: Any) -> bool:
         return isinstance(event, ResponseEvent)
+
+    def pop_pending_stream_item(self) -> Any | None:
+        if self._pending_stream_items:
+            return self._pending_stream_items.popleft()
+        return None
+
+    async def __anext__(self):
+        pending = self.pop_pending_stream_item()
+        if pending is not None:
+            return pending
+        return await super().__anext__()
+
+    def _emit_stream_items(self, items: list[Any]) -> Any:
+        filtered = [item for item in items if item is not None]
+        if not filtered:
+            return None
+        first, *rest = filtered
+        self._pending_stream_items.extend(rest)
+        return first
 
     @override
     def process(self, event: ResponseEvent) -> Any:
@@ -579,6 +604,7 @@ class ResponseCollector(BaseCollector):
                 is_server_tool_use=False,
             )
         elif isinstance(event.item, ResponseOutputMessage):
+            self._message_phase[event.item.id] = getattr(event.item, "phase", None)
             return None
         elif isinstance(event.item, ResponseFunctionWebSearch):
             # TODO We should add this to the messages history
@@ -615,26 +641,55 @@ class ResponseCollector(BaseCollector):
             logger.warning("Unhandled output item added event", response_output_item_added_event=event)
 
     def _handle_content_part_added(self, event: ResponseContentPartAddedEvent) -> None:
-        """Handle content part added events from OpenAI."""
+        """Handle content part added events from OpenAI.
+
+        The text block is *held* until its first characters show whether it is prose
+        or a leaked tool call (`` to=functions.…``, see ``harmony_leak``). Prose is
+        released as one ``Text`` carrying what accumulated meanwhile; a leak is never
+        streamed — it is recovered as a tool call in ``result()``.
+        """
         if isinstance(event.part, ResponseOutputText):
             self.content[event.item_id] = {
                 "type": "text",
                 "citations": [],
                 "text": event.part.text,
+                "phase": self._message_phase.get(event.item_id),
+                "held": True,
+                "leak": False,
             }
-            content_block_id = event.item_id
-            self.content_blocks.add(content_block_id)
-            return TimbalText(
-                id=content_block_id,
-                text=event.part.text,
-            )
+            return self._release_text_if_decided(event.item_id)
         else:
             logger.warning("Unhandled content part added event", response_content_part_added_event=event)
 
+    def _release_text_if_decided(self, item_id: str, *, force: bool = False) -> TimbalText | None:
+        """Start the stream block for a held text once it is known not to be a leak.
+
+        ``force`` settles an undecided block (the item ended while still a prefix of
+        the marker, e.g. a message that is just ``"to"``) as prose.
+        """
+        entry = self.content[item_id]
+        if not entry.get("held"):
+            return None
+        state = leak_state(entry["text"])
+        if state == "leak":
+            entry["leak"] = True
+            entry["held"] = False
+            return None
+        if state == "undecided" and not force:
+            return None
+        entry["held"] = False
+        self.content_blocks.add(item_id)
+        return TimbalText(id=item_id, text=entry["text"])
+
     def _handle_text_delta(self, event: ResponseTextDeltaEvent) -> None:
         """Handle text delta events from OpenAI."""
-        self.content[event.item_id]["text"] += event.delta
+        entry = self.content[event.item_id]
+        entry["text"] += event.delta
         content_block_id = event.item_id
+        if entry.get("held"):
+            return self._release_text_if_decided(content_block_id)
+        if entry.get("leak"):
+            return None
         assert content_block_id in self.content_blocks, "Text delta event without content block start event"
         return TimbalTextDelta(
             id=content_block_id,
@@ -743,7 +798,21 @@ class ResponseCollector(BaseCollector):
                 return TimbalContentBlockStop(id=content_block_id)
             else:
                 return None
-        elif isinstance(event.item, ResponseFunctionToolCall | ResponseOutputMessage):
+        elif isinstance(event.item, ResponseOutputMessage):
+            content_block_id = event.item.id
+            phase = getattr(event.item, "phase", None)
+            if phase:
+                self._message_phase[content_block_id] = phase
+                if content_block_id in self.content:
+                    self.content[content_block_id]["phase"] = phase
+            released = None
+            if content_block_id in self.content:
+                # A block still held at the end (too short to decide) is prose.
+                released = self._release_text_if_decided(content_block_id, force=True)
+            if content_block_id in self.content_blocks:
+                return self._emit_stream_items([released, TimbalContentBlockStop(id=content_block_id)])
+            return None
+        elif isinstance(event.item, ResponseFunctionToolCall):
             content_block_id = event.item.id
             if content_block_id in self.content_blocks:
                 return TimbalContentBlockStop(id=content_block_id)
@@ -820,6 +889,11 @@ class ResponseCollector(BaseCollector):
         span.metadata["tps"] = tps
 
         content = []
+        # Leaked tool calls are recovered only when the response produced no structured
+        # one: next to real function_calls the leaked text is a duplicate or a
+        # hallucination, and running it would double the action.
+        has_structured_tool_use = any(b["type"] == "tool_use" for b in self.content.values())
+        recovered = 0
         for content_block in self.content.values():  # Python dicts are ordered
             if content_block["type"] == "tool_use":
                 content.append(
@@ -850,11 +924,32 @@ class ResponseCollector(BaseCollector):
                 )
             elif content_block["type"] == "text":
                 text = content_block["text"]
+                phase = content_block.get("phase")
                 # e.g. {'type': 'url_citation', 'end_index': 2538, 'start_index': 2403, 'title': 'Weather Forecast and Conditions for Barcelona, Barcelona, Spain - The Weather Channel | Weather.com', 'url': 'https://weather.com/weather/today/l/b3b13a74649dd0a2a0aada41e1bf764de39e5dacf21d062ef18ecdeb09796ba0?utm_source=openai'}
                 # Openai annotations are already formatted into the text
-                content.append(TextContent(text=text))
+                if content_block.get("leak") or contains_leak(text):
+                    # A tool call written as text (see harmony_leak). Keep the prose
+                    # before it; turn what parses into real tool calls; drop the rest
+                    # — surfacing it would hand the user a summary of work nobody did.
+                    prefix, calls = parse_leaked_tool_calls(text)
+                    if prefix:
+                        content.append(TextContent(text=prefix, phase=phase))
+                    if has_structured_tool_use:
+                        logger.warning("Leaked tool-call text alongside structured tool calls; dropped",
+                                       names=[n for n, _ in calls], text=text[:300])
+                        continue
+                    for name, args in calls:
+                        recovered += 1
+                        content.append(ToolUseContent(id=f"call_leak_{uuid7(as_type='hex')}", name=name, input=args))
+                    if not calls:
+                        logger.warning("Leaked tool-call text with no parseable call; dropped", text=text[:300])
+                    continue
+                content.append(TextContent(text=text, phase=phase))
             else:
                 # Unreachable
                 raise AssertionError(f"Unknown content block type: {content_block['type']}")
+        if recovered:
+            logger.warning("Recovered tool calls from leaked assistant text", count=recovered, model=getattr(self, "model", None))
+            get_run_context().update_usage("recovered_tool_calls", recovered)
 
         return Message(role="assistant", content=content, stop_reason=self._stop_reason)

@@ -111,13 +111,42 @@ class Message:
         return md is not None and md.get("source") == RUNTIME_SOURCE
 
     def to_openai_responses_input(self) -> list[dict[str, Any]]:
-        """Convert the message to OpenAI's responses api expected input format."""
-        inputs = []
-        message_content = []
+        """Convert the message to OpenAI's responses api expected input format.
+
+        Content order is wire order: a ``message`` item is flushed whenever a top-level
+        item (``reasoning``, ``function_call``, ``function_call_output``) follows it, so
+        an assistant preamble replays *before* the tool call it introduced instead of
+        after every call of the turn. Assistant text also splits into one ``message``
+        per ``phase`` (``commentary`` / ``final_answer``) and carries it — GPT-5.4+
+        read a dropped phase as "this preamble was the final answer".
+        """
+        inputs: list[dict[str, Any]] = []
+        message_content: list[dict[str, Any]] = []
+        message_phase: str | None = None
+
+        def flush() -> None:
+            nonlocal message_content, message_phase
+            if message_content:
+                # Role here should only be 'user' or 'assistant'
+                item: dict[str, Any] = {"role": self.role, "content": message_content}
+                if self.role == "assistant" and message_phase:
+                    item["phase"] = message_phase
+                inputs.append(item)
+            message_content = []
+            message_phase = None
+
+        def add_part(part: dict[str, Any], phase: str | None) -> None:
+            nonlocal message_phase
+            if message_content and phase != message_phase:
+                flush()
+            message_phase = phase
+            message_content.append(part)
+
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent | ToolResultContent):
                 item_input = content_item.to_openai_responses_input()
                 if item_input is not None:
+                    flush()
                     inputs.append(item_input)
             elif isinstance(content_item, ThinkingContent):
                 item_input = content_item.to_openai_responses_input(role=self.role)
@@ -127,16 +156,16 @@ class Message:
                 # input item like a function_call, not a part of a `message`. It must
                 # precede the function_call it produced, which content order guarantees.
                 if item_input.get("type") == "reasoning":
+                    flush()
                     inputs.append(item_input)
                 else:
-                    message_content.append(item_input)
+                    add_part(item_input, None)
             else:
                 item_input = content_item.to_openai_responses_input(role=self.role)
                 if item_input is not None:
-                    message_content.append(item_input)
-        if message_content:
-            # Role here should only be 'user' or 'assistant'
-            inputs.append({"role": self.role, "content": message_content})
+                    phase = getattr(content_item, "phase", None) if self.role == "assistant" else None
+                    add_part(item_input, phase)
+        flush()
         return inputs
 
     def to_openai_chat_completions_input(

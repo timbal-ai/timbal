@@ -23,7 +23,7 @@ def content_factory(value: Any) -> BaseContent:
         if content_type == "custom":
             return CustomContent(value=value.get("value"))
         elif content_type == "text":
-            return TextContent(text=value.get("text"))
+            return TextContent(text=value.get("text"), phase=value.get("phase"))
         elif content_type == "thinking":
             return ThinkingContent(
                 thinking=value.get("thinking") or "",

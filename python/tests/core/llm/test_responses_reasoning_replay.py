@@ -476,3 +476,59 @@ class TestAgentToolLoopReplaysReasoning:
         kinds = [(i.get("type") or i.get("role")) for i in second]
         assert kinds == ["user", "function_call", "function_call_output"], kinds
         assert [type(c).__name__ for c in result.output.content] == ["TextContent"]
+
+
+# ---------------------------------------------------------------------------
+# Leaked tool calls (Harmony text) run like real ones; `phase` survives the loop
+# ---------------------------------------------------------------------------
+
+
+def _text_turn_with_phase(rs_id: str, encrypted: str, text: str, phase: str | None):
+    """`_text_turn` whose message items carry a `phase` (GPT-5.4+)."""
+    events = _text_turn(rs_id, encrypted, text)
+    out = []
+    for e in events:
+        item = getattr(e, "item", None)
+        if isinstance(item, ResponseOutputMessage) and phase:
+            e = e.model_copy(update={"item": item.model_copy(update={"phase": phase})})
+        out.append(e)
+    return out
+
+
+class TestAgentRecoversLeakedToolCalls:
+    @pytest.mark.asyncio
+    async def test_leaked_call_text_runs_the_tool_and_the_loop_continues(self):
+        """Turn 1 is a `message` that says ` to=functions.search json {"q":"x"}` instead of a
+        function_call item. The tool must run and turn 2 must see a real function_call +
+        output in its input — never the leaked text as assistant prose."""
+        leak = ' to=functions.search  (json 恒一\n{"q":"x"}ંалда'
+        scripted = _ScriptedResponses(
+            [
+                _text_turn("rs_1", "enc-1", leak),
+                _text_turn("rs_2", "enc-2", "Done: x"),
+            ]
+        )
+        result, calls = await _run_agent(scripted)
+
+        assert calls == [{"q": "x"}]
+        assert result.output.content[-1].text == "Done: x"
+        second = scripted.requests[1]["input"]
+        kinds = [(i.get("type") or i.get("role")) for i in second]
+        assert kinds == ["user", "reasoning", "function_call", "function_call_output"], kinds
+        assert second[2]["name"] == "search"
+        assert second[2]["call_id"].startswith("call_leak_")
+        assert second[3]["call_id"] == second[2]["call_id"]
+        assert not any("to=functions" in str(i) for i in second)
+
+    @pytest.mark.asyncio
+    async def test_assistant_phase_is_replayed_on_the_next_request(self):
+        scripted = _ScriptedResponses(
+            [
+                _text_turn_with_phase("rs_1", "enc-1", "One moment.", "commentary"),
+            ]
+        )
+        result, _ = await _run_agent(scripted)
+        assert result.output.content[-1].phase == "commentary"
+        # A follow-up turn replays the assistant message with its phase intact.
+        items = result.output.to_openai_responses_input()
+        assert items[-1] == {"role": "assistant", "content": [{"type": "output_text", "text": "One moment."}], "phase": "commentary"}
