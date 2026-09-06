@@ -48,6 +48,7 @@ from anthropic.types.beta import (
     BetaWebSearchToolResultBlock,
 )
 
+from ...core.models import service_tier_usage_suffix
 from ...state import get_billing_id, get_run_context
 from ...types.content.custom import CustomContent
 from ...types.content.text import TextContent
@@ -86,6 +87,31 @@ AnthropicEvent = (
 logger = structlog.get_logger("timbal.collectors.impl.anthropic")
 
 
+def _usage_int(usage: Any, attr: str) -> int | None:
+    """Read a non-negative integer usage field; ``None`` when absent, null, or malformed.
+
+    Usage objects allow pydantic extras, so fields the SDK does not declare yet
+    (``speed``, ``output_tokens_details``) are still reachable via ``getattr``.
+    """
+    value = getattr(usage, attr, None) if usage is not None else None
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _first_usage_int(attr: str, *sources: Any) -> int:
+    """First source that reports ``attr``; 0 when none does."""
+    for source in sources:
+        value = _usage_int(source, attr)
+        if value is not None:
+            return value
+    return 0
+
+
 @register_collector
 class AnthropicCollector(BaseCollector):
     """Collector for Anthropic streaming events."""
@@ -98,6 +124,11 @@ class AnthropicCollector(BaseCollector):
         self._stop_reason: str | None = None
         self.content_blocks: set[str] = set()
         self.content: list[dict[str, Any]] = []
+        # ``message_start`` carries the request-side usage (prompt, cache breakdown,
+        # ``speed``); ``message_delta`` carries the final cumulative totals. Billing
+        # happens once, from whichever of the two we have by the end of the stream.
+        self._start_usage: Any = None
+        self._usage_recorded: bool = False
 
     @classmethod
     @override
@@ -129,6 +160,7 @@ class AnthropicCollector(BaseCollector):
         self.id = event.message.id
         self.anthropic_model = event.message.model
         self.content = []
+        self._start_usage = event.message.usage
 
     def _handle_content_block_start(self, event: RawContentBlockStartEvent) -> TimbalDeltaItem | None:
         """Handle content block start events."""
@@ -255,23 +287,89 @@ class AnthropicCollector(BaseCollector):
         if event.delta.stop_reason:
             self._stop_reason = event.delta.stop_reason
 
+        self._output_tokens = _first_usage_int("output_tokens", event.usage)
+        self._record_usage(delta_usage=event.usage)
+
+    def _record_usage(self, *, delta_usage: Any = None) -> None:
+        """Record this message's billable usage exactly once.
+
+        Anthropic's ``usage`` is a set of *disjoint* buckets, each priced at its own rate,
+        plus breakdowns that must not be billed on top of the bucket they detail:
+
+        - ``input_tokens`` / ``cache_read_input_tokens`` / ``output_tokens`` — disjoint.
+        - ``cache_creation_input_tokens`` = ``cache_creation.ephemeral_5m_input_tokens``
+          + ``cache_creation.ephemeral_1h_input_tokens``. 5m writes bill at 1.25x input,
+          1h writes at 2x, so the per-TTL units are emitted whenever the breakdown is
+          present and reconciles; otherwise the aggregate is emitted. Never both.
+          The breakdown only ships on ``message_start``; ``message_delta`` repeats the
+          aggregate.
+        - ``output_tokens_details.thinking_tokens`` is a *subset* of ``output_tokens``
+          (already billed at the output rate) and is therefore not emitted.
+        - ``server_tool_use.*_requests`` are per-call fees, emitted as-is.
+        - ``usage.speed == "fast"`` (Opus fast mode, 2x) suffixes every token unit with
+          ``_fast`` when the catalog prices that tier for the model.
+
+        Called from ``message_delta`` with the final cumulative totals, or from
+        ``result()`` when the stream ended without one (interrupted / cancelled): the
+        prompt side is charged by Anthropic regardless, so it is billed from
+        ``message_start``; output is unknown in that case and left unbilled.
+        """
+        if self._usage_recorded:
+            return
+        start_usage = self._start_usage
+        if delta_usage is None and start_usage is None:
+            return
         run_context = get_run_context()
         if not run_context:
-            return None
-        billing_id = get_billing_id() or self.anthropic_model  # anthropic_model from RawMessageStartEvent
+            return
+        self._usage_recorded = True
+        billing_id = get_billing_id() or getattr(self, "anthropic_model", None)
+        if not billing_id:
+            return
 
-        def _update_usage(usage):
-            for k, v in usage.items():
-                if isinstance(v, dict):
-                    _update_usage(v)
-                elif isinstance(v, int) and v > 0:
-                    run_context.update_usage(f"{billing_id}:{k}", v)
+        speed = getattr(start_usage, "speed", None) if start_usage is not None else None
+        tier = service_tier_usage_suffix(billing_id, "fast") if speed == "fast" else ""
 
-        _update_usage(event.usage.model_dump())
+        def _emit(unit: str, value: int, *, suffix: str = tier) -> None:
+            if value > 0:
+                run_context.update_usage(f"{billing_id}:{unit}{suffix}", value)
+
+        # Request side: the delta repeats these; fall back to message_start when it does not.
+        _emit("input_tokens", _first_usage_int("input_tokens", delta_usage, start_usage))
+        _emit("cache_read_input_tokens", _first_usage_int("cache_read_input_tokens", delta_usage, start_usage))
+
+        cache_creation_total = _first_usage_int("cache_creation_input_tokens", delta_usage, start_usage)
+        breakdown = getattr(start_usage, "cache_creation", None) if start_usage is not None else None
+        ephemeral_5m = _first_usage_int("ephemeral_5m_input_tokens", breakdown)
+        ephemeral_1h = _first_usage_int("ephemeral_1h_input_tokens", breakdown)
+        if cache_creation_total > 0 and ephemeral_5m + ephemeral_1h == cache_creation_total:
+            _emit("ephemeral_5m_input_tokens", ephemeral_5m)
+            _emit("ephemeral_1h_input_tokens", ephemeral_1h)
+        else:
+            _emit("cache_creation_input_tokens", cache_creation_total)
+
+        # Response side: only the delta knows the final count (message_start reports a
+        # placeholder of a few tokens while generation is still in flight).
+        if delta_usage is not None:
+            _emit("output_tokens", _first_usage_int("output_tokens", delta_usage))
+
+        server_tool_use = getattr(delta_usage, "server_tool_use", None) if delta_usage is not None else None
+        if server_tool_use is None and start_usage is not None:
+            server_tool_use = getattr(start_usage, "server_tool_use", None)
+        if hasattr(server_tool_use, "model_dump"):
+            server_tool_use = server_tool_use.model_dump()
+        if isinstance(server_tool_use, dict):
+            for name, value in server_tool_use.items():
+                if name.endswith("_requests") and isinstance(value, int) and not isinstance(value, bool):
+                    _emit(name, value, suffix="")
 
     @override
     def result(self) -> Message:
         """Returns structured Anthropic response."""
+        # Stream ended without a ``message_delta`` (interrupted / cancelled): Anthropic
+        # still charges the prompt, so bill what ``message_start`` reported.
+        self._record_usage()
+
         run_context = get_run_context()
         if run_context:
             if self._first_token:

@@ -280,6 +280,7 @@ anthropic/claude-opus-4-7
 anthropic/claude-opus-4-6
 anthropic/claude-sonnet-4-6
 anthropic/claude-haiku-4-5
+openai/gpt-6-astra
 openai/gpt-5.5
 openai/gpt-5.5-2026-04-23
 openai/gpt-4o
