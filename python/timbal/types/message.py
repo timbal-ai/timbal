@@ -27,7 +27,10 @@ BACKGROUND_TASK_COMPLETED_KIND = "background_task_completed"
 def _append_anthropic_content_blocks(
     target: list[dict[str, Any]], anthropic_input: dict[str, Any] | list[dict[str, Any]]
 ) -> None:
-    """Append Anthropic content blocks, dropping empty text (API rejects text: '')."""
+    """Append Anthropic content blocks, dropping empty text (API rejects text: '') and
+    blocks a content type declined to serialize (``None``)."""
+    if anthropic_input is None:
+        return
     if isinstance(anthropic_input, list):
         for block in anthropic_input:
             _append_anthropic_content_blocks(target, block)
@@ -116,6 +119,17 @@ class Message:
                 item_input = content_item.to_openai_responses_input()
                 if item_input is not None:
                     inputs.append(item_input)
+            elif isinstance(content_item, ThinkingContent):
+                item_input = content_item.to_openai_responses_input(role=self.role)
+                if item_input is None:
+                    continue
+                # An OpenAI reasoning item (`rs_…` + encrypted payload) is a top-level
+                # input item like a function_call, not a part of a `message`. It must
+                # precede the function_call it produced, which content order guarantees.
+                if item_input.get("type") == "reasoning":
+                    inputs.append(item_input)
+                else:
+                    message_content.append(item_input)
             else:
                 item_input = content_item.to_openai_responses_input(role=self.role)
                 if item_input is not None:

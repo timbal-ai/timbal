@@ -26,8 +26,10 @@ def content_factory(value: Any) -> BaseContent:
             return TextContent(text=value.get("text"))
         elif content_type == "thinking":
             return ThinkingContent(
-                thinking=value.get("thinking"),
+                thinking=value.get("thinking") or "",
                 signature=value.get("signature"),
+                id=value.get("id"),
+                encrypted_content=value.get("encrypted_content"),
             )
         elif content_type == "file":
             return FileContent(file=File(value.get("file")), name=value.get("name"))

@@ -379,6 +379,83 @@ def test_thinking_only_message_drops_turn_for_chat_completions() -> None:
     }
 
 
+def test_openai_reasoning_item_is_top_level_and_precedes_its_function_call() -> None:
+    """An assistant turn `reasoning → function_call` replays as two top-level items in that
+    order — the shape OpenAI's reasoning models need to keep their chain of thought across a
+    tool loop. Nothing is wrapped in a `message`."""
+    message = Message(
+        role="assistant",
+        content=[
+            ThinkingContent(thinking="", id="rs_1", encrypted_content="enc-1"),
+            ToolUseContent(id="call_1", name="search", input={"q": "x"}),
+        ],
+    )
+    items = message.to_openai_responses_input()
+    assert [i["type"] for i in items] == ["reasoning", "function_call"]
+    assert items[0] == {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc-1", "summary": []}
+    assert items[1]["call_id"] == "call_1"
+
+
+def test_openai_reasoning_item_with_text_keeps_text_in_a_message() -> None:
+    message = Message(
+        role="assistant",
+        content=[
+            ThinkingContent(thinking="thought", id="rs_1", encrypted_content="enc-1"),
+            TextContent(text="Here you go."),
+        ],
+    )
+    items = message.to_openai_responses_input()
+    assert items[0]["type"] == "reasoning"
+    assert items[0]["summary"] == [{"type": "summary_text", "text": "thought"}]
+    assert items[1] == {"role": "assistant", "content": [{"type": "output_text", "text": "Here you go."}]}
+
+
+def test_openai_reasoning_items_one_per_step_all_replayed() -> None:
+    """Parallel tool calls: each reasoning item stays adjacent to the call it produced."""
+    message = Message(
+        role="assistant",
+        content=[
+            ThinkingContent(thinking="", id="rs_1", encrypted_content="enc-1"),
+            ToolUseContent(id="call_1", name="a", input={}),
+            ThinkingContent(thinking="", id="rs_2", encrypted_content="enc-2"),
+            ToolUseContent(id="call_2", name="b", input={}),
+        ],
+    )
+    items = message.to_openai_responses_input()
+    assert [(i["type"], i.get("id") or i.get("call_id")) for i in items] == [
+        ("reasoning", "rs_1"),
+        ("function_call", "call_1"),
+        ("reasoning", "rs_2"),
+        ("function_call", "call_2"),
+    ]
+
+
+def test_legacy_thinking_without_payload_still_rides_inside_the_message() -> None:
+    """No id/encrypted payload (xAI raw reasoning, pre-fix memory): historical behaviour."""
+    message = Message(
+        role="assistant",
+        content=[ThinkingContent(thinking="raw"), TextContent(text="answer")],
+    )
+    assert message.to_openai_responses_input() == [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "raw"}, {"type": "output_text", "text": "answer"}]}
+    ]
+
+
+def test_empty_legacy_thinking_does_not_produce_an_empty_text_part() -> None:
+    message = Message(role="assistant", content=[ThinkingContent(thinking=""), TextContent(text="answer")])
+    assert message.to_openai_responses_input() == [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
+    ]
+
+
+def test_reasoning_only_assistant_turn_replays_as_just_the_reasoning_item() -> None:
+    """A turn that was cut off after reasoning (max_tokens) must not become an empty message."""
+    message = Message(role="assistant", content=[ThinkingContent(thinking="", id="rs_1", encrypted_content="enc-1")])
+    assert message.to_openai_responses_input() == [
+        {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc-1", "summary": []}
+    ]
+
+
 def test_server_tool_blocks_preserved_in_anthropic_input() -> None:
     result = _anthropic_server_tool_message().to_anthropic_input()
     assert result["content"][0] == {

@@ -1849,3 +1849,194 @@ class TestResponseCollectorResult:
 
         msg = collector.result()
         assert len(msg.content) == 0  # server_tool_use skipped
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses: reasoning items carry `id` + `encrypted_content` into memory
+# ---------------------------------------------------------------------------
+
+def _reasoning(item_id: str, *, status: str = "in_progress", encrypted: str | None = None, summary: list[str] | None = None):
+    from openai.types.responses.response_reasoning_item import Summary
+
+    return ResponseReasoningItem(
+        type="reasoning",
+        id=item_id,
+        status=status,
+        summary=[Summary(type="summary_text", text=t) for t in (summary or [])],
+        encrypted_content=encrypted,
+    )
+
+
+def _fn_call(item_id: str, call_id: str, name: str = "search", arguments: str = "", status: str = "in_progress"):
+    return ResponseFunctionToolCall(
+        type="function_call", id=item_id, call_id=call_id, name=name, arguments=arguments, status=status,
+    )
+
+
+def _added(item, index: int, seq: int):
+    return ResponseOutputItemAddedEvent(type="response.output_item.added", output_index=index, item=item, sequence_number=seq)
+
+
+def _done(item, index: int, seq: int):
+    return ResponseOutputItemDoneEvent(type="response.output_item.done", output_index=index, item=item, sequence_number=seq)
+
+
+def _completed(seq: int):
+    resp = _make_response(model="gpt-5.6-luna", status="completed")
+    resp.usage = _make_response_usage()
+    return ResponseCompletedEvent(type="response.completed", response=resp, sequence_number=seq)
+
+
+class TestResponseCollectorEncryptedReasoning:
+    """The chain of thought a reasoning model needs back on the next call of a tool loop."""
+
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_encrypted_content_from_done_lands_on_thinking_content(self):
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        c.process(_completed(3))
+
+        msg = c.result()
+        assert len(msg.content) == 1
+        block = msg.content[0]
+        assert isinstance(block, ThinkingContent)
+        assert block.id == "rs_1"
+        assert block.encrypted_content == "enc-1"
+        assert block.thinking == ""
+        assert block.is_openai_reasoning_item
+
+    def test_reasoning_precedes_the_function_call_it_produced(self):
+        """Order in memory is order on the wire: reasoning item, then its function_call."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        c.process(_added(_fn_call("fc_1", "call_1"), 1, 3))
+        c.process(ResponseFunctionCallArgumentsDeltaEvent(
+            type="response.function_call_arguments.delta", item_id="fc_1", output_index=1, delta='{"q":"x"}', sequence_number=4,
+        ))
+        c.process(_done(_fn_call("fc_1", "call_1", arguments='{"q":"x"}', status="completed"), 1, 5))
+        c.process(_completed(6))
+
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ThinkingContent", "ToolUseContent"]
+        assert msg.content[0].encrypted_content == "enc-1"
+        assert msg.content[1].id == "call_1"
+        # …and that message replays as [reasoning, function_call] with the same ids.
+        items = msg.to_openai_responses_input()
+        assert [i["type"] for i in items] == ["reasoning", "function_call"]
+        assert items[0]["id"] == "rs_1" and items[0]["encrypted_content"] == "enc-1"
+        assert items[1]["call_id"] == "call_1"
+
+    def test_reasoning_without_payload_or_summary_is_not_kept(self):
+        """`include` not requested (or a non-reasoning model): nothing to replay, no empty block."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed"), 0, 2))
+        c.process(_added(_fn_call("fc_1", "call_1"), 1, 3))
+        c.process(_done(_fn_call("fc_1", "call_1", arguments="{}", status="completed"), 1, 4))
+        c.process(_completed(5))
+
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.to_openai_responses_input()[0]["type"] == "function_call"
+
+    def test_streamed_summary_and_encrypted_content_both_kept(self):
+        from openai.types.responses.response_reasoning_summary_part_added_event import Part as ReasoningSummaryPart
+
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(ResponseReasoningSummaryPartAddedEvent(
+            type="response.reasoning_summary_part.added", item_id="rs_1", output_index=0, summary_index=0,
+            part=ReasoningSummaryPart(type="summary_text", text=""), sequence_number=2,
+        ))
+        c.process(ResponseReasoningSummaryTextDeltaEvent(
+            type="response.reasoning_summary_text.delta", item_id="rs_1", output_index=0, summary_index=0,
+            delta="Need the schema first.", sequence_number=3,
+        ))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1", summary=["Need the schema first."]), 0, 4))
+        c.process(_completed(5))
+
+        block = c.result().content[0]
+        assert block.thinking == "Need the schema first."
+        assert block.encrypted_content == "enc-1"
+        assert block.to_openai_responses_input(role="assistant")["summary"] == [
+            {"type": "summary_text", "text": "Need the schema first."}
+        ]
+
+    def test_multiple_summary_parts_join_as_paragraphs(self):
+        from openai.types.responses.response_reasoning_summary_part_added_event import Part as ReasoningSummaryPart
+
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        for idx, text in enumerate(["first", "second"]):
+            c.process(ResponseReasoningSummaryPartAddedEvent(
+                type="response.reasoning_summary_part.added", item_id="rs_1", output_index=0, summary_index=idx,
+                part=ReasoningSummaryPart(type="summary_text", text=""), sequence_number=2 + 2 * idx,
+            ))
+            c.process(ResponseReasoningSummaryTextDeltaEvent(
+                type="response.reasoning_summary_text.delta", item_id="rs_1", output_index=0, summary_index=idx,
+                delta=text, sequence_number=3 + 2 * idx,
+            ))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1", summary=["first", "second"]), 0, 6))
+        c.process(_completed(7))
+        assert c.result().content[0].thinking == "first\n\nsecond"
+
+    def test_summary_only_on_done_is_used_when_nothing_streamed(self):
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1", summary=["late summary"]), 0, 2))
+        c.process(_completed(3))
+        assert c.result().content[0].thinking == "late summary"
+
+    def test_summary_without_encrypted_content_keeps_legacy_thinking(self):
+        """Summary text but no payload (include not requested): visible thinking, not a reasoning item."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", summary=["visible"]), 0, 2))
+        c.process(_completed(3))
+        block = c.result().content[0]
+        assert block.thinking == "visible"
+        assert block.encrypted_content is None
+        assert block.id is None
+        assert not block.is_openai_reasoning_item
+
+    def test_done_without_added_still_records_the_item(self):
+        """A `.done` for an item whose `.added` was missed must not raise or lose the payload."""
+        c = self._collector()
+        item = c.process(_done(_reasoning("rs_orphan", status="completed", encrypted="enc-o"), 0, 1))
+        assert item is None  # no content block was opened, so no stop event
+        c.process(_completed(2))
+        block = c.result().content[0]
+        assert block.id == "rs_orphan" and block.encrypted_content == "enc-o"
+
+    def test_added_and_done_emit_stream_events_as_before(self):
+        c = self._collector()
+        started = c.process(_added(_reasoning("rs_1"), 0, 1))
+        assert isinstance(started, Thinking) and started.id == "rs_1"
+        stopped = c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        assert isinstance(stopped, ContentBlockStop) and stopped.id == "rs_1"
+
+    def test_two_steps_two_reasoning_items(self):
+        """Parallel tool calls in one response: each reasoning item keeps its own payload."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        c.process(_added(_fn_call("fc_1", "call_1", name="a"), 1, 3))
+        c.process(_done(_fn_call("fc_1", "call_1", name="a", arguments="{}", status="completed"), 1, 4))
+        c.process(_added(_reasoning("rs_2"), 2, 5))
+        c.process(_done(_reasoning("rs_2", status="completed", encrypted="enc-2"), 2, 6))
+        c.process(_added(_fn_call("fc_2", "call_2", name="b"), 3, 7))
+        c.process(_done(_fn_call("fc_2", "call_2", name="b", arguments="{}", status="completed"), 3, 8))
+        c.process(_completed(9))
+
+        items = c.result().to_openai_responses_input()
+        assert [(i["type"], i.get("id") or i.get("call_id")) for i in items] == [
+            ("reasoning", "rs_1"), ("function_call", "call_1"), ("reasoning", "rs_2"), ("function_call", "call_2"),
+        ]
+        assert [i["encrypted_content"] for i in items if i["type"] == "reasoning"] == ["enc-1", "enc-2"]

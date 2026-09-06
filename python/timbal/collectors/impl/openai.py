@@ -592,10 +592,13 @@ class ResponseCollector(BaseCollector):
             )
         elif isinstance(event.item, ResponseReasoningItem):
             content_block_id = event.item.id
+            # Register the block now so it keeps its position ahead of the function_call
+            # it produced; the encrypted payload (and any summary) land on `.done`.
+            self._reasoning_entry(event.item)
             self.content_blocks.add(content_block_id)
             return TimbalThinking(
                 id=content_block_id,
-                thinking="",  # TODO Review this
+                thinking="",
             )
         elif isinstance(event.item, ResponseCustomToolCall):
             # Server-side custom tools (e.g. xAI's x_keyword_search, web_fetch).
@@ -654,12 +657,36 @@ class ResponseCollector(BaseCollector):
             input_delta=event.delta,
         )
 
+    def _reasoning_entry(self, item: ResponseReasoningItem | None = None, item_id: str | None = None) -> dict[str, Any]:
+        """The content block for a reasoning item, created on first sight.
+
+        Carries the item id and, once `.done` delivers it, the `encrypted_content` the
+        request asked for via `include: ["reasoning.encrypted_content"]`. Both are what
+        `ThinkingContent` needs to replay this step's chain of thought on the next call.
+        """
+        key = item.id if item is not None else item_id
+        entry = self.content.get(key)
+        if entry is None:
+            entry = {"type": "thinking", "thinking": "", "id": key, "encrypted_content": None}
+            self.content[key] = entry
+        if item is not None:
+            entry["id"] = item.id
+            if item.encrypted_content:
+                entry["encrypted_content"] = item.encrypted_content
+            # The final item carries the complete summary; prefer it over what streamed
+            # in (identical when parts streamed, filled in when they did not).
+            summary = "\n\n".join(part.text for part in (item.summary or []) if getattr(part, "text", ""))
+            if summary:
+                entry["thinking"] = summary
+        return entry
+
     def _handle_reasoning_summary_part_added(self, event: ResponseReasoningSummaryPartAddedEvent) -> None:
         """Handle reasoning summary part added events from OpenAI."""
-        self.content[event.item_id] = {
-            "type": "thinking",
-            "thinking": event.part.text,  # Usually empty string from the beginning
-        }
+        entry = self._reasoning_entry(item_id=event.item_id)
+        # Several summary parts make one thinking block; separate them like paragraphs.
+        if entry["thinking"]:
+            entry["thinking"] += "\n\n"
+        entry["thinking"] += event.part.text  # Usually empty string from the beginning
         content_block_id = event.item_id
         self.content_blocks.add(content_block_id)
         return TimbalThinking(
@@ -669,7 +696,7 @@ class ResponseCollector(BaseCollector):
 
     def _handle_reasoning_summary_text_delta(self, event: ResponseReasoningSummaryTextDeltaEvent) -> None:
         """Handle reasoning summary text delta events from OpenAI."""
-        self.content[event.item_id]["thinking"] += event.delta
+        self._reasoning_entry(item_id=event.item_id)["thinking"] += event.delta
         content_block_id = event.item_id
         assert content_block_id in self.content_blocks, (
             "Reasoning summary text delta event without content block start event"
@@ -681,12 +708,7 @@ class ResponseCollector(BaseCollector):
 
     def _handle_reasoning_text_delta(self, event: ResponseReasoningTextDeltaEvent) -> None:
         """Handle raw reasoning text delta events (e.g. from xAI)."""
-        if event.item_id not in self.content:
-            self.content[event.item_id] = {
-                "type": "thinking",
-                "thinking": "",
-            }
-        self.content[event.item_id]["thinking"] += event.delta
+        self._reasoning_entry(item_id=event.item_id)["thinking"] += event.delta
         content_block_id = event.item_id
         if content_block_id not in self.content_blocks:
             self.content_blocks.add(content_block_id)
@@ -713,7 +735,15 @@ class ResponseCollector(BaseCollector):
                 return TimbalContentBlockStop(id=content_block_id)
             else:
                 return None
-        elif isinstance(event.item, ResponseFunctionToolCall | ResponseOutputMessage | ResponseReasoningItem):
+        elif isinstance(event.item, ResponseReasoningItem):
+            # `.done` is where `encrypted_content` (and the full summary) arrive.
+            self._reasoning_entry(event.item)
+            content_block_id = event.item.id
+            if content_block_id in self.content_blocks:
+                return TimbalContentBlockStop(id=content_block_id)
+            else:
+                return None
+        elif isinstance(event.item, ResponseFunctionToolCall | ResponseOutputMessage):
             content_block_id = event.item.id
             if content_block_id in self.content_blocks:
                 return TimbalContentBlockStop(id=content_block_id)
@@ -804,7 +834,20 @@ class ResponseCollector(BaseCollector):
             elif content_block["type"] == "server_tool_result":
                 continue
             elif content_block["type"] == "thinking":
-                content.append(ThinkingContent(thinking=content_block["thinking"]))
+                thinking = content_block.get("thinking") or ""
+                encrypted = content_block.get("encrypted_content")
+                if not thinking and not encrypted:
+                    # A reasoning item with neither a summary nor an encrypted payload
+                    # (`include` not requested) carries nothing to replay; an empty
+                    # thinking block would only serialize as an empty text part.
+                    continue
+                content.append(
+                    ThinkingContent(
+                        thinking=thinking,
+                        id=content_block.get("id") if encrypted else None,
+                        encrypted_content=encrypted,
+                    )
+                )
             elif content_block["type"] == "text":
                 text = content_block["text"]
                 # e.g. {'type': 'url_citation', 'end_index': 2538, 'start_index': 2403, 'title': 'Weather Forecast and Conditions for Barcelona, Barcelona, Spain - The Weather Channel | Weather.com', 'url': 'https://weather.com/weather/today/l/b3b13a74649dd0a2a0aada41e1bf764de39e5dacf21d062ef18ecdeb09796ba0?utm_source=openai'}
