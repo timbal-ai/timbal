@@ -111,3 +111,24 @@ class TestParallelWrapper:
 
     def test_wrapper_without_tool_uses_yields_nothing(self):
         assert parse_leaked_tool_calls(' to=multi_tool_use.parallel json\n{"foo":1}') == ("", [])
+
+
+class TestBareRecipient:
+    def test_bare_header_with_object_is_recovered(self):
+        text = ' to=timbal__codegen  code:\n{"action":"get-flow","name":"support"}'
+        assert leak_state(text) == "leak"
+        assert parse_leaked_tool_calls(text) == ("", [("timbal__codegen", {"action": "get-flow", "name": "support"})])
+
+    def test_bare_header_typing_is_undecided_then_leak(self):
+        assert leak_state(" to=timbal") == "undecided"
+        assert leak_state(" to=timbal__codegen ") == "leak"
+        assert leak_state(" to=timbal__codegen\n{") == "leak"
+
+    def test_prose_is_still_clean(self):
+        for t in ("today", "to be honest", "total: 5", "Tomorrow we ship."):
+            assert leak_state(t) == "clean", t
+        assert parse_leaked_tool_calls("Set the timeout to=30 seconds.") == ("Set the timeout to=30 seconds.", [])
+
+    def test_functions_prefix_still_wins(self):
+        text = ' to=functions.search json\n{"q":"x"}\n to=list_background_tasks json\n{}'
+        assert [n for n, _ in parse_leaked_tool_calls(text)[1]] == ["search", "list_background_tasks"]

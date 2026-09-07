@@ -43,7 +43,14 @@ LEAKED_TOOL_CALL_UNRECOVERED = "leaked_tool_call_unrecovered"
 # The recipient header. A tool name is what the Responses API allows for a function
 # name plus the dots timbal uses for namespaced tools (``timbal__codegen`` has none,
 # but MCP-style ``server.tool`` names exist elsewhere).
-_HEADER_RE = re.compile(r"to=(?:functions\.([A-Za-z0-9_][A-Za-z0-9_.\-]*)|(multi_tool_use\.parallel))")
+# `functions.` is usually present; the bare form (`to=timbal__codegen code: {…}`) shows up
+# too. A bare name is accepted only when a JSON object follows it (see the parser) — the
+# agent's unknown-tool path answers a wrong name with an error the model can act on.
+_HEADER_RE = re.compile(
+    r"to=(?:(multi_tool_use\.parallel)|(?:functions\.)?([A-Za-z_][A-Za-z0-9_.\-]*))(?![A-Za-z0-9_.\-])"
+)
+_BARE_HEAD_RE = re.compile(r"^to=[A-Za-z_][A-Za-z0-9_.\-]*(?:\s|\()")
+_BARE_TYPING_RE = re.compile(r"^to=[A-Za-z_]?[A-Za-z0-9_.\-]*$")
 
 LeakState = Literal["undecided", "leak", "clean"]
 
@@ -61,6 +68,12 @@ def leak_state(text: str) -> LeakState:
     if any(head.startswith(m) for m in LEAK_MARKERS):
         return "leak"
     if any(m.startswith(head) for m in LEAK_MARKERS):
+        return "undecided"
+    # Bare recipient (`to=timbal__codegen …`): a leak once the name is complete; while
+    # the name is still being typed, undecided. Prose does not start with `to=`.
+    if _BARE_HEAD_RE.match(head) and not head.startswith("to=functions.") and not head.startswith("to=multi_tool_use."):
+        return "leak"
+    if _BARE_TYPING_RE.match(head):
         return "undecided"
     return "clean"
 
@@ -142,7 +155,7 @@ def parse_leaked_tool_calls(text: str) -> tuple[str, list[tuple[str, dict]]]:
             continue
         if not isinstance(args, dict):
             continue
-        expanded = _expand_parallel(args) if m.group(2) else [(m.group(1), args)]
+        expanded = _expand_parallel(args) if m.group(1) else [(m.group(2), args)]
         for name, a in expanded:
             key = (name, json.dumps(a, sort_keys=True))
             if key in seen:
