@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Literal
 
 LEAK_MARKER = "to=functions."
@@ -79,7 +80,8 @@ def leak_state(text: str) -> LeakState:
 
 
 def contains_leak(text: str) -> bool:
-    return bool(_HEADER_RE.search(text or ""))
+    """A leak header that counts: at a line start, outside code fences."""
+    return bool(_leak_headers(text or ""))
 
 
 def _expand_parallel(args: dict) -> list[tuple[str, dict]]:
@@ -128,6 +130,54 @@ def _extract_json_object(text: str, start: int) -> tuple[str, int] | None:
     return None
 
 
+def _fenced_ranges(text: str) -> list[tuple[int, int]]:
+    """Spans of ``` fenced code blocks — a header inside one is being *quoted*, not issued."""
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    for m in re.finditer(r"^[ \t]*```", text, re.M):
+        if start is None:
+            start = m.start()
+        else:
+            spans.append((start, m.end()))
+            start = None
+    if start is not None:
+        spans.append((start, len(text)))
+    return spans
+
+
+def _at_line_start(text: str, pos: int) -> bool:
+    """The header begins a line (after optional indentation). Leaks always do; a header
+    embedded mid-sentence is someone describing the syntax."""
+    line_start = text.rfind("\n", 0, pos) + 1
+    return text[line_start:pos].strip() == ""
+
+
+def _leak_headers(text: str) -> list[re.Match]:
+    fenced = _fenced_ranges(text)
+    return [
+        m for m in _HEADER_RE.finditer(text or "")
+        if _at_line_start(text, m.start()) and not any(a <= m.start() < b for a, b in fenced)
+    ]
+
+
+def _looks_corrupted(raw: str) -> bool:
+    """Control-token debris landed *inside* the JSON.
+
+    The debris is what the decoder makes of special tokens: private-use, unassigned and
+    replacement code points (``\\U0004e7ff``, ``񟿿``, ``￼``, ``\\ufffd``). Real text — in
+    any script — does not contain those, so their presence means the arguments cannot
+    be trusted (a `builder` prompt with a garbage line in it would still parse). Such
+    a call is not recovered; with nothing else runnable the step is re-requested.
+    """
+    for ch in raw:
+        if ch in ("\ufffc", "\ufffd"):
+            return True
+        cat = unicodedata.category(ch)
+        if cat in ("Co", "Cn", "Cs"):
+            return True
+    return False
+
+
 def parse_leaked_tool_calls(text: str) -> tuple[str, list[tuple[str, dict]]]:
     """Split a text block into the prose before the first leak and the calls it carries.
 
@@ -136,8 +186,11 @@ def parse_leaked_tool_calls(text: str) -> tuple[str, list[tuple[str, dict]]]:
     is nothing to run). Identical ``(name, arguments)`` pairs collapse into one call.
     Text *between* or *after* the calls is dropped: it is either control-token debris
     or a summary the model wrote believing the calls had run.
+
+    A header only counts when it starts a line and sits outside a ``` fence; an
+    object carrying decoder debris (see ``_looks_corrupted``) is not recovered.
     """
-    matches = list(_HEADER_RE.finditer(text or ""))
+    matches = _leak_headers(text or "")
     if not matches:
         return text, []
     prefix = text[: matches[0].start()].rstrip()
@@ -149,6 +202,8 @@ def parse_leaked_tool_calls(text: str) -> tuple[str, list[tuple[str, dict]]]:
         if found is None:
             continue
         raw, _ = found
+        if _looks_corrupted(raw):
+            continue
         try:
             args = json.loads(raw)
         except ValueError:

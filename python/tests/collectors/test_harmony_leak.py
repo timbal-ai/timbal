@@ -132,3 +132,41 @@ class TestBareRecipient:
     def test_functions_prefix_still_wins(self):
         text = ' to=functions.search json\n{"q":"x"}\n to=list_background_tasks json\n{}'
         assert [n for n, _ in parse_leaked_tool_calls(text)[1]] == ["search", "list_background_tasks"]
+
+
+class TestFalsePositiveGuards:
+    """Recover only what a leak produces — never a model *describing* the syntax."""
+
+    def test_header_quoted_in_a_code_fence_is_not_a_call(self):
+        text = 'Harmony renders a tool call like this:\n\n```\n to=functions.search json\n{"q":"x"}\n```\n\nThat is all.'
+        assert not contains_leak(text)
+        assert parse_leaked_tool_calls(text) == (text, [])
+
+    def test_header_mid_sentence_is_not_a_call(self):
+        text = 'The wire form is to=functions.search {"q":"x"} and the parser handles it.'
+        assert not contains_leak(text)
+        assert parse_leaked_tool_calls(text) == (text, [])
+
+    def test_header_at_line_start_after_prose_is_a_call(self):
+        text = 'Probing now.\n to=functions.search json\n{"q":"x"}'
+        assert contains_leak(text)
+        assert parse_leaked_tool_calls(text) == ("Probing now.", [("search", {"q": "x"})])
+
+    def test_debris_inside_the_object_is_not_recovered(self):
+        """Decoder debris inside the arguments: the JSON parses, the content is untrusted
+        (a `builder` prompt with a garbage line would still spawn a worker)."""
+        for raw in (
+            '{"prompt":"## Objective\\nBuild the In\U0004e7ff"}',
+            '{"prompt":"ok\ufffc"}',
+            '{"q":"x\ufffd"}',
+            '{"q":"\U000f0000"}',
+        ):
+            assert parse_leaked_tool_calls(" to=functions.builder code:\n" + raw) == ("", []), raw
+
+    def test_legit_non_latin_arguments_are_fine(self):
+        text = ' to=functions.search json\n{"q":"日本語 テスト — Català, Ελληνικά, Русский, 中文"}'
+        assert parse_leaked_tool_calls(text)[1] == [("search", {"q": "日本語 テスト — Català, Ελληνικά, Русский, 中文"})]
+
+    def test_debris_before_the_object_is_still_fine(self):
+        text = ' to=functions.timbal__get_preview_logs  code\U0004e7fejson\n{"component":"ui"}'
+        assert parse_leaked_tool_calls(text)[1] == [("timbal__get_preview_logs", {"component": "ui"})]

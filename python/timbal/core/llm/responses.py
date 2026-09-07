@@ -55,7 +55,18 @@ def prepare_responses_request(
     if system_prompt:
         responses_kwargs["instructions"] = system_prompt
 
-    responses_kwargs["input"] = sum([message.to_openai_responses_input() for message in messages], [])
+    input_items = sum([message.to_openai_responses_input() for message in messages], [])
+    if not supports_encrypted_reasoning(model_name):
+        # History written by an OpenAI reasoning model, replayed to something else
+        # (FallbackModel to xAI, a gpt-4.1 follow-up): `reasoning` items with another
+        # model's encrypted payload and the assistant `phase` field are not accepted
+        # there. The function_call each reasoning item preceded stays.
+        input_items = [
+            {k: v for k, v in item.items() if k != "phase"}
+            for item in input_items
+            if not (item.get("type") == "reasoning" and item.get("encrypted_content"))
+        ]
+    responses_kwargs["input"] = input_items
 
     if tools:
         responses_tools = [tool.openai_responses_schema for tool in tools]

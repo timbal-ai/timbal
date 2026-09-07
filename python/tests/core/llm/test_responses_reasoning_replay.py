@@ -568,3 +568,44 @@ class TestAgentRetriesUnrecoverableLeak:
         # 1 original + 2 retries (max_leaked_tool_call_retries) = 3 requests; then the turn ends
         assert len(scripted.requests) == 3
         assert result.output.metadata.get("kind") == "leaked_tool_call_unrecovered"
+
+
+# ---------------------------------------------------------------------------
+# Cross-provider replay: reasoning payloads and `phase` are OpenAI-reasoning-only
+# ---------------------------------------------------------------------------
+
+
+def _history_from_a_reasoning_model() -> list[Message]:
+    from timbal.types.content import TextContent
+
+    return [
+        Message.validate({"role": "user", "content": "hi"}),
+        Message(
+            role="assistant",
+            content=[
+                ThinkingContent(thinking="", id="rs_1", encrypted_content="enc-1"),
+                ToolUseContent(id="call_1", name="search", input={"q": "x"}),
+                TextContent(text="Done.", phase="final_answer"),
+            ],
+        ),
+    ]
+
+
+class TestCrossProviderReplayScrub:
+    @pytest.mark.asyncio
+    async def test_reasoning_model_keeps_reasoning_and_phase(self):
+        kw = await _kwargs_sent(model_name="gpt-5.6-luna", messages=_history_from_a_reasoning_model())
+        kinds = [(i.get("type") or i.get("role")) for i in kw["input"]]
+        assert kinds == ["user", "reasoning", "function_call", "assistant"], kinds
+        assert kw["input"][-1]["phase"] == "final_answer"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", ["gpt-4.1", "grok-4"])
+    async def test_other_target_gets_neither(self, model):
+        """FallbackModel to xAI, or a gpt-4.1 follow-up on a gpt-5 history: the function_call
+        stays, the encrypted reasoning item and the phase do not."""
+        kw = await _kwargs_sent(model_name=model, messages=_history_from_a_reasoning_model())
+        kinds = [(i.get("type") or i.get("role")) for i in kw["input"]]
+        assert kinds == ["user", "function_call", "assistant"], (model, kinds)
+        assert "phase" not in kw["input"][-1]
+        assert kw["input"][-1]["content"] == [{"type": "output_text", "text": "Done."}]
