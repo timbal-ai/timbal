@@ -31,11 +31,15 @@ import re
 from typing import Literal
 
 LEAK_MARKER = "to=functions."
+# The model's parallel-call wrapper leaks too:
+#   to=multi_tool_use.parallel … {"tool_uses":[{"recipient_name":"functions.X","parameters":{…}}, …]}
+PARALLEL_MARKER = "to=multi_tool_use.parallel"
+LEAK_MARKERS = (LEAK_MARKER, PARALLEL_MARKER)
 
 # The recipient header. A tool name is what the Responses API allows for a function
 # name plus the dots timbal uses for namespaced tools (``timbal__codegen`` has none,
 # but MCP-style ``server.tool`` names exist elsewhere).
-_HEADER_RE = re.compile(r"to=functions\.([A-Za-z0-9_][A-Za-z0-9_.\-]*)")
+_HEADER_RE = re.compile(r"to=(?:functions\.([A-Za-z0-9_][A-Za-z0-9_.\-]*)|(multi_tool_use\.parallel))")
 
 LeakState = Literal["undecided", "leak", "clean"]
 
@@ -50,15 +54,29 @@ def leak_state(text: str) -> LeakState:
     head = text.lstrip()
     if not head:
         return "undecided"
-    if head.startswith(LEAK_MARKER):
+    if any(head.startswith(m) for m in LEAK_MARKERS):
         return "leak"
-    if LEAK_MARKER.startswith(head):
+    if any(m.startswith(head) for m in LEAK_MARKERS):
         return "undecided"
     return "clean"
 
 
 def contains_leak(text: str) -> bool:
     return bool(_HEADER_RE.search(text or ""))
+
+
+def _expand_parallel(args: dict) -> list[tuple[str, dict]]:
+    """``{"tool_uses": [{"recipient_name": "functions.X", "parameters": {…}}, …]}`` → calls."""
+    out: list[tuple[str, dict]] = []
+    for use in args.get("tool_uses") or []:
+        if not isinstance(use, dict):
+            continue
+        name = str(use.get("recipient_name") or "")
+        name = name.split("functions.", 1)[1] if "functions." in name else name
+        params = use.get("parameters")
+        if name and isinstance(params, dict):
+            out.append((name, params))
+    return out
 
 
 def _extract_json_object(text: str, start: int) -> tuple[str, int] | None:
@@ -120,9 +138,11 @@ def parse_leaked_tool_calls(text: str) -> tuple[str, list[tuple[str, dict]]]:
             continue
         if not isinstance(args, dict):
             continue
-        key = (m.group(1), json.dumps(args, sort_keys=True))
-        if key in seen:
-            continue
-        seen.add(key)
-        calls.append((m.group(1), args))
+        expanded = _expand_parallel(args) if m.group(2) else [(m.group(1), args)]
+        for name, a in expanded:
+            key = (name, json.dumps(a, sort_keys=True))
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append((name, a))
     return prefix, calls

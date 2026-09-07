@@ -81,3 +81,33 @@ class TestParse:
         text = "The `functions.search` helper is documented in README."
         assert not contains_leak(text)
         assert parse_leaked_tool_calls(text) == (text, [])
+
+
+class TestParallelWrapper:
+    SAMPLE = (
+        ' to=multi_tool_use.parallel  (json in assistant code)\n'
+        '{"tool_uses":[{"recipient_name":"functions.timbal__codegen","parameters":{"command":"get-flow","workforce":"triage"}},'
+        '{"recipient_name":"functions.timbal__get_preview_logs","parameters":{"component":"ui"}},'
+        '{"recipient_name":"functions.timbal__codegen","parameters":{"command":"get-flow","workforce":"triage"}}]}'
+    )
+
+    def test_state_and_detection(self):
+        assert leak_state(" to=multi") == "undecided"
+        assert leak_state(" to=multi_tool_use.parallel") == "leak"
+        assert contains_leak(self.SAMPLE)
+
+    def test_expands_into_individual_calls_deduped(self):
+        prefix, calls = parse_leaked_tool_calls(self.SAMPLE)
+        assert prefix == ""
+        assert calls == [
+            ("timbal__codegen", {"command": "get-flow", "workforce": "triage"}),
+            ("timbal__get_preview_logs", {"component": "ui"}),
+        ]
+
+    def test_mixed_with_plain_headers(self):
+        text = self.SAMPLE + '\n\n to=functions.list_background_tasks code:\n{}'
+        _, calls = parse_leaked_tool_calls(text)
+        assert [n for n, _ in calls] == ["timbal__codegen", "timbal__get_preview_logs", "list_background_tasks"]
+
+    def test_wrapper_without_tool_uses_yields_nothing(self):
+        assert parse_leaked_tool_calls(' to=multi_tool_use.parallel json\n{"foo":1}') == ("", [])
