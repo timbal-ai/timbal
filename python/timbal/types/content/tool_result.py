@@ -52,7 +52,7 @@ class ToolResultContent(BaseContent):
         nested: list[dict[str, Any]] = []
         for item in self.content:
             block = item.to_anthropic_input()
-            if block.get("type") == "text" and not block.get("text"):
+            if block is None or (block.get("type") == "text" and not block.get("text")):
                 continue
             nested.append(block)
         return {

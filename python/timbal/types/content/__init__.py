@@ -23,11 +23,13 @@ def content_factory(value: Any) -> BaseContent:
         if content_type == "custom":
             return CustomContent(value=value.get("value"))
         elif content_type == "text":
-            return TextContent(text=value.get("text"))
+            return TextContent(text=value.get("text"), phase=value.get("phase"))
         elif content_type == "thinking":
             return ThinkingContent(
-                thinking=value.get("thinking"),
+                thinking=value.get("thinking") or "",
                 signature=value.get("signature"),
+                id=value.get("id"),
+                encrypted_content=value.get("encrypted_content"),
             )
         elif content_type == "file":
             return FileContent(file=File(value.get("file")), name=value.get("name"))

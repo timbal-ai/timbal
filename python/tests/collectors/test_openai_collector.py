@@ -478,8 +478,9 @@ class TestResponseCollectorText:
             part=text_part,
             sequence_number=1,
         ))
-        assert isinstance(item, Text)
-        assert item.id == item_id
+        # An empty part is held until the first characters show it is prose, not a
+        # leaked `to=functions.…` call (see TestResponseCollectorLeakedToolCalls).
+        assert item is None
 
         item = collector.process(ResponseTextDeltaEvent(
             type="response.output_text.delta",
@@ -490,8 +491,21 @@ class TestResponseCollectorText:
             logprobs=[],
             sequence_number=2,
         ))
+        assert isinstance(item, Text)
+        assert item.id == item_id
+        assert item.text == "Hello"
+
+        item = collector.process(ResponseTextDeltaEvent(
+            type="response.output_text.delta",
+            item_id=item_id,
+            output_index=0,
+            content_index=0,
+            delta=" there",
+            logprobs=[],
+            sequence_number=2,
+        ))
         assert isinstance(item, TimbalTextDelta)
-        assert item.text_delta == "Hello"
+        assert item.text_delta == " there"
 
         result = collector.process(ResponseTextDoneEvent(
             type="response.output_text.done",
@@ -1849,3 +1863,453 @@ class TestResponseCollectorResult:
 
         msg = collector.result()
         assert len(msg.content) == 0  # server_tool_use skipped
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses: reasoning items carry `id` + `encrypted_content` into memory
+# ---------------------------------------------------------------------------
+
+def _reasoning(item_id: str, *, status: str = "in_progress", encrypted: str | None = None, summary: list[str] | None = None):
+    from openai.types.responses.response_reasoning_item import Summary
+
+    return ResponseReasoningItem(
+        type="reasoning",
+        id=item_id,
+        status=status,
+        summary=[Summary(type="summary_text", text=t) for t in (summary or [])],
+        encrypted_content=encrypted,
+    )
+
+
+def _fn_call(item_id: str, call_id: str, name: str = "search", arguments: str = "", status: str = "in_progress"):
+    return ResponseFunctionToolCall(
+        type="function_call", id=item_id, call_id=call_id, name=name, arguments=arguments, status=status,
+    )
+
+
+def _added(item, index: int, seq: int):
+    return ResponseOutputItemAddedEvent(type="response.output_item.added", output_index=index, item=item, sequence_number=seq)
+
+
+def _done(item, index: int, seq: int):
+    return ResponseOutputItemDoneEvent(type="response.output_item.done", output_index=index, item=item, sequence_number=seq)
+
+
+def _completed(seq: int):
+    resp = _make_response(model="gpt-5.6-luna", status="completed")
+    resp.usage = _make_response_usage()
+    return ResponseCompletedEvent(type="response.completed", response=resp, sequence_number=seq)
+
+
+class TestResponseCollectorEncryptedReasoning:
+    """The chain of thought a reasoning model needs back on the next call of a tool loop."""
+
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_encrypted_content_from_done_lands_on_thinking_content(self):
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        c.process(_completed(3))
+
+        msg = c.result()
+        assert len(msg.content) == 1
+        block = msg.content[0]
+        assert isinstance(block, ThinkingContent)
+        assert block.id == "rs_1"
+        assert block.encrypted_content == "enc-1"
+        assert block.thinking == ""
+        assert block.is_openai_reasoning_item
+
+    def test_reasoning_precedes_the_function_call_it_produced(self):
+        """Order in memory is order on the wire: reasoning item, then its function_call."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        c.process(_added(_fn_call("fc_1", "call_1"), 1, 3))
+        c.process(ResponseFunctionCallArgumentsDeltaEvent(
+            type="response.function_call_arguments.delta", item_id="fc_1", output_index=1, delta='{"q":"x"}', sequence_number=4,
+        ))
+        c.process(_done(_fn_call("fc_1", "call_1", arguments='{"q":"x"}', status="completed"), 1, 5))
+        c.process(_completed(6))
+
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ThinkingContent", "ToolUseContent"]
+        assert msg.content[0].encrypted_content == "enc-1"
+        assert msg.content[1].id == "call_1"
+        # …and that message replays as [reasoning, function_call] with the same ids.
+        items = msg.to_openai_responses_input()
+        assert [i["type"] for i in items] == ["reasoning", "function_call"]
+        assert items[0]["id"] == "rs_1" and items[0]["encrypted_content"] == "enc-1"
+        assert items[1]["call_id"] == "call_1"
+
+    def test_reasoning_without_payload_or_summary_is_not_kept(self):
+        """`include` not requested (or a non-reasoning model): nothing to replay, no empty block."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed"), 0, 2))
+        c.process(_added(_fn_call("fc_1", "call_1"), 1, 3))
+        c.process(_done(_fn_call("fc_1", "call_1", arguments="{}", status="completed"), 1, 4))
+        c.process(_completed(5))
+
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.to_openai_responses_input()[0]["type"] == "function_call"
+
+    def test_streamed_summary_and_encrypted_content_both_kept(self):
+        from openai.types.responses.response_reasoning_summary_part_added_event import Part as ReasoningSummaryPart
+
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(ResponseReasoningSummaryPartAddedEvent(
+            type="response.reasoning_summary_part.added", item_id="rs_1", output_index=0, summary_index=0,
+            part=ReasoningSummaryPart(type="summary_text", text=""), sequence_number=2,
+        ))
+        c.process(ResponseReasoningSummaryTextDeltaEvent(
+            type="response.reasoning_summary_text.delta", item_id="rs_1", output_index=0, summary_index=0,
+            delta="Need the schema first.", sequence_number=3,
+        ))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1", summary=["Need the schema first."]), 0, 4))
+        c.process(_completed(5))
+
+        block = c.result().content[0]
+        assert block.thinking == "Need the schema first."
+        assert block.encrypted_content == "enc-1"
+        assert block.to_openai_responses_input(role="assistant")["summary"] == [
+            {"type": "summary_text", "text": "Need the schema first."}
+        ]
+
+    def test_multiple_summary_parts_join_as_paragraphs(self):
+        from openai.types.responses.response_reasoning_summary_part_added_event import Part as ReasoningSummaryPart
+
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        for idx, text in enumerate(["first", "second"]):
+            c.process(ResponseReasoningSummaryPartAddedEvent(
+                type="response.reasoning_summary_part.added", item_id="rs_1", output_index=0, summary_index=idx,
+                part=ReasoningSummaryPart(type="summary_text", text=""), sequence_number=2 + 2 * idx,
+            ))
+            c.process(ResponseReasoningSummaryTextDeltaEvent(
+                type="response.reasoning_summary_text.delta", item_id="rs_1", output_index=0, summary_index=idx,
+                delta=text, sequence_number=3 + 2 * idx,
+            ))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1", summary=["first", "second"]), 0, 6))
+        c.process(_completed(7))
+        assert c.result().content[0].thinking == "first\n\nsecond"
+
+    def test_summary_only_on_done_is_used_when_nothing_streamed(self):
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1", summary=["late summary"]), 0, 2))
+        c.process(_completed(3))
+        assert c.result().content[0].thinking == "late summary"
+
+    def test_summary_without_encrypted_content_keeps_legacy_thinking(self):
+        """Summary text but no payload (include not requested): visible thinking, not a reasoning item."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", summary=["visible"]), 0, 2))
+        c.process(_completed(3))
+        block = c.result().content[0]
+        assert block.thinking == "visible"
+        assert block.encrypted_content is None
+        assert block.id is None
+        assert not block.is_openai_reasoning_item
+
+    def test_done_without_added_still_records_the_item(self):
+        """A `.done` for an item whose `.added` was missed must not raise or lose the payload."""
+        c = self._collector()
+        item = c.process(_done(_reasoning("rs_orphan", status="completed", encrypted="enc-o"), 0, 1))
+        assert item is None  # no content block was opened, so no stop event
+        c.process(_completed(2))
+        block = c.result().content[0]
+        assert block.id == "rs_orphan" and block.encrypted_content == "enc-o"
+
+    def test_added_and_done_emit_stream_events_as_before(self):
+        c = self._collector()
+        started = c.process(_added(_reasoning("rs_1"), 0, 1))
+        assert isinstance(started, Thinking) and started.id == "rs_1"
+        stopped = c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        assert isinstance(stopped, ContentBlockStop) and stopped.id == "rs_1"
+
+    def test_two_steps_two_reasoning_items(self):
+        """Parallel tool calls in one response: each reasoning item keeps its own payload."""
+        c = self._collector()
+        c.process(_added(_reasoning("rs_1"), 0, 1))
+        c.process(_done(_reasoning("rs_1", status="completed", encrypted="enc-1"), 0, 2))
+        c.process(_added(_fn_call("fc_1", "call_1", name="a"), 1, 3))
+        c.process(_done(_fn_call("fc_1", "call_1", name="a", arguments="{}", status="completed"), 1, 4))
+        c.process(_added(_reasoning("rs_2"), 2, 5))
+        c.process(_done(_reasoning("rs_2", status="completed", encrypted="enc-2"), 2, 6))
+        c.process(_added(_fn_call("fc_2", "call_2", name="b"), 3, 7))
+        c.process(_done(_fn_call("fc_2", "call_2", name="b", arguments="{}", status="completed"), 3, 8))
+        c.process(_completed(9))
+
+        items = c.result().to_openai_responses_input()
+        assert [(i["type"], i.get("id") or i.get("call_id")) for i in items] == [
+            ("reasoning", "rs_1"), ("function_call", "call_1"), ("reasoning", "rs_2"), ("function_call", "call_2"),
+        ]
+        assert [i["encrypted_content"] for i in items if i["type"] == "reasoning"] == ["enc-1", "enc-2"]
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Responses: assistant `phase` and leaked tool-call recovery
+# ---------------------------------------------------------------------------
+
+def _msg_item(item_id: str, *, phase: str | None = None, status: str = "in_progress", text: str | None = None):
+    content = [ResponseOutputText(type="output_text", text=text, annotations=[])] if text is not None else []
+    kwargs = {"phase": phase} if phase else {}
+    return ResponseOutputMessage(id=item_id, type="message", role="assistant", content=content, status=status, **kwargs)
+
+
+def _part_added(item_id: str, seq: int):
+    return ResponseContentPartAddedEvent(
+        type="response.content_part.added", item_id=item_id, output_index=0, content_index=0,
+        part=ResponseOutputText(type="output_text", text="", annotations=[]), sequence_number=seq,
+    )
+
+
+def _delta(item_id: str, delta: str, seq: int):
+    return ResponseTextDeltaEvent(
+        type="response.output_text.delta", item_id=item_id, output_index=0, content_index=0,
+        delta=delta, logprobs=[], sequence_number=seq,
+    )
+
+
+class TestResponseCollectorPhase:
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_phase_from_added_lands_on_text_content(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1", phase="commentary"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", "Checking first.", 3))
+        c.process(_done(_msg_item("msg_1", phase="commentary", status="completed", text="Checking first."), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["TextContent"]
+        assert msg.content[0].phase == "commentary"
+        assert msg.to_openai_responses_input()[0]["phase"] == "commentary"
+
+    def test_phase_only_on_done_is_still_captured(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", "Done.", 3))
+        c.process(_done(_msg_item("msg_1", phase="final_answer", status="completed", text="Done."), 0, 4))
+        c.process(_completed(5))
+        assert c.result().content[0].phase == "final_answer"
+
+    def test_no_phase_means_none(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", "Hello", 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text="Hello"), 0, 4))
+        c.process(_completed(5))
+        assert c.result().content[0].phase is None
+
+
+class TestResponseCollectorLeakedToolCalls:
+    """A `message` whose text is a Harmony-form tool call becomes the tool call."""
+
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_prose_is_held_until_decided_then_released_with_what_accumulated(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        assert c.process(_part_added("msg_1", 2)) is None            # empty: undecided
+        assert c.process(_delta("msg_1", "t", 3)) is None            # prefix of `to=functions.`
+        assert c.process(_delta("msg_1", "o", 4)) is None
+        started = c.process(_delta("msg_1", "morrow", 5))            # diverged: prose
+        assert isinstance(started, Text) and started.id == "msg_1" and started.text == "tomorrow"
+        nxt = c.process(_delta("msg_1", " then", 6))
+        assert isinstance(nxt, TimbalTextDelta) and nxt.text_delta == " then"
+        assert isinstance(c.process(_done(_msg_item("msg_1", status="completed", text="tomorrow then"), 0, 7)), ContentBlockStop)
+        c.process(_completed(8))
+        assert c.result().content[0].text == "tomorrow then"
+
+    def test_clean_text_releases_on_the_first_delta(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        started = c.process(_delta("msg_1", "Hello", 3))
+        assert isinstance(started, Text) and started.text == "Hello"
+
+    def test_short_undecided_text_is_released_at_done_with_its_stop(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        assert c.process(_delta("msg_1", "to", 3)) is None
+        first = c.process(_done(_msg_item("msg_1", status="completed", text="to"), 0, 4))
+        assert isinstance(first, Text) and first.text == "to"
+        assert isinstance(c.pop_pending_stream_item(), ContentBlockStop)
+        c.process(_completed(5))
+        assert c.result().content[0].text == "to"
+
+    def test_leak_is_never_streamed_and_becomes_a_tool_call(self):
+        leak = ' to=functions.timbal__get_preview_logs  (json 恒一\n{"service":"ui"}ંалда'
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1", phase="final_answer"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        emitted = [c.process(_delta("msg_1", ch, 3 + i)) for i, ch in enumerate(leak)]
+        assert all(e is None for e in emitted), "leaked text must not reach the stream"
+        assert c.process(_done(_msg_item("msg_1", phase="final_answer", status="completed", text=leak), 0, 99)) is None
+        c.process(_completed(100))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        call = msg.content[0]
+        assert call.name == "timbal__get_preview_logs"
+        assert call.input == {"service": "ui"}
+        assert call.id.startswith("call_leak_")
+        assert msg.to_openai_responses_input()[0]["type"] == "function_call"
+
+    def test_repeated_leaked_calls_collapse_and_the_fake_summary_is_dropped(self):
+        leak = (
+            ' to=functions.wait_for_background_tasks  code:\n{"task_ids":["x"],"timeout_seconds":120}\n\n'
+            ' to=functions.wait_for_background_tasks  code:\n{"task_ids":["x"],"timeout_seconds":120}\n\n'
+            "Invoice Triage is built.\n- Knowledge base: 5 vendors"
+        )
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", leak, 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.content[0].input == {"task_ids": ["x"], "timeout_seconds": 120}
+        assert "Invoice Triage" not in msg.collect_text()
+
+    def test_leak_after_prose_keeps_the_prose_and_recovers_the_call(self):
+        text = 'Wave 3 dependency check:\n- UI → ready.\n\n\n to=functions.builder  code:\n{"title":"UI","run_in_background":true}'
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1", phase="commentary"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", text, 3))  # streams (it starts as prose) — history is still cleaned
+        c.process(_done(_msg_item("msg_1", phase="commentary", status="completed", text=text), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["TextContent", "ToolUseContent"]
+        assert msg.content[0].text == "Wave 3 dependency check:\n- UI → ready."
+        assert msg.content[0].phase == "commentary"
+        assert msg.content[1].name == "builder"
+
+    def test_leak_next_to_a_structured_call_is_dropped_not_duplicated(self):
+        c = self._collector()
+        c.process(_added(_fn_call("fc_1", "call_1", name="search"), 0, 1))
+        c.process(_done(_fn_call("fc_1", "call_1", name="search", arguments='{"q":"x"}', status="completed"), 0, 2))
+        leak = ' to=functions.search json\n{"q":"x"}'
+        c.process(_added(_msg_item("msg_1"), 1, 3))
+        c.process(_part_added("msg_1", 4))
+        c.process(_delta("msg_1", leak, 5))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 1, 6))
+        c.process(_completed(7))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.content[0].id == "call_1"
+
+    def test_unparseable_leak_is_dropped_leaving_no_garbage(self):
+        leak = " to=functions.wait_for_background_tasks  code: 亚洲AV"
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", leak, 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_completed(5))
+        assert c.result().content == []
+
+    def test_recovered_count_is_recorded_in_usage(self):
+        ctx = _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        leak = ' to=functions.a json\n{}\n to=functions.b json\n{"k":1}'
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        c.process(_delta("msg_1", leak, 3))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_completed(5))
+        msg = c.result()
+        assert [b.name for b in msg.content] == ["a", "b"]
+        assert ctx.current_span().usage.get("recovered_tool_calls") == 2
+
+
+class TestResponseCollectorTextAfterLeak:
+    """Prose the model writes after a leaked call is its account of work that never ran."""
+
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_summary_after_a_leak_is_neither_streamed_nor_kept(self):
+        leak = ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}'
+        summary = "Invoice Triage is built.\n\n- Knowledge base: 5 vendors, 12 invoices"
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        assert c.process(_delta("msg_1", leak, 3)) is None
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_added(_msg_item("msg_2", phase="final_answer"), 1, 5))
+        c.process(_part_added("msg_2", 6))
+        streamed = [c.process(_delta("msg_2", part, 7 + i)) for i, part in enumerate(summary.split(" "))]
+        assert all(s is None for s in streamed), "the fake summary must not reach the stream"
+        assert c.process(_done(_msg_item("msg_2", phase="final_answer", status="completed", text=summary), 1, 40)) is None
+        c.process(_completed(41))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.content[0].name == "timbal__get_preview_logs"
+        # replays as just the call — no "final answer" wedged before the tool output
+        assert [i["type"] for i in msg.to_openai_responses_input()] == ["function_call"]
+
+    def test_later_leaked_blocks_are_still_recovered_and_deduped(self):
+        c = self._collector()
+        blocks = [
+            ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}',
+            ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}',
+            ' to=functions.list_background_tasks code:\n{}',
+            "All done here.",
+        ]
+        for n, text in enumerate(blocks):
+            mid = f"msg_{n}"
+            c.process(_added(_msg_item(mid), n, 10 * n + 1))
+            c.process(_part_added(mid, 10 * n + 2))
+            c.process(_delta(mid, text, 10 * n + 3))
+            c.process(_done(_msg_item(mid, status="completed", text=text), n, 10 * n + 4))
+        c.process(_completed(99))
+        msg = c.result()
+        assert [(type(b).__name__, getattr(b, "name", None)) for b in msg.content] == [
+            ("ToolUseContent", "timbal__get_preview_logs"),
+            ("ToolUseContent", "list_background_tasks"),
+        ]
+
+    def test_prose_before_the_first_leak_is_kept_and_was_streamed(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_0", phase="commentary"), 0, 1))
+        c.process(_part_added("msg_0", 2))
+        assert isinstance(c.process(_delta("msg_0", "Probing the UI build now.", 3)), Text)
+        c.process(_done(_msg_item("msg_0", phase="commentary", status="completed", text="Probing the UI build now."), 0, 4))
+        leak = ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}'
+        c.process(_added(_msg_item("msg_1"), 1, 5))
+        c.process(_part_added("msg_1", 6))
+        c.process(_delta("msg_1", leak, 7))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 1, 8))
+        c.process(_completed(9))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["TextContent", "ToolUseContent"]
+        assert msg.content[0].phase == "commentary"
+        items = msg.to_openai_responses_input()
+        assert [i.get("type") or i.get("phase") for i in items] == ["commentary", "function_call"]
