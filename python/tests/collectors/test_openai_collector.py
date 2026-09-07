@@ -2244,3 +2244,72 @@ class TestResponseCollectorLeakedToolCalls:
         msg = c.result()
         assert [b.name for b in msg.content] == ["a", "b"]
         assert ctx.current_span().usage.get("recovered_tool_calls") == 2
+
+
+class TestResponseCollectorTextAfterLeak:
+    """Prose the model writes after a leaked call is its account of work that never ran."""
+
+    def _collector(self):
+        _make_context()
+        c = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
+        c.process(ResponseCreatedEvent(type="response.created", response=_make_response(model="gpt-5.6-luna"), sequence_number=0))
+        return c
+
+    def test_summary_after_a_leak_is_neither_streamed_nor_kept(self):
+        leak = ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}'
+        summary = "Invoice Triage is built.\n\n- Knowledge base: 5 vendors, 12 invoices"
+        c = self._collector()
+        c.process(_added(_msg_item("msg_1"), 0, 1))
+        c.process(_part_added("msg_1", 2))
+        assert c.process(_delta("msg_1", leak, 3)) is None
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 0, 4))
+        c.process(_added(_msg_item("msg_2", phase="final_answer"), 1, 5))
+        c.process(_part_added("msg_2", 6))
+        streamed = [c.process(_delta("msg_2", part, 7 + i)) for i, part in enumerate(summary.split(" "))]
+        assert all(s is None for s in streamed), "the fake summary must not reach the stream"
+        assert c.process(_done(_msg_item("msg_2", phase="final_answer", status="completed", text=summary), 1, 40)) is None
+        c.process(_completed(41))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["ToolUseContent"]
+        assert msg.content[0].name == "timbal__get_preview_logs"
+        # replays as just the call — no "final answer" wedged before the tool output
+        assert [i["type"] for i in msg.to_openai_responses_input()] == ["function_call"]
+
+    def test_later_leaked_blocks_are_still_recovered_and_deduped(self):
+        c = self._collector()
+        blocks = [
+            ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}',
+            ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}',
+            ' to=functions.list_background_tasks code:\n{}',
+            "All done here.",
+        ]
+        for n, text in enumerate(blocks):
+            mid = f"msg_{n}"
+            c.process(_added(_msg_item(mid), n, 10 * n + 1))
+            c.process(_part_added(mid, 10 * n + 2))
+            c.process(_delta(mid, text, 10 * n + 3))
+            c.process(_done(_msg_item(mid, status="completed", text=text), n, 10 * n + 4))
+        c.process(_completed(99))
+        msg = c.result()
+        assert [(type(b).__name__, getattr(b, "name", None)) for b in msg.content] == [
+            ("ToolUseContent", "timbal__get_preview_logs"),
+            ("ToolUseContent", "list_background_tasks"),
+        ]
+
+    def test_prose_before_the_first_leak_is_kept_and_was_streamed(self):
+        c = self._collector()
+        c.process(_added(_msg_item("msg_0", phase="commentary"), 0, 1))
+        c.process(_part_added("msg_0", 2))
+        assert isinstance(c.process(_delta("msg_0", "Probing the UI build now.", 3)), Text)
+        c.process(_done(_msg_item("msg_0", phase="commentary", status="completed", text="Probing the UI build now."), 0, 4))
+        leak = ' to=functions.timbal__get_preview_logs  code:\n{"component":"ui"}'
+        c.process(_added(_msg_item("msg_1"), 1, 5))
+        c.process(_part_added("msg_1", 6))
+        c.process(_delta("msg_1", leak, 7))
+        c.process(_done(_msg_item("msg_1", status="completed", text=leak), 1, 8))
+        c.process(_completed(9))
+        msg = c.result()
+        assert [type(b).__name__ for b in msg.content] == ["TextContent", "ToolUseContent"]
+        assert msg.content[0].phase == "commentary"
+        items = msg.to_openai_responses_input()
+        assert [i.get("type") or i.get("phase") for i in items] == ["commentary", "function_call"]

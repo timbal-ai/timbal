@@ -1,3 +1,4 @@
+import json
 import time
 from collections import deque
 from typing import Any
@@ -492,6 +493,11 @@ class ResponseCollector(BaseCollector):
         # `phase` per message item id (`commentary` / `final_answer`), from the
         # item's `.added` / `.done`; the text block is keyed by the same id.
         self._message_phase: dict[str, str | None] = {}
+        # Once a text block is a leaked tool call, every later text block of this
+        # response is the model narrating work that never ran ("Invoice Triage is
+        # built…"). It is neither streamed nor kept; the real answer comes after
+        # the recovered call has actually run.
+        self._leak_seen: bool = False
         # A `.done` that has to flush held text emits two items; see `_emit_stream_items`.
         self._pending_stream_items: deque[Any] = deque()
 
@@ -670,10 +676,15 @@ class ResponseCollector(BaseCollector):
         entry = self.content[item_id]
         if not entry.get("held"):
             return None
+        if self._leak_seen:
+            entry["after_leak"] = True
+            entry["held"] = False
+            return None
         state = leak_state(entry["text"])
         if state == "leak":
             entry["leak"] = True
             entry["held"] = False
+            self._leak_seen = True
             return None
         if state == "undecided" and not force:
             return None
@@ -688,7 +699,7 @@ class ResponseCollector(BaseCollector):
         content_block_id = event.item_id
         if entry.get("held"):
             return self._release_text_if_decided(content_block_id)
-        if entry.get("leak"):
+        if entry.get("leak") or entry.get("after_leak"):
             return None
         assert content_block_id in self.content_blocks, "Text delta event without content block start event"
         return TimbalTextDelta(
@@ -894,6 +905,8 @@ class ResponseCollector(BaseCollector):
         # hallucination, and running it would double the action.
         has_structured_tool_use = any(b["type"] == "tool_use" for b in self.content.values())
         recovered = 0
+        recovered_keys: set[tuple[str, str]] = set()
+        leak_recovered_here = False  # a leaked block has been seen in this response (content order)
         for content_block in self.content.values():  # Python dicts are ordered
             if content_block["type"] == "tool_use":
                 content.append(
@@ -927,7 +940,15 @@ class ResponseCollector(BaseCollector):
                 phase = content_block.get("phase")
                 # e.g. {'type': 'url_citation', 'end_index': 2538, 'start_index': 2403, 'title': 'Weather Forecast and Conditions for Barcelona, Barcelona, Spain - The Weather Channel | Weather.com', 'url': 'https://weather.com/weather/today/l/b3b13a74649dd0a2a0aada41e1bf764de39e5dacf21d062ef18ecdeb09796ba0?utm_source=openai'}
                 # Openai annotations are already formatted into the text
+                if (content_block.get("after_leak") or leak_recovered_here) and not contains_leak(text):
+                    # Prose after a leaked call in the same response: the model's
+                    # account of work that never ran. Replaying it puts a "final
+                    # answer" between the recovered function_call and its output,
+                    # and the next turn answers as if it were already done.
+                    logger.warning("Dropped assistant text following a leaked tool call", text=text[:200])
+                    continue
                 if content_block.get("leak") or contains_leak(text):
+                    leak_recovered_here = True
                     # A tool call written as text (see harmony_leak). Keep the prose
                     # before it; turn what parses into real tool calls; drop the rest
                     # — surfacing it would hand the user a summary of work nobody did.
@@ -939,6 +960,11 @@ class ResponseCollector(BaseCollector):
                                        names=[n for n, _ in calls], text=text[:300])
                         continue
                     for name, args in calls:
+                        # The model repeats the same call across message items; one run each.
+                        key = (name, json.dumps(args, sort_keys=True))
+                        if key in recovered_keys:
+                            continue
+                        recovered_keys.add(key)
                         recovered += 1
                         content.append(ToolUseContent(id=f"call_leak_{uuid7(as_type='hex')}", name=name, input=args))
                     if not calls:
