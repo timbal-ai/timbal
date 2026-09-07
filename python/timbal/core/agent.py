@@ -51,6 +51,7 @@ from ..state.background import (
     current_background_store,
     format_background_completion_notice,
 )
+from ..collectors.harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED
 from ..types.content import (
     CustomContent,
     FileContent,
@@ -301,6 +302,12 @@ class Agent(Runnable):
     max_guardrail_retries: int = 2
     """Budget for guardrail "retry" verdicts per turn (the reask loop). Exhaustion blocks
     with the last rejection reason."""
+    max_leaked_tool_call_retries: int = 2
+    """GPT-5.x on the Responses API occasionally writes a tool call as text instead of a
+    `function_call` item (`to=functions.x …`). The collector runs what it can parse; when
+    the call never got its arguments there is nothing to run and nothing to show, so the
+    step is re-requested — with the model's reasoning items kept — up to this many times
+    per turn instead of ending the turn empty. 0 disables."""
     temperature: float | None = None
     """Sampling temperature for the LLM response."""
     output_model: type[BaseModel] | None = None
@@ -1581,6 +1588,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         _llm_memory_saved = False
         # Guardrail "retry" verdicts consumed this turn (bounded by max_guardrail_retries).
         guardrail_retry_count = 0
+        # Re-requests after a leaked, unrecoverable tool call (max_leaked_tool_call_retries).
+        leaked_call_retry_count = 0
         # Token usage reported by the previous LLM call this turn — the live signal for
         # mid-loop compaction. None until the first LLM call completes.
         last_llm_usage: dict | None = None
@@ -1778,6 +1787,41 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 )
                         delta_scrubbers.clear()
                         last_delta_events.clear()
+
+                        # A tool call leaked as text whose arguments never arrived: the
+                        # collector could neither run nor show anything. Re-request the
+                        # step. The empty message is not kept (a reasoning item with no
+                        # following item is rejected on replay); a runtime nudge tells the
+                        # model why it is being asked again.
+                        if (
+                            not interrupted
+                            and event.output.metadata.get("kind") == LEAKED_TOOL_CALL_UNRECOVERED
+                            and leaked_call_retry_count < self.max_leaked_tool_call_retries
+                            and i < self.max_iter - 1
+                        ):
+                            leaked_call_retry_count += 1
+                            logger.warning(
+                                "Re-requesting step after a leaked tool call with no arguments",
+                                agent_path=self._path,
+                                attempt=leaked_call_retry_count,
+                            )
+                            await _append_memory(
+                                Message(
+                                    role="user",
+                                    content=[TextContent(text=(
+                                        "Your previous response ended before the tool call was issued "
+                                        "(the call was emitted as text, without arguments, and nothing ran). "
+                                        "Issue the tool call now as a proper function call."
+                                    ))],
+                                    metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
+                                )
+                            )
+                            _llm_memory_saved = True
+                            last_llm_usage = event.usage
+                            buffered_events.clear()
+                            i += 1
+                            need_retry = True
+                            break
 
                         # model_step rails run on every assistant message; model_output
                         # rails on the final one (no tool calls). Both run BEFORE the

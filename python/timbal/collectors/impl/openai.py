@@ -53,7 +53,7 @@ from ...core.models import (
 )
 from ...state import get_billing_id, get_run_context
 from ...types.content.text import TextContent
-from ..harmony_leak import contains_leak, leak_state, parse_leaked_tool_calls
+from ..harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED, contains_leak, leak_state, parse_leaked_tool_calls
 from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
 from ...types.events.delta import (
@@ -977,5 +977,18 @@ class ResponseCollector(BaseCollector):
         if recovered:
             logger.warning("Recovered tool calls from leaked assistant text", count=recovered, model=getattr(self, "model", None))
             get_run_context().update_usage("recovered_tool_calls", recovered)
+        metadata: dict[str, Any] | None = None
+        if leak_recovered_here and not has_structured_tool_use:
+            # Debris-adjacent empty text parts carry nothing; they would only replay as
+            # empty `output_text` items around the recovered calls.
+            content = [c for c in content if not (isinstance(c, TextContent) and not c.text)]
+            if not recovered and not any(isinstance(c, TextContent) for c in content):
+                # A leak whose call never got its arguments (`to=functions.builder (json…`
+                # and then nothing): nothing to run, nothing to say. The agent loop
+                # re-requests on this flag instead of ending the turn empty.
+                metadata = {"source": "runtime", "kind": LEAKED_TOOL_CALL_UNRECOVERED}
+                logger.warning("Leaked tool call with no recoverable arguments; turn needs a retry",
+                               model=getattr(self, "model", None))
+                get_run_context().update_usage("unrecovered_tool_call_leaks", 1)
 
-        return Message(role="assistant", content=content, stop_reason=self._stop_reason)
+        return Message(role="assistant", content=content, stop_reason=self._stop_reason, metadata=metadata)

@@ -532,3 +532,39 @@ class TestAgentRecoversLeakedToolCalls:
         # A follow-up turn replays the assistant message with its phase intact.
         items = result.output.to_openai_responses_input()
         assert items[-1] == {"role": "assistant", "content": [{"type": "output_text", "text": "One moment."}], "phase": "commentary"}
+
+
+class TestAgentRetriesUnrecoverableLeak:
+    @pytest.mark.asyncio
+    async def test_leak_without_arguments_is_re_requested_and_the_loop_completes(self):
+        """Turn 1 leaks `to=functions.search (json…` with no JSON: nothing to run. The agent
+        must re-request (nudge appended, empty assistant turn not kept), turn 2 calls the
+        tool properly, turn 3 answers."""
+        scripted = _ScriptedResponses(
+            [
+                _text_turn("rs_1", "enc-1", " to=functions.search  (jsonеиҳәеит?)\n"),
+                _tool_call_turn("rs_2", "enc-2", "call_1", "fc_1", "search", '{"q": "x"}'),
+                _text_turn("rs_3", "enc-3", "Done: x"),
+            ]
+        )
+        result, calls = await _run_agent(scripted)
+
+        assert calls == [{"q": "x"}]
+        assert result.output.content[-1].text == "Done: x"
+        assert len(scripted.requests) == 3
+        second = scripted.requests[1]["input"]
+        kinds = [(i.get("type") or i.get("role")) for i in second]
+        # user prompt, then the runtime nudge — no dangling reasoning item, no empty assistant message
+        assert kinds == ["user", "user"], kinds
+        assert "emitted as text" in second[1]["content"][0]["text"]
+        assert not any(i.get("type") == "reasoning" for i in second)
+
+    @pytest.mark.asyncio
+    async def test_retry_budget_is_bounded(self):
+        leak = " to=functions.search  (json\n"
+        scripted = _ScriptedResponses([_text_turn(f"rs_{n}", f"enc-{n}", leak) for n in range(1, 5)])
+        result, calls = await _run_agent(scripted)
+        assert calls == []
+        # 1 original + 2 retries (max_leaked_tool_call_retries) = 3 requests; then the turn ends
+        assert len(scripted.requests) == 3
+        assert result.output.metadata.get("kind") == "leaked_tool_call_unrecovered"

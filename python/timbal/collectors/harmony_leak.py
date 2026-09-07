@@ -36,6 +36,10 @@ LEAK_MARKER = "to=functions."
 PARALLEL_MARKER = "to=multi_tool_use.parallel"
 LEAK_MARKERS = (LEAK_MARKER, PARALLEL_MARKER)
 
+# `Message.metadata["kind"]` the collector sets when a leak carried no runnable call —
+# the agent loop re-requests instead of ending the turn with nothing.
+LEAKED_TOOL_CALL_UNRECOVERED = "leaked_tool_call_unrecovered"
+
 # The recipient header. A tool name is what the Responses API allows for a function
 # name plus the dots timbal uses for namespaced tools (``timbal__codegen`` has none,
 # but MCP-style ``server.tool`` names exist elsewhere).
