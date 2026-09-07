@@ -448,12 +448,26 @@ def test_empty_legacy_thinking_does_not_produce_an_empty_text_part() -> None:
     ]
 
 
-def test_reasoning_only_assistant_turn_replays_as_just_the_reasoning_item() -> None:
-    """A turn that was cut off after reasoning (max_tokens) must not become an empty message."""
+def test_reasoning_only_assistant_turn_replays_as_nothing() -> None:
+    """A turn cut off after reasoning (max_tokens, or a leaked tool call with nothing
+    recoverable): a trailing reasoning item is rejected by the API ("provided without
+    its required following item"), so it is not sent — and neither is an empty message."""
     message = Message(role="assistant", content=[ThinkingContent(thinking="", id="rs_1", encrypted_content="enc-1")])
-    assert message.to_openai_responses_input() == [
-        {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc-1", "summary": []}
-    ]
+    assert message.to_openai_responses_input() == []
+
+
+def test_trailing_reasoning_items_are_dropped_but_earlier_ones_kept() -> None:
+    message = Message(
+        role="assistant",
+        content=[
+            ThinkingContent(thinking="", id="rs_1", encrypted_content="enc-1"),
+            ToolUseContent(id="call_1", name="search", input={}),
+            ThinkingContent(thinking="", id="rs_2", encrypted_content="enc-2"),
+            ThinkingContent(thinking="", id="rs_3", encrypted_content="enc-3"),
+        ],
+    )
+    items = message.to_openai_responses_input()
+    assert [(i["type"], i.get("id") or i.get("call_id")) for i in items] == [("reasoning", "rs_1"), ("function_call", "call_1")]
 
 
 # --- assistant `phase` and wire order (GPT-5.4+ preambles) ----------------------------

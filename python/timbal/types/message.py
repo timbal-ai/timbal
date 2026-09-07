@@ -166,6 +166,13 @@ class Message:
                     phase = getattr(content_item, "phase", None) if self.role == "assistant" else None
                     add_part(item_input, phase)
         flush()
+        # A reasoning item must be followed by the item it produced (function_call or
+        # message); OpenAI rejects a trailing one ("provided without its required
+        # following item"). A turn cut off after reasoning, or one whose only visible
+        # output was dropped (a leaked tool call with nothing recoverable), replays as
+        # nothing rather than as a request the API refuses.
+        while inputs and inputs[-1].get("type") == "reasoning":
+            inputs.pop()
         return inputs
 
     def to_openai_chat_completions_input(

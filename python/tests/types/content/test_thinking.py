@@ -1,6 +1,6 @@
 """ThinkingContent: Anthropic signature vs OpenAI Responses reasoning item replay."""
 
-from timbal.types.content import ThinkingContent, content_factory
+from timbal.types.content import ThinkingContent, ToolUseContent, content_factory
 from timbal.types.message import Message
 
 
@@ -109,8 +109,14 @@ class TestPersistence:
         adapter = TypeAdapter(Message)
         msg = Message(
             role="assistant",
-            content=[ThinkingContent(thinking="t", id="rs_1", encrypted_content="enc-1")],
+            content=[
+                ThinkingContent(thinking="t", id="rs_1", encrypted_content="enc-1"),
+                ToolUseContent(id="call_1", name="search", input={"q": "x"}),
+            ],
         )
         reloaded = adapter.validate_json(adapter.dump_json(msg))
         assert reloaded.content[0] == msg.content[0]
-        assert reloaded.to_openai_responses_input()[0]["type"] == "reasoning"
+        assert reloaded.content[0].encrypted_content == "enc-1"
+        items = reloaded.to_openai_responses_input()
+        assert [i["type"] for i in items] == ["reasoning", "function_call"]
+        assert items[0]["encrypted_content"] == "enc-1"
