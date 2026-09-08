@@ -438,6 +438,11 @@ def client_parent_run_id(config: dict[str, Any]) -> str | None:
     return raw.strip()
 
 
+def voice_media_owned_by_platform() -> bool:
+    """Sidecar owns STT/TTS/VAD; this process is headless ``/stream`` only."""
+    return os.environ.get("TIMBAL_VOICE_MEDIA_OWNER", "").strip().lower() == "platform"
+
+
 def voice_warmup_intended(runnable: Any) -> bool:
     """Whether server boot should pre-import the voice stack and pre-load ONNX models.
 
@@ -448,13 +453,21 @@ def voice_warmup_intended(runnable: Any) -> bool:
 
     Policy, in order:
 
-    1. ``TIMBAL_VOICE_WARMUP`` env: truthy forces warmup (the playground
+    1. ``TIMBAL_VOICE_MEDIA_OWNER=platform``: never. Media is the sidecar;
+       loading onnxruntime here is the dest-box SIGSEGV inside bwrap.
+       Beats ``TIMBAL_VOICE_WARMUP=1`` — a leftover playground/ProjectVar
+       must not turn a headless box back into a media process.
+    2. ``TIMBAL_VOICE_WARMUP`` env: truthy forces warmup (the playground
        launcher sets this for its child servers), falsy disables it.
-    2. The runnable declares ``voice_config`` — clearly a voice app.
-    3. Any ``TIMBAL_VOICE_*`` / ``ELEVENLABS_VOICE_ID`` env is set — the
-       deployment is voice-configured even if the runnable isn't.
-    4. Otherwise: no warmup.
+    3. The runnable declares ``voice_config`` — clearly a voice app.
+    4. Any *other* ``TIMBAL_VOICE_*`` / ``ELEVENLABS_VOICE_ID`` env is set —
+       the deployment is voice-configured even if the runnable isn't.
+       ``TIMBAL_VOICE_WARMUP`` and ``TIMBAL_VOICE_MEDIA_OWNER`` themselves
+       are not media-intent (they are this function's inputs).
+    5. Otherwise: no warmup.
     """
+    if voice_media_owned_by_platform():
+        return False
     override = os.environ.get("TIMBAL_VOICE_WARMUP", "").strip().lower()
     if override in _TRUTHY:
         return True
@@ -464,7 +477,10 @@ def voice_warmup_intended(runnable: Any) -> bool:
         return True
     if os.environ.get("ELEVENLABS_VOICE_ID"):
         return True
-    return any(k.startswith("TIMBAL_VOICE_") for k in os.environ)
+    return any(
+        k.startswith("TIMBAL_VOICE_") and k not in ("TIMBAL_VOICE_WARMUP", "TIMBAL_VOICE_MEDIA_OWNER")
+        for k in os.environ
+    )
 
 
 def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:

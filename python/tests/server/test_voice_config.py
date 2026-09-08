@@ -73,6 +73,28 @@ class TestVoiceWarmupIntended:
         r.voice_config = {"stt_provider": "elevenlabs"}  # even a voice app
         assert voice_routes.voice_warmup_intended(r) is False
 
+    def test_platform_media_owner_skips_warmup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Headless dest box: sidecar owns media. voice_config must not load onnx."""
+        self._clear_warmup_env(monkeypatch)
+        monkeypatch.setenv("TIMBAL_VOICE_MEDIA_OWNER", "platform")
+        r = self._Runnable()
+        r.voice_config = {"stt_provider": "elevenlabs"}
+        assert voice_routes.voice_warmup_intended(r) is False
+
+    def test_platform_media_owner_beats_warmup_force_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_warmup_env(monkeypatch)
+        monkeypatch.setenv("TIMBAL_VOICE_MEDIA_OWNER", "platform")
+        monkeypatch.setenv("TIMBAL_VOICE_WARMUP", "1")
+        r = self._Runnable()
+        r.voice_config = {"stt_provider": "elevenlabs"}
+        assert voice_routes.voice_warmup_intended(r) is False
+
+    def test_platform_media_owner_is_not_a_warmup_signal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Informational owner env must not trip the any(TIMBAL_VOICE_*) heuristic."""
+        self._clear_warmup_env(monkeypatch)
+        monkeypatch.setenv("TIMBAL_VOICE_MEDIA_OWNER", "platform")
+        assert voice_routes.voice_warmup_intended(self._Runnable()) is False
+
 
 class TestVoiceOnnxWarmupIntended:
     """Flux / provider EOU must not pull Smart Turn + Namo + Silero at boot."""
