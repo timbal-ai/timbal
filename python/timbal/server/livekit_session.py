@@ -74,7 +74,12 @@ import structlog
 
 from ..voice.config import VoiceConfig
 from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
-from .voice import build_voice_session, event_to_payloads, merge_client_voice_overrides
+from .voice import (
+    build_voice_session,
+    event_to_payloads,
+    merge_client_voice_overrides,
+    voice_media_owned_by_platform,
+)
 
 logger = structlog.get_logger("timbal.server.livekit_session")
 
@@ -215,7 +220,14 @@ def _sessions(app: Any) -> dict[str, asyncio.Task]:
 
 
 def maybe_start_livekit_session(app: Any) -> asyncio.Task | None:
-    """Lifespan hook: start the dial-out driver when the transport is LiveKit."""
+    """Lifespan hook: start the dial-out driver when the transport is LiveKit.
+
+    No-op when ``TIMBAL_VOICE_MEDIA_OWNER=platform``: STT/TTS run in the
+    sidecar and this process is headless ``/stream``. A leftover ProjectVar
+    ``TIMBAL_VOICE_TRANSPORT=livekit`` must not join a room from here.
+    """
+    if voice_media_owned_by_platform():
+        return None
     if os.environ.get("TIMBAL_VOICE_TRANSPORT", "").strip().lower() != "livekit":
         return None
     return asyncio.create_task(_run_livekit_session(app), name="voice-livekit-session")

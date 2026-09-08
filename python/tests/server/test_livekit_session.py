@@ -54,19 +54,28 @@ def _reassemble(chunks: list[dict]) -> dict:
 class TestMaybeStart:
     def test_off_when_transport_unset(self, monkeypatch) -> None:
         monkeypatch.delenv("TIMBAL_VOICE_TRANSPORT", raising=False)
+        monkeypatch.delenv("TIMBAL_VOICE_MEDIA_OWNER", raising=False)
         assert maybe_start_livekit_session(SimpleNamespace()) is None
 
     def test_off_when_transport_is_webrtc(self, monkeypatch) -> None:
+        monkeypatch.delenv("TIMBAL_VOICE_MEDIA_OWNER", raising=False)
         monkeypatch.setenv("TIMBAL_VOICE_TRANSPORT", "webrtc")
         assert maybe_start_livekit_session(SimpleNamespace()) is None
 
     async def test_starts_a_task_when_livekit(self, monkeypatch) -> None:
+        monkeypatch.delenv("TIMBAL_VOICE_MEDIA_OWNER", raising=False)
         monkeypatch.setenv("TIMBAL_VOICE_TRANSPORT", "livekit")
         task = maybe_start_livekit_session(SimpleNamespace(state=SimpleNamespace(runnable=None)))
         assert task is not None
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    def test_off_when_platform_owns_media(self, monkeypatch) -> None:
+        """Leftover TIMBAL_VOICE_TRANSPORT=livekit on a headless dest box."""
+        monkeypatch.setenv("TIMBAL_VOICE_TRANSPORT", "livekit")
+        monkeypatch.setenv("TIMBAL_VOICE_MEDIA_OWNER", "platform")
+        assert maybe_start_livekit_session(SimpleNamespace()) is None
 
 
 class TestCallerIdentity:
