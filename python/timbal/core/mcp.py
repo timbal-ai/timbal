@@ -930,6 +930,19 @@ class MCPServer(ToolSet):
             return False
         return run_id is None or run_id != self._tools_cache_run_id
 
+    def _reuse_tools_cache(self, run_id: str | None) -> list[Runnable]:
+        """Hand out the cached list and stamp it with the run that is now using it.
+
+        The stamp is what ``_tools_refresh_due`` compares against, so it must follow the
+        *latest* run that saw the list, not the one that fetched it. A long-lived server
+        reused across runs would otherwise treat a ``tools/list_changed`` arriving mid-run
+        B as a boundary (``B != A``) and swap the tool set under the LLM's feet.
+        """
+        assert self._tools_cache is not None
+        if run_id is not None:
+            self._tools_cache_run_id = run_id
+        return self._tools_cache
+
     async def resolve(self) -> list[Runnable]:
         """See base class.
 
@@ -943,13 +956,11 @@ class MCPServer(ToolSet):
         run_context = get_run_context()
         run_id = run_context.id if run_context is not None else None
         if not self._tools_refresh_due(run_id):
-            assert self._tools_cache is not None
-            return self._tools_cache
+            return self._reuse_tools_cache(run_id)
 
         async with self._get_tools_lock():
             if not self._tools_refresh_due(run_id):
-                assert self._tools_cache is not None
-                return self._tools_cache
+                return self._reuse_tools_cache(run_id)
 
             result = await self._request(lambda session: session.list_tools(), what="tools/list", idempotent=True)
             mcp_tools = sorted(result.tools, key=lambda t: t.name)

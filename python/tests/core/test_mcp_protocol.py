@@ -477,6 +477,81 @@ class TestToolListChanged:
             set_run_context(None)
             await server.close()
 
+    async def test_reused_server_does_not_refresh_mid_run(self, make_server):
+        """The boundary check must key on the run *using* the cache, not the one that fetched it.
+
+        A long-lived server (the documented pattern) fetches in run A and hands the warm
+        cache to run B. A ``tools/list_changed`` arriving mid-run B must not read as a
+        boundary just because B is not A.
+        """
+        server = make_server()
+        try:
+            set_run_context(RunContext())
+            tools_a = await server.resolve()
+
+            run_b = RunContext()
+            set_run_context(run_b)
+            assert await server.resolve() is tools_a
+            assert server._tools_cache_run_id == run_b.id
+
+            await {t.name: t for t in tools_a}["add_tool"]().collect()
+            await asyncio.sleep(0)
+            assert server._tools_stale is True
+
+            # Still run B: the list changed under us, but the tool set must hold.
+            set_run_context(run_b)
+            assert await server.resolve() is tools_a
+            assert server._tools_stale is True
+
+            set_run_context(RunContext())
+            tools_c = await server.resolve()
+            assert tools_c is not tools_a
+            assert "extra" in {t.name for t in tools_c}
+            assert server._tools_stale is False
+        finally:
+            set_run_context(None)
+            await server.close()
+
+    async def test_agent_reusing_server_keeps_tool_set_for_the_whole_run(self, make_server):
+        """End to end: run 1 warms the cache, run 2 triggers list_changed mid-turn and its
+        next LLM iteration must see the same tools; run 3 sees the new one."""
+        server = make_server()
+
+        def _offered(events: list, agent_name: str) -> list[set[str]]:
+            return [
+                {tool.name for tool in e.input["tools"]}
+                for e in events
+                if isinstance(e, OutputEvent) and e.path == f"{agent_name}.llm"
+            ]
+
+        # Distinct agent names: same-named agents share memory through the in-memory
+        # provider, which would shift TestModel's step-indexed responses.
+        try:
+            first = Agent(name="a1", model=TestModel(responses=["hi"]), tools=[server], max_iter=3)
+            events_1 = [e async for e in first(prompt="hello")]
+            assert events_1[-1].status.code == "success"
+            (tools_run_1,) = _offered(events_1, "a1")
+            assert "extra" not in tools_run_1
+
+            model_2 = TestModel(responses=[_tool_call(("c1", "add_tool", {})), "done"])
+            second = Agent(name="a2", model=model_2, tools=[server], max_iter=3)
+            events_2 = [e async for e in second(prompt="add a tool")]
+            assert events_2[-1].status.code == "success"
+            assert [e.output for e in events_2 if isinstance(e, OutputEvent) and e.path == "a2.add_tool"] == ["added"]
+            offered_2 = _offered(events_2, "a2")
+            assert len(offered_2) == 2
+            assert offered_2[0] == tools_run_1
+            assert offered_2[1] == tools_run_1, "tool set changed mid-run after tools/list_changed"
+            assert server._tools_stale is True
+
+            third = Agent(name="a3", model=TestModel(responses=["hi"]), tools=[server], max_iter=3)
+            events_3 = [e async for e in third(prompt="hello again")]
+            (tools_run_3,) = _offered(events_3, "a3")
+            assert tools_run_3 == tools_run_1 | {"extra"}
+            assert server._tools_stale is False
+        finally:
+            await server.close()
+
     async def test_stale_list_refreshes_immediately_outside_a_run(self, make_server):
         server = make_server()
         try:
