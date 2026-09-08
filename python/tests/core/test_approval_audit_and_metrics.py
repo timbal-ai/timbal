@@ -386,6 +386,7 @@ class TestResolutionSnapshotCompleteness:
         snapshot = out.metadata["approval"]["resolution"]
         assert snapshot == {
             "approved": True,
+            "scope": "call",
             "reason": "trusted source",
             "approver_id": "user_42",
             "comment": "vetted via SSO",

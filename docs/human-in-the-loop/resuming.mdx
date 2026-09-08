@@ -145,7 +145,7 @@ result = await agent(prompt="...").collect()
 
 if result.status.reason == "approval_required":
     for entry in result.metadata["pending_approvals"]:
-        print(entry["approval_id"], entry["runnable_path"], entry["prompt"], entry["input"])
+        print(entry["approval_id"], entry["runnable_path"], entry["prompt"], entry["grant_key"], entry["grantable"])
 
 if result.status.reason == "input_required":
     for entry in result.metadata["pending_interactions"]:

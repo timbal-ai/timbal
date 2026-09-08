@@ -47,7 +47,13 @@ from ..state.context import RunContext, _EmitSink
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
-from ..types.approval import ApprovalPolicyDecision, ApprovalResolution, Cancel
+from ..types.approval import (
+    APPROVAL_GRANTS_SESSION_KEY,
+    ApprovalGrant,
+    ApprovalPolicyDecision,
+    ApprovalResolution,
+    Cancel,
+)
 from ..types.events import (
     ApprovalEvent,
     BaseEvent,
@@ -271,6 +277,15 @@ class Runnable(ABC, BaseModel):
     """Ergonomic shortcut for ``approval_redactor``: each listed key in the
     validated input is replaced with ``"***"`` on the public approval
     surfaces. The handler still receives the unredacted input."""
+    approval_grant_key: str | Callable[..., str | None] | None = None
+    """What a ``scope="session"`` approval ("yes, don't ask again") is remembered
+    under, or a callable over the validated input returning it. ``None`` means
+    this runnable's path — "this tool". Set one per subcommand on a tool that
+    multiplexes them. A policy callable's ``ApprovalPolicyDecision.grant_key``
+    takes precedence."""
+    approval_grantable: bool = True
+    """Whether a human may remember an approval of this runnable for the rest of
+    the session. ``False`` for decisions that must be taken every time."""
 
     schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
@@ -968,12 +983,21 @@ class Runnable(ABC, BaseModel):
             if isinstance(ui, BaseModel):
                 ui = ui.model_dump(mode="json")
 
+            grant_key = decision.grant_key
+            if decision.required and grant_key is None and self.approval_grant_key is not None:
+                if callable(self.approval_grant_key):
+                    grant_key = await self._execute_approval_callable(self.approval_grant_key, validated_input)
+                else:
+                    grant_key = self.approval_grant_key
+
             return ApprovalPolicyDecision(
                 required=decision.required,
                 prompt=prompt,
                 description=decision.description or self.approval_description,
                 kind=decision.kind or self.approval_kind,
                 ui=ui,
+                grant_key=grant_key,
+                grantable=decision.grantable and self.approval_grantable,
                 metadata=decision.metadata,
             )
         except ApprovalPolicyError:
@@ -1342,6 +1366,8 @@ class Runnable(ABC, BaseModel):
         # Set by the agent on the START event when this gate fires inside a
         # tool call (see Agent._safe_tool_dispatch). None for direct calls.
         tool_call_id = span.metadata.get("tool_call_id")
+        # "This tool" unless the decision named something narrower.
+        grant_key = approval_decision.grant_key or span.path
         span.metadata["approval"] = {
             "id": approval_id,
             "required": True,
@@ -1351,11 +1377,14 @@ class Runnable(ABC, BaseModel):
             "ui": approval_decision.ui,
             "input_schema": input_schema,
             "tool_call_id": tool_call_id,
+            "grant_key": grant_key,
+            "grantable": approval_decision.grantable,
             "metadata": approval_decision.metadata,
             "input": redacted_input,
         }
         approval_resolution = None
         approval_cancel: Cancel | None = None
+        granted_by: ApprovalGrant | None = None
         if approval_id in run_context._resume_values:
             run_context._used_resume_ids.add(approval_id)
             raw_resume = run_context._resume_values[approval_id]
@@ -1376,10 +1405,32 @@ class Runnable(ABC, BaseModel):
             run_context.update_usage("approvals:expired", 1)
             approval_resolution = None
 
+        # No explicit answer for this call: an earlier "don't ask again" in this
+        # session may cover it. An explicit resume value always wins — a human who
+        # declined *this* call after remembering the tool meant this call.
+        if approval_resolution is None and approval_cancel is None and approval_decision.grantable:
+            granted_by = await self._find_approval_grant(run_context, grant_key)
+            if granted_by is not None:
+                approval_resolution = ApprovalResolution(
+                    approved=True,
+                    scope="session",
+                    reason="Approved by a session grant.",
+                    approver_id=granted_by.approver_id,
+                    comment=granted_by.comment,
+                    decided_at=granted_by.granted_at,
+                    expires_at=granted_by.expires_at,
+                    metadata={"granted_by": granted_by.approval_id, "grant_key": granted_by.key},
+                )
+                span.metadata["approval"]["granted"] = granted_by.model_dump(mode="json")
+                run_context.update_usage("approvals:granted", 1)
+
         # A decision OR a cancel claims the gate; the first claimer wins and
-        # any later duplicate (resolve or cancel) stops here.
-        if (approval_resolution is not None or approval_cancel is not None) and (
-            run_context._tracing_provider is not None
+        # any later duplicate (resolve or cancel) stops here. A grant is not a
+        # resume of a pending gate, so there is nothing to race for.
+        if (
+            (approval_resolution is not None or approval_cancel is not None)
+            and granted_by is None
+            and run_context._tracing_provider is not None
         ):
             claimed = await run_context._tracing_provider.claim_approval(
                 str(run_context.parent_id) if run_context.parent_id else None,
@@ -1447,6 +1498,8 @@ class Runnable(ABC, BaseModel):
                 description=approval_decision.description,
                 kind=approval_decision.kind,
                 ui=approval_decision.ui,
+                grant_key=grant_key,
+                grantable=approval_decision.grantable,
                 metadata=approval_decision.metadata,
             )
             run_context.update_usage("approvals:required", 1)
@@ -1458,6 +1511,7 @@ class Runnable(ABC, BaseModel):
         # query e.g. ``approval.resolution.approver_id`` directly.
         span.metadata["approval"]["resolution"] = {
             "approved": approval_resolution.approved,
+            "scope": approval_resolution.scope,
             "reason": approval_resolution.reason,
             "approver_id": approval_resolution.approver_id,
             "comment": approval_resolution.comment,
@@ -1483,6 +1537,34 @@ class Runnable(ABC, BaseModel):
 
         run_context.update_usage("approvals:approved", 1)
 
+        # "Yes, and don't ask again": remember the human's decision for the rest
+        # of the session. A grant-derived resolution is already remembered.
+        if approval_resolution.scope == "session" and granted_by is None:
+            if approval_decision.grantable:
+                await self._store_approval_grant(
+                    run_context,
+                    ApprovalGrant(
+                        key=grant_key,
+                        runnable_path=span.path,
+                        approval_id=approval_id,
+                        run_id=str(run_context.id),
+                        granted_at=approval_resolution.decided_at or int(time.time() * 1000),
+                        expires_at=approval_resolution.expires_at,
+                        approver_id=approval_resolution.approver_id,
+                        comment=approval_resolution.comment,
+                    ),
+                )
+                run_context.update_usage("approvals:remembered", 1)
+            else:
+                # The call itself is approved; only the memory is refused.
+                span.metadata["approval"]["grant_refused"] = True
+                _get_logger().warning(
+                    "Approval resolution asked for scope='session' on a gate that is not grantable; "
+                    "approving this call only.",
+                    runnable_path=span.path,
+                    approval_id=approval_id,
+                )
+
         # Edit-on-approve: merge the human's overrides over the proposed
         # input (override wins) and re-validate so the handler runs with
         # the corrected, type-checked values. The audit snapshot above
@@ -1496,6 +1578,48 @@ class Runnable(ABC, BaseModel):
             span.metadata["approval"]["effective_input"] = span.input
 
         return True, None, validated_input
+
+    @staticmethod
+    async def _find_approval_grant(run_context: Any, grant_key: str) -> ApprovalGrant | None:
+        """The live session grant for ``grant_key``, if any.
+
+        Grants live in the run's session data, which every tracing provider already
+        carries across ``parent_id`` (root span ``session``), so a "don't ask again"
+        survives process restarts wherever the trace itself does. An expired or
+        malformed entry is treated as absent — the gate then asks.
+        """
+        try:
+            session = await run_context.get_session()
+        except Exception as exc:
+            _get_logger().warning(
+                "Could not load session data for approval grants; asking.",
+                grant_key=grant_key,
+                error=repr(exc),
+            )
+            return None
+        grants = session.get(APPROVAL_GRANTS_SESSION_KEY)
+        if not isinstance(grants, dict):
+            return None
+        raw = grants.get(grant_key)
+        if raw is None:
+            return None
+        try:
+            grant = ApprovalGrant.model_validate(raw)
+        except Exception:
+            return None
+        if grant.is_expired():
+            return None
+        return grant
+
+    @staticmethod
+    async def _store_approval_grant(run_context: Any, grant: ApprovalGrant) -> None:
+        """Persist a grant in the session; ``_save_trace`` writes it to the root span."""
+        session = await run_context.get_session()
+        grants = session.get(APPROVAL_GRANTS_SESSION_KEY)
+        if not isinstance(grants, dict):
+            grants = {}
+            session[APPROVAL_GRANTS_SESSION_KEY] = grants
+        grants[grant.key] = grant.model_dump(mode="json")
 
     async def _finalize_suspend(self, suspend_signal: Suspend, span: Any, run_context: Any) -> InteractionEvent:
         """Record a ``suspend()`` pause on the span and build its InteractionEvent.

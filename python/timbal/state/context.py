@@ -236,6 +236,8 @@ class RunContext(BaseModel):
                         "kind": approval.get("kind"),
                         "ui": approval.get("ui"),
                         "input_schema": approval.get("input_schema"),
+                        "grant_key": approval.get("grant_key", span.path),
+                        "grantable": approval.get("grantable", True),
                         "metadata": approval.get("metadata", {}),
                         "input": approval.get("input"),
                     }
