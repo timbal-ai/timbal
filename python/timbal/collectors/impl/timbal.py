@@ -62,6 +62,8 @@ class TimbalCollector(BaseCollector):
                 "description": event.description,
                 "kind": event.kind,
                 "ui": event.ui,
+                "grant_key": event.grant_key,
+                "grantable": event.grantable,
                 "metadata": event.metadata,
                 "t0": event.t0,
                 "call_id": event.call_id,

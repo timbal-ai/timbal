@@ -139,10 +139,14 @@ class TestSessionGrantOnTool:
         from timbal.state import get_run_context
 
         tool = Tool(name="wire", handler=lambda amount: "ok", requires_approval=True, approval_grantable=False)
-        events = [e async for e in tool(amount=1)]
-        card = _approval_event(events)
-        assert card is not None
-        entry = next(e for e in get_run_context().pending_approvals() if e["approval_id"] == card.approval_id)
+        collected = await tool(amount=1).collect()
+        pending = collected.metadata["pending_approvals"]
+        assert len(pending) == 1
+        meta = pending[0]
+        assert meta["grant_key"] == "wire"
+        assert meta["grantable"] is False
+
+        entry = next(e for e in get_run_context().pending_approvals() if e["approval_id"] == meta["approval_id"])
         assert entry["grant_key"] == "wire"
         assert entry["grantable"] is False
 
