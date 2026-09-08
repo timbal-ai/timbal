@@ -139,6 +139,49 @@ decision = ApprovalResolution(
 
 This is useful when an operator stamps a decision in a UI but a worker doesn't pick it up immediately. Stale decisions force a fresh re-review instead of silently going through.
 
+## "Yes, and don't ask me again" (`scope="session"`)
+
+An `approval_id` covers one exact call. A human who has approved `rm /tmp/a` will be asked again for `rm /tmp/b`. To let them stop being asked, resume with `scope="session"`:
+
+```python
+result = await agent(
+    prompt="clean up",
+    parent_id=paused_run_id,
+    resume={approval_id: {"approved": True, "scope": "session"}},
+).collect()
+```
+
+That approves the call **and** leaves an `ApprovalGrant` in the run's session data (`RunContext.get_session()`, the dict that follows a conversation across runs on the root span), keyed by the gate's `grant_key`. Every later gate in the same session — the chain of runs linked by `parent_id` — that resolves to the same key is approved without an `ApprovalEvent`. The synthesized resolution is written to `span.metadata["approval"]["resolution"]` like any other, with `scope: "session"` and `metadata.granted_by` = the `approval_id` the human actually answered; the grant itself is at `span.metadata["approval"]["granted"]`. Because grants ride the session, they persist wherever the trace does (JSONL, SQLite, the platform) with no extra storage.
+
+Every `ApprovalEvent` carries the two fields a client needs to offer the option:
+
+- `grant_key` — what a session approval would remember. Defaults to the runnable's path ("this tool"). Show it on the button: *Always allow `rm` in this chat*.
+- `grantable` — whether the option may be offered at all.
+
+Narrow or forbid remembering from the tool side:
+
+```python
+# One tool, several subcommands: remembering `delete` must not cover `drop`.
+admin = Tool(
+    handler=admin_impl,
+    requires_approval=lambda command, **_: command in {"delete", "drop"},
+    approval_grant_key=lambda command, **_: f"admin:{command}",
+)
+
+# Money moves: every occurrence needs a human.
+wire = Tool(handler=wire_impl, requires_approval=True, approval_grantable=False)
+```
+
+A policy callable can return the same two fields on its `ApprovalPolicyDecision` (`grant_key`, `grantable`); they win over the tool-level values.
+
+Rules:
+
+- An explicit resume value for a call always beats a grant — declining one occurrence after remembering the tool means that occurrence.
+- A decline is never remembered (`scope` is ignored when `approved=False`).
+- A `scope="session"` resolution on a gate that is not `grantable` approves that call only and sets `span.metadata["approval"]["grant_refused"] = True`.
+- `expires_at` on the resolution bounds the grant too; an expired grant is ignored and the gate asks again.
+- `scope="call"` is the default and is what a bare `True` means. Other scopes (a user across sessions, an org) may be added later; they will be additive.
+
 ## Redacting approval input
 
 Approval input is shown to humans and written to traces. If a gated runnable receives secrets or PII, redact the public approval snapshot.

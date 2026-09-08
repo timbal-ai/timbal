@@ -22,6 +22,8 @@ When the run cancels, `OutputEvent.status.reason` carries one of:
 - `approvals:approved` — a valid approved resolution was consumed
 - `approvals:denied` — a valid denied resolution was consumed
 - `approvals:expired` — an expired resolution was ignored and the gate re-emitted
+- `approvals:remembered` — an approved resolution carried `scope="session"` and a grant was stored
+- `approvals:granted` — a gate was approved by an existing session grant, without emitting an `ApprovalEvent`
 - `approvals:cancelled` — a `Cancel` aborted the run at a gate
 - `suspends:required` — a `suspend()` call paused the run
 

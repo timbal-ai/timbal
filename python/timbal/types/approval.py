@@ -5,6 +5,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+ApprovalScope = Literal["call", "session"]
+"""How far an approval reaches.
+
+- ``"call"``: this ``approval_id`` only — the exact runnable path + input. The default.
+- ``"session"``: this call, and every later invocation in the same session (the chain of
+  runs linked by ``parent_id``) whose gate resolves to the same ``grant_key``. The grant is
+  stored in the run's session data (``RunContext.get_session()``), so it persists wherever
+  the trace does and needs nothing from the tracing provider beyond ``get``/``put``.
+
+Additional scopes (a user across sessions, an org) are additive: a client that sends
+``"session"`` today keeps working when they exist.
+"""
+
+APPROVAL_GRANTS_SESSION_KEY = "approval_grants"
+"""Key under which session-scoped grants live in ``RunContext.get_session()``:
+``{grant_key: ApprovalGrant.model_dump()}``."""
+
 
 class ApprovalPolicyDecision(BaseModel):
     """Normalized approval policy decision for a runnable invocation.
@@ -13,7 +30,8 @@ class ApprovalPolicyDecision(BaseModel):
     single decision approves every invocation with the same path + input. For
     irreversible operations (money movement, destructive deletes) include a
     unique value in the input (e.g. ``idempotency_key=uuid4()``) so each call
-    derives a distinct ``approval_id`` and requires a fresh decision.
+    derives a distinct ``approval_id`` and requires a fresh decision — and set
+    ``grantable=False`` so a human cannot remember the decision either.
     """
 
     required: bool
@@ -26,7 +44,47 @@ class ApprovalPolicyDecision(BaseModel):
     """Structured, presentation-only JSON for rendering a rich approval card
     (title, fields, severity, ...). Built from the *redacted* input, so secrets
     excluded via ``approval_redactor`` / ``approval_redact_keys`` never reach it."""
+    grant_key: str | None = None
+    """Identity a session-scoped approval is remembered under. Every later gate in the
+    session that resolves to the same key is auto-approved. ``None`` means the runnable's
+    path — "this tool". A tool that multiplexes subcommands sets one per subcommand
+    (``"codegen:delete-workforce"``) so remembering one does not wave the others through."""
+    grantable: bool = True
+    """Whether a human may answer this gate with ``scope="session"``. ``False`` for
+    decisions that must be taken every time (money movement); the card should then not
+    offer "don't ask again", and a resolution that asks for it is honoured for this call
+    only, with ``span.metadata.approval.grant_refused`` set."""
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApprovalGrant(BaseModel):
+    """A remembered approval: what a ``scope="session"`` resolution leaves behind.
+
+    Stored in the session under ``APPROVAL_GRANTS_SESSION_KEY`` keyed by ``key``. A later
+    gate whose ``grant_key`` matches is approved without a card; the synthesized
+    resolution carries ``metadata.granted_by`` = the ``approval_id`` recorded here, so an
+    audit can walk from any auto-approved call back to the human decision.
+    """
+
+    key: str
+    runnable_path: str
+    approval_id: str
+    """The gate the human answered with ``scope="session"``."""
+    run_id: str
+    """The run in which that decision was applied."""
+    granted_at: int
+    """Unix ms."""
+    expires_at: int | None = None
+    """Copied from the resolution. An expired grant is ignored and the gate asks again."""
+    approver_id: str | None = None
+    comment: str | None = None
+
+    def is_expired(self, now_ms: int | None = None) -> bool:
+        if self.expires_at is None:
+            return False
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        return now_ms >= self.expires_at
 
 
 class ApprovalResolution(BaseModel):
@@ -42,6 +100,12 @@ class ApprovalResolution(BaseModel):
     """
 
     approved: bool
+    scope: ApprovalScope = "call"
+    """How far an ``approved=True`` reaches — see :data:`ApprovalScope`. ``"session"`` is
+    "yes, and don't ask again for this in this conversation": the gate stores an
+    :class:`ApprovalGrant` under the decision's ``grant_key``. Ignored when
+    ``approved=False`` (a decline is never remembered) and when the decision is not
+    ``grantable``. Over the wire: ``{"approved": true, "scope": "session"}``."""
     reason: str | None = None
     override_input: dict[str, Any] | None = Field(
         default=None,

@@ -19,6 +19,8 @@ class ApprovalEvent(BaseEvent):
         "description",
         "kind",
         "ui",
+        "grant_key",
+        "grantable",
         "metadata",
     )
 
@@ -37,6 +39,8 @@ class ApprovalEvent(BaseEvent):
         "description",
         "kind",
         "ui",
+        "grant_key",
+        "grantable",
         "metadata",
     )
 
@@ -60,6 +64,8 @@ class ApprovalEvent(BaseEvent):
         description: str | None = None,
         kind: str | None = None,
         ui: dict[str, Any] | None = None,
+        grant_key: str | None = None,
+        grantable: bool = True,
         metadata: dict[str, Any] | None = None,
         **_ignored: Any,
     ) -> None:
@@ -102,5 +108,11 @@ class ApprovalEvent(BaseEvent):
         self.ui = ui
         """Structured, presentation-only JSON for the card (title, fields, severity, ...).
         Authored via the tool's ``approval_ui``. Already redacted; safe to render verbatim."""
+        self.grant_key = grant_key
+        """What a ``scope="session"`` answer remembers: every later gate in this session with
+        the same key is auto-approved. Label the "don't ask again" action with it."""
+        self.grantable = grantable
+        """Whether the card may offer "don't ask again" (``resume={approval_id: {"approved":
+        true, "scope": "session"}}``). ``False`` means every occurrence needs a human."""
         self.metadata = metadata if metadata is not None else {}
         """Additional policy metadata for future approval engines."""
