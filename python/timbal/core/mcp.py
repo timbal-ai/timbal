@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import inspect
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -44,7 +45,23 @@ _ELICIT_ACTIONS = frozenset({"accept", "decline", "cancel"})
 # standard code: mcp.types.INVALID_REQUEST is -32600, this is the positive twin.
 _SESSION_TERMINATED_CODE = 32600
 
+DEFAULT_TIMEOUT_SECONDS = 600.0
+"""Default per-request bound (``tools/list``, ``tools/call``). Ten minutes is past any tool
+that legitimately runs long (a full test run, a document ingest) while still turning a
+server that accepted a request and will never answer into an error instead of a run that
+sits open until someone restarts the process. ``timeout=None`` opts out explicitly."""
+
 T = TypeVar("T")
+
+_USE_SERVER_TIMEOUT: Any = object()
+"""Sentinel for ``_request(timeout=...)``: fall back to ``MCPServer.timeout``."""
+
+_AMBIGUOUS_ELICITATION_NOTE = (
+    "[timbal] While this call was in flight, the MCP server asked for user input that could not be "
+    "attributed to one of the {n} tool calls running in parallel on this server, so the question was "
+    "answered with `cancel` on the tool's behalf. If this result reflects a declined or cancelled action, "
+    "call this tool on its own (not in parallel with other tools) and try again."
+)
 
 # MCP log levels (RFC 5424) -> structlog method names.
 _MCP_LOG_LEVELS = {
@@ -108,6 +125,16 @@ def _convert_call_tool_result(tool_name: str, result: mcp_types.CallToolResult) 
     return result.structuredContent
 
 
+def _with_ambiguity_note(converted: Any, inflight: int) -> Any:
+    """Append the auto-cancelled-elicitation note to a text result; leave other shapes alone."""
+    note = _AMBIGUOUS_ELICITATION_NOTE.format(n=inflight)
+    if isinstance(converted, str):
+        return f"{converted}\n\n{note}"
+    if isinstance(converted, list) and all(isinstance(item, str) for item in converted):
+        return [*converted, note]
+    return converted
+
+
 def _describe_error(error: BaseException) -> str:
     """``str(error)`` that looks through anyio's ExceptionGroups to the real causes."""
     if isinstance(error, BaseExceptionGroup):
@@ -124,6 +151,24 @@ def _is_session_terminated(error: BaseException) -> bool:
         and error.error is not None
         and (error.error.code == _SESSION_TERMINATED_CODE or error.error.message == "Session terminated")
     )
+
+
+def _approval_policy_arity(policy: Callable[..., Any]) -> int:
+    """How many positional arguments an ``approval=`` callable takes: 1 (``tool``) or 2 (``tool, arguments``).
+
+    Anything that cannot be introspected (builtins, some callables with ``__call__``) is
+    treated as the one-argument form, which is the documented original.
+    """
+    try:
+        params = list(inspect.signature(policy).parameters.values())
+    except (TypeError, ValueError):
+        return 1
+    positional = [
+        p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return 2
+    return 2 if len(positional) >= 2 else 1
 
 
 def _is_destructive(mcp_tool: mcp_types.Tool) -> bool:
@@ -308,12 +353,18 @@ class MCPServer(ToolSet):
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
-    timeout: float | None = None
+    timeout: float | None = DEFAULT_TIMEOUT_SECONDS
     """Seconds to wait for the server to answer a request on an established session
-    (``tools/list``, ``tools/call``). ``None`` (default) waits forever, which is what MCP
-    tools that legitimately run for minutes need; set it for servers that may accept a
-    request and never answer. A dead transport is detected independently of this and
-    fails the call immediately. Does not cover connecting — see ``connect_timeout``."""
+    (``tools/list``, ``tools/call``). Defaults to ``DEFAULT_TIMEOUT_SECONDS`` (10 minutes);
+    ``None`` waits forever. Per-tool overrides go in ``tool_timeouts``. A dead transport is
+    detected independently of this and fails the call immediately. Does not cover
+    connecting — see ``connect_timeout``."""
+
+    tool_timeouts: dict[str, float | None] = Field(default_factory=dict)
+    """Per-tool override of ``timeout`` for ``tools/call``, keyed by the server's bare tool
+    name (``"codegen"``, not ``"timbal__codegen"``). ``None`` waits forever for that tool.
+    One server usually mixes a few long-running tools with many that answer in
+    milliseconds; this keeps the long bound on the tools that earn it."""
 
     connect_timeout: float | None = None
     """Seconds to wait for the transport to come up and ``initialize`` to complete. Kept
@@ -325,13 +376,18 @@ class MCPServer(ToolSet):
     ``suspend()``. Set False to hide the capability (servers then must fail closed
     on tools that need confirmation)."""
 
-    approval: Literal["destructive", "all"] | Callable[[mcp_types.Tool], bool] | None = None
+    approval: Literal["destructive", "all"] | Callable[..., Any] | None = None
     """Route tools through the human-approval gate (``requires_approval``).
 
     - ``"destructive"``: tools whose annotations say destructive (``destructiveHint``
       not false and ``readOnlyHint`` not true). Unannotated tools are not gated.
     - ``"all"``: every tool.
-    - callable: receives the server's ``mcp.types.Tool``; return True to gate.
+    - callable ``(tool) -> bool``: receives the server's ``mcp.types.Tool`` once, at
+      resolve time; return True to gate every call of that tool.
+    - callable ``(tool, arguments) -> bool | dict | ApprovalPolicyDecision``: decided
+      per call, with the LLM's arguments — for one tool that multiplexes subcommands
+      (``codegen delete-workforce`` yes, ``codegen get-flow`` no). Same return contract
+      as ``Runnable.requires_approval``; may be async.
     - ``None`` (default): no gating.
     """
 
@@ -608,6 +664,7 @@ class MCPServer(ToolSet):
         what: str,
         idempotent: bool = False,
         abort: asyncio.Future | None = None,
+        timeout: float | None = _USE_SERVER_TIMEOUT,
     ) -> T:
         """Run one request against the live session, with the failure modes the SDK leaves to us.
 
@@ -618,12 +675,15 @@ class MCPServer(ToolSet):
           after a restart or expiry): the session is reset and the request retried once.
           Safe for any request — a 404 means the server never saw it.
         - **No answer within** ``timeout`` (server alive, never replies): ``TimeoutError``.
-          The session stays up; the server may still be running the tool.
+          The session stays up; the server may still be running the tool. Defaults to
+          ``self.timeout``; ``tools/call`` passes the tool's ``tool_timeouts`` entry.
         - ``abort``: a future a callback may fail when it learns the call can never complete
           (stateless server asked us something); raised here instead of waiting.
         - ``idempotent=True`` also retries once after a mid-request connection loss
           (``tools/list``); ``tools/call`` never does, the tool may have run.
         """
+        if timeout is _USE_SERVER_TIMEOUT:
+            timeout = self.timeout
         for attempt in (1, 2):
             session = await self._connect()
             owner = self._session_task
@@ -634,7 +694,7 @@ class MCPServer(ToolSet):
                     waiting.add(owner)
                 if abort is not None:
                     waiting.add(abort)
-                done, _ = await asyncio.wait(waiting, timeout=self.timeout, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 if not request.done():
                     request.cancel()
@@ -642,7 +702,7 @@ class MCPServer(ToolSet):
                 if abort is not None and abort in done:
                     raise abort.exception()  # type: ignore[misc]
                 if not done:
-                    raise TimeoutError(f"MCP server '{self._label}': {what} timed out after {self.timeout}s")
+                    raise TimeoutError(f"MCP server '{self._label}': {what} timed out after {timeout}s")
                 if idempotent and attempt == 1:
                     logger.warning("MCP connection lost; retrying", server=self.name, what=what)
                     continue
@@ -876,14 +936,39 @@ class MCPServer(ToolSet):
             return f"{self.name}__{tool_name}"
         return tool_name
 
-    def _needs_approval(self, mcp_tool: mcp_types.Tool) -> bool:
+    def _tool_timeout(self, bare_name: str) -> float | None:
+        if bare_name in self.tool_timeouts:
+            return self.tool_timeouts[bare_name]
+        return self.timeout
+
+    def _approval_policy(self, mcp_tool: mcp_types.Tool) -> bool | Callable[..., Any]:
+        """The ``requires_approval`` value for one tool: a static bool, or a per-call policy.
+
+        The two-argument form of ``approval`` is wrapped into a ``**arguments`` callable so
+        ``Runnable._execute_approval_callable`` hands it the whole validated input; its
+        return (bool / dict / ``ApprovalPolicyDecision``) flows through unchanged.
+        """
         if self.approval is None:
             return False
         if self.approval == "all":
             return True
         if self.approval == "destructive":
             return _is_destructive(mcp_tool)
-        return bool(self.approval(mcp_tool))
+        policy = self.approval
+        if _approval_policy_arity(policy) == 1:
+            return bool(policy(mcp_tool))
+
+        if inspect.iscoroutinefunction(policy):
+
+            async def _per_call_async(**arguments: Any) -> Any:
+                return await policy(mcp_tool, arguments)
+
+            return _per_call_async
+
+        def _per_call(**arguments: Any) -> Any:
+            return policy(mcp_tool, arguments)
+
+        return _per_call
 
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.
@@ -905,6 +990,7 @@ class MCPServer(ToolSet):
                     lambda session: session.call_tool(bare_name, arguments=kwargs),
                     what=f"tools/call {bare_name}",
                     abort=call.abort,
+                    timeout=self._tool_timeout(bare_name),
                 )
             finally:
                 self._end_call(call)
@@ -922,9 +1008,25 @@ class MCPServer(ToolSet):
                     f"flight on this server so the request could not be attributed to one of them. "
                     "Call this tool on its own (not in parallel with other tools) and try again."
                 )
-            return _convert_call_tool_result(bare_name, result)
+            converted = _convert_call_tool_result(bare_name, result)
+            if call.ambiguous_with:
+                # The server's question was answered `cancel` for it, and a server that treats
+                # a cancelled confirmation as a normal answer ("not swapped") returns a result
+                # that looks fine but is not what the user chose. Raising here would also
+                # discard the innocent sibling's result, so the LLM is told instead. Which of
+                # the in-flight calls asked is unknowable, so every one of them carries the note.
+                converted = _with_ambiguity_note(converted, call.ambiguous_with)
+                if not isinstance(converted, str | list):
+                    logger.warning(
+                        "MCP tool result may reflect an auto-cancelled elicitation",
+                        server=self.name,
+                        tool=bare_name,
+                        inflight=call.ambiguous_with,
+                    )
+            return converted
 
-        requires_approval = self._needs_approval(mcp_tool)
+        approval_policy = self._approval_policy(mcp_tool)
+        requires_approval = bool(approval_policy)
         return MCPTool(
             name=exposed_name,
             description=description,
@@ -932,7 +1034,7 @@ class MCPServer(ToolSet):
             input_schema=mcp_tool.inputSchema or {},
             title=title,
             tool_annotations=annotations,
-            requires_approval=requires_approval,
+            requires_approval=approval_policy,
             approval_prompt=f"Run {title or exposed_name}?" if requires_approval else None,
             approval_description=(mcp_tool.description or None) if requires_approval else None,
             approval_kind="mcp_tool" if requires_approval else None,

@@ -54,6 +54,13 @@ async def swap_kb(kb_id: int, ctx: Context) -> str:
     raise ValueError("confirmation cancelled")
 
 
+@mcp.tool()
+async def swap_kb_soft(kb_id: int, ctx: Context) -> str:
+    """Like swap_kb, but a cancelled confirmation is a normal answer, not an error."""
+    result = await ctx.elicit(message=f"Swap KB to {kb_id}?", schema=Confirm)
+    return "swapped" if result.action == "accept" else "not swapped"
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def read_kb() -> str:
     """Read the KB (read-only)."""
@@ -253,6 +260,62 @@ class TestApprovalFromAnnotations:
         finally:
             await server.close()
 
+    async def test_per_call_policy_decides_from_arguments(self, make_server):
+        """``approval=lambda tool, arguments: ...`` runs per call with the LLM's arguments — one
+        tool that multiplexes subcommands can gate `delete-workforce` and wave `get-flow` through."""
+        seen: list[tuple[str, dict]] = []
+
+        def policy(tool, arguments):
+            seen.append((tool.name, arguments))
+            return tool.name == "slow" and arguments["seconds"] >= 1
+
+        server = make_server(approval=policy)
+        try:
+            tools = {t.name: t for t in await server.resolve()}
+            assert callable(tools["slow"].requires_approval)
+            assert tools["slow"].approval_kind == "mcp_tool"
+
+            # Below the threshold: no gate, the tool just runs.
+            quick = await tools["slow"](seconds=0.1).collect()
+            assert quick.status.code == "success" and quick.output == "done"
+            assert seen[-1] == ("slow", {"seconds": 0.1})
+
+            # At the threshold: the agent pauses, and resume runs it.
+            model = TestModel(responses=[_tool_call(("c1", "slow", {"seconds": 1})), "done"])
+            agent = Agent(name="a", model=model, tools=[server], max_iter=3)
+            approvals: list[ApprovalEvent] = []
+            final = None
+            async for event in agent(prompt="wait"):
+                if isinstance(event, ApprovalEvent):
+                    approvals.append(event)
+                if isinstance(event, OutputEvent) and event.path == "a":
+                    final = event
+            assert len(approvals) == 1
+            assert approvals[0].kind == "mcp_tool"
+            assert approvals[0].input == {"seconds": 1}
+            assert final.status.reason == "approval_required"
+
+            events = [
+                e async for e in agent(prompt="wait", parent_id=final.run_id, resume={approvals[0].approval_id: True})
+            ]
+            tool_out = [e for e in events if isinstance(e, OutputEvent) and e.path == "a.slow"]
+            assert tool_out[0].status.code == "success" and tool_out[0].output == "done"
+        finally:
+            await server.close()
+
+    async def test_per_call_policy_may_be_async(self, make_server):
+        async def policy(tool, arguments):
+            return tool.name == "plain" and arguments == {}
+
+        server = make_server(approval=policy)
+        try:
+            tools = {t.name: t for t in await server.resolve()}
+            gated = await tools["plain"]().collect()
+            assert gated.status.reason == "approval_required"
+            assert (await tools["read_kb"]().collect()).output == "kb"
+        finally:
+            await server.close()
+
     async def test_agent_pauses_for_approval_then_runs_tool(self, make_server):
         server = make_server(approval="destructive")
         model = TestModel(responses=[_tool_call(("c1", "delete_thing", {})), "done"])
@@ -429,6 +492,30 @@ class TestElicitation:
                 assert out.status.code == "error"
                 assert "Call this tool on its own" in out.error["message"]
             assert events[-1].status.code == "success"
+        finally:
+            await server.close()
+
+    async def test_parallel_elicitation_annotates_a_normal_looking_answer(self, make_server):
+        """A server that treats a cancelled confirmation as a normal answer ("not swapped")
+        returns success. The LLM would relay a result the user never chose, so the result
+        carries a note saying the question was auto-cancelled; raising instead would also
+        discard the innocent sibling's result."""
+        server = make_server()
+        model = TestModel(
+            responses=[_tool_call(("c1", "slow", {"seconds": 1}), ("c2", "swap_kb_soft", {"kb_id": 2})), "done"]
+        )
+        agent = Agent(name="a", model=model, tools=[server], max_iter=3)
+        try:
+            events = [e async for e in agent(prompt="wait and swap")]
+            assert not any(isinstance(e, InteractionEvent) for e in events)
+            soft = [e for e in events if isinstance(e, OutputEvent) and e.path == "a.swap_kb_soft"][0]
+            assert soft.status.code == "success"
+            assert soft.output.startswith("not swapped")
+            assert "answered with `cancel`" in soft.output
+            assert "2 tool calls" in soft.output
+            sibling = [e for e in events if isinstance(e, OutputEvent) and e.path == "a.slow"][0]
+            assert sibling.status.code == "success"
+            assert sibling.output.startswith("done")
         finally:
             await server.close()
 
@@ -641,13 +728,32 @@ class TestConnectionLifecycle:
         assert asyncio.get_running_loop().time() - t0 < 5
         assert server._session is None and server._session_task is None
 
-    async def test_no_timeout_by_default_waits(self, make_server):
+    async def test_default_timeout_is_generous_but_bounded(self, make_server):
+        assert MCPServer.model_fields["timeout"].default == 600.0
         server = make_server()
         try:
             slow = {t.name: t for t in await server.resolve()}["slow"]
             assert (await slow(seconds=0.7).collect()).output == "done"
         finally:
             await server.close()
+
+    async def test_tool_timeouts_override_the_server_timeout(self, make_server):
+        """One server mixes millisecond tools with a few long ones: the long bound goes only
+        on the tools that earn it, in either direction."""
+        lenient_slow = make_server(timeout=0.3, tool_timeouts={"slow": None})
+        strict_slow = make_server(timeout=None, tool_timeouts={"slow": 0.3})
+        try:
+            slow = {t.name: t for t in await lenient_slow.resolve()}["slow"]
+            assert (await slow(seconds=0.7).collect()).output == "done"
+
+            tools = {t.name: t for t in await strict_slow.resolve()}
+            result = await tools["slow"](seconds=2).collect()
+            assert result.status.code == "error"
+            assert "tools/call slow timed out after 0.3s" in result.error["message"]
+            assert (await tools["plain"]().collect()).output == "plain"
+        finally:
+            await lenient_slow.close()
+            await strict_slow.close()
 
     async def test_dead_transport_resets_session_and_reconnects(self):
         """If the owner task dies (transport error), the next call reopens instead of failing forever."""
