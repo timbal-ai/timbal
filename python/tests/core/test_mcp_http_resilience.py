@@ -5,6 +5,7 @@ Runs a real FastMCP streamable-http server in a subprocess so the transport code
 (POST/SSE, Mcp-Session-Id, 404 -> "Session terminated") is the SDK's, not a mock.
 """
 
+import asyncio
 import contextlib
 import socket
 import subprocess
@@ -26,6 +27,7 @@ pytestmark = pytest.mark.skipif(mcp_types is None, reason="mcp package not insta
 
 
 SERVER_SCRIPT = '''
+import asyncio
 import sys
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -40,6 +42,13 @@ mcp = FastMCP("http-server", host="127.0.0.1", port=int(sys.argv[1]), stateless_
 def ping() -> str:
     """Ping."""
     return "pong"
+
+
+@mcp.tool()
+async def slow(seconds: float) -> str:
+    """Sleep, then answer."""
+    await asyncio.sleep(seconds)
+    return f"slept {seconds}"
 
 
 class Confirm(BaseModel):
@@ -192,6 +201,45 @@ class TestHttpResilience:
             sid = first.output["suspension_id"]
             resumed = await swap(kb_id=5, parent_id=first.run_id, resume={sid: {"confirm": True}}).collect()
             assert resumed.output == "swapped"
+        finally:
+            await client.close()
+
+    async def test_tool_slower_than_httpx_default_read_timeout_completes(self, http_server):
+        """A ``tools/call`` answer is the first bytes of the POST's SSE stream. With httpx's
+        5s default read timeout the SDK's SSE reader hit ``ReadTimeout``, logged it at debug
+        and returned without failing the request: transport up, owner task alive, call hung
+        forever (Composer bootstrap on ``codegen test``, 2026-09-07). A parallel fast call on
+        the same session, as the agent multiplexer issues them, must not change that."""
+        client = MCPServer(transport="http", url=http_server.url)
+        try:
+            tools = {t.name: t for t in await client.resolve()}
+            t0 = time.monotonic()
+            ping, slow = await asyncio.wait_for(
+                asyncio.gather(tools["ping"]().collect(), tools["slow"](seconds=6).collect()),
+                timeout=30,
+            )
+            elapsed = time.monotonic() - t0
+            assert ping.output == "pong"
+            assert slow.status.code == "success", slow.error
+            assert slow.output == "slept 6.0"
+            assert 6 <= elapsed < 12, elapsed
+            # The session is still the same one and still serves.
+            assert (await _ping(client)).output == "pong"
+        finally:
+            await client.close()
+
+    async def test_timeout_bounds_a_slow_http_tool(self, http_server):
+        client = MCPServer(transport="http", url=http_server.url, timeout=1)
+        try:
+            slow = {t.name: t for t in await client.resolve()}["slow"]
+            t0 = time.monotonic()
+            result = await slow(seconds=30).collect()
+            assert time.monotonic() - t0 < 5
+            assert result.status.code == "error"
+            assert result.error["type"] == "TimeoutError"
+            assert "tools/call slow" in result.error["message"]
+            # The session survives the timeout; the next call works.
+            assert (await _ping(client)).output == "pong"
         finally:
             await client.close()
 

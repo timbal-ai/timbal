@@ -406,10 +406,31 @@ class MCPServer(ToolSet):
                 logger.info("Connected to MCP server via stdio", command=self.command)
                 yield session
 
+    def _http_timeout(self) -> httpx.Timeout:
+        """httpx timeouts for the streamable HTTP transport.
+
+        A bare ``httpx.AsyncClient()`` applies its 5-second default to *reads*, and a
+        ``tools/call`` answer arrives as the first bytes of a POST's SSE stream — so any
+        tool that ran longer than 5s tripped ``ReadTimeout`` inside the SDK's SSE reader,
+        which logs it at debug and returns without failing the pending request. The
+        transport stayed up, the owner task stayed alive, and the call hung forever
+        (Composer bootstrap on ``codegen test``, 2026-09-07). Reads are unbounded here:
+        the wall-clock bound on a request is ``timeout`` in ``_request``, and the
+        standalone GET stream for server notifications idles by design. Connect stays
+        bounded so a black-holed host does not wedge the handshake even with
+        ``connect_timeout=None``.
+        """
+        connect = self.connect_timeout if self.connect_timeout is not None else 30.0
+        return httpx.Timeout(connect=connect, read=None, write=30.0, pool=30.0)
+
     @asynccontextmanager
     async def _connect_http(self):
         assert self.url is not None
-        async with httpx.AsyncClient(headers=self.headers if self.headers else None) as http_client:
+        async with httpx.AsyncClient(
+            headers=self.headers if self.headers else None,
+            timeout=self._http_timeout(),
+            follow_redirects=True,
+        ) as http_client:
             async with streamable_http_client(self.url, http_client=http_client) as (read, write, get_session_id):
                 async with self._client_session(read, write) as session:
                     await session.initialize()

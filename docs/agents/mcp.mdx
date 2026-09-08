@@ -182,6 +182,7 @@ Each connection is owned by a dedicated task, so `close()` can be called from an
 - **Stale session** (an HTTP server restarted or expired the session while you were idle, so it 404s your `Mcp-Session-Id` with `Session terminated`): the session is reset and the request retried once, transparently. Safe for any request — a 404 means the server never saw it.
 - **Server unreachable**: `ConnectionError("MCP server 'name' failed to connect: ConnectError: ...")` with the real cause, not anyio's `unhandled errors in a TaskGroup`.
 - **Server accepts but never answers**: only `timeout=` (requests) / `connect_timeout=` (handshake) cover this; both default to waiting forever.
+- **Slow HTTP tools**: the transport's read timeout is unbounded, so a `tools/call` that takes minutes completes. (A bare `httpx.AsyncClient` applied its 5-second default to the SSE read and the SDK swallowed the resulting `ReadTimeout`, so any HTTP tool slower than 5s hung the call forever.) Connect stays bounded at 30s (or `connect_timeout`) even when `connect_timeout=None`.
 
 A `tools/call` that loses its connection mid-flight is never retried automatically — the tool may already have run. `tools/list` is.
 
