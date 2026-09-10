@@ -31,6 +31,9 @@ Env contract for the boot-env path (all platform-owned):
   Session identity, not a voice knob: it is read here (and off the dial body
   on the per-request path), never off the data-channel hello.
 * ``TIMBAL_VOICE_ABANDON_SECS`` — default 45; see ``SingleSessionGuard``
+* ``TIMBAL_VOICE_HELLO_WAIT_SECS`` / ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS`` —
+  the config-hello window for browser (default 2) and SIP (default 0) callers;
+  see ``hello_wait_secs``.
 
 Env contract for the per-request path (both optional, both recommended on
 anything long-lived — the dial tells the process where to connect and what to
@@ -91,6 +94,30 @@ _EVENTS_TOPIC = "timbal.events"
 # still being published — anchoring it after the mic subscribe instead would
 # put a flat 2s on top of every hello-less call's setup.
 _HELLO_WAIT_SECS = 2.0
+# A SIP caller has no data channel to say hello on, so the window can only
+# expire for them: measured live, 2.0s of dead air on every inbound PSTN call.
+# Zero by default; a deployment whose SIP bridge does deliver a hello (or that
+# wants a settle beat before build) can raise it.
+_SIP_HELLO_WAIT_SECS = 0.0
+
+
+def hello_wait_secs(*, caller_is_sip: bool) -> float:
+    """The config-hello window for this caller, from env or the defaults above.
+
+    ``TIMBAL_VOICE_HELLO_WAIT_SECS`` (browser / standard participants, default
+    2.0) and ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS`` (SIP, default 0). Read per
+    call, not at import, so an operator can tune a running deployment's next
+    call and tests can set the env. A bad value logs and falls back.
+    """
+    name = "TIMBAL_VOICE_SIP_HELLO_WAIT_SECS" if caller_is_sip else "TIMBAL_VOICE_HELLO_WAIT_SECS"
+    default = _SIP_HELLO_WAIT_SECS if caller_is_sip else _HELLO_WAIT_SECS
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logger.warning("livekit_bad_hello_wait_secs", env=name, value=raw)
+    return default
 
 # How long a per-request join may take before the caller gets a 504. The SFU is
 # in the same VPC, so this covers the FFI import on a cold process, not a WAN
@@ -846,19 +873,13 @@ async def _run_livekit_session(
         # hello rides the data channel the moment the caller connects while
         # the mic subscribe takes a getUserMedia + publish round trip.
         #
-        # A SIP caller has no data channel to say hello on, so for a phone the
-        # window can only ever expire: measured live on an inbound PSTN call,
-        # 2.0s of dead air between "agent joined" and "session built", before
-        # a single byte of STT or greeting. Skip it outright.
-        if caller_is_sip:
-            hello_wait = 0.0
-        else:
-            seen_at = caller_seen_at.get("t")
-            hello_wait = (
-                max(0.0, _HELLO_WAIT_SECS - (time.monotonic() - seen_at))
-                if seen_at is not None
-                else _HELLO_WAIT_SECS
-            )
+        # For a SIP caller the window is 0 by default (see ``hello_wait_secs``):
+        # a phone has no data channel to say hello on, so it could only expire
+        # — measured live as 2.0s of dead air between "agent joined" and
+        # "session built", before a single byte of STT or greeting.
+        window = hello_wait_secs(caller_is_sip=caller_is_sip)
+        seen_at = caller_seen_at.get("t")
+        hello_wait = max(0.0, window - (time.monotonic() - seen_at)) if seen_at is not None else window
         await _wait_event_or_abort(hello_event, timeout=hello_wait)
         if session_aborted.is_set():
             _release_if_never_connected()
