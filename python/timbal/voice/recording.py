@@ -161,11 +161,17 @@ class CallRecorder:
             self._path, self._container, self._stream, self._fifo = old
             new_path.unlink(missing_ok=True)
             raise
+        # From here the swap has happened and must be reported as such: the
+        # caller sets its id only if we return. Closing / unlinking the old
+        # (empty) file is cleanup, never a reason to leave the identity split.
         try:
             old[1].close()
         except Exception as e:
             logger.warning("recording_retarget_close_failed", error=str(e))
-        old[0].unlink(missing_ok=True)
+        try:
+            old[0].unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("recording_retarget_unlink_failed", path=str(old[0]), error=str(e))
 
     # -- Feed points -----------------------------------------------------------
 

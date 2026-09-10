@@ -201,6 +201,61 @@ class TestRobustness:
         assert result.audio_path == old
         assert sorted(p.name for p in tmp_path.iterdir()) == ["generated.json", "generated.mp3"]
 
+    def test_retarget_old_file_cleanup_failure_does_not_undo_the_swap(self, tmp_path: Path, monkeypatch) -> None:
+        """Once the new encoder is open the swap is committed: a failing unlink
+        of the old file is logged, not raised — a raise here would leave the
+        caller's id on the generated name while the file is on the pinned one."""
+        old = tmp_path / "generated.mp3"
+        rec = CallRecorder(old, sample_rate=SR)
+
+        real_unlink = Path.unlink
+
+        def deny(self: Path, *a, **k):
+            if self == old:
+                raise PermissionError("held open")
+            return real_unlink(self, *a, **k)
+
+        monkeypatch.setattr(Path, "unlink", deny)
+        rec.retarget(tmp_path / "pinned.mp3")  # must not raise
+        monkeypatch.undo()
+
+        assert rec.audio_path == tmp_path / "pinned.mp3"
+        rec.add_mic(_silence(0.1))
+        result = rec.close(manifest={"session_id": "pinned"})
+        assert result is not None
+        assert result.audio_path == tmp_path / "pinned.mp3"
+        assert (tmp_path / "pinned.json").exists()
+
+    async def test_session_id_pin_survives_old_file_cleanup_failure(self, tmp_path: Path, monkeypatch) -> None:
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.voice import VoiceSession
+
+        from .test_session import DelayedMockSTT, MockTTS
+
+        old = tmp_path / "generated.mp3"
+        rec = CallRecorder(old, sample_rate=SR)
+        session = VoiceSession(
+            agent=Agent(name="rec", model=TestModel(responses=["x"]), tools=[]),
+            stt=DelayedMockSTT(),
+            tts=MockTTS(chunk=b"\x00\x00", num_chunks=1),
+            recorder=rec,
+            session_id="generated",
+            turn_detector="heuristic",
+        )
+        real_unlink = Path.unlink
+        monkeypatch.setattr(
+            Path,
+            "unlink",
+            lambda self, *a, **k: (_ for _ in ()).throw(PermissionError("held")) if self == old else real_unlink(self, *a, **k),
+        )
+        session.session_id = "platform-0001"
+        monkeypatch.undo()
+        # Identity is one string across the session and the file.
+        assert session.session_id == "platform-0001"
+        assert rec.audio_path.stem == "platform-0001"
+        rec.close()
+
     async def test_session_id_setter_pins_recorder_and_refuses_bad_ids(self, tmp_path: Path) -> None:
         from timbal import Agent
         from timbal.core.test_model import TestModel
