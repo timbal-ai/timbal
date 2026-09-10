@@ -146,6 +146,31 @@ async for event in agent(prompt="Hello"):
     print(event)
 ```
 
+### Iteration Budget
+
+`max_iter` (default `10`) bounds the LLM → tool rounds in one turn. `on_max_iter` decides what happens when the budget is spent and the model still wants tools:
+
+| `on_max_iter` | Extra LLM call | Output |
+|---|---|---|
+| `"final_answer"` (default) | One, with **no tools**, preceded by a notice telling the model its budget is gone | The model's text |
+| `"stop"` | None | A fixed assistant reply (`stop_reason="max_iter"`) |
+| `"error"` | None | Raises `timbal.errors.MaxIterExceeded` — for one-shot runs; memory is left ending in an unanswered tool batch |
+
+The notice matters: silently handed an empty tool list, models narrate the step they were about to take ("I'll update the file now") as if it had happened.
+
+For anything custom, pass a callable (sync or async). It receives a `MaxIterContext(max_iter, memory, agent_path)` and returns a message: `role="user"` is used as the notice for a final tool-less call, `role="assistant"` is the reply and ends the turn, `None` makes the tool-less call with no notice, and raising fails the run.
+
+```python
+def out_of_budget(ctx):
+    if ctx.agent_path != "assistant":  # sub-agents: stop cheaply, let the parent decide
+        return {"role": "assistant", "content": f"[Stopped after {ctx.max_iter} steps.]"}
+    return {"role": "user", "content": "Budget spent. Report what is done and what is not; claim nothing else."}
+
+agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], max_iter=16, on_max_iter=out_of_budget)
+```
+
+Every mode records `metadata["max_iter_reached"] = {"max_iter", "behavior"}` on the agent span. Injected messages are persisted in memory tagged `metadata={"source": "runtime", "kind": "max_iter_notice" | "max_iter_stop"}`, so `Message.is_runtime()` lets you hide them when rendering a human transcript.
+
 ### Approval-Required Tools
 
 Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `resume`:

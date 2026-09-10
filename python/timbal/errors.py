@@ -41,6 +41,14 @@ class CredentialNotAvailable(APIKeyNotFoundError, ValueError):
         return " ".join(parts)
 
 
+class MaxIterExceeded(TimbalError):
+    """Raised when an agent with ``on_max_iter="error"`` exhausts ``max_iter`` without a final answer."""
+
+    def __init__(self, max_iter: int) -> None:
+        super().__init__(f"Agent exhausted its iteration budget (max_iter={max_iter}) without producing a final answer.")
+        self.max_iter = max_iter
+
+
 class EarlyExit(TimbalError):
     """Error raised when an early exit is requested.
 

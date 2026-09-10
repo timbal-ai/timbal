@@ -1,10 +1,12 @@
 import asyncio
 import contextvars
 import difflib
+import inspect
 import json
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Literal
@@ -28,7 +30,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import GuardrailBlocked, InterruptError, PauseRequired, RunCancelled, bail
+from ..errors import GuardrailBlocked, InterruptError, MaxIterExceeded, PauseRequired, RunCancelled, bail
 from ..guardrails.apply import (
     build_guardrail_events,
     message_text,
@@ -81,6 +83,33 @@ from .tool_result_offload import (
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
+
+DEFAULT_MAX_ITER_NOTICE = (
+    "[System notice] You have used all {max_iter} tool-call steps allowed for this turn, so no "
+    "tools are available for this reply. Write your final answer now: state plainly what was "
+    "completed and what was not. Do not describe pending or unfinished work as done, and do not "
+    "announce actions you can no longer take."
+)
+"""User message injected before the final tool-less LLM call (``on_max_iter="final_answer"``)."""
+
+DEFAULT_MAX_ITER_STOP_MESSAGE = (
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
+    "answer was produced.]"
+)
+"""Assistant reply returned without an LLM call (``on_max_iter="stop"``)."""
+
+
+@dataclass(frozen=True, slots=True)
+class MaxIterContext:
+    """What an ``on_max_iter`` callable sees: the budget and this turn's memory (read-only)."""
+
+    max_iter: int
+    memory: Sequence[Message]
+    agent_path: str
+
+
+OnMaxIterHook = Callable[[MaxIterContext], Message | None | Awaitable[Message | None]]
+OnMaxIter = Literal["final_answer", "stop", "error"] | OnMaxIterHook
 
 # Status reasons that mean a child paused and must bubble up to pause the run —
 # an approval gate (approval_required) or a suspend() call (input_required).
@@ -246,6 +275,19 @@ class Agent(Runnable):
     Mutually exclusive with skills_include."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
+    on_max_iter: OnMaxIter = "final_answer"
+    """What happens once ``max_iter`` is spent and the model still wants tools.
+
+    ``"final_answer"`` (default): append ``DEFAULT_MAX_ITER_NOTICE`` as a user message and make
+    one more tool-less LLM call. ``"stop"``: append ``DEFAULT_MAX_ITER_STOP_MESSAGE`` as the
+    assistant reply, no LLM call. ``"error"``: raise :class:`timbal.errors.MaxIterExceeded`
+    (one-shot runs — memory is left ending in an unanswered tool batch).
+
+    A callable (sync or async) receives a :class:`MaxIterContext` and returns a ``Message``:
+    ``role="user"`` acts as the notice for a final tool-less call, ``role="assistant"`` is the
+    reply and ends the turn, ``None`` makes the tool-less call silently; raising fails the run.
+    Injected messages are tagged runtime (``kind="max_iter_notice"`` / ``"max_iter_stop"``) so
+    ``Message.is_runtime()`` hides them from transcripts and input guardrails."""
     max_background_concurrent: int | None = 20
     """Max in-flight background children for this agent's session bag.
     ``None`` = unlimited. Applied at turn start; also settable via
@@ -1107,6 +1149,39 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return tools, commands
 
+    def _synthetic_event(
+        self,
+        name: str,
+        status: RunStatus,
+        *,
+        input: Any = None,
+        output: Any = None,
+        error: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> OutputEvent:
+        """OutputEvent for something that never ran as a span (no LLM, no tool).
+
+        Lives at ``<agent>.<name>``; ``parent_call_id`` is None on purpose — there is no span
+        to link it to.
+        """
+        run_context = get_run_context()
+        now = int(time.time() * 1000)
+        return OutputEvent(
+            run_id=run_context.id if run_context is not None else "",
+            parent_run_id=None,
+            path=f"{self._path}.{name}",
+            call_id=uuid7(as_type="hex"),
+            parent_call_id=None,
+            input=input,
+            status=status,
+            output=output,
+            error=error,
+            t0=now,
+            t1=now,
+            usage={},
+            metadata=metadata or {},
+        )
+
     def _build_unknown_tool_event(self, tool_call: ToolUseContent, tools: list[Tool]) -> OutputEvent:
         """Build a synthetic OutputEvent for a tool the LLM hallucinated.
 
@@ -1130,22 +1205,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             f"Tool '{tool_call.name}' not found.{hint} Available tools: {available_str}. "
             "If you intended to use a skill, call `read_skill` first to load it."
         )
-
-        run_context = get_run_context()
-        now = int(time.time() * 1000)
-        return OutputEvent(
-            run_id=run_context.id if run_context is not None else "",
-            parent_run_id=None,
-            path=f"{self._path}.{tool_call.name}",
-            call_id=uuid7(as_type="hex"),
-            parent_call_id=None,
+        return self._synthetic_event(
+            tool_call.name,
+            RunStatus(code="error", reason="tool_not_found", message=message),
             input=tool_call.input,
-            status=RunStatus(code="error", reason="tool_not_found", message=message),
-            output=None,
             error=message,
-            t0=now,
-            t1=now,
-            usage={},
             metadata={"tool_not_found": True, "requested_tool": tool_call.name},
         )
 
@@ -1156,26 +1220,52 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             agent_path=self._path,
             tool=tool_call.name,
         )
-        run_context = get_run_context()
-        now = int(time.time() * 1000)
-        return OutputEvent(
-            run_id=run_context.id if run_context is not None else "",
-            parent_run_id=None,
-            path=f"{self._path}.{tool_call.name}",
-            call_id=uuid7(as_type="hex"),
-            parent_call_id=None,
+        return self._synthetic_event(
+            tool_call.name,
+            RunStatus(code="error", reason="dispatch_failed", message=str(e)),
             input=tool_call.input,
-            status=RunStatus(code="error", reason="dispatch_failed", message=str(e)),
-            output=None,
-            error={
-                "type": type(e).__name__,
-                "message": str(e),
-                "traceback": traceback.format_exc(),
-            },
-            t0=now,
-            t1=now,
-            usage={},
+            error={"type": type(e).__name__, "message": str(e), "traceback": traceback.format_exc()},
             metadata={"dispatch_failed": True, "requested_tool": tool_call.name},
+        )
+
+    async def _resolve_max_iter(self, memory: list[Message]) -> Message | None:
+        """Turn ``on_max_iter`` into the message to append when the budget is spent.
+
+        ``role="user"`` → notice before a final tool-less LLM call; ``role="assistant"`` → the
+        reply, no LLM call; ``None`` → tool-less call with no notice. Raises for ``"error"``
+        or when a custom hook raises.
+        """
+        policy = self.on_max_iter
+        if policy == "error":
+            raise MaxIterExceeded(self.max_iter)
+        if policy == "stop":
+            reply: Message | None = Message(
+                role="assistant",
+                content=[TextContent(text=DEFAULT_MAX_ITER_STOP_MESSAGE.format(max_iter=self.max_iter))],
+            )
+        elif policy == "final_answer":
+            reply = Message(
+                role="user", content=[TextContent(text=DEFAULT_MAX_ITER_NOTICE.format(max_iter=self.max_iter))]
+            )
+        else:
+            reply = policy(MaxIterContext(max_iter=self.max_iter, memory=tuple(memory), agent_path=self._path))
+            if inspect.isawaitable(reply):
+                reply = await reply
+            if reply is None:
+                return None
+            reply = Message.validate(reply)
+            if reply.role not in ("user", "assistant"):
+                raise ValueError(f"on_max_iter hook must return a user or assistant Message, got role={reply.role!r}")
+        is_reply = reply.role == "assistant"
+        return Message(
+            role=reply.role,
+            content=reply.content,
+            stop_reason=reply.stop_reason or ("max_iter" if is_reply else None),
+            metadata={
+                **reply.metadata,
+                "source": "runtime",
+                "kind": "max_iter_stop" if is_reply else "max_iter_notice",
+            },
         )
 
     def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
@@ -1586,6 +1676,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         i = 0
         need_retry = False
         _llm_memory_saved = False
+        max_iter_handled = False  # on_max_iter applied once per turn
         # Guardrail "retry" verdicts consumed this turn (bounded by max_guardrail_retries).
         guardrail_retry_count = 0
         # Re-requests after a leaked, unrecoverable tool call (max_leaked_tool_call_retries).
@@ -1599,6 +1690,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
                 tools, commands = await self._resolve_tools(i)
+                if i >= self.max_iter and not max_iter_handled:
+                    # Budget spent: _resolve_tools withheld tools for this call. Apply on_max_iter.
+                    max_iter_handled = True
+                    behavior = self.on_max_iter if isinstance(self.on_max_iter, str) else "custom"
+                    current_span.metadata["max_iter_reached"] = {"max_iter": self.max_iter, "behavior": behavior}
+                    logger.warning(
+                        "Agent reached max_iter.", path=self._path, max_iter=self.max_iter, behavior=behavior
+                    )
+                    # The last LLM output is already in memory — nothing to salvage if we leave here.
+                    _llm_memory_saved = True
+                    reply = await self._resolve_max_iter(current_span.memory)
+                    if reply is not None:
+                        await _append_memory(reply)
+                        if reply.role == "assistant":
+                            yield self._synthetic_event(
+                                "max_iter", RunStatus(code="success", reason="max_iter"), output=reply
+                            )
+                            break
+                    _llm_memory_saved = False  # a final tool-less LLM call follows
                 pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
                 tool_result_limits = {}
                 tool_guardrail_runners = {}
