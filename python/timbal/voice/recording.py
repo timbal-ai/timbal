@@ -93,12 +93,7 @@ class CallRecorder:
         self.meta = meta
 
         self._channel_layout = "mono" if layout == "mixed" else "stereo"
-        self._container = av.open(str(self._path), mode="w")
-        self._stream = self._container.add_stream("libmp3lame", rate=sample_rate)
-        self._stream.codec_context.layout = self._channel_layout
-        self._stream.codec_context.format = "s16p"
-        self._stream.codec_context.bit_rate = bitrate_kbps * 1000
-        self._fifo = av.AudioFifo()
+        self._open_container()
 
         # Sample alignment: chunks may split an s16 sample across calls.
         self._mic_rem = b""
@@ -136,6 +131,47 @@ class CallRecorder:
     @property
     def duration_secs(self) -> float:
         return self._samples_written / self._sample_rate
+
+    def retarget(self, path: str | Path) -> None:
+        """Reopen the encoder at ``path``. Only valid before any samples are written.
+
+        ``build_voice_session`` mints a uuid7 and opens the MP3 under that
+        name *before* a host ``on_session_built`` hook can pin
+        ``session.session_id``. Call this (or assign ``session.session_id``,
+        which does it) so the file stem, the manifest, and the upload path
+        share the pinned id.
+        """
+        if self._closed or self._failed:
+            raise RuntimeError("cannot retarget a closed or failed recorder")
+        if self._samples_written or self._mic_bytes or self._agent_bytes or self._agent_pending or self._mic_rem:
+            raise RuntimeError("cannot retarget after audio has been written")
+        new_path = Path(path)
+        if new_path == self._path:
+            return
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        # Open the new encoder *before* letting go of the old one, so a failed
+        # open leaves the recorder exactly as it was (still writable, still at
+        # the old path) rather than pointing at a file that was never created
+        # while encoding into a closed container.
+        old = (self._path, self._container, self._stream, self._fifo)
+        self._path = new_path
+        try:
+            self._open_container()
+        except Exception:
+            self._path, self._container, self._stream, self._fifo = old
+            new_path.unlink(missing_ok=True)
+            raise
+        # From here the swap has happened and must be reported as such: the
+        # caller sets its id only if we return. Closing / unlinking the old
+        # (empty) file is cleanup, never a reason to leave the identity split.
+        try:
+            old[1].close()
+        except Exception as e:
+            logger.warning("recording_retarget_close_failed", error=str(e))
+        try:
+            old[0].unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("recording_retarget_unlink_failed", path=str(old[0]), error=str(e))
 
     # -- Feed points -----------------------------------------------------------
 
@@ -248,6 +284,14 @@ class CallRecorder:
         return self._result
 
     # -- Internal ---------------------------------------------------------------
+
+    def _open_container(self) -> None:
+        self._container = av.open(str(self._path), mode="w")
+        self._stream = self._container.add_stream("libmp3lame", rate=self._sample_rate)
+        self._stream.codec_context.layout = self._channel_layout
+        self._stream.codec_context.format = "s16p"
+        self._stream.codec_context.bit_rate = self._bitrate_kbps * 1000
+        self._fifo = av.AudioFifo()
 
     def _write(self, mic: bytes, agent: bytes) -> None:
         """Encode one span (equal-length mic/agent PCM16 mono) onto the timeline."""

@@ -13,10 +13,12 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from timbal.server.http import create_app
 from timbal.voice import (
@@ -142,6 +144,19 @@ def _setup_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stt_cls, tts_cls
     monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", stt_cls)
     monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", tts_cls)
     return create_app()
+
+
+def _host_runnable(monkeypatch: pytest.MonkeyPatch, stt_cls, tts_cls):
+    """An Agent for a host that is not ``timbal.server`` (no lifespan, no
+    ``TIMBAL_RUNNABLE``), with the same adapter mocks as ``_setup_app``."""
+    from timbal import Agent
+    from timbal.core.test_model import TestModel
+
+    for k in VOICE_ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", stt_cls)
+    monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsStreamTTS", tts_cls)
+    return Agent(name="phone_host", model=TestModel(responses=["Hi there!"]), tools=[])
 
 
 def _collect_frames(ws) -> list[dict]:
@@ -526,6 +541,144 @@ class TestUlawWire:
         # Resampler ramps in, but the steady-state must sit near 16000.
         steady = values[len(values) // 2 :]
         assert sum(steady) / len(steady) > 10_000
+
+
+class TestEmbeddedBridge:
+    """``serve_media_ws`` as a library: a host that owns the socket and the
+    runnable (a platform media sidecar) runs the same bridge with its own
+    ``VoiceConfig`` and an ``on_session_built`` observer."""
+
+    def test_public_names_and_aliases(self) -> None:
+        from timbal.server import telephony as tel
+
+        assert tel.dialect_for("twilio") is tel.TWILIO
+        assert tel.dialect_for(" Telnyx ") is tel.TELNYX
+        with pytest.raises(KeyError):
+            tel.dialect_for("vonage")
+        assert isinstance(tel.TWILIO, tel.TwilioDialect)
+        assert isinstance(tel.TELNYX, tel.TelnyxDialect)
+        # Pre-2.7.17 spellings still resolve to the same objects.
+        assert tel._TWILIO is tel.TWILIO and tel._TELNYX is tel.TELNYX
+        assert tel._TwilioDialect is tel.TwilioDialect
+        assert tel._serve_media_ws is tel.serve_media_ws
+
+    def test_host_supplies_defaults_and_observes_the_session(self, monkeypatch, tmp_path) -> None:
+        pytest.importorskip("av")
+        from timbal.server import telephony as tel
+        from timbal.voice.config import RecordingConfig, VoiceConfig
+
+        stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Hello")])
+        # Same adapter mocks; the app under test is NOT timbal.server — it is
+        # a host that never sets ``app.state.voice_config``.
+        runnable = _host_runnable(monkeypatch, stt_cls, _make_tts_class(_TTS_CHUNK))
+        seen: dict = {}
+        rec_dir = tmp_path / "recordings"
+
+        host = FastAPI()
+
+        @host.websocket("/media/{provider}")
+        async def media(ws: WebSocket, provider: str) -> None:
+            await ws.accept()
+            defaults = VoiceConfig(language="es", recording=RecordingConfig(dir=str(rec_dir)))
+
+            # Async observer: a sidecar resolves tenant identity with I/O.
+            async def observe(session, meta):
+                await asyncio.sleep(0)
+                seen["session"] = session
+                seen["meta_keys"] = set(meta)
+                seen["generated_id"] = session.session_id
+                seen["meta_session_id_before"] = meta.get("session_id")
+                session.session_id = "platform-0001"
+                meta["org_id"] = "781"
+                meta["transport"] = f"{provider}-via-host"
+
+            await tel.serve_media_ws(
+                ws, runnable, tel.dialect_for(provider), defaults=defaults, on_session_built=observe
+            )
+
+        with TestClient(host) as client, client.websocket_connect("/media/telnyx") as ws:
+            ws.send_json({"event": "connected"})
+            ws.send_json(_telnyx_start_frame())
+            frames = _collect_frames(ws)
+
+        assert [f for f in frames if f["event"] == "media"], "bridge produced no downlink"
+        session = seen["session"]
+        assert seen["generated_id"] and seen["generated_id"] != "platform-0001"
+        assert seen["meta_session_id_before"] == seen["generated_id"]
+        assert session.session_id == session.recording_meta["session_id"] == "platform-0001"
+        # The observer saw the final meta and its edits landed on the session.
+        assert {"transport", "call_id", "from", "to"} <= seen["meta_keys"]
+        assert session.recording_meta["org_id"] == "781"
+        assert session.recording_meta["transport"] == "telnyx-via-host"
+        assert session.recording_meta["from"] == "+13120000001"
+        # Host VoiceConfig actually reached the session (language is never in
+        # recording_meta — a `.get("language", "es")` would always pass).
+        assert session.audio_input.language == "es"
+        # Recorder opened under the generated id, then followed the pin.
+        assert (rec_dir / "platform-0001.mp3").exists()
+        assert list(rec_dir.glob("*.mp3")) == [rec_dir / "platform-0001.mp3"]
+        manifest = json.loads((rec_dir / "platform-0001.json").read_text())
+        assert manifest["session_id"] == "platform-0001"
+
+    def test_a_refused_pin_keeps_the_generated_id_everywhere(self, monkeypatch, tmp_path) -> None:
+        """A pin the recorder cannot carry onto the file must not split the id
+        across the session, the manifest and the file: it is refused (the
+        hook's error is logged) and the generated uuid7 stays in force."""
+        pytest.importorskip("av")
+        from timbal.server import telephony as tel
+        from timbal.voice.config import RecordingConfig, VoiceConfig
+
+        stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Hello")])
+        runnable = _host_runnable(monkeypatch, stt_cls, _make_tts_class(_TTS_CHUNK))
+        seen: dict = {}
+        rec_dir = tmp_path / "recordings"
+        host = FastAPI()
+
+        @host.websocket("/media")
+        async def media(ws: WebSocket) -> None:
+            await ws.accept()
+            defaults = VoiceConfig(recording=RecordingConfig(dir=str(rec_dir)))
+
+            def pin_badly(session, meta):  # noqa: ARG001 - the hook shape
+                seen["session"] = session
+                session.session_id = "../escape"
+
+            await tel.serve_media_ws(ws, runnable, tel.TWILIO, defaults=defaults, on_session_built=pin_badly)
+
+        with TestClient(host) as client, client.websocket_connect("/media") as ws:
+            ws.send_json(_twilio_start_frame())
+            frames = _collect_frames(ws)
+
+        assert [f for f in frames if f["event"] == "media"], "bridge produced no downlink"
+        session = seen["session"]
+        generated = session.session_id
+        assert generated != "../escape"
+        assert session.recording_meta["session_id"] == generated
+        assert [p.name for p in sorted(rec_dir.iterdir())] == [f"{generated}.json", f"{generated}.mp3"]
+        manifest = json.loads((rec_dir / f"{generated}.json").read_text())
+        assert manifest["session_id"] == generated
+
+    def test_a_failing_observer_never_ends_the_call(self, monkeypatch) -> None:
+        pytest.importorskip("av")
+        from timbal.server import telephony as tel
+
+        stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Hello")])
+        runnable = _host_runnable(monkeypatch, stt_cls, _make_tts_class(_TTS_CHUNK))
+        host = FastAPI()
+
+        @host.websocket("/media")
+        async def media(ws: WebSocket) -> None:
+            await ws.accept()
+
+            def boom(session, meta):  # noqa: ARG001 - the hook shape, deliberately failing
+                raise RuntimeError("observer bug")
+
+            await tel.serve_media_ws(ws, runnable, tel.TWILIO, on_session_built=boom)
+
+        with TestClient(host) as client, client.websocket_connect("/media") as ws:
+            ws.send_json(_twilio_start_frame())
+            frames = _collect_frames(ws)
+        assert [f for f in frames if f["event"] == "media"]
 
 
 class TestCallContext:

@@ -12,6 +12,12 @@ Routes (per provider ``{p}`` in ``twilio`` | ``telnyx``):
   TwiML/TeXML that connects the call to the media WebSocket below.
 - ``WS /voice/{p}/stream`` — the bidirectional media stream.
 
+Embedding the bridge elsewhere: :func:`serve_media_ws` (with
+:func:`dialect_for` / :data:`TWILIO` / :data:`TELNYX`) runs one call against
+a caller-supplied runnable and :class:`VoiceConfig`, with an
+``on_session_built`` seam — for a process that terminates the carrier
+socket for many tenants and owns the media on their behalf.
+
 The two providers speak near-identical protocols with different spellings
 (Twilio camelCase / ``streamSid``; Telnyx snake_case / ``stream_id``), so one
 handler runs both via a small dialect table.
@@ -28,9 +34,11 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from typing import Any
 from urllib.parse import parse_qsl
@@ -43,6 +51,17 @@ from ..voice.config import VoiceConfig
 from .capacity import acquire_session_slot, release_session_slot
 
 logger = structlog.get_logger("timbal.server.telephony")
+
+__all__ = [
+    "DIALECTS",
+    "TELNYX",
+    "TWILIO",
+    "TelnyxDialect",
+    "TwilioDialect",
+    "dialect_for",
+    "router",
+    "serve_media_ws",
+]
 
 router = APIRouter(prefix="/voice", tags=["telephony"])
 
@@ -95,7 +114,7 @@ _MIN_MEDIA_BYTES = 160  # 20ms of mulaw @ 8kHz
 # ---------------------------------------------------------------------------
 
 
-class _TwilioDialect:
+class TwilioDialect:
     """Twilio Media Streams: camelCase frames keyed by ``streamSid``."""
 
     name = "twilio"
@@ -142,7 +161,7 @@ class _TwilioDialect:
         return {"event": "clear", "streamSid": stream_id}
 
 
-class _TelnyxDialect:
+class TelnyxDialect:
     """Telnyx bidirectional streaming: snake_case frames keyed by ``stream_id``.
 
     Client → Telnyx frames carry no stream id (one stream per socket).
@@ -190,8 +209,27 @@ class _TelnyxDialect:
         return {"event": "clear"}
 
 
-_TWILIO = _TwilioDialect()
-_TELNYX = _TelnyxDialect()
+TWILIO = TwilioDialect()
+TELNYX = TelnyxDialect()
+
+Dialect = TwilioDialect | TelnyxDialect
+
+#: Provider name → dialect. Public so a platform that terminates the carrier
+#: socket elsewhere (and only knows the provider by name) can pick one.
+DIALECTS: dict[str, Dialect] = {TWILIO.name: TWILIO, TELNYX.name: TELNYX}
+
+
+def dialect_for(provider: str) -> Dialect:
+    """The dialect for ``"twilio"`` / ``"telnyx"``; ``KeyError`` otherwise."""
+    return DIALECTS[provider.strip().lower()]
+
+
+# Pre-2.7.17 spellings. Same objects; kept so out-of-tree callers that
+# reached for the underscored names keep working.
+_TwilioDialect = TwilioDialect
+_TelnyxDialect = TelnyxDialect
+_TWILIO = TWILIO
+_TELNYX = TELNYX
 
 
 # ---------------------------------------------------------------------------
@@ -358,15 +396,15 @@ async def telnyx_incoming(request: Request) -> Response:
 
 @router.websocket("/twilio/stream")
 async def twilio_stream(ws: WebSocket) -> None:
-    await _media_ws(ws, _TWILIO)
+    await _media_ws(ws, TWILIO)
 
 
 @router.websocket("/telnyx/stream")
 async def telnyx_stream(ws: WebSocket) -> None:
-    await _media_ws(ws, _TELNYX)
+    await _media_ws(ws, TELNYX)
 
 
-async def _media_ws(ws: WebSocket, dialect: Any) -> None:
+async def _media_ws(ws: WebSocket, dialect: Dialect) -> None:
     from ..core.agent import Agent
 
     await ws.accept()
@@ -390,7 +428,7 @@ async def _media_ws(ws: WebSocket, dialect: Any) -> None:
     guard = getattr(ws.app.state, "single_session_guard", None)
     if guard is None:
         try:
-            await _serve_media_ws(ws, runnable, dialect)
+            await serve_media_ws(ws, runnable, dialect)
         finally:
             release_session_slot()
         return
@@ -402,7 +440,7 @@ async def _media_ws(ws: WebSocket, dialect: Any) -> None:
         return
     guard.mark_connected()
     try:
-        await _serve_media_ws(ws, runnable, dialect)
+        await serve_media_ws(ws, runnable, dialect)
     finally:
         release_session_slot()
         await guard.finish()
@@ -416,8 +454,42 @@ async def _safe_close(ws: WebSocket, code: int, reason: str) -> None:
         pass
 
 
-async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
-    """One phone call: start frame → session → μ-law media both ways, until stop."""
+async def serve_media_ws(
+    ws: WebSocket,
+    runnable: Any,
+    dialect: Dialect,
+    *,
+    defaults: VoiceConfig | None = None,
+    on_session_built: Callable[[Any, dict[str, Any]], Awaitable[None] | None] | None = None,
+) -> None:
+    """One phone call: start frame → session → μ-law media both ways, until stop.
+
+    Public so a process that terminates the carrier socket for many tenants
+    (a platform media sidecar) can run the bridge itself:
+
+    - ``ws`` must already be accepted. Capacity / single-session gating and
+      the "runnable is an :class:`~timbal.core.agent.Agent`" check are the
+      caller's job (this server does both in ``_media_ws``).
+    - ``defaults`` is the :class:`VoiceConfig` the session is built from.
+      ``None`` reads ``ws.app.state.voice_config`` — the one-agent-per-box
+      layout — so existing callers are unchanged.
+    - ``on_session_built(session, meta)`` (sync or async) runs once the
+      :class:`VoiceSession` exists and before it runs, with the *final*
+      ``meta`` (``transport``, ``call_id``, ``from``, ``to`` plus the
+      build's). Mutate ``meta`` in place to shape what lands on
+      ``session.recording_meta``; set ``session.session_id`` to pin your own
+      identity — the recording file stem and ``meta["session_id"]`` follow
+      (ids: ``[A-Za-z0-9_-]{1,128}``). Exceptions are logged and ignored — an
+      observer must never end a call — and a refused pin leaves the
+      generated id in force everywhere.
+
+    Recording *destination* identity does not come from ``meta``: the env
+    knobs ``build_voice_session`` reads (``TIMBAL_VOICE_RECORDING_*``,
+    ``TIMBAL_ORG_ID`` / ``TIMBAL_PROJECT_ID`` for the platform upload path)
+    are process-wide. A multi-tenant host must carry them per call through
+    ``defaults.recording`` (``dir`` and an ``on_saved`` hook that knows the
+    tenant) and leave ``TIMBAL_VOICE_RECORDING_UPLOAD`` unset.
+    """
     try:
         from ..voice import AgentTextDone, AudioOutput, FillerSpoken, SessionEnded, TurnMetricsEvent
         from ..voice.telephony import (
@@ -478,7 +550,8 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
     client_config = {k: v for k, v in custom.items() if k in _CONFIG_PARAM_KEYS and isinstance(v, str) and v}
     call_context = _call_context_from_start(info, custom)
 
-    defaults: VoiceConfig = getattr(ws.app.state, "voice_config", None) or VoiceConfig()
+    if defaults is None:
+        defaults = getattr(ws.app.state, "voice_config", None) or VoiceConfig()
     session_rate = int(merge_client_voice_overrides(defaults, client_config).sample_rate)
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
@@ -529,6 +602,18 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
         "to": info.get("to"),
         **meta,
     }
+    if on_session_built is not None:
+        try:
+            result = on_session_built(session, meta)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:  # noqa: BLE001 - an observer must never end a call
+            logger.error("telephony_session_hook_failed", provider=dialect.name, error=str(e), exc_info=True)
+    # The hook may pin ``session.session_id`` after the recorder already
+    # opened under a generated uuid7. The setter retargets the file (or
+    # raises and leaves the id alone), so stamping *after* the hook keeps
+    # recording_meta, the manifest, and the upload path (file stem) equal.
+    meta["session_id"] = session.session_id
     session.recording_meta = meta
 
     up_resampler = PcmResampler(line_rate, session_rate) if line_rate != session_rate else None
@@ -648,3 +733,7 @@ async def _serve_media_ws(ws: WebSocket, runnable: Any, dialect: Any) -> None:
         except Exception:
             pass
         logger.info("telephony_ws_disconnected", provider=dialect.name)
+
+
+# Pre-2.7.17 spelling; same coroutine.
+_serve_media_ws = serve_media_ws
