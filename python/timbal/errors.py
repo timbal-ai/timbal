@@ -42,20 +42,11 @@ class CredentialNotAvailable(APIKeyNotFoundError, ValueError):
 
 
 class MaxIterExceeded(TimbalError):
-    """Raised when an agent exhausts ``max_iter`` and is configured with ``on_max_iter="error"``.
+    """Raised when an agent with ``on_max_iter="error"`` exhausts ``max_iter`` without a final answer."""
 
-    Args:
-        max_iter: The configured iteration budget.
-        iterations: LLM -> tool rounds actually consumed before the limit was hit.
-    """
-
-    def __init__(self, max_iter: int, iterations: int) -> None:
-        super().__init__(
-            f"Agent exhausted its iteration budget: {iterations} tool-call rounds reached max_iter={max_iter} "
-            "without producing a final answer."
-        )
+    def __init__(self, max_iter: int) -> None:
+        super().__init__(f"Agent exhausted its iteration budget (max_iter={max_iter}) without producing a final answer.")
         self.max_iter = max_iter
-        self.iterations = iterations
 
 
 class EarlyExit(TimbalError):

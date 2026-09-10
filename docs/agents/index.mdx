@@ -150,28 +150,26 @@ async for event in agent(prompt="Hello"):
 
 `max_iter` (default `10`) bounds the LLM → tool rounds in one turn. `on_max_iter` decides what happens when the budget is spent and the model still wants tools:
 
-| `on_max_iter` | Extra LLM call | Output | Use when |
-|---|---|---|---|
-| `"final_answer"` (default) | One, with **no tools** | The model's text | Chat: the user should get an answer, even a partial one |
-| `"stop"` | None | `max_iter_stop_message` as the assistant reply (`stop_reason="max_iter"`) | You want to decide what to show the user yourself, at zero extra cost |
-| `"error"` | None | Raises `timbal.errors.MaxIterExceeded` | Batch / pipelines: a partial answer is worse than a failure |
+| `on_max_iter` | Extra LLM call | Output |
+|---|---|---|
+| `"final_answer"` (default) | One, with **no tools**, preceded by a notice telling the model its budget is gone | The model's text |
+| `"stop"` | None | A fixed assistant reply (`stop_reason="max_iter"`) |
+| `"error"` | None | Raises `timbal.errors.MaxIterExceeded` — for one-shot runs; memory is left ending in an unanswered tool batch |
 
-In `"final_answer"` mode the agent first appends `max_iter_notice` as a user message telling the model its tools are gone and asking it to report what was and was not completed — otherwise models tend to narrate the step they were about to take ("I'll update the file now") as if it had happened.
+The notice matters: silently handed an empty tool list, models narrate the step they were about to take ("I'll update the file now") as if it had happened.
+
+For anything custom, pass a callable (sync or async). It receives a `MaxIterContext(max_iter, memory, agent_path)` and returns a message: `role="user"` is used as the notice for a final tool-less call, `role="assistant"` is the reply and ends the turn, `None` makes the tool-less call with no notice, and raising fails the run.
 
 ```python
-agent = Agent(
-    name="assistant",
-    model="openai/gpt-5",
-    tools=[search, write_report],
-    max_iter=16,
-    on_max_iter="final_answer",
-    # ``{max_iter}`` is substituted in both messages. ``max_iter_notice=None`` skips the notice.
-    max_iter_notice="[System] Step budget of {max_iter} spent. Summarize progress; do not claim unfinished work is done.",
-    max_iter_stop_message="[Stopped after {max_iter} steps without a final answer.]",  # used by on_max_iter="stop"
-)
+def out_of_budget(ctx):
+    if ctx.agent_path != "assistant":  # sub-agents: stop cheaply, let the parent decide
+        return {"role": "assistant", "content": f"[Stopped after {ctx.max_iter} steps.]"}
+    return {"role": "user", "content": "Budget spent. Report what is done and what is not; claim nothing else."}
+
+agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], max_iter=16, on_max_iter=out_of_budget)
 ```
 
-Every mode records `metadata["max_iter_reached"] = {"max_iter", "iterations", "behavior"}` on the agent span, so exhausted turns are easy to find in traces. The notice and the stop message are persisted in memory like any other message, tagged with `metadata={"source": "runtime", "kind": "max_iter_notice" | "max_iter_stop"}` so `Message.is_runtime()` lets you hide them when rendering a human transcript. `"error"` is meant for one-shot runs: memory is left ending in an unanswered tool batch, so a chained next turn starts from that dangling state.
+Every mode records `metadata["max_iter_reached"] = {"max_iter", "behavior"}` on the agent span. Injected messages are persisted in memory tagged `metadata={"source": "runtime", "kind": "max_iter_notice" | "max_iter_stop"}`, so `Message.is_runtime()` lets you hide them when rendering a human transcript.
 
 ### Approval-Required Tools
 

@@ -830,13 +830,13 @@ class TestMaxIterNotice:
         last_call = seen[-1]
         assert last_call[-1].role == "user"
         notice = last_call[-1].collect_text()
-        assert notice == DEFAULT_MAX_ITER_NOTICE.replace("{max_iter}", "2")
+        assert notice == DEFAULT_MAX_ITER_NOTICE.format(max_iter=2)
         assert "2 tool-call steps" in notice
         # Earlier calls never saw it.
         assert all(m.collect_text() != notice for call in seen[:-1] for m in call)
 
         span = ctx._trace.get_path(agent._path)[0]
-        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "iterations": 2, "behavior": "final_answer"}
+        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "behavior": "final_answer"}
         # Persisted: the notice sits right before the final assistant message in memory.
         assert span.memory[-2].role == "user" and span.memory[-2].collect_text() == notice
         assert span.memory[-1].role == "assistant"
@@ -855,19 +855,35 @@ class TestMaxIterNotice:
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
-    async def test_custom_notice_substitutes_max_iter(self):
-        agent, seen = self._looping_agent(max_iter_notice="Budget of {max_iter} spent. Wrap up.")
+    async def test_hook_user_message_is_the_notice(self):
+        from timbal.core.agent import MaxIterContext
+
+        seen_ctx: list[MaxIterContext] = []
+
+        def hook(ctx: MaxIterContext) -> Message:
+            seen_ctx.append(ctx)
+            return Message.validate({"role": "user", "content": f"Budget of {ctx.max_iter} spent. Wrap up."})
+
+        agent, seen = self._looping_agent(on_max_iter=hook)
         out = await agent(prompt="go").collect()
         assert out.status.code == "success", out.error
-        assert seen[-1][-1].collect_text() == "Budget of 2 spent. Wrap up."
+        assert len(seen) == 3  # the user message still buys a final tool-less call
+        notice = seen[-1][-1]
+        assert notice.collect_text() == "Budget of 2 spent. Wrap up."
+        assert notice.metadata == {"source": "runtime", "kind": "max_iter_notice"}  # tagged for the caller
+        assert len(seen_ctx) == 1 and seen_ctx[0].agent_path == agent._path
+        assert seen_ctx[0].memory[-1].role == "tool"  # hook sees the turn so far
 
     @pytest.mark.asyncio
-    async def test_notice_disabled(self):
+    async def test_hook_none_skips_notice(self):
         from timbal.state import set_run_context
         from timbal.state.context import RunContext
         from timbal.state.tracing.providers import InMemoryTracingProvider
 
-        agent, seen = self._looping_agent(max_iter_notice=None)
+        async def hook(_ctx):  # async hooks are awaited
+            return None
+
+        agent, seen = self._looping_agent(on_max_iter=hook)
         ctx = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx)
         out = await agent(prompt="go").collect()
@@ -876,7 +892,7 @@ class TestMaxIterNotice:
         # Final call still happens tool-less, but the last message is the tool result, not a notice.
         assert seen[-1][-1].role == "tool"
         span = ctx._trace.get_path(agent._path)[0]
-        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "iterations": 2, "behavior": "final_answer"}
+        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "behavior": "custom"}
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
@@ -936,10 +952,10 @@ class TestOnMaxIter:
         assert out.output.stop_reason == "max_iter"
         assert out.output.is_runtime()
         assert out.output.metadata == {"source": "runtime", "kind": "max_iter_stop"}
-        assert out.output.collect_text() == DEFAULT_MAX_ITER_STOP_MESSAGE.replace("{max_iter}", "2")
+        assert out.output.collect_text() == DEFAULT_MAX_ITER_STOP_MESSAGE.format(max_iter=2)
 
         span = ctx._trace.get_path(agent._path)[0]
-        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "iterations": 2, "behavior": "stop"}
+        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "behavior": "stop"}
         # The stop reply is persisted as the turn's assistant message, exactly once.
         assert span.memory[-1].role == "assistant"
         assert span.memory[-1].collect_text() == out.output.collect_text()
@@ -947,11 +963,36 @@ class TestOnMaxIter:
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
-    async def test_stop_custom_message(self):
-        agent, _ = self._looping_agent(on_max_iter="stop", max_iter_stop_message="Out of steps ({max_iter}).")
+    async def test_hook_assistant_message_ends_turn(self):
+        def hook(ctx):
+            return {"role": "assistant", "content": f"Out of steps ({ctx.max_iter})."}  # dicts are validated
+
+        agent, seen = self._looping_agent(on_max_iter=hook)
         out = await agent(prompt="go").collect()
         assert out.status.code == "success", out.error
+        assert out.status.reason == "max_iter"
+        assert len(seen) == 2  # no extra LLM call
         assert out.output.collect_text() == "Out of steps (2)."
+        assert out.output.stop_reason == "max_iter"
+        assert out.output.metadata == {"source": "runtime", "kind": "max_iter_stop"}
+
+    @pytest.mark.asyncio
+    async def test_hook_raising_fails_the_run(self):
+        def hook(_ctx):
+            raise RuntimeError("budget policy says no")
+
+        agent, seen = self._looping_agent(on_max_iter=hook)
+        out = await agent(prompt="go").collect()
+        assert out.status.code == "error"
+        assert out.error["type"] == "RuntimeError"
+        assert len(seen) == 2
+
+    @pytest.mark.asyncio
+    async def test_hook_bad_role_rejected(self):
+        agent, _ = self._looping_agent(on_max_iter=lambda _ctx: Message.validate({"role": "tool", "content": "nope"}))
+        out = await agent(prompt="go").collect()
+        assert out.status.code == "error"
+        assert out.error["type"] == "ValueError"
 
     @pytest.mark.asyncio
     async def test_error_raises_max_iter_exceeded(self):
@@ -970,7 +1011,7 @@ class TestOnMaxIter:
         assert len(seen) == 2
 
         span = ctx._trace.get_path(agent._path)[0]
-        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "iterations": 2, "behavior": "error"}
+        assert span.metadata.get("max_iter_reached") == {"max_iter": 2, "behavior": "error"}
         # Memory holds the model's last (tool_use) reply once — the finally-block salvage
         # must not re-append it.
         tool_use_msgs = [m for m in span.memory if any(isinstance(c, ToolUseContent) for c in m.content)]
