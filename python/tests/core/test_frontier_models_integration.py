@@ -62,10 +62,10 @@ LIVE_MODELS = [
         id="fireworks-minimax-m3",
     ),
     pytest.param(
-        "fireworks/accounts/fireworks/models/qwen3p7-plus",
+        "fireworks/accounts/fireworks/models/qwen3p8-max",
         "FIREWORKS_API_KEY",
         None,
-        id="fireworks-qwen3p7-plus",
+        id="fireworks-qwen3p8-max",
     ),
     pytest.param(
         "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
