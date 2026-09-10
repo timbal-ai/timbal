@@ -111,7 +111,7 @@ read_tool_result(handle, offset=0, limit=200, pattern=None)
 
 - Line-numbered paging via `offset`/`limit` (hard-capped at 500 lines / 50,000 chars per call, so a read can never blow the window back up).
 - `pattern` filters to lines containing a **literal substring** (not a regex).
-- Unknown or expired handles return a clean tool error the model can react to.
+- Unknown or expired handles return a plain-text notice (not a tool error) telling the model the payload is gone and to re-run the tool instead of retrying the read.
 
 The model uses it on its own — the placeholder tells it how.
 
@@ -123,6 +123,7 @@ Spilled payloads go through a narrow protocol, so the backend is swappable:
 class OffloadStore(Protocol):
     async def write(self, key: str, data: bytes) -> str:  # returns a handle
     async def read(self, handle: str) -> bytes:
+    # optional: def exists(self, handle: str) -> bool  — enables stale-handle reconciliation
 ```
 
 The default `LocalOffloadStore` writes one file per result under `~/.timbal/offload/` (owner-only permissions; reads are hardened against path traversal and symlink escapes). Handles are store-relative keys, not absolute paths, so a different backend can resolve the same handle in another process.
@@ -138,6 +139,15 @@ agent = Agent(..., tool_result_limit=ToolResultLimit(store=store))
 ```
 
 Pruning runs off the hot path and never fails a run.
+
+### Handles across turns and instances
+
+Handles are only as durable as the store behind them. The default root is **per machine**: if a conversation's turns are served by different instances, or each turn runs in a fresh container, a later turn cannot read what an earlier one spilled to its own `~/.timbal/offload/`.
+
+Two things keep that from costing iterations:
+
+- **Shared root.** Set `TIMBAL_OFFLOAD_DIR` to a volume every instance mounts (a network filesystem, a persistent disk). `LocalOffloadStore()` resolves its root as: explicit `root=` argument → `$TIMBAL_OFFLOAD_DIR` → `~/.timbal/offload`.
+- **Reconciliation at turn start.** When memory is loaded from the previous run, every inherited placeholder is probed against the current store (`exists(handle)`, one `stat`). Handles the store cannot resolve are rewritten to an explicit "no longer readable — re-run the tool" note and their `offload_handle` is cleared, so the model is never invited to page a dead payload. The cleared handles are recorded under `metadata["offload_unreadable"]` on the agent span. Custom stores opt in by implementing `exists(handle) -> bool` (sync or async); stores without it are left untouched.
 
 ## How Compaction Works
 
