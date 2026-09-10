@@ -28,10 +28,10 @@ from timbal.core.tool import Tool
 from timbal.voice import resolve_turn_detector
 
 _MODE = os.environ.get("TIMBAL_VOICE_TURN_DETECTOR", "local").strip().lower()
-# Qwen3.6-27B on Groq: capable enough for phatic voice turns, fast enough
+# Qwen3.8-27B on Groq: capable enough for phatic voice turns, fast enough
 # that TTS is not waiting on a 70B. Thinking is ON by default on this model
 # and would eat 1–2s of silence before first audio — force it off.
-_MODEL = os.environ.get("TIMBAL_VOICE_DEMO_MODEL", "groq/qwen/qwen3.6-27b")
+_MODEL = os.environ.get("TIMBAL_VOICE_DEMO_MODEL", "groq/qwen/qwen3.8-27b")
 
 
 async def get_datetime() -> str:

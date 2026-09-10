@@ -13,7 +13,7 @@ NEW_MODEL_IDS = [
     "xai/grok-4.5",
     "xai/grok-4.3",
     "fireworks/accounts/fireworks/models/minimax-m3",
-    "fireworks/accounts/fireworks/models/qwen3p7-plus",
+    "fireworks/accounts/fireworks/models/qwen3p8-max",
     "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
     "fireworks/accounts/fireworks/models/kimi-k2p7-code",
     "openai/gpt-6-astra",
@@ -23,7 +23,7 @@ NEW_MODEL_IDS = [
     "openai/gpt-5.5-pro",
     "openai/gpt-5.4-pro",
     "fireworks/accounts/fireworks/models/glm-5p2",
-    "groq/qwen/qwen3.6-27b",
+    "groq/qwen/qwen3.8-27b",
     "togetherai/moonshotai/Kimi-K2.7-Code",
     "togetherai/zai-org/GLM-5.2",
     "togetherai/MiniMaxAI/MiniMax-M3",
@@ -135,7 +135,7 @@ class TestFireworksRouterDispatch:
         "model_id,api_name",
         [
             ("fireworks/accounts/fireworks/models/minimax-m3", "accounts/fireworks/models/minimax-m3"),
-            ("fireworks/accounts/fireworks/models/qwen3p7-plus", "accounts/fireworks/models/qwen3p7-plus"),
+            ("fireworks/accounts/fireworks/models/qwen3p8-max", "accounts/fireworks/models/qwen3p8-max"),
             ("fireworks/accounts/fireworks/models/deepseek-v4-flash-0731", "accounts/fireworks/models/deepseek-v4-flash-0731"),
         ],
     )

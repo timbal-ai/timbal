@@ -842,15 +842,15 @@ models:
     cached_input_price: 0.4
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
-- id: groq/qwen/qwen3.6-27b
+- id: groq/qwen/qwen3.8-27b
   provider: groq
-  display_name: Qwen3.6 27B (Groq)
-  description: Qwen3.6 27B with hybrid thinking mode, delivered at Groq's ultra-low latency.
-  notes: Preview tier on Groq; replacement for retired Qwen3 32B / Llama 4 Scout.
-  input_price: 0.6
-  output_price: 3.0
-  context_window: 131072
-  capabilities: [tools, reasoning]
+  display_name: Qwen3.8 27B (Groq)
+  description: Qwen3.8 27B multimodal with hybrid thinking/instruct modes, delivered at Groq's ultra-low latency.
+  notes: Preview tier on Groq. Replaces Qwen3.6 27B in this catalog; Groq still lists qwen/qwen3.6-27b as Preview.
+  input_price: 0.8
+  output_price: 4.0
+  context_window: 131042
+  capabilities: [vision, tools, reasoning]
 - id: groq/openai/gpt-oss-120b
   provider: groq
   display_name: GPT OSS 120B (Groq)
@@ -876,14 +876,16 @@ models:
   output_price: 0.66
   context_window: 1048576
   capabilities: [tools, reasoning]
-- id: fireworks/accounts/fireworks/models/qwen3p7-plus
+- id: fireworks/accounts/fireworks/models/qwen3p8-max
   provider: fireworks
-  display_name: Qwen 3.7 Plus (Fireworks)
-  description: 'Alibaba Qwen 3.7 Plus on Fireworks serverless: multimodal flagship with strong agentic and coding benchmarks.'
-  input_price: 0.4
-  output_price: 1.6
+  display_name: Qwen 3.8 Max (Fireworks)
+  description: 'Alibaba Qwen 3.8 Max on Fireworks serverless: flagship MoE for long-horizon coding and agentic work (same family as Qwen3.8-2.4T-A95B).'
+  notes: Replacement for retired serverless qwen3p7-plus.
+  input_price: 2.0
+  output_price: 6.0
+  cached_input_price: 0.25
   context_window: 262144
-  capabilities: [vision, tools, reasoning]
+  capabilities: [tools, reasoning]
 - id: fireworks/accounts/fireworks/models/kimi-k2p6
   provider: fireworks
   display_name: Kimi K2.6 (Fireworks)
