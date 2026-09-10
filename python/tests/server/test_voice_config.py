@@ -17,7 +17,7 @@ from timbal import __version__ as timbal_version
 from timbal.server import voice as voice_routes
 from timbal.server.http import create_app, lifespan
 from timbal.utils import ImportSpec
-from timbal.voice.config import DEFAULT_VOICE_ID, FillerConfig, RecordingConfig, VoiceConfig
+from timbal.voice.config import DEFAULT_VOICE_ID, FillerConfig, GreetingConfig, RecordingConfig, VoiceConfig
 
 from .voice_env import VOICE_ENV_KEYS
 
@@ -629,6 +629,43 @@ class TestDeclaredVoiceConfig:
         assert out["greeting"] == {"text": "Bon dia"}
         # Defaults the agent never touched are not "declared".
         assert "stt_provider" not in out and "voice" not in out and "sample_rate" not in out
+
+    def test_model_instances_inside_a_dict_are_reported_sparsely(self):
+        """Regression: a ``GreetingConfig`` / ``FillerConfig`` *inside a dict*
+        used to be dropped by the JSON pass while ``merge_voice_config`` still
+        honoured it — the box spoke the opener, the endpoint said there was none."""
+
+        class R:
+            voice_config = {
+                "language": "es",
+                "greeting": GreetingConfig(text="Hola", delay_ms=300),
+                "filler": FillerConfig(delay_secs=0.8),
+            }
+
+        declared = voice_routes.declared_voice_config(R())
+        assert declared == {
+            "language": "es",
+            "greeting": {"text": "Hola", "delay_ms": 300},  # sparse: only what was set
+            "filler": {"delay_secs": 0.8},
+        }
+        merged = voice_routes.merge_voice_config(R())
+        assert merged.greeting is not None and merged.greeting.text == "Hola" and merged.greeting.delay_ms == 300
+        assert merged.filler is not None and merged.filler.delay_secs == 0.8
+
+    def test_voice_config_instance_keeps_nested_blocks_sparse_too(self, monkeypatch):
+        """The ``VoiceConfig`` spelling must not clobber env-supplied nested
+        values with the nested model's *defaults* (the original reason for the
+        sparse redo), and must report the same shape as the dict spelling."""
+        monkeypatch.setenv("TIMBAL_VOICE_GREETING", "Env opener")
+
+        class R:
+            voice_config = VoiceConfig(greeting=GreetingConfig(delay_ms=250, instructions="be brief"))
+
+        declared = voice_routes.declared_voice_config(R())
+        assert declared == {"greeting": {"delay_ms": 250, "instructions": "be brief"}}
+        merged = voice_routes.merge_voice_config(R())
+        # Env text survives the agent's partial greeting block.
+        assert merged.greeting is not None and merged.greeting.text == "Env opener" and merged.greeting.delay_ms == 250
 
     def test_callable_is_resolved(self):
         class R:

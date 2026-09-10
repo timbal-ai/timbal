@@ -119,20 +119,32 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
     Accepts a dict, a zero-arg callable returning one, or a ``VoiceConfig``
     (dumped by ``model_fields_set`` so defaults the agent never touched do not
     masquerade as choices). ``None`` when the runnable declares nothing.
+
+    Nested ``filler`` / ``greeting`` come back as sparse dicts whichever way
+    the agent spelled them — a ``FillerConfig`` / ``GreetingConfig`` instance
+    inside a plain dict is as common as a ``VoiceConfig`` — so every consumer
+    (:func:`merge_voice_config`, :func:`declared_voice_config`) sees one shape.
     """
     vc = getattr(runnable, "voice_config", None)
     if callable(vc):
         vc = vc()
     if isinstance(vc, VoiceConfig):
+        # Top-level ``include`` dumps nested models in full (unset fields and
+        # all); put the instances back so the sparse redo below applies to
+        # them exactly as it does to instances the agent placed in a dict.
         dumped = vc.model_dump(include=vc.model_fields_set)
-        # Top-level ``include`` dumps nested models in full; redo filler and
-        # greeting sparsely so unset fields don't clobber env values below.
-        if isinstance(vc.filler, FillerConfig):
-            dumped["filler"] = vc.filler.model_dump(include=vc.filler.model_fields_set)
-        if isinstance(vc.greeting, GreetingConfig):
-            dumped["greeting"] = vc.greeting.model_dump(include=vc.greeting.model_fields_set)
+        for key in ("filler", "greeting"):
+            if key in dumped:
+                dumped[key] = getattr(vc, key)
         vc = dumped
-    return vc if isinstance(vc, dict) else None
+    if not isinstance(vc, dict):
+        return None
+    out = dict(vc)
+    for key, model_type in (("filler", FillerConfig), ("greeting", GreetingConfig)):
+        nested = out.get(key)
+        if isinstance(nested, model_type):
+            out[key] = nested.model_dump(include=nested.model_fields_set)
+    return out
 
 
 #: ``VoiceConfig`` keys that stay on this box when the config is served over
@@ -211,17 +223,15 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
         data["stt_extra"] = {**base.stt_extra, **vc["stt_extra"]}
     if isinstance(vc.get("tts_extra"), dict):
         data["tts_extra"] = {**base.tts_extra, **vc["tts_extra"]}
+    # ``filler`` / ``greeting`` arrive as sparse dicts (or ``None`` / ``""``)
+    # from the normalizer, however the agent spelled them.
     filler = vc.get("filler")
-    if isinstance(filler, FillerConfig):
-        filler = filler.model_dump(include=filler.model_fields_set)
     if isinstance(filler, dict):
         base_filler = base.filler.model_dump(include=base.filler.model_fields_set) if base.filler else {}
         data["filler"] = {**base_filler, **filler}
     elif filler is not None:
         data["filler"] = filler
     greeting = vc.get("greeting")
-    if isinstance(greeting, GreetingConfig):
-        greeting = greeting.model_dump(include=greeting.model_fields_set)
     if isinstance(greeting, dict):
         # Same deep merge as filler: an agent tweaking ``delay_ms`` must not drop
         # the text TIMBAL_VOICE_GREETING supplied (and lose the whole opener to a
