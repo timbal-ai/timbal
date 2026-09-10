@@ -275,7 +275,9 @@ class Agent(Runnable):
       assistant's reply and returned as the output (``stop_reason="max_iter"``). Cheapest;
       the caller decides what to tell the user.
     - ``"error"`` — raise :class:`timbal.errors.MaxIterExceeded`; the run fails. For batch or
-      pipeline agents where a partial answer is worse than a failure.
+      pipeline agents where a partial answer is worse than a failure. Meant for one-shot use:
+      memory is left ending in an unanswered tool batch (assistant tool_use + tool_results, no
+      assistant text), so a chained next turn (``parent_id``) starts from that dangling state.
 
     Every mode records ``metadata["max_iter_reached"]`` on the agent span."""
     max_iter_notice: str | None = DEFAULT_MAX_ITER_NOTICE
@@ -283,10 +285,12 @@ class Agent(Runnable):
     the final LLM call. Without it the model is silently handed an empty tool list and tends
     to narrate the next step it intended to take ("I'll update the file now") as if it could
     still run it. ``{max_iter}`` is substituted. ``None`` disables the notice; the tool-less
-    final call still happens."""
+    final call still happens. Stored with ``metadata={"source": "runtime", "kind":
+    "max_iter_notice"}`` so ``Message.is_runtime()`` filters it out of human transcripts."""
     max_iter_stop_message: str = DEFAULT_MAX_ITER_STOP_MESSAGE
     """``on_max_iter="stop"`` only: the assistant message returned instead of calling the LLM
-    again. ``{max_iter}`` is substituted."""
+    again. ``{max_iter}`` is substituted. Stored with ``metadata={"source": "runtime", "kind":
+    "max_iter_stop"}``."""
     max_background_concurrent: int | None = 20
     """Max in-flight background children for this agent's session bag.
     ``None`` = unlimited. Applied at turn start; also settable via
@@ -1233,6 +1237,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             parent_run_id=None,
             path=f"{self._path}.max_iter",
             call_id=uuid7(as_type="hex"),
+            # Never registered as a span (same as the tool_not_found / dispatch_failed
+            # synthetics), so there is no parent to link — keep this None on purpose.
             parent_call_id=None,
             input=None,
             status=RunStatus(code="success", reason="max_iter", message=None),
@@ -1692,16 +1698,27 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             role="assistant",
                             content=[TextContent(text=self.max_iter_stop_message.replace("{max_iter}", str(self.max_iter)))],
                             stop_reason="max_iter",
+                            metadata={"source": "runtime", "kind": "max_iter_stop"},
                         )
                         await _append_memory(stop_message)
                         yield self._build_max_iter_stop_event(stop_message, iterations=i)
                         break
                     # final_answer: say so before the tool-less call. A model that does not know
                     # its budget is gone keeps planning tool calls it can no longer make and
-                    # reports them to the user as done.
+                    # reports them to the user as done. Tagged as a runtime control message
+                    # (like leaked-tool retries and background completion notices) so
+                    # ``Message.is_runtime()`` hides it from transcripts and keeps
+                    # ``_trailing_user_messages`` / input guardrails from treating it as user
+                    # input if the final call fails and it is still trailing next turn.
                     if self.max_iter_notice:
                         notice = self.max_iter_notice.replace("{max_iter}", str(self.max_iter))
-                        await _append_memory(Message(role="user", content=[TextContent(text=notice)]))
+                        await _append_memory(
+                            Message(
+                                role="user",
+                                content=[TextContent(text=notice)],
+                                metadata={"source": "runtime", "kind": "max_iter_notice"},
+                            )
+                        )
                 pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
                 tool_result_limits = {}
                 tool_guardrail_runners = {}

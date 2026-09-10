@@ -840,10 +840,18 @@ class TestMaxIterNotice:
         # Persisted: the notice sits right before the final assistant message in memory.
         assert span.memory[-2].role == "user" and span.memory[-2].collect_text() == notice
         assert span.memory[-1].role == "assistant"
+        # Runtime control message, not a human utterance — hidden from transcripts and from
+        # input guardrails / _trailing_user_messages if it ends up trailing.
+        assert span.memory[-2].is_runtime()
+        assert span.memory[-2].metadata == {"source": "runtime", "kind": "max_iter_notice"}
+        assert agent._trailing_user_messages(span.memory[:-1]) == []
         dumped_texts = [
             c.get("text") for m in span._memory_dump for c in m.get("content", []) if c.get("type") == "text"
         ]
         assert notice in dumped_texts
+        # The tag survives the dump so a chained turn reloads it as runtime.
+        dumped_notice = next(m for m in span._memory_dump if m.get("role") == "user" and m.get("metadata"))
+        assert dumped_notice["metadata"] == {"source": "runtime", "kind": "max_iter_notice"}
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
@@ -926,6 +934,8 @@ class TestOnMaxIter:
         assert isinstance(out.output, Message)
         assert out.output.role == "assistant"
         assert out.output.stop_reason == "max_iter"
+        assert out.output.is_runtime()
+        assert out.output.metadata == {"source": "runtime", "kind": "max_iter_stop"}
         assert out.output.collect_text() == DEFAULT_MAX_ITER_STOP_MESSAGE.replace("{max_iter}", "2")
 
         span = ctx._trace.get_path(agent._path)[0]
