@@ -426,7 +426,7 @@ class VoiceSession:
         self._output_audio_chunks: list[bytes] = []
         # Persistent call recording (MP3 + manifest; see voice/recording.py).
         # Distinct from the in-memory record_audio seam above.
-        self.session_id = session_id or uuid7(as_type="hex")
+        self._session_id = session_id or uuid7(as_type="hex")
         self._recorder = recorder
         #: Wall-clock session start (set when run() begins); transcript offsets
         #: in the recording manifest and session_transcript are relative to it.
@@ -448,6 +448,27 @@ class VoiceSession:
         self._turn_audio_bytes = 0
 
     # -- Public: session recording ------------------------------------------
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        """Pin identity. Retargets an already-opened recorder onto ``{id}.mp3``."""
+        self._session_id = value
+        recorder = self._recorder
+        if recorder is None:
+            return
+        current = recorder.audio_path
+        if current.stem == value:
+            return
+        try:
+            recorder.retarget(current.with_name(f"{value}{current.suffix}"))
+        except Exception as e:
+            # Keep the pinned id even if the file stays under the generated
+            # name — an observer must never fail a call over a rename.
+            logger.error("recording_retarget_failed", error=str(e), session_id=value, exc_info=True)
 
     @property
     def transcript(self) -> list[TranscriptEntry]:

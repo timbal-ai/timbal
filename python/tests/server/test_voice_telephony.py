@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -565,24 +566,27 @@ class TestEmbeddedBridge:
     def test_host_supplies_defaults_and_observes_the_session(self, monkeypatch, tmp_path) -> None:
         pytest.importorskip("av")
         from timbal.server import telephony as tel
-        from timbal.voice.config import VoiceConfig
+        from timbal.voice.config import RecordingConfig, VoiceConfig
 
         stt_cls = _make_stt_class([TranscriptEvent(type="committed", text="Hello")])
         # Same adapter mocks; the app under test is NOT timbal.server — it is
         # a host that never sets ``app.state.voice_config``.
         runnable = _host_runnable(monkeypatch, tmp_path, stt_cls, _make_tts_class(_TTS_CHUNK))
         seen: dict = {}
+        rec_dir = tmp_path / "recordings"
 
         host = FastAPI()
 
         @host.websocket("/media/{provider}")
         async def media(ws: WebSocket, provider: str) -> None:
             await ws.accept()
-            defaults = VoiceConfig(language="es")
+            defaults = VoiceConfig(language="es", recording=RecordingConfig(dir=str(rec_dir)))
 
             def observe(session, meta):
                 seen["session"] = session
                 seen["meta_keys"] = set(meta)
+                seen["generated_id"] = session.session_id
+                seen["meta_session_id_before"] = meta.get("session_id")
                 session.session_id = "platform-0001"
                 meta["org_id"] = "781"
                 meta["transport"] = f"{provider}-via-host"
@@ -598,14 +602,22 @@ class TestEmbeddedBridge:
 
         assert [f for f in frames if f["event"] == "media"], "bridge produced no downlink"
         session = seen["session"]
-        assert session.session_id == "platform-0001"
+        assert seen["generated_id"] and seen["generated_id"] != "platform-0001"
+        assert seen["meta_session_id_before"] == seen["generated_id"]
+        assert session.session_id == session.recording_meta["session_id"] == "platform-0001"
         # The observer saw the final meta and its edits landed on the session.
         assert {"transport", "call_id", "from", "to"} <= seen["meta_keys"]
         assert session.recording_meta["org_id"] == "781"
         assert session.recording_meta["transport"] == "telnyx-via-host"
         assert session.recording_meta["from"] == "+13120000001"
-        # The host's config was the one built from, not a box default.
-        assert session.recording_meta.get("language", "es") == "es"
+        # Host VoiceConfig actually reached the session (language is never in
+        # recording_meta — a `.get("language", "es")` would always pass).
+        assert session.audio_input.language == "es"
+        # Recorder opened under the generated id, then followed the pin.
+        assert (rec_dir / "platform-0001.mp3").exists()
+        assert list(rec_dir.glob("*.mp3")) == [rec_dir / "platform-0001.mp3"]
+        manifest = json.loads((rec_dir / "platform-0001.json").read_text())
+        assert manifest["session_id"] == "platform-0001"
 
     def test_a_failing_observer_never_ends_the_call(self, monkeypatch, tmp_path) -> None:
         pytest.importorskip("av")

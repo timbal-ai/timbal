@@ -462,8 +462,9 @@ async def serve_media_ws(
       exists and before it runs, with the *final* ``meta`` (``transport``,
       ``call_id``, ``from``, ``to`` plus the build's). Mutate ``meta`` in
       place to shape what lands on ``session.recording_meta``; set
-      ``session.session_id`` to pin your own identity. Exceptions are logged
-      and ignored — an observer must never end a call.
+      ``session.session_id`` to pin your own identity (the recorder file,
+      ``meta["session_id"]``, and the upload path follow). Exceptions are
+      logged and ignored — an observer must never end a call.
     """
     try:
         from ..voice import AgentTextDone, AudioOutput, FillerSpoken, SessionEnded, TurnMetricsEvent
@@ -582,6 +583,11 @@ async def serve_media_ws(
             on_session_built(session, meta)
         except Exception as e:  # noqa: BLE001 - an observer must never end a call
             logger.error("telephony_session_hook_failed", provider=dialect.name, error=str(e), exc_info=True)
+    # The hook may pin ``session.session_id`` after the recorder already
+    # opened under a generated uuid7. ``VoiceSession.session_id`` retargets
+    # the file; copy it onto meta *after* the hook so recording_meta, the
+    # manifest, and any upload path share that id.
+    meta["session_id"] = session.session_id
     session.recording_meta = meta
 
     up_resampler = PcmResampler(line_rate, session_rate) if line_rate != session_rate else None

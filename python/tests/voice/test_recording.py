@@ -162,6 +162,24 @@ class TestRobustness:
         with pytest.raises(ValueError, match="layout"):
             CallRecorder(tmp_path / "call.mp3", layout="both")  # type: ignore[arg-type]
 
+    def test_retarget_renames_output_before_any_samples(self, tmp_path: Path) -> None:
+        old = tmp_path / "generated.mp3"
+        rec = CallRecorder(old, sample_rate=SR)
+        rec.retarget(tmp_path / "pinned.mp3")
+        rec.add_mic(_silence(0.1))
+        result = rec.close()
+        assert result is not None
+        assert result.audio_path == tmp_path / "pinned.mp3"
+        assert (tmp_path / "pinned.mp3").exists()
+        assert not old.exists()
+
+    def test_retarget_after_samples_raises(self, tmp_path: Path) -> None:
+        rec = CallRecorder(tmp_path / "a.mp3", sample_rate=SR)
+        rec.add_mic(_silence(0.1))
+        with pytest.raises(RuntimeError, match="after audio"):
+            rec.retarget(tmp_path / "b.mp3")
+        rec.close()
+
 
 class TestSessionIntegration:
     async def test_session_writes_recording_manifest_and_fires_on_saved(self, tmp_path: Path) -> None:
