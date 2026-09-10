@@ -667,6 +667,33 @@ class TestDeclaredVoiceConfig:
         # Env text survives the agent's partial greeting block.
         assert merged.greeting is not None and merged.greeting.text == "Env opener" and merged.greeting.delay_ms == 250
 
+    def test_ambient_travels_as_a_preset_but_never_as_a_path(self):
+        """The first platform-media PSTN call with an agent that asked for the
+        café bed got silence behind the voice: ``ambient`` was withheld
+        wholesale. A preset name is portable (same CDN asset on any host); a
+        file path names this box's disk and stays here."""
+        from timbal.voice.config import AmbientAudioConfig
+
+        class Preset:
+            voice_config = {"ambient": {"source": "Cafe", "volume": 0.3}}
+
+        assert voice_routes.declared_voice_config(Preset()) == {"ambient": {"source": "cafe", "volume": 0.3}}
+
+        class Instance:
+            voice_config = {"ambient": AmbientAudioConfig(source="office")}
+
+        assert voice_routes.declared_voice_config(Instance()) == {"ambient": {"source": "office"}}
+
+        class Path_:
+            voice_config = {"language": "es", "ambient": {"source": "/srv/beds/lobby.ogg", "volume": 0.2}}
+
+        assert voice_routes.declared_voice_config(Path_()) == {"language": "es"}
+
+        class Garbage:
+            voice_config = {"ambient": {"source": "cafe", "volume": "loud"}}
+
+        assert voice_routes.declared_voice_config(Garbage()) == {"ambient": {"source": "cafe"}}
+
     def test_callable_is_resolved(self):
         class R:
             @staticmethod

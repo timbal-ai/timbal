@@ -31,6 +31,7 @@ from ..voice.ambience import PRESETS as AMBIENT_PRESETS
 from ..voice.ambience import ensure_ambient_source
 from ..voice.config import (
     DEFAULT_VOICE_ID,
+    AmbientAudioConfig,
     FillerConfig,
     GreetingConfig,
     RecordingConfig,
@@ -149,9 +150,31 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
 
 #: ``VoiceConfig`` keys that stay on this box when the config is served over
 #: HTTP (:func:`declared_voice_config`). ``recording`` carries a directory and
-#: an ``on_saved`` callable; ``ambient.source`` may be a local file path. Both
-#: are this process's business, never a remote media host's.
-_VOICE_CONFIG_SERVER_ONLY = frozenset({"recording", "ambient"})
+#: an ``on_saved`` callable — this process's business, never a remote media
+#: host's. ``ambient`` is handled separately: a *preset* name is portable (the
+#: remote host fetches the same CDN asset), a file path is not.
+_VOICE_CONFIG_SERVER_ONLY = frozenset({"recording"})
+
+
+def _portable_ambient(block: Any) -> dict[str, Any] | None:
+    """The agent's ``ambient`` block if a remote media host can honour it.
+
+    Only a preset name travels — a file path names something on *this* box's
+    disk, and the first PSTN call on platform media showed why this matters
+    the other way too: withholding ``ambient`` wholesale meant an agent that
+    asked for the café bed got silence behind its voice.
+    """
+    if isinstance(block, AmbientAudioConfig):
+        block = block.model_dump(include=block.model_fields_set)
+    if not isinstance(block, dict):
+        return None
+    source = block.get("source")
+    if not isinstance(source, str) or source.strip().lower() not in AMBIENT_PRESETS:
+        return None
+    out: dict[str, Any] = {"source": source.strip().lower()}
+    if isinstance(block.get("volume"), (int, float)) and not isinstance(block["volume"], bool):
+        out["volume"] = float(block["volume"])
+    return out
 
 _DROP = object()
 
@@ -185,14 +208,18 @@ def declared_voice_config(runnable: Any) -> dict[str, Any]:
     and turn policy — and must not inherit this box's env defaults, which is
     why the result is sparse (declared keys only) rather than the merged
     :class:`VoiceConfig`. Nested ``filler`` / ``greeting`` lose their ``model``
-    unless it is a plain ``"provider/model"`` string.
+    unless it is a plain ``"provider/model"`` string; ``ambient`` travels only
+    as a preset name (see :func:`_portable_ambient`).
     """
     vc = _normalize_declared_voice_config(runnable)
     if not vc:
         return {}
-    out = _json_safe({k: v for k, v in vc.items() if k not in _VOICE_CONFIG_SERVER_ONLY})
+    ambient = _portable_ambient(vc.get("ambient"))
+    out = _json_safe({k: v for k, v in vc.items() if k not in _VOICE_CONFIG_SERVER_ONLY and k != "ambient"})
     if out is _DROP:
         return {}
+    if ambient is not None:
+        out["ambient"] = ambient
     for nested in ("filler", "greeting"):
         block = out.get(nested)
         if isinstance(block, dict) and "model" in block and not isinstance(block["model"], str):
