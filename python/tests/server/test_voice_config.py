@@ -17,7 +17,7 @@ from timbal import __version__ as timbal_version
 from timbal.server import voice as voice_routes
 from timbal.server.http import create_app, lifespan
 from timbal.utils import ImportSpec
-from timbal.voice.config import DEFAULT_VOICE_ID, FillerConfig, RecordingConfig, VoiceConfig
+from timbal.voice.config import DEFAULT_VOICE_ID, FillerConfig, GreetingConfig, RecordingConfig, VoiceConfig
 
 from .voice_env import VOICE_ENV_KEYS
 
@@ -582,3 +582,105 @@ class TestVoiceServerScript:
         runn = os.environ["TIMBAL_RUNNABLE"]
         assert runn.endswith("::agent")
         assert "voice_server.py" in runn
+
+
+@pytest.mark.usefixtures("clear_voice_env")
+class TestDeclaredVoiceConfig:
+    """``declared_voice_config`` — the wire form behind ``GET /voice_config``.
+
+    A platform sidecar that joins the room on the agent's behalf reads this to
+    honour the agent's opener / language / voice. It must be *what the agent
+    set*, not the box's env-merged defaults, and never a server-only knob.
+    """
+
+    def test_nothing_declared_is_empty(self):
+        class R:
+            voice_config = None
+
+        assert voice_routes.declared_voice_config(R()) == {}
+        assert voice_routes.declared_voice_config(object()) == {}
+
+    def test_dict_is_sparse_and_json_safe(self):
+        class R:
+            voice_config = {
+                "language": "es",
+                "greeting": {"text": "Hola, soy el copiloto.", "interruptible": False, "model": object()},
+                "filler": {"delay_secs": 0.8, "model": "groq/llama"},
+                "turn_detector": lambda: None,
+                "model": None,
+                "recording": {"dir": "/var/lib/rec", "on_saved": lambda r: None},
+                "ambient": {"source": "/etc/passwd"},
+            }
+
+        out = voice_routes.declared_voice_config(R())
+        assert out == {
+            "language": "es",
+            "greeting": {"text": "Hola, soy el copiloto.", "interruptible": False},
+            "filler": {"delay_secs": 0.8, "model": "groq/llama"},
+        }
+        json.dumps(out)  # wire-safe by construction
+
+    def test_voice_config_instance_only_reports_fields_the_agent_set(self):
+        class R:
+            voice_config = VoiceConfig(language="ca", greeting="Bon dia")
+
+        out = voice_routes.declared_voice_config(R())
+        assert out["language"] == "ca"
+        assert out["greeting"] == {"text": "Bon dia"}
+        # Defaults the agent never touched are not "declared".
+        assert "stt_provider" not in out and "voice" not in out and "sample_rate" not in out
+
+    def test_model_instances_inside_a_dict_are_reported_sparsely(self):
+        """Regression: a ``GreetingConfig`` / ``FillerConfig`` *inside a dict*
+        used to be dropped by the JSON pass while ``merge_voice_config`` still
+        honoured it — the box spoke the opener, the endpoint said there was none."""
+
+        class R:
+            voice_config = {
+                "language": "es",
+                "greeting": GreetingConfig(text="Hola", delay_ms=300),
+                "filler": FillerConfig(delay_secs=0.8),
+            }
+
+        declared = voice_routes.declared_voice_config(R())
+        assert declared == {
+            "language": "es",
+            "greeting": {"text": "Hola", "delay_ms": 300},  # sparse: only what was set
+            "filler": {"delay_secs": 0.8},
+        }
+        merged = voice_routes.merge_voice_config(R())
+        assert merged.greeting is not None and merged.greeting.text == "Hola" and merged.greeting.delay_ms == 300
+        assert merged.filler is not None and merged.filler.delay_secs == 0.8
+
+    def test_voice_config_instance_keeps_nested_blocks_sparse_too(self, monkeypatch):
+        """The ``VoiceConfig`` spelling must not clobber env-supplied nested
+        values with the nested model's *defaults* (the original reason for the
+        sparse redo), and must report the same shape as the dict spelling."""
+        monkeypatch.setenv("TIMBAL_VOICE_GREETING", "Env opener")
+
+        class R:
+            voice_config = VoiceConfig(greeting=GreetingConfig(delay_ms=250, instructions="be brief"))
+
+        declared = voice_routes.declared_voice_config(R())
+        assert declared == {"greeting": {"delay_ms": 250, "instructions": "be brief"}}
+        merged = voice_routes.merge_voice_config(R())
+        # Env text survives the agent's partial greeting block.
+        assert merged.greeting is not None and merged.greeting.text == "Env opener" and merged.greeting.delay_ms == 250
+
+    def test_callable_is_resolved(self):
+        class R:
+            @staticmethod
+            def voice_config():
+                return {"voice": "abc123", "turn_detector": "lexical"}
+
+        assert voice_routes.declared_voice_config(R()) == {"voice": "abc123", "turn_detector": "lexical"}
+
+    def test_merge_still_sees_the_same_declaration(self, monkeypatch):
+        """Refactor guard: ``merge_voice_config`` and ``declared_voice_config``
+        read the declaration through one normalizer."""
+
+        class R:
+            voice_config = VoiceConfig(language="es", greeting="Hola")
+
+        merged = voice_routes.merge_voice_config(R())
+        assert merged.language == "es" and merged.greeting is not None and merged.greeting.text == "Hola"
