@@ -101,14 +101,20 @@ _HELLO_WAIT_SECS = 2.0
 _SIP_HELLO_WAIT_SECS = 0.0
 
 
-def hello_wait_secs(*, caller_is_sip: bool) -> float:
-    """The config-hello window for this caller, from env or the defaults above.
+def hello_wait_secs(*, caller_is_sip: bool, defaults: Any = None) -> float:
+    """The config-hello window for this caller.
 
-    ``TIMBAL_VOICE_HELLO_WAIT_SECS`` (browser / standard participants, default
-    2.0) and ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS`` (SIP, default 0). Read per
-    call, not at import, so an operator can tune a running deployment's next
-    call and tests can set the env. A bad value logs and falls back.
+    Precedence: the agent's own ``voice_config`` (``hello_wait_secs`` /
+    ``sip_hello_wait_secs`` on ``defaults`` — what ``agent.py`` or
+    ``codegen set-config`` wrote), then env ``TIMBAL_VOICE_HELLO_WAIT_SECS`` /
+    ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS`` (operator tuning, read per call, not
+    at import), then 2.0 for browser callers and 0 for SIP. A bad env value
+    logs and falls back.
     """
+    field = "sip_hello_wait_secs" if caller_is_sip else "hello_wait_secs"
+    declared = getattr(defaults, field, None)
+    if declared is not None:
+        return max(0.0, float(declared))
     name = "TIMBAL_VOICE_SIP_HELLO_WAIT_SECS" if caller_is_sip else "TIMBAL_VOICE_HELLO_WAIT_SECS"
     default = _SIP_HELLO_WAIT_SECS if caller_is_sip else _HELLO_WAIT_SECS
     raw = os.environ.get(name, "").strip()
@@ -877,7 +883,8 @@ async def _run_livekit_session(
         # a phone has no data channel to say hello on, so it could only expire
         # — measured live as 2.0s of dead air between "agent joined" and
         # "session built", before a single byte of STT or greeting.
-        window = hello_wait_secs(caller_is_sip=caller_is_sip)
+        defaults = getattr(app.state, "voice_config", None) or VoiceConfig()
+        window = hello_wait_secs(caller_is_sip=caller_is_sip, defaults=defaults)
         seen_at = caller_seen_at.get("t")
         hello_wait = max(0.0, window - (time.monotonic() - seen_at)) if seen_at is not None else window
         await _wait_event_or_abort(hello_event, timeout=hello_wait)
@@ -895,7 +902,6 @@ async def _run_livekit_session(
                 attrs = dict(getattr(caller_participant, "attributes", None) or {})
                 sip_ctx = sip_call_context(attrs)
                 sip_meta.update(sip_recording_meta(attrs))
-        defaults = getattr(app.state, "voice_config", None) or VoiceConfig()
         sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
 
         downlink = LkPacedSource(sample_rate=sample_rate)

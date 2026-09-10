@@ -206,6 +206,16 @@ class VoiceConfig(BaseModel):
     """Per-session LLM override ("provider/model")."""
     turn_timeout_secs: float | None = None
     """None → ``VoiceSession`` default."""
+    hello_wait_secs: float | None = Field(default=None, ge=0.0)
+    """LiveKit transport: how long to hold the session build for a browser
+    caller's config hello (STT/TTS/turn-detector picks on the data channel).
+    None → ``TIMBAL_VOICE_HELLO_WAIT_SECS``, else 2.0. Server-side only — the
+    hello is the thing being waited for, so it cannot carry this."""
+    sip_hello_wait_secs: float | None = Field(default=None, ge=0.0)
+    """Same window for a SIP caller. None → ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS``,
+    else 0: a phone has no data channel to say hello on, so the window can
+    only expire — measured live as 2s of dead air before the first word. Raise
+    it only for a SIP bridge that does deliver a hello, or for a settle beat."""
     turn_timeout_fallback: str | None = None
     """None → ``VoiceSession`` default; "" → no spoken apology on timeout."""
     recording: RecordingConfig | None = None

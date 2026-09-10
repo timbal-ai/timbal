@@ -609,8 +609,10 @@ class TestSipRuntime:
         assert task in done, "build waited on the hello window for a SIP caller"
         assert built_at["t"] - subscribed_at < 0.5
 
-    def test_hello_window_is_env_tunable_per_caller_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_hello_window_is_tunable_per_caller_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """agent voice_config > env > default, separately for browser and SIP."""
         from timbal.server.livekit_session import hello_wait_secs
+        from timbal.voice.config import VoiceConfig
 
         monkeypatch.delenv("TIMBAL_VOICE_HELLO_WAIT_SECS", raising=False)
         monkeypatch.delenv("TIMBAL_VOICE_SIP_HELLO_WAIT_SECS", raising=False)
@@ -620,11 +622,48 @@ class TestSipRuntime:
         monkeypatch.setenv("TIMBAL_VOICE_SIP_HELLO_WAIT_SECS", "0.3")
         assert hello_wait_secs(caller_is_sip=False) == 0.75
         assert hello_wait_secs(caller_is_sip=True) == 0.3
-        # Garbage and negatives never break a call: fall back / clamp.
+        # What agent.py / `codegen set-config voice_config` wrote beats env.
+        declared = VoiceConfig(hello_wait_secs=1.25, sip_hello_wait_secs=0.5)
+        assert hello_wait_secs(caller_is_sip=False, defaults=declared) == 1.25
+        assert hello_wait_secs(caller_is_sip=True, defaults=declared) == 0.5
+        # An agent that sets only one leaves the other to env.
+        assert hello_wait_secs(caller_is_sip=True, defaults=VoiceConfig(hello_wait_secs=1.0)) == 0.3
+        # Garbage and negatives in env never break a call: fall back / clamp.
         monkeypatch.setenv("TIMBAL_VOICE_HELLO_WAIT_SECS", "soon")
         monkeypatch.setenv("TIMBAL_VOICE_SIP_HELLO_WAIT_SECS", "-4")
         assert hello_wait_secs(caller_is_sip=False) == 2.0
         assert hello_wait_secs(caller_is_sip=True) == 0.0
+        # In config the model refuses a negative outright (ge=0) — a typo
+        # fails at boot, not on the first call.
+        with pytest.raises(ValueError):
+            VoiceConfig(sip_hello_wait_secs=-1)
+
+    async def test_agent_voice_config_reopens_the_sip_hello_window(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The driver reads the window off the agent's merged voice_config
+        (``app.state.voice_config``) — the same object the box builds from
+        ``agent.py`` — so a Python-side ``sip_hello_wait_secs`` is honoured."""
+        from timbal.voice.config import VoiceConfig
+
+        room, _guard, _log, app = driver_env
+        monkeypatch.delenv("TIMBAL_VOICE_SIP_HELLO_WAIT_SECS", raising=False)
+        app.state.voice_config = VoiceConfig(sip_hello_wait_secs=0.4)
+
+        def _capture(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _subscribe_caller(room, identity="+34111", kind="PARTICIPANT_KIND_SIP")
+        done, _ = await asyncio.wait({task}, timeout=0.15)
+        assert task not in done
+        done, _ = await asyncio.wait({task}, timeout=1.0)
+        assert task in done
 
     async def test_sip_hello_window_can_be_reopened_from_env(
         self,
