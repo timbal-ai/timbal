@@ -922,7 +922,7 @@ async def _run_livekit_session(
             parent_run_id=dial.parent_id or None,
         )
         session_holder["s"] = session
-        if session_aborted.is_set():
+        if session_aborted.is_set() or session.closed:
             with contextlib.suppress(BaseException):
                 await session.close()
             return
@@ -948,9 +948,11 @@ async def _run_livekit_session(
                     await session.close()
                 raise
             # The connects took real time; a BYE / short-abandon may have
-            # landed meanwhile. Same gate as after build: never publish (and
-            # so never answer) a call whose caller is already gone.
-            if session_aborted.is_set():
+            # landed meanwhile. Once ``session_holder`` is set that path goes
+            # through ``session.close()`` rather than ``_abort()``, so check
+            # both: never publish (and so never answer) a call whose caller is
+            # already gone.
+            if session_aborted.is_set() or session.closed:
                 with contextlib.suppress(BaseException):
                     await session.close()
                 return

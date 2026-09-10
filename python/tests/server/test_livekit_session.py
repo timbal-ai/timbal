@@ -724,11 +724,13 @@ class TestSipRuntime:
         class _Session:
             recording_meta: dict | None = None
             session_id = "s"
+            closed = False
 
             async def prepare(self) -> None:
                 order.append("prepare")
 
             async def close(self) -> None:
+                self.closed = True
                 order.append("close")
 
             async def run(self, _audio_in: object):
@@ -831,9 +833,11 @@ class TestSipRuntime:
         room, guard, _log, app = driver_env
         built: list[object] = []
         closed: list[object] = []
+        published: list[object] = []
 
         class _Session:
             recording_meta: dict | None = None
+            closed = False
 
             async def prepare(self) -> None:
                 # Hold here long enough for the abandon timer to fire, the way
@@ -841,12 +845,25 @@ class TestSipRuntime:
                 await asyncio.sleep(0.2)
 
             async def close(self) -> None:
+                # The real path: once session_holder is set, the abandon goes
+                # through close(), not _abort() — the gate must see this.
+                self.closed = True
                 closed.append(True)
 
         def _capture(*_args: object, **_kwargs: object):
             built.append(True)
             return _Session(), {}
 
+        async def _publish(*_args: object, **_kwargs: object) -> None:
+            published.append(True)
+
+        room.local_participant.publish_track = _publish  # type: ignore[method-assign]
+        fake_rtc = sys.modules["livekit"].rtc
+        monkeypatch.setattr(
+            fake_rtc, "LocalAudioTrack", SimpleNamespace(create_audio_track=lambda *_args: object()), raising=False
+        )
+        monkeypatch.setattr(fake_rtc, "TrackPublishOptions", lambda **_kwargs: _kwargs, raising=False)
+        monkeypatch.setattr(fake_rtc, "TrackSource", SimpleNamespace(SOURCE_MICROPHONE=1), raising=False)
         monkeypatch.setenv("TIMBAL_VOICE_SIP_ABANDON_SECS", "0.05")
         monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
         task = asyncio.create_task(_run_livekit_session(app))
@@ -862,7 +879,8 @@ class TestSipRuntime:
         done, _ = await asyncio.wait({task}, timeout=2.0)
         assert task in done
         assert built == [True]
-        assert closed == [True]  # built, then torn down — never published, never ran
+        assert closed  # built, then torn down by the abandon
+        assert published == []  # a hung-up caller is never answered (Bugbot, PR 170)
         assert guard.finished
 
     async def test_late_media_after_sip_bye_does_not_build(
