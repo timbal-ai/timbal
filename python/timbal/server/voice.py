@@ -121,9 +121,9 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
     (dumped by ``model_fields_set`` so defaults the agent never touched do not
     masquerade as choices). ``None`` when the runnable declares nothing.
 
-    Nested ``filler`` / ``greeting`` come back as sparse dicts whichever way
-    the agent spelled them — a ``FillerConfig`` / ``GreetingConfig`` instance
-    inside a plain dict is as common as a ``VoiceConfig`` — so every consumer
+    Nested ``filler`` / ``greeting`` / ``ambient`` come back as sparse dicts
+    whichever way the agent spelled them — a model instance inside a plain
+    dict is as common as a ``VoiceConfig`` — so every consumer
     (:func:`merge_voice_config`, :func:`declared_voice_config`) sees one shape.
     """
     vc = getattr(runnable, "voice_config", None)
@@ -134,18 +134,27 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
         # all); put the instances back so the sparse redo below applies to
         # them exactly as it does to instances the agent placed in a dict.
         dumped = vc.model_dump(include=vc.model_fields_set)
-        for key in ("filler", "greeting"):
+        for key, _ in _SPARSE_NESTED:
             if key in dumped:
                 dumped[key] = getattr(vc, key)
         vc = dumped
     if not isinstance(vc, dict):
         return None
     out = dict(vc)
-    for key, model_type in (("filler", FillerConfig), ("greeting", GreetingConfig)):
+    for key, model_type in _SPARSE_NESTED:
         nested = out.get(key)
         if isinstance(nested, model_type):
             out[key] = nested.model_dump(include=nested.model_fields_set)
     return out
+
+
+#: Nested ``VoiceConfig`` blocks that are re-dumped by ``model_fields_set`` so a
+#: default the agent never touched is not reported (or merged) as a choice.
+_SPARSE_NESTED: tuple[tuple[str, type], ...] = (
+    ("filler", FillerConfig),
+    ("greeting", GreetingConfig),
+    ("ambient", AmbientAudioConfig),
+)
 
 
 #: ``VoiceConfig`` keys that stay on this box when the config is served over

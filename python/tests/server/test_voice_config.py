@@ -684,6 +684,11 @@ class TestDeclaredVoiceConfig:
 
         assert voice_routes.declared_voice_config(Instance()) == {"ambient": {"source": "office"}}
 
+        class Top:  # VoiceConfig spelling must be just as sparse (Bugbot: default volume leaked)
+            voice_config = VoiceConfig(ambient=AmbientAudioConfig(source="office"))
+
+        assert voice_routes.declared_voice_config(Top()) == {"ambient": {"source": "office"}}
+
         class Path_:
             voice_config = {"language": "es", "ambient": {"source": "/srv/beds/lobby.ogg", "volume": 0.2}}
 
