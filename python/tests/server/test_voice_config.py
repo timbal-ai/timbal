@@ -608,7 +608,7 @@ class TestDeclaredVoiceConfig:
                 "filler": {"delay_secs": 0.8, "model": "groq/llama"},
                 "turn_detector": lambda: None,
                 "model": None,
-                "recording": {"dir": "/var/lib/rec", "on_saved": lambda r: None},
+                "recording": {"dir": "/var/lib/rec", "on_saved": lambda *_args: None},
                 "ambient": {"source": "/etc/passwd"},
             }
 
@@ -675,7 +675,7 @@ class TestDeclaredVoiceConfig:
 
         assert voice_routes.declared_voice_config(R()) == {"voice": "abc123", "turn_detector": "lexical"}
 
-    def test_merge_still_sees_the_same_declaration(self, monkeypatch):
+    def test_merge_still_sees_the_same_declaration(self):
         """Refactor guard: ``merge_voice_config`` and ``declared_voice_config``
         read the declaration through one normalizer."""
 

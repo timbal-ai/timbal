@@ -345,6 +345,8 @@ class VoiceSession:
         self._current_turn_task: asyncio.Task | None = None
         self._is_speaking = False
         self._closed = False
+        #: STT/TTS connections opened (``prepare()``), so ``run()`` skips them.
+        self._prepared = False
         self._held_user_text: str | None = None
         self._hold_task: asyncio.Task | None = None
         self._hold_armed_timeout_secs: float | None = None
@@ -553,13 +555,28 @@ class VoiceSession:
             await self._begin_user_turn(text, replace_user_entry=False)
             return True
 
+    async def prepare(self) -> None:
+        """Open the STT and TTS connections ahead of :meth:`run`.
+
+        Optional and idempotent: ``run()`` does this itself when it has not
+        been done. A transport that signals "answered" to the far end only
+        once the agent's media is published (SIP via LiveKit: the 200 OK
+        follows our track) calls this first, so the moment the callee hears
+        the line go live we are already listening — without it the first
+        ~half second of the call is dead, and the first word is lost.
+        """
+        if self._prepared:
+            return
+        await self.stt.connect(self.audio_input)
+        await self.tts.connect(self.audio_output)
+        self._prepared = True
+
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
         try:
             self.started_at = time.time()
             self._start_llm_warmup()
-            await self.stt.connect(self.audio_input)
-            await self.tts.connect(self.audio_output)
+            await self.prepare()
             await self.turn_detector.start(self.audio_input)
             await self._maybe_start_endpointer()
             await self._emit(SessionStarted())

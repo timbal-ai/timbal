@@ -845,12 +845,20 @@ async def _run_livekit_session(
         # already consume is waited out here — usually nothing, because the
         # hello rides the data channel the moment the caller connects while
         # the mic subscribe takes a getUserMedia + publish round trip.
-        seen_at = caller_seen_at.get("t")
-        hello_wait = (
-            max(0.0, _HELLO_WAIT_SECS - (time.monotonic() - seen_at))
-            if seen_at is not None
-            else _HELLO_WAIT_SECS
-        )
+        #
+        # A SIP caller has no data channel to say hello on, so for a phone the
+        # window can only ever expire: measured live on an inbound PSTN call,
+        # 2.0s of dead air between "agent joined" and "session built", before
+        # a single byte of STT or greeting. Skip it outright.
+        if caller_is_sip:
+            hello_wait = 0.0
+        else:
+            seen_at = caller_seen_at.get("t")
+            hello_wait = (
+                max(0.0, _HELLO_WAIT_SECS - (time.monotonic() - seen_at))
+                if seen_at is not None
+                else _HELLO_WAIT_SECS
+            )
         await _wait_event_or_abort(hello_event, timeout=hello_wait)
         if session_aborted.is_set():
             _release_if_never_connected()
@@ -899,6 +907,26 @@ async def _run_livekit_session(
             **meta,
         }
         session.recording_meta = {**(session.recording_meta or {}), **meta}
+
+        if caller_is_sip:
+            # Publishing our track is what makes livekit-sip send the 200 OK,
+            # so on a phone call "answered" must mean "listening". Open the
+            # STT/TTS connections first (idempotent; ``run()`` skips them) —
+            # otherwise the callee hears the line go live ~0.5s before the
+            # first word can be heard, and the first "hola" is lost.
+            try:
+                await session.prepare()
+            except BaseException:
+                with contextlib.suppress(BaseException):
+                    await session.close()
+                raise
+            # The connects took real time; a BYE / short-abandon may have
+            # landed meanwhile. Same gate as after build: never publish (and
+            # so never answer) a call whose caller is already gone.
+            if session_aborted.is_set():
+                with contextlib.suppress(BaseException):
+                    await session.close()
+                return
 
         track = rtc.LocalAudioTrack.create_audio_track("agent", downlink.source)
         await room.local_participant.publish_track(

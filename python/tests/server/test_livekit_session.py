@@ -8,6 +8,7 @@ tests inject a fake ``livekit`` module.
 from __future__ import annotations
 
 import asyncio
+import time
 import base64
 import contextlib
 import json
@@ -582,6 +583,111 @@ class TestSipRuntime:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
+    async def test_sip_caller_does_not_wait_for_a_hello(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A phone has no data channel to send a config hello on, so the
+        2s hello window can only expire — measured live as 2.0s of dead air
+        between the agent joining and the session being built. For a SIP
+        caller the build must follow the mic subscribe immediately."""
+        room, _guard, _log, app = driver_env
+        built_at: dict[str, float] = {}
+
+        def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
+            built_at["t"] = time.monotonic()
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        subscribed_at = time.monotonic()
+        _subscribe_caller(room, identity="+34111", kind="PARTICIPANT_KIND_SIP")  # no hello, ever
+        done, _ = await asyncio.wait({task}, timeout=1.0)
+        assert task in done, "build waited on the hello window for a SIP caller"
+        assert built_at["t"] - subscribed_at < 0.5
+
+    async def test_browser_caller_still_gets_the_hello_window(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Contrast: a standard participant without a hello is waited on —
+        the playground's dropdowns ride that hello."""
+        room, _guard, _log, app = driver_env
+        monkeypatch.setattr("timbal.server.livekit_session._HELLO_WAIT_SECS", 0.4)
+
+        def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
+            raise RuntimeError("stop")
+
+        monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _subscribe_caller(room)  # browser, no hello
+        done, _ = await asyncio.wait({task}, timeout=0.15)
+        assert task not in done  # still inside the window
+        done, _ = await asyncio.wait({task}, timeout=1.0)
+        assert task in done
+
+    async def test_sip_session_is_listening_before_the_track_is_published(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Our published track is what makes livekit-sip send the 200 OK, so
+        for a phone "answered" must mean STT/TTS are already connected."""
+        room, _guard, _log, app = driver_env
+        order: list[str] = []
+
+        class _Session:
+            recording_meta: dict | None = None
+            session_id = "s"
+
+            async def prepare(self) -> None:
+                order.append("prepare")
+
+            async def close(self) -> None:
+                order.append("close")
+
+            async def run(self, _audio_in: object):
+                order.append("run")
+                await asyncio.Event().wait()
+                yield  # pragma: no cover - never reached
+
+        monkeypatch.setattr(
+            "timbal.server.livekit_session.build_voice_session",
+            lambda *_args, **_kwargs: (_Session(), {}),
+        )
+        original_publish = room.local_participant.publish_track
+
+        async def _publish(*args: object, **kwargs: object) -> None:
+            order.append("publish")
+            await original_publish(*args, **kwargs)
+
+        room.local_participant.publish_track = _publish  # type: ignore[method-assign]
+        # No other test reaches publish, so the fake rtc has no track types.
+        fake_rtc = sys.modules["livekit"].rtc
+        monkeypatch.setattr(
+            fake_rtc, "LocalAudioTrack", SimpleNamespace(create_audio_track=lambda *_args: object()), raising=False
+        )
+        monkeypatch.setattr(fake_rtc, "TrackPublishOptions", lambda **_kwargs: _kwargs, raising=False)
+        monkeypatch.setattr(fake_rtc, "TrackSource", SimpleNamespace(SOURCE_MICROPHONE=1), raising=False)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _subscribe_caller(room, identity="+34111", kind="PARTICIPANT_KIND_SIP")
+        for _ in range(50):
+            if "publish" in order:
+                break
+            await asyncio.sleep(0.02)
+        assert order[:2] == ["prepare", "publish"], order
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
     async def test_sip_path_applies_phone_tuned_config(
         self,
         driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
@@ -637,14 +743,30 @@ class TestSipRuntime:
         driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Short-abandon after media but before session_holder must abort
-        the hello wait — not tear the room and then still build_voice_session."""
+        """A SIP caller gets no hello window (see
+        ``test_sip_caller_does_not_wait_for_a_hello``), so a blip right after
+        media lands *after* the build: the session is built at once, the
+        short-abandon then tears it down through finish(). What must not
+        happen is a build that outlives the abandon — the driver's post-build
+        abort check is what this pins."""
         room, guard, _log, app = driver_env
         built: list[object] = []
+        closed: list[object] = []
 
-        def _capture(*_args: object, **_kwargs: object) -> None:
+        class _Session:
+            recording_meta: dict | None = None
+
+            async def prepare(self) -> None:
+                # Hold here long enough for the abandon timer to fire, the way
+                # a real STT/TTS connect would.
+                await asyncio.sleep(0.2)
+
+            async def close(self) -> None:
+                closed.append(True)
+
+        def _capture(*_args: object, **_kwargs: object):
             built.append(True)
-            raise RuntimeError("should not build after short-abandon")
+            return _Session(), {}
 
         monkeypatch.setenv("TIMBAL_VOICE_SIP_ABANDON_SECS", "0.05")
         monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
@@ -660,7 +782,8 @@ class TestSipRuntime:
         room.handlers["participant_disconnected"](participant)
         done, _ = await asyncio.wait({task}, timeout=2.0)
         assert task in done
-        assert built == []
+        assert built == [True]
+        assert closed == [True]  # built, then torn down — never published, never ran
         assert guard.finished
 
     async def test_late_media_after_sip_bye_does_not_build(
