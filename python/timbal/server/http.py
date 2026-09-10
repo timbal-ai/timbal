@@ -142,6 +142,22 @@ def create_app() -> FastAPI:
     async def healthcheck() -> Response:
         return Response(status_code=204)
 
+    @app.get("/voice_config")
+    async def voice_config() -> Response:
+        """The agent's declared ``voice_config``, sparse and JSON-safe.
+
+        For a host that runs the voice session on this agent's behalf (a
+        platform media sidecar in the same room) and needs the agent's own
+        greeting / language / voice rather than this box's env defaults. See
+        :func:`timbal.server.voice.declared_voice_config` for what is withheld.
+        """
+        from .voice import declared_voice_config
+
+        return JSONResponse(
+            status_code=200,
+            content={"voice_config": declared_voice_config(app.state.runnable)},
+        )
+
     @app.get("/params_model_schema")
     async def params_model_schema() -> Response:
         params_model_schema = app.state.runnable.params_model_schema

@@ -113,13 +113,13 @@ _RECORDING_IDENTITY_ENV = (
 )
 
 
-def merge_voice_config(runnable: Any) -> VoiceConfig:
-    """Env defaults, then optional ``runnable.voice_config`` (dict, callable, or ``VoiceConfig``).
+def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
+    """``runnable.voice_config`` as the sparse dict the agent actually set.
 
-    Validated strictly: an unknown key or bad value raises at server boot
-    instead of silently falling back to defaults on the first call.
+    Accepts a dict, a zero-arg callable returning one, or a ``VoiceConfig``
+    (dumped by ``model_fields_set`` so defaults the agent never touched do not
+    masquerade as choices). ``None`` when the runnable declares nothing.
     """
-    base = default_voice_config_from_env()
     vc = getattr(runnable, "voice_config", None)
     if callable(vc):
         vc = vc()
@@ -132,7 +132,75 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
         if isinstance(vc.greeting, GreetingConfig):
             dumped["greeting"] = vc.greeting.model_dump(include=vc.greeting.model_fields_set)
         vc = dumped
-    if not isinstance(vc, dict):
+    return vc if isinstance(vc, dict) else None
+
+
+#: ``VoiceConfig`` keys that stay on this box when the config is served over
+#: HTTP (:func:`declared_voice_config`). ``recording`` carries a directory and
+#: an ``on_saved`` callable; ``ambient.source`` may be a local file path. Both
+#: are this process's business, never a remote media host's.
+_VOICE_CONFIG_SERVER_ONLY = frozenset({"recording", "ambient"})
+
+_DROP = object()
+
+
+def _json_safe(value: Any) -> Any:
+    """Keep JSON scalars / lists / dicts; drop everything else (callables,
+    ``TestModel`` instances, ``TurnDetector`` factories, …)."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        out = [_json_safe(v) for v in value]
+        return [v for v in out if v is not _DROP]
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                continue
+            sv = _json_safe(v)
+            if sv is not _DROP:
+                out[k] = sv
+        return out
+    return _DROP
+
+
+def declared_voice_config(runnable: Any) -> dict[str, Any]:
+    """What ``runnable.voice_config`` says, JSON-safe, minus server-only keys.
+
+    This is the wire form for ``GET /voice_config``: a host that runs the
+    media session *for* this agent elsewhere (a platform sidecar joining the
+    room on the agent's behalf) needs the agent's own opener, language, voice
+    and turn policy — and must not inherit this box's env defaults, which is
+    why the result is sparse (declared keys only) rather than the merged
+    :class:`VoiceConfig`. Nested ``filler`` / ``greeting`` lose their ``model``
+    unless it is a plain ``"provider/model"`` string.
+    """
+    vc = _normalize_declared_voice_config(runnable)
+    if not vc:
+        return {}
+    out = _json_safe({k: v for k, v in vc.items() if k not in _VOICE_CONFIG_SERVER_ONLY})
+    if out is _DROP:
+        return {}
+    for nested in ("filler", "greeting"):
+        block = out.get(nested)
+        if isinstance(block, dict) and "model" in block and not isinstance(block["model"], str):
+            block.pop("model")
+    if "turn_detector" in out and not isinstance(out["turn_detector"], str):
+        out.pop("turn_detector")
+    if "model" in out and not isinstance(out["model"], str):
+        out.pop("model")
+    return out
+
+
+def merge_voice_config(runnable: Any) -> VoiceConfig:
+    """Env defaults, then optional ``runnable.voice_config`` (dict, callable, or ``VoiceConfig``).
+
+    Validated strictly: an unknown key or bad value raises at server boot
+    instead of silently falling back to defaults on the first call.
+    """
+    base = default_voice_config_from_env()
+    vc = _normalize_declared_voice_config(runnable)
+    if vc is None:
         return base
     skip = frozenset({"stt_extra", "tts_extra", "filler", "greeting"})
     data = {

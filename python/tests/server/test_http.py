@@ -140,6 +140,28 @@ class TestFastAPIApp:
         response = tool_client.get("/healthcheck")
         assert response.status_code == 204
 
+    def test_voice_config_endpoint_reports_the_agents_declaration(self, agent_app, agent_client):
+        """``GET /voice_config`` hands a remote media host the agent's own
+        ``voice_config`` — sparse, JSON-safe, server-only keys withheld."""
+        # Nothing declared → empty block, still 200 (the caller merges over it).
+        r = agent_client.get("/voice_config")
+        assert r.status_code == 200
+        assert r.json() == {"voice_config": {}}
+
+        agent_app.state.runnable.voice_config = {
+            "language": "es",
+            "greeting": {"text": "Hola, ¿en qué te ayudo?", "interruptible": False},
+            "recording": {"dir": "/var/lib/rec"},
+        }
+        r = agent_client.get("/voice_config")
+        assert r.status_code == 200
+        assert r.json() == {
+            "voice_config": {
+                "language": "es",
+                "greeting": {"text": "Hola, ¿en qué te ayudo?", "interruptible": False},
+            }
+        }
+
     def test_params_model_schema_endpoint_tool(self, tool_client):
         """Test /params_model_schema endpoint returns correct schema for tool."""
         response = tool_client.get("/params_model_schema")
