@@ -31,6 +31,9 @@ Env contract for the boot-env path (all platform-owned):
   Session identity, not a voice knob: it is read here (and off the dial body
   on the per-request path), never off the data-channel hello.
 * ``TIMBAL_VOICE_ABANDON_SECS`` — default 45; see ``SingleSessionGuard``
+* ``TIMBAL_VOICE_HELLO_WAIT_SECS`` / ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS`` —
+  the config-hello window for browser (default 2) and SIP (default 0) callers;
+  see ``hello_wait_secs``.
 
 Env contract for the per-request path (both optional, both recommended on
 anything long-lived — the dial tells the process where to connect and what to
@@ -91,6 +94,36 @@ _EVENTS_TOPIC = "timbal.events"
 # still being published — anchoring it after the mic subscribe instead would
 # put a flat 2s on top of every hello-less call's setup.
 _HELLO_WAIT_SECS = 2.0
+# A SIP caller has no data channel to say hello on, so the window can only
+# expire for them: measured live, 2.0s of dead air on every inbound PSTN call.
+# Zero by default; a deployment whose SIP bridge does deliver a hello (or that
+# wants a settle beat before build) can raise it.
+_SIP_HELLO_WAIT_SECS = 0.0
+
+
+def hello_wait_secs(*, caller_is_sip: bool, defaults: Any = None) -> float:
+    """The config-hello window for this caller.
+
+    Precedence: the agent's own ``voice_config`` (``hello_wait_secs`` /
+    ``sip_hello_wait_secs`` on ``defaults`` — what ``agent.py`` or
+    ``codegen set-config`` wrote), then env ``TIMBAL_VOICE_HELLO_WAIT_SECS`` /
+    ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS`` (operator tuning, read per call, not
+    at import), then 2.0 for browser callers and 0 for SIP. A bad env value
+    logs and falls back.
+    """
+    field = "sip_hello_wait_secs" if caller_is_sip else "hello_wait_secs"
+    declared = getattr(defaults, field, None)
+    if declared is not None:
+        return max(0.0, float(declared))
+    name = "TIMBAL_VOICE_SIP_HELLO_WAIT_SECS" if caller_is_sip else "TIMBAL_VOICE_HELLO_WAIT_SECS"
+    default = _SIP_HELLO_WAIT_SECS if caller_is_sip else _HELLO_WAIT_SECS
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logger.warning("livekit_bad_hello_wait_secs", env=name, value=raw)
+    return default
 
 # How long a per-request join may take before the caller gets a 504. The SFU is
 # in the same VPC, so this covers the FFI import on a cold process, not a WAN
@@ -845,12 +878,15 @@ async def _run_livekit_session(
         # already consume is waited out here — usually nothing, because the
         # hello rides the data channel the moment the caller connects while
         # the mic subscribe takes a getUserMedia + publish round trip.
+        #
+        # For a SIP caller the window is 0 by default (see ``hello_wait_secs``):
+        # a phone has no data channel to say hello on, so it could only expire
+        # — measured live as 2.0s of dead air between "agent joined" and
+        # "session built", before a single byte of STT or greeting.
+        defaults = getattr(app.state, "voice_config", None) or VoiceConfig()
+        window = hello_wait_secs(caller_is_sip=caller_is_sip, defaults=defaults)
         seen_at = caller_seen_at.get("t")
-        hello_wait = (
-            max(0.0, _HELLO_WAIT_SECS - (time.monotonic() - seen_at))
-            if seen_at is not None
-            else _HELLO_WAIT_SECS
-        )
+        hello_wait = max(0.0, window - (time.monotonic() - seen_at)) if seen_at is not None else window
         await _wait_event_or_abort(hello_event, timeout=hello_wait)
         if session_aborted.is_set():
             _release_if_never_connected()
@@ -866,7 +902,6 @@ async def _run_livekit_session(
                 attrs = dict(getattr(caller_participant, "attributes", None) or {})
                 sip_ctx = sip_call_context(attrs)
                 sip_meta.update(sip_recording_meta(attrs))
-        defaults = getattr(app.state, "voice_config", None) or VoiceConfig()
         sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
 
         downlink = LkPacedSource(sample_rate=sample_rate)
@@ -887,7 +922,7 @@ async def _run_livekit_session(
             parent_run_id=dial.parent_id or None,
         )
         session_holder["s"] = session
-        if session_aborted.is_set():
+        if session_aborted.is_set() or session.closed:
             with contextlib.suppress(BaseException):
                 await session.close()
             return
@@ -899,6 +934,28 @@ async def _run_livekit_session(
             **meta,
         }
         session.recording_meta = {**(session.recording_meta or {}), **meta}
+
+        if caller_is_sip:
+            # Publishing our track is what makes livekit-sip send the 200 OK,
+            # so on a phone call "answered" must mean "listening". Open the
+            # STT/TTS connections first (idempotent; ``run()`` skips them) —
+            # otherwise the callee hears the line go live ~0.5s before the
+            # first word can be heard, and the first "hola" is lost.
+            try:
+                await session.prepare()
+            except BaseException:
+                with contextlib.suppress(BaseException):
+                    await session.close()
+                raise
+            # The connects took real time; a BYE / short-abandon may have
+            # landed meanwhile. Once ``session_holder`` is set that path goes
+            # through ``session.close()`` rather than ``_abort()``, so check
+            # both: never publish (and so never answer) a call whose caller is
+            # already gone.
+            if session_aborted.is_set() or session.closed:
+                with contextlib.suppress(BaseException):
+                    await session.close()
+                return
 
         track = rtc.LocalAudioTrack.create_audio_track("agent", downlink.source)
         await room.local_participant.publish_track(

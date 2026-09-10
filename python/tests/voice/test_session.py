@@ -303,6 +303,43 @@ class TestVoiceSessionLifecycle:
         await session.close()
         await session.close()
 
+    async def test_prepare_then_run_connects_once(self) -> None:
+        """A transport may open STT/TTS ahead of run() (SIP answers only once
+        our track is published — we must be listening by then); run() must not
+        reconnect on top."""
+        session, stt, tts = _make_session(stt_script=[])
+        await session.prepare()
+        assert stt._connected and tts._connected
+        stt._connected = False  # would flip back to True on a second connect
+        events = await _collect_events(session)
+        assert events[0].type == "session_started"
+        assert stt._connected is False
+        assert stt._closed and tts._closed  # run()'s finally still cleans up
+
+    async def test_close_after_prepare_without_run_closes_the_adapters(self) -> None:
+        """prepare() opened the provider sockets; if run() never starts (BYE
+        during the connects, publish failure, cancellation) close() is the
+        only teardown left — it must not leak them (Bugbot, PR 170)."""
+        session, stt, tts = _make_session(stt_script=[])
+        await session.prepare()
+        assert stt._connected and not stt._closed
+        await session.close()
+        assert stt._closed and tts._closed
+        assert session.closed
+        await session.close()  # still idempotent
+
+    async def test_half_open_prepare_closes_what_it_opened(self) -> None:
+        session, stt, tts = _make_session(stt_script=[])
+
+        async def _boom(_config: object) -> None:
+            raise RuntimeError("tts down")
+
+        tts.connect = _boom  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            await session.prepare()
+        assert stt._connected and stt._closed  # STT was opened, then closed again
+        assert not session._prepared
+
     async def test_call_context_seeded_into_session_bag(self) -> None:
         """Empty-``_trace`` reuse: turn 1's callable reads the session bag."""
         session, _, _ = _make_session(stt_script=[])

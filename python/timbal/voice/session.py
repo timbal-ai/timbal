@@ -345,6 +345,8 @@ class VoiceSession:
         self._current_turn_task: asyncio.Task | None = None
         self._is_speaking = False
         self._closed = False
+        #: STT/TTS connections opened (``prepare()``), so ``run()`` skips them.
+        self._prepared = False
         self._held_user_text: str | None = None
         self._hold_task: asyncio.Task | None = None
         self._hold_armed_timeout_secs: float | None = None
@@ -553,13 +555,49 @@ class VoiceSession:
             await self._begin_user_turn(text, replace_user_entry=False)
             return True
 
+    async def prepare(self) -> None:
+        """Open the STT and TTS connections ahead of :meth:`run`.
+
+        Optional and idempotent: ``run()`` does this itself when it has not
+        been done. A transport that signals "answered" to the far end only
+        once the agent's media is published (SIP via LiveKit: the 200 OK
+        follows our track) calls this first, so the moment the callee hears
+        the line go live we are already listening — without it the first
+        ~half second of the call is dead, and the first word is lost.
+        """
+        if self._prepared:
+            return
+        try:
+            await self.stt.connect(self.audio_input)
+            await self.tts.connect(self.audio_output)
+        except BaseException:
+            # A half-open pair (STT up, TTS failed) has no ``run()`` finally
+            # coming to close it.
+            await self._close_prepared_adapters()
+            raise
+        self._prepared = True
+
+    @property
+    def closed(self) -> bool:
+        """``True`` once :meth:`close` ran — the caller hung up or the host
+        tore the session down. A transport that answers the far end only after
+        its own setup (SIP: the 200 OK follows our published track) checks this
+        before answering; a closed session must never be put on the air."""
+        return self._closed
+
+    async def _close_prepared_adapters(self) -> None:
+        for closer in (self.stt.close, self.tts.close):
+            try:
+                await closer()
+            except Exception as e:  # noqa: BLE001 - teardown must finish
+                logger.debug("voice_prepared_adapter_close_failed", error=str(e))
+
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
         try:
             self.started_at = time.time()
             self._start_llm_warmup()
-            await self.stt.connect(self.audio_input)
-            await self.tts.connect(self.audio_output)
+            await self.prepare()
             await self.turn_detector.start(self.audio_input)
             await self._maybe_start_endpointer()
             await self._emit(SessionStarted())
@@ -744,6 +782,10 @@ class VoiceSession:
             self._greeting_task.cancel()
         await self.interrupt(truncate_completed=False)
         await self._emit(None)  # sentinel stops the run() iterator
+        if self._prepared and self.started_at is None:
+            # ``prepare()`` opened the provider sockets but ``run()`` never
+            # started, so its ``finally`` (``_cleanup``) will never close them.
+            await self._close_prepared_adapters()
 
     # -- Internal: first-reply warmup -----------------------------------------
 
