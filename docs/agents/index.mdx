@@ -146,6 +146,33 @@ async for event in agent(prompt="Hello"):
     print(event)
 ```
 
+### Iteration Budget
+
+`max_iter` (default `10`) bounds the LLM → tool rounds in one turn. `on_max_iter` decides what happens when the budget is spent and the model still wants tools:
+
+| `on_max_iter` | Extra LLM call | Output | Use when |
+|---|---|---|---|
+| `"final_answer"` (default) | One, with **no tools** | The model's text | Chat: the user should get an answer, even a partial one |
+| `"stop"` | None | `max_iter_stop_message` as the assistant reply (`stop_reason="max_iter"`) | You want to decide what to show the user yourself, at zero extra cost |
+| `"error"` | None | Raises `timbal.errors.MaxIterExceeded` | Batch / pipelines: a partial answer is worse than a failure |
+
+In `"final_answer"` mode the agent first appends `max_iter_notice` as a user message telling the model its tools are gone and asking it to report what was and was not completed — otherwise models tend to narrate the step they were about to take ("I'll update the file now") as if it had happened.
+
+```python
+agent = Agent(
+    name="assistant",
+    model="openai/gpt-5",
+    tools=[search, write_report],
+    max_iter=16,
+    on_max_iter="final_answer",
+    # ``{max_iter}`` is substituted in both messages. ``max_iter_notice=None`` skips the notice.
+    max_iter_notice="[System] Step budget of {max_iter} spent. Summarize progress; do not claim unfinished work is done.",
+    max_iter_stop_message="[Stopped after {max_iter} steps without a final answer.]",  # used by on_max_iter="stop"
+)
+```
+
+Every mode records `metadata["max_iter_reached"] = {"max_iter", "iterations", "behavior"}` on the agent span, so exhausted turns are easy to find in traces. The notice and the stop message are persisted in memory like any other message.
+
 ### Approval-Required Tools
 
 Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `resume`:
@@ -272,7 +299,7 @@ async for event in agent(
 # For OpenAI: pass "reasoning" key
 response = await agent(
     prompt="Solve this complex problem",
-    model="openai/gpt-5.5",
+    model="openai/gpt-5",
     provider_params={"reasoning": {"effort": "high", "summary": "auto"}}
 ).collect()
 

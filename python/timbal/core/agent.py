@@ -28,7 +28,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import GuardrailBlocked, InterruptError, PauseRequired, RunCancelled, bail
+from ..errors import GuardrailBlocked, InterruptError, MaxIterExceeded, PauseRequired, RunCancelled, bail
 from ..guardrails.apply import (
     build_guardrail_events,
     message_text,
@@ -81,6 +81,26 @@ from .tool_result_offload import (
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
+
+DEFAULT_MAX_ITER_NOTICE = (
+    "[System notice] You have used all {max_iter} tool-call steps allowed for this turn, so no "
+    "tools are available for this reply. Write your final answer now: state plainly what was "
+    "completed and what was not. Do not describe pending or unfinished work as done, and do not "
+    "announce actions you can no longer take."
+)
+"""Default text appended as a user message right before the final, tool-less LLM call once
+``max_iter`` is exhausted (``on_max_iter="final_answer"``). ``{max_iter}`` is substituted. See
+``Agent.max_iter_notice``."""
+
+DEFAULT_MAX_ITER_STOP_MESSAGE = (
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
+    "answer was produced.]"
+)
+"""Default assistant message the agent returns when ``on_max_iter="stop"`` — no extra LLM call
+is made. ``{max_iter}`` is substituted. See ``Agent.max_iter_stop_message``."""
+
+OnMaxIter = Literal["final_answer", "stop", "error"]
+"""What an agent does once ``max_iter`` is exhausted. See ``Agent.on_max_iter``."""
 
 # Status reasons that mean a child paused and must bubble up to pause the run —
 # an approval gate (approval_required) or a suspend() call (input_required).
@@ -246,6 +266,27 @@ class Agent(Runnable):
     Mutually exclusive with skills_include."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
+    on_max_iter: OnMaxIter = "final_answer"
+    """What happens once ``max_iter`` LLM->tool rounds have run and the model still wants tools:
+
+    - ``"final_answer"`` (default) — one more LLM call with **no tools**, preceded by
+      ``max_iter_notice`` so the model knows to wrap up. The model's text is the output.
+    - ``"stop"`` — no further LLM call. ``max_iter_stop_message`` is appended as the
+      assistant's reply and returned as the output (``stop_reason="max_iter"``). Cheapest;
+      the caller decides what to tell the user.
+    - ``"error"`` — raise :class:`timbal.errors.MaxIterExceeded`; the run fails. For batch or
+      pipeline agents where a partial answer is worse than a failure.
+
+    Every mode records ``metadata["max_iter_reached"]`` on the agent span."""
+    max_iter_notice: str | None = DEFAULT_MAX_ITER_NOTICE
+    """``on_max_iter="final_answer"`` only: message appended to memory (as a user turn) before
+    the final LLM call. Without it the model is silently handed an empty tool list and tends
+    to narrate the next step it intended to take ("I'll update the file now") as if it could
+    still run it. ``{max_iter}`` is substituted. ``None`` disables the notice; the tool-less
+    final call still happens."""
+    max_iter_stop_message: str = DEFAULT_MAX_ITER_STOP_MESSAGE
+    """``on_max_iter="stop"`` only: the assistant message returned instead of calling the LLM
+    again. ``{max_iter}`` is substituted."""
     max_background_concurrent: int | None = 20
     """Max in-flight background children for this agent's session bag.
     ``None`` = unlimited. Applied at turn start; also settable via
@@ -1178,6 +1219,31 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             metadata={"dispatch_failed": True, "requested_tool": tool_call.name},
         )
 
+    def _build_max_iter_stop_event(self, message: Message, *, iterations: int) -> OutputEvent:
+        """Synthetic OutputEvent carrying the ``on_max_iter="stop"`` reply.
+
+        No LLM ran for it, so it is not attributed to the ``.llm`` path; it lives under
+        ``<agent>.max_iter`` with ``status.reason="max_iter"`` so traces show plainly that the
+        turn was cut by the budget rather than finished by the model.
+        """
+        run_context = get_run_context()
+        now = int(time.time() * 1000)
+        return OutputEvent(
+            run_id=run_context.id if run_context is not None else "",
+            parent_run_id=None,
+            path=f"{self._path}.max_iter",
+            call_id=uuid7(as_type="hex"),
+            parent_call_id=None,
+            input=None,
+            status=RunStatus(code="success", reason="max_iter", message=None),
+            output=message,
+            error=None,
+            t0=now,
+            t1=now,
+            usage={},
+            metadata={"max_iter": self.max_iter, "iterations": iterations},
+        )
+
     def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
         """Find the tool for a call, logging when the LLM asked for an unknown one."""
         tool = next((t for t in tools if t.name == tool_call.name), None)
@@ -1586,6 +1652,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         i = 0
         need_retry = False
         _llm_memory_saved = False
+        # Whether the max_iter notice has been injected (once per turn, right before the
+        # final tool-less LLM call).
+        max_iter_notice_sent = False
         # Guardrail "retry" verdicts consumed this turn (bounded by max_guardrail_retries).
         guardrail_retry_count = 0
         # Re-requests after a leaked, unrecoverable tool call (max_leaked_tool_call_retries).
@@ -1599,6 +1668,40 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
                 tools, commands = await self._resolve_tools(i)
+                if i >= self.max_iter and not max_iter_notice_sent:
+                    # Budget spent (tools were withheld for this call). Apply on_max_iter.
+                    max_iter_notice_sent = True
+                    current_span.metadata["max_iter_reached"] = {
+                        "max_iter": self.max_iter,
+                        "iterations": i,
+                        "behavior": self.on_max_iter,
+                    }
+                    logger.warning(
+                        "Agent reached max_iter.",
+                        path=self._path,
+                        max_iter=self.max_iter,
+                        on_max_iter=self.on_max_iter,
+                    )
+                    if self.on_max_iter == "error":
+                        # The last LLM output is already in memory; nothing to salvage.
+                        _llm_memory_saved = True
+                        raise MaxIterExceeded(self.max_iter, i)
+                    if self.on_max_iter == "stop":
+                        _llm_memory_saved = True
+                        stop_message = Message(
+                            role="assistant",
+                            content=[TextContent(text=self.max_iter_stop_message.replace("{max_iter}", str(self.max_iter)))],
+                            stop_reason="max_iter",
+                        )
+                        await _append_memory(stop_message)
+                        yield self._build_max_iter_stop_event(stop_message, iterations=i)
+                        break
+                    # final_answer: say so before the tool-less call. A model that does not know
+                    # its budget is gone keeps planning tool calls it can no longer make and
+                    # reports them to the user as done.
+                    if self.max_iter_notice:
+                        notice = self.max_iter_notice.replace("{max_iter}", str(self.max_iter))
+                        await _append_memory(Message(role="user", content=[TextContent(text=notice)]))
                 pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
                 tool_result_limits = {}
                 tool_guardrail_runners = {}
