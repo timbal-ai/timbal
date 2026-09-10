@@ -149,14 +149,23 @@ class CallRecorder:
         if new_path == self._path:
             return
         new_path.parent.mkdir(parents=True, exist_ok=True)
-        old_path = self._path
+        # Open the new encoder *before* letting go of the old one, so a failed
+        # open leaves the recorder exactly as it was (still writable, still at
+        # the old path) rather than pointing at a file that was never created
+        # while encoding into a closed container.
+        old = (self._path, self._container, self._stream, self._fifo)
+        self._path = new_path
         try:
-            self._container.close()
+            self._open_container()
+        except Exception:
+            self._path, self._container, self._stream, self._fifo = old
+            new_path.unlink(missing_ok=True)
+            raise
+        try:
+            old[1].close()
         except Exception as e:
             logger.warning("recording_retarget_close_failed", error=str(e))
-        self._path = new_path
-        self._open_container()
-        old_path.unlink(missing_ok=True)
+        old[0].unlink(missing_ok=True)
 
     # -- Feed points -----------------------------------------------------------
 

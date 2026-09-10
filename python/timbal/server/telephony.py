@@ -34,10 +34,11 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 from typing import Any
 from urllib.parse import parse_qsl
@@ -50,6 +51,17 @@ from ..voice.config import VoiceConfig
 from .capacity import acquire_session_slot, release_session_slot
 
 logger = structlog.get_logger("timbal.server.telephony")
+
+__all__ = [
+    "DIALECTS",
+    "TELNYX",
+    "TWILIO",
+    "TelnyxDialect",
+    "TwilioDialect",
+    "dialect_for",
+    "router",
+    "serve_media_ws",
+]
 
 router = APIRouter(prefix="/voice", tags=["telephony"])
 
@@ -200,12 +212,14 @@ class TelnyxDialect:
 TWILIO = TwilioDialect()
 TELNYX = TelnyxDialect()
 
+Dialect = TwilioDialect | TelnyxDialect
+
 #: Provider name → dialect. Public so a platform that terminates the carrier
 #: socket elsewhere (and only knows the provider by name) can pick one.
-DIALECTS: dict[str, Any] = {TWILIO.name: TWILIO, TELNYX.name: TELNYX}
+DIALECTS: dict[str, Dialect] = {TWILIO.name: TWILIO, TELNYX.name: TELNYX}
 
 
-def dialect_for(provider: str) -> Any:
+def dialect_for(provider: str) -> Dialect:
     """The dialect for ``"twilio"`` / ``"telnyx"``; ``KeyError`` otherwise."""
     return DIALECTS[provider.strip().lower()]
 
@@ -390,7 +404,7 @@ async def telnyx_stream(ws: WebSocket) -> None:
     await _media_ws(ws, TELNYX)
 
 
-async def _media_ws(ws: WebSocket, dialect: Any) -> None:
+async def _media_ws(ws: WebSocket, dialect: Dialect) -> None:
     from ..core.agent import Agent
 
     await ws.accept()
@@ -443,28 +457,38 @@ async def _safe_close(ws: WebSocket, code: int, reason: str) -> None:
 async def serve_media_ws(
     ws: WebSocket,
     runnable: Any,
-    dialect: Any,
+    dialect: Dialect,
     *,
     defaults: VoiceConfig | None = None,
-    on_session_built: Callable[[Any, dict[str, Any]], None] | None = None,
+    on_session_built: Callable[[Any, dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> None:
     """One phone call: start frame → session → μ-law media both ways, until stop.
 
     Public so a process that terminates the carrier socket for many tenants
     (a platform media sidecar) can run the bridge itself:
 
-    - ``ws`` must already be accepted. Capacity / single-session gating is
-      the caller's job (this server does it in ``_media_ws``).
+    - ``ws`` must already be accepted. Capacity / single-session gating and
+      the "runnable is an :class:`~timbal.core.agent.Agent`" check are the
+      caller's job (this server does both in ``_media_ws``).
     - ``defaults`` is the :class:`VoiceConfig` the session is built from.
       ``None`` reads ``ws.app.state.voice_config`` — the one-agent-per-box
       layout — so existing callers are unchanged.
-    - ``on_session_built(session, meta)`` runs once the :class:`VoiceSession`
-      exists and before it runs, with the *final* ``meta`` (``transport``,
-      ``call_id``, ``from``, ``to`` plus the build's). Mutate ``meta`` in
-      place to shape what lands on ``session.recording_meta``; set
-      ``session.session_id`` to pin your own identity (the recorder file,
-      ``meta["session_id"]``, and the upload path follow). Exceptions are
-      logged and ignored — an observer must never end a call.
+    - ``on_session_built(session, meta)`` (sync or async) runs once the
+      :class:`VoiceSession` exists and before it runs, with the *final*
+      ``meta`` (``transport``, ``call_id``, ``from``, ``to`` plus the
+      build's). Mutate ``meta`` in place to shape what lands on
+      ``session.recording_meta``; set ``session.session_id`` to pin your own
+      identity — the recording file stem and ``meta["session_id"]`` follow
+      (ids: ``[A-Za-z0-9_-]{1,128}``). Exceptions are logged and ignored — an
+      observer must never end a call — and a refused pin leaves the
+      generated id in force everywhere.
+
+    Recording *destination* identity does not come from ``meta``: the env
+    knobs ``build_voice_session`` reads (``TIMBAL_VOICE_RECORDING_*``,
+    ``TIMBAL_ORG_ID`` / ``TIMBAL_PROJECT_ID`` for the platform upload path)
+    are process-wide. A multi-tenant host must carry them per call through
+    ``defaults.recording`` (``dir`` and an ``on_saved`` hook that knows the
+    tenant) and leave ``TIMBAL_VOICE_RECORDING_UPLOAD`` unset.
     """
     try:
         from ..voice import AgentTextDone, AudioOutput, FillerSpoken, SessionEnded, TurnMetricsEvent
@@ -580,13 +604,15 @@ async def serve_media_ws(
     }
     if on_session_built is not None:
         try:
-            on_session_built(session, meta)
+            result = on_session_built(session, meta)
+            if inspect.isawaitable(result):
+                await result
         except Exception as e:  # noqa: BLE001 - an observer must never end a call
             logger.error("telephony_session_hook_failed", provider=dialect.name, error=str(e), exc_info=True)
     # The hook may pin ``session.session_id`` after the recorder already
-    # opened under a generated uuid7. ``VoiceSession.session_id`` retargets
-    # the file; copy it onto meta *after* the hook so recording_meta, the
-    # manifest, and any upload path share that id.
+    # opened under a generated uuid7. The setter retargets the file (or
+    # raises and leaves the id alone), so stamping *after* the hook keeps
+    # recording_meta, the manifest, and the upload path (file stem) equal.
     meta["session_id"] = session.session_id
     session.recording_meta = meta
 

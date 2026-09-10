@@ -180,6 +180,70 @@ class TestRobustness:
             rec.retarget(tmp_path / "b.mp3")
         rec.close()
 
+    def test_retarget_failed_open_leaves_recorder_untouched(self, tmp_path: Path, monkeypatch) -> None:
+        """A failed reopen must not strand the recorder at a path that was never
+        created while it keeps encoding into a closed container."""
+        old = tmp_path / "generated.mp3"
+        rec = CallRecorder(old, sample_rate=SR)
+
+        def boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(av, "open", boom)
+        with pytest.raises(OSError, match="disk full"):
+            rec.retarget(tmp_path / "pinned.mp3")
+        monkeypatch.undo()
+
+        assert rec.audio_path == old
+        rec.add_mic(_silence(0.1))
+        result = rec.close(manifest={"session_id": "generated"})
+        assert result is not None
+        assert result.audio_path == old
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["generated.json", "generated.mp3"]
+
+    async def test_session_id_setter_pins_recorder_and_refuses_bad_ids(self, tmp_path: Path) -> None:
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.voice import VoiceSession
+
+        from .test_session import DelayedMockSTT, MockTTS
+
+        def _session(rec):
+            return VoiceSession(
+                agent=Agent(name="rec", model=TestModel(responses=["x"]), tools=[]),
+                stt=DelayedMockSTT(),
+                tts=MockTTS(chunk=b"\x00\x00", num_chunks=1),
+                recorder=rec,
+                session_id="generated",
+                turn_detector="heuristic",
+            )
+
+        rec = CallRecorder(tmp_path / "generated.mp3", sample_rate=SR)
+        session = _session(rec)
+        session.session_id = "platform-0001"
+        assert session.session_id == "platform-0001"
+        assert rec.audio_path == tmp_path / "platform-0001.mp3"
+
+        # Refused pins leave both the id and the file alone.
+        for bad in ("", "a/b", "../x", "x" * 129, "with space"):
+            with pytest.raises(ValueError, match="session_id"):
+                session.session_id = bad
+        assert session.session_id == "platform-0001"
+        assert rec.audio_path == tmp_path / "platform-0001.mp3"
+
+        # After audio the pin cannot be carried onto the file → refused, not split.
+        rec.add_mic(_silence(0.1))
+        with pytest.raises(RuntimeError, match="after audio"):
+            session.session_id = "platform-0002"
+        assert session.session_id == "platform-0001"
+        assert rec.audio_path.stem == "platform-0001"
+        rec.close()
+
+        # No recorder: the id is just a string.
+        free = _session(None)
+        free.session_id = "no-recorder"
+        assert free.session_id == "no-recorder"
+
 
 class TestSessionIntegration:
     async def test_session_writes_recording_manifest_and_fires_on_saved(self, tmp_path: Path) -> None:

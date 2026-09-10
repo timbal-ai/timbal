@@ -84,6 +84,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger("timbal.voice.session")
 
+# Platform session-id contract (see server/recording_upload.py): the id is a
+# file stem and a URL path segment, so no separators and a bounded length.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
 # Wall-clock cap on a single agent turn (LLM stream + in-turn TTS drains).
 # Without this a hung provider leaves the caller in silence forever.
 DEFAULT_TURN_TIMEOUT_SECS = 60.0
@@ -455,20 +459,25 @@ class VoiceSession:
 
     @session_id.setter
     def session_id(self, value: str) -> None:
-        """Pin identity. Retargets an already-opened recorder onto ``{id}.mp3``."""
-        self._session_id = value
+        """Pin identity. Retargets an already-opened recorder onto ``{id}.mp3``.
+
+        Only valid before any audio has been recorded (a host's
+        ``on_session_built`` hook is the intended caller). Raises rather than
+        half-applying: the recording file stem, the manifest ``session_id``
+        and the platform upload path must all be the same string, so a pin
+        that cannot be carried onto the file is refused and the previous id
+        stays in force. Ids follow the platform contract ``[A-Za-z0-9_-]{1,128}``.
+        """
+        if not isinstance(value, str) or not _SESSION_ID_RE.fullmatch(value):
+            raise ValueError(f"session_id must match [A-Za-z0-9_-]{{1,128}}, got {value!r}")
         recorder = self._recorder
-        if recorder is None:
-            return
-        current = recorder.audio_path
-        if current.stem == value:
-            return
-        try:
-            recorder.retarget(current.with_name(f"{value}{current.suffix}"))
-        except Exception as e:
-            # Keep the pinned id even if the file stays under the generated
-            # name — an observer must never fail a call over a rename.
-            logger.error("recording_retarget_failed", error=str(e), session_id=value, exc_info=True)
+        if recorder is not None:
+            current = recorder.audio_path
+            if current.stem != value:
+                # Raises on a closed/failed recorder, after audio, or on a
+                # failed reopen — in all cases the recorder is left as it was.
+                recorder.retarget(current.with_name(f"{value}{current.suffix}"))
+        self._session_id = value
 
     @property
     def transcript(self) -> list[TranscriptEntry]:
