@@ -77,6 +77,7 @@ from .tool_result_offload import (
     ToolResultLimit,
     apply_tool_result_limit,
     create_read_tool_result,
+    reconcile_offload_handles,
 )
 from .tool_set import ToolSet
 
@@ -473,6 +474,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     read_store = state["store"]
                     break
         self._read_tool_result = None
+        # The store read_tool_result resolves against — also what resolve_memory probes to
+        # reconcile handles inherited from earlier runs.
+        self._read_store = read_store
         if read_store is not None:
             self._read_tool_result = create_read_tool_result(read_store)
             self._read_tool_result.nest(self._path)
@@ -819,6 +823,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if not isinstance(previous_span.memory, list):
             return
         memory = [Message.validate(m) for m in previous_span.memory]
+
+        # Offloaded results from earlier turns may point at payloads this instance cannot
+        # read (per-machine store, pruned, container recycled). Replace those placeholders
+        # before the model sees them, or it keeps paying iterations on read_tool_result.
+        read_store = getattr(self, "_read_store", None)
+        if read_store is not None:
+            cleared = await reconcile_offload_handles(memory, read_store)
+            if cleared:
+                current_span.metadata["offload_unreadable"] = cleared
 
         # On approval-required resume the gated tool_uses will be re-executed
         # by the agent loop (see _find_pending_tool_uses), so we must NOT

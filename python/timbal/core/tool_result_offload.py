@@ -22,6 +22,7 @@ strategies treat offloaded results as already-compacted (see ``compact_tool_resu
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -39,6 +40,8 @@ from ..types.content.tool_result import ToolResultContent
 logger = structlog.get_logger("timbal.core.tool_result_offload")
 
 __all__ = [
+    "OFFLOAD_DIR_ENV",
+    "OFFLOAD_UNAVAILABLE_MARKER",
     "LocalOffloadStore",
     "OffloadStore",
     "Spill",
@@ -46,11 +49,22 @@ __all__ = [
     "Truncate",
     "apply_tool_result_limit",
     "create_read_tool_result",
+    "reconcile_offload_handles",
+    "store_has_handle",
 ]
 
 OFFLOAD_MARKER = "[Tool result offloaded:"
 """Prefix of the inline placeholder text for spilled results. Kept stable for tests and
 downstream detection; programmatic detection should use ``ToolResultContent.offload_handle``."""
+
+OFFLOAD_UNAVAILABLE_MARKER = "[Tool result offloaded earlier is no longer readable:"
+"""Prefix of the placeholder that replaces a spilled result whose handle can no longer be
+resolved by the current store (produced on another instance, pruned, or the store moved)."""
+
+OFFLOAD_DIR_ENV = "TIMBAL_OFFLOAD_DIR"
+"""Environment variable overriding :class:`LocalOffloadStore`'s default root. Point it at a
+volume shared by every instance that may serve a conversation (e.g. a network mount) so the
+handles a turn produces are still readable when a later turn lands elsewhere."""
 
 _SEGMENT_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -125,6 +139,26 @@ class OffloadStore(Protocol):
         ...
 
 
+async def store_has_handle(store: Any, handle: str) -> bool | None:
+    """Whether ``store`` can currently resolve ``handle``.
+
+    Stores may implement an optional ``exists(handle) -> bool`` (sync or async). Returns
+    ``None`` when the store offers no such method, so callers can only reconcile handles for
+    stores that can answer cheaply — never by attempting a full ``read``.
+    """
+    exists = getattr(store, "exists", None)
+    if exists is None:
+        return None
+    try:
+        outcome = exists(handle)
+        if hasattr(outcome, "__await__"):
+            outcome = await outcome
+        return bool(outcome)
+    except Exception:  # noqa: BLE001 — a probe must never fail a run
+        logger.warning("Offload store exists() probe failed; assuming handle is readable.", handle=handle)
+        return None
+
+
 def _sanitize_key(key: str) -> Path:
     """Turn a handle/key into a safe relative path.
 
@@ -148,9 +182,16 @@ class LocalOffloadStore:
     Keep-forever by default — deleting on run end would break a later run (session chaining,
     resume) that still holds handles. Opt into age-based pruning with ``cleanup_after``;
     pruning runs on a daemon thread off the hot path and never raises into the agent run.
+
+    The root resolves, in order: the ``root`` argument, ``$TIMBAL_OFFLOAD_DIR``, then
+    ``~/.timbal/offload``. The default is per machine: a conversation whose turns are served
+    by different instances (or a fresh container per turn) cannot read back handles from an
+    earlier turn unless the root is a shared volume — set the env var in those deployments.
     """
 
     def __init__(self, root: str | Path | None = None, cleanup_after: timedelta | None = None) -> None:
+        if root is None:
+            root = os.environ.get(OFFLOAD_DIR_ENV) or None
         self.root = (Path(root) if root else Path.home() / ".timbal" / "offload").expanduser().resolve()
         self.cleanup_after = cleanup_after
 
@@ -187,6 +228,15 @@ class LocalOffloadStore:
         if not path.is_file():
             raise FileNotFoundError(f"No offloaded content found for handle {handle!r}.")
         return path.read_bytes()
+
+    def exists(self, handle: str) -> bool:
+        """Cheap probe (one ``stat``) used to reconcile handles inherited from earlier runs."""
+        try:
+            rel = _sanitize_key(handle)
+        except ValueError:
+            return False
+        path = (self.root / rel).resolve()
+        return path.is_relative_to(self.root) and path.is_file()
 
     def _prune(self) -> None:
         try:
@@ -325,6 +375,45 @@ async def apply_tool_result_limit(
     return record
 
 
+def _unavailable_placeholder(handle: str) -> str:
+    return (
+        f"{OFFLOAD_UNAVAILABLE_MARKER} handle {handle!r} was produced in an earlier run and this "
+        "instance cannot resolve it. Do not call read_tool_result on it — re-run the tool that "
+        "produced it if you need the data.]"
+    )
+
+
+async def reconcile_offload_handles(memory: list[Any], store: Any) -> list[str]:
+    """Neutralize spilled results in ``memory`` whose handles ``store`` can no longer resolve.
+
+    Handles are only readable where the payload was written. When a conversation resumes on
+    another instance (or the store was pruned), the inherited placeholders still invite the
+    model to page them with ``read_tool_result`` — every attempt fails and burns an iteration.
+    For each unresolvable handle the placeholder text is replaced with an explicit "no longer
+    readable" note and ``offload_handle`` is cleared, so nothing in history points at a dead
+    payload. File items on the result are kept. Mutates ``memory`` in place and returns the
+    handles that were cleared. Stores without an ``exists`` probe are left untouched.
+    """
+    cleared: list[str] = []
+    if store is None or getattr(store, "exists", None) is None:
+        return cleared
+    for message in memory:
+        content = getattr(message, "content", None) or []
+        for c in content:
+            if not isinstance(c, ToolResultContent) or not c.offload_handle:
+                continue
+            present = await store_has_handle(store, c.offload_handle)
+            if present is not False:
+                continue
+            files = [x for x in c.content if not isinstance(x, TextContent)]
+            c.content = [TextContent(text=_unavailable_placeholder(c.offload_handle)), *files]
+            cleared.append(c.offload_handle)
+            c.offload_handle = None
+    if cleared:
+        logger.info("Cleared offload handles no longer readable by this store.", count=len(cleared))
+    return cleared
+
+
 # ---------------------------------------------------------------------------
 # read_tool_result
 # ---------------------------------------------------------------------------
@@ -349,7 +438,12 @@ def create_read_tool_result(store: OffloadStore) -> Any:
         ),
     ) -> str:
         """Read part of an offloaded tool result. Results are line-numbered; page with offset/limit."""
-        data = await store.read(handle)
+        try:
+            data = await store.read(handle)
+        except FileNotFoundError:
+            # A dead handle is a fact about the conversation, not a tool failure: return it as
+            # text so the model stops retrying instead of surfacing an error on the trace.
+            return _unavailable_placeholder(handle)
         text = data.decode("utf-8", errors="replace")
         lines = text.splitlines()
         total = len(lines)
