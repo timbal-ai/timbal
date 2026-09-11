@@ -953,6 +953,26 @@ class TestTurnMetrics:
         assert m.speech_end_to_transcript_ms is not None
         assert 150 <= m.speech_end_to_transcript_ms <= 600
 
+    async def test_ignored_commits_do_not_steal_the_pending_asr_latency(self) -> None:
+        """A noise commit the detector IGNOREs (mid-HOLD, say) must not overwrite
+        the measurement of the utterance that will actually open the turn."""
+
+        class _Ignoring(TurnDetector):
+            async def on_partial(self, text, state):
+                return None
+
+            async def on_committed(self, text, state):
+                return CommitDecision(action=CommitAction.IGNORE, text=text, reason="noise")
+
+        agent = Agent(name="t", model=TestModel(responses=["Hi!"]), tools=[])
+        session = VoiceSession(agent=agent, stt=DelayedMockSTT(), tts=MockTTS(), turn_detector=_Ignoring())
+        session._pending_stt_latency = (123.0, "partial")  # from an accepted (held) commit
+        session._last_partial_at = session._last_commit_at + 0.05  # something to measure from
+
+        await session._handle_committed("uh")
+
+        assert session._pending_stt_latency == (123.0, "partial")
+
     async def test_final_metrics_persisted_by_serializing_provider(self, tmp_path) -> None:
         """Regression: the agent run's trace is saved (provider put) when the
         generator exhausts — before the turn's finally builds final metrics.

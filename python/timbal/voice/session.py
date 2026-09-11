@@ -342,6 +342,13 @@ class VoiceSession:
         self._idle_task: asyncio.Task[None] | None = None
         self._idle_prompt_count = 0
         self._idle_prompt_speaking = False
+        # The prompt's ``[text, bytes]`` TTS record, its transcript entry and
+        # the played-bytes origin it started from — what ``interrupt()`` needs
+        # to rewrite the prompt to the heard prefix on barge-in. Kept apart from
+        # the greeting's so the two never overwrite each other.
+        self._idle_record: list | None = None
+        self._idle_entry: TranscriptEntry | None = None
+        self._idle_played_baseline = 0
         self._idle_since: float | None = None
         # Monotonic time of the last thing the user did (partial or commit).
         # Starts at run(); the hang-up clock is measured from here.
@@ -723,6 +730,8 @@ class VoiceSession:
         # rewrites what was left unheard, ``close()`` leaves the transcript alone.
         if was_active and truncate_completed and self._greeting_record is not None:
             self._truncate_greeting()
+        if was_active and truncate_completed and self._idle_record is not None:
+            self._truncate_idle_prompt()
         self._is_speaking = False
         if was_active:
             self.playback.on_interrupted()
@@ -1510,7 +1519,11 @@ class VoiceSession:
         if self._closed:
             return
         self._commit_event_at = time.monotonic()
-        self._pending_stt_latency = self._measure_stt_latency(self._commit_event_at)
+        # Measured now (the VAD / partial stamps are freshest here) but only
+        # published once the commit is *accepted* below: a noise commit the
+        # detector ignores mid-HOLD, or a late duplicate, must not overwrite the
+        # measurement of the utterance that actually opens the turn.
+        stt_latency = self._measure_stt_latency(self._commit_event_at)
         # Any commit (endpointer-forced or provider debounce) makes a pending
         # VAD endpoint stale — the STT segment it targeted is already closed.
         if self._endpointer is not None:
@@ -1600,6 +1613,10 @@ class VoiceSession:
             return
 
         final_text = decision.text or text
+        # Accepted (HOLD / NEW_TURN / CONTINUE): this is the commit whose ASR
+        # wait the turn should report. A HOLD keeps it until expiry; a later
+        # accepted commit that merges or continues replaces it with its own.
+        self._pending_stt_latency = stt_latency
         logger.info(
             "stt_committed_accepted",
             action=decision.action.value,
@@ -2620,22 +2637,85 @@ class VoiceSession:
             logger.warning("user_idle_watch_failed", error=str(e), exc_info=True)
 
     async def _speak_idle_prompt(self, text: str) -> None:
-        """Say ``text`` outside any turn: interruptible, transcribed, not a turn metric."""
+        """Say ``text`` outside any turn: interruptible, transcribed, not a turn metric.
+
+        Same shape as an interruptible opener, with its own bookkeeping:
+
+        * ``_is_speaking`` is raised for the duration so ``interrupt()`` sees
+          the prompt as active from the first synthesized byte, not only once
+          the client reports playback — a callee answering "are you still
+          there?" barges in either way.
+        * The prompt is in ``_tts_tasks``, so ``interrupt()`` cancels it; the
+          cancel path seals the client's bubble with what was heard
+          (``_truncate_idle_prompt`` ran inside ``interrupt()`` first).
+        * It only ever starts once the previous reply has fully drained
+          (``_agent_busy``), so that reply has nothing left to truncate:
+          ``_turn_finalized_ok`` is cleared so a barge-in here is attributed to
+          the prompt, never re-run against the finished turn.
+        """
         self._idle_prompt_speaking = True
-        self._transcript.append(TranscriptEntry(role="assistant", text=text))
+        self._is_speaking = True
+        self._turn_finalized_ok = False
+        self._idle_played_baseline = self.playback.played_bytes
+        self._idle_entry = TranscriptEntry(role="assistant", text=text)
+        self._transcript.append(self._idle_entry)
         await self._emit(AgentTextDelta(text=text))
-        speak_task = asyncio.create_task(self._speak(text, greeting=True))
+        speak_task = asyncio.create_task(self._speak(text, idle=True))
         self._tts_tail = speak_task
         self._tts_tasks.add(speak_task)
         speak_task.add_done_callback(lambda t: self._tts_tasks.discard(t))
         try:
             await speak_task
         except asyncio.CancelledError:
-            # Barged in — ``interrupt()`` already cleared the client buffer.
+            # Barged in. ``interrupt()`` has mapped the played bytes to the heard
+            # prefix and rewritten (or dropped) the transcript entry; seal the
+            # client's open bubble the same way the opener does.
+            await self._emit(AgentTextDone(text=self._last_interruption_heard_text or ""))
             return
         finally:
             self._idle_prompt_speaking = False
+            self._is_speaking = False
+            self._idle_record = None
+            self._idle_entry = None
         await self._emit(AgentTextDone(text=text))
+
+    def _truncate_idle_prompt(self) -> None:
+        """Align the idle prompt's transcript entry with what the caller heard.
+
+        Called from ``interrupt()`` before the client's buffer is cleared, like
+        :meth:`_truncate_greeting`. The prompt is not the session's first audio,
+        so heard bytes are measured from the played-bytes origin it started at.
+        """
+        record = self._idle_record
+        self._idle_record = None
+        if record is None or self._idle_entry is None:
+            return
+        full = str(record[0])
+        played = max(0, self.playback.played_bytes - self._idle_played_baseline)
+        heard = map_played_bytes_to_text([(full, int(record[1]))], played)
+        if self._recorder is not None:
+            self._recorder.drop_agent_tail(max(0, int(record[1]) - played))
+        # By construction the prompt is the newest thing said (it only starts
+        # when nothing else is), so SessionInterrupted — and the cancelled
+        # speak task's AgentTextDone — describe it, heard in full or not.
+        self._last_interruption_heard_text = heard
+        if heard == full:
+            return
+        index = next((i for i, e in enumerate(self._transcript) if e is self._idle_entry), None)
+        if index is None:
+            return
+        logger.info(
+            "user_idle_prompt_truncation",
+            heard_chars=len(heard),
+            prompt_chars=len(full),
+            **_trace_debug_fields(),
+        )
+        if heard:
+            self._idle_entry = TranscriptEntry(role="assistant", text=heard)
+            self._transcript[index] = self._idle_entry
+        else:
+            self._transcript.pop(index)
+            self._idle_entry = None
 
     async def _generate_idle_prompt(self) -> str | None:
         """One-shot LLM line for ``user_idle.instructions`` — same shape as the greeting generator."""
@@ -3067,20 +3147,30 @@ class VoiceSession:
             except (asyncio.CancelledError, Exception):
                 pass
 
-    async def _speak(self, text: str, *, filler: bool = False, greeting: bool = False) -> None:
+    async def _speak(self, text: str, *, filler: bool = False, greeting: bool = False, idle: bool = False) -> None:
+        """Synthesize ``text`` and emit its audio.
+
+        ``greeting`` / ``idle`` mark speech that belongs to no turn (the opener,
+        a user-idle prompt): it is kept out of the turn's segment list and
+        timings, ignores the per-turn cancel flag (stopping it is
+        ``interrupt()``'s job, by cancelling the task) and keeps its own
+        ``[text, bytes]`` record for barge-in truncation.
+        """
         text = _strip_markdown(text)
+        turnless = greeting or idle
         logger.debug(
             "turn_tts_synthesize_begin",
             text_chars=len(text),
             text_preview=text[:120],
             filler=filler,
             greeting=greeting,
+            idle=idle,
             cancel_turn_set=self._cancel_turn.is_set(),
             **_trace_debug_fields(),
         )
         chunk_count = 0
         total_bytes = 0
-        if not greeting:
+        if not turnless:
             if self._turn_tts_started_at is None:
                 self._turn_tts_started_at = time.monotonic()
             self._turn_tts_segments += 1
@@ -3094,14 +3184,16 @@ class VoiceSession:
             # TTS timings. Keep a direct handle so its byte count stays
             # readable after the first turn rebinds the record list.
             self._greeting_record = segment_record
+        elif idle:
+            self._idle_record = segment_record
         else:
             self._turn_tts_segment_records.append(segment_record)
         try:
             async for chunk in self.tts.synthesize(text):
-                # The opener predates every turn, so the per-turn cancel flag says
-                # nothing about it: stopping it is ``interrupt()``'s job, by
-                # cancelling this task, and only when it is interruptible.
-                if self._cancel_turn.is_set() and not greeting:
+                # Turnless speech predates / sits outside every turn, so the
+                # per-turn cancel flag says nothing about it: stopping it is
+                # ``interrupt()``'s job, by cancelling this task.
+                if self._cancel_turn.is_set() and not turnless:
                     # INFO on purpose: explains truncated audio_bytes in metrics.
                     logger.info(
                         "turn_tts_synthesize_break",
@@ -3113,7 +3205,7 @@ class VoiceSession:
                     break
                 chunk_count += 1
                 total_bytes += len(chunk)
-                if not greeting:
+                if not turnless:
                     if self._turn_first_audio_at is None:
                         self._turn_first_audio_at = time.monotonic()
                     self._turn_audio_bytes += len(chunk)
@@ -3147,7 +3239,7 @@ class VoiceSession:
                 **_trace_debug_fields(),
             )
         finally:
-            if not greeting:
+            if not turnless:
                 self._turn_tts_ended_at = time.monotonic()
 
     # -- Internal: interruption truncation ------------------------------------

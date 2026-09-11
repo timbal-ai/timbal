@@ -15,6 +15,7 @@ from timbal.core.test_model import TestModel
 from timbal.voice import (
     AgentTextDone,
     SessionEnded,
+    SessionInterrupted,
     TranscriptEvent,
     UserIdleConfig,
     VoiceConfig,
@@ -22,7 +23,7 @@ from timbal.voice import (
     VoiceSessionEvent,
 )
 
-from .test_voice_greeting import GREETING, REPLY, _OpenSTT, _run
+from .test_voice_greeting import GREETING, REPLY, _drain_queue, _OpenSTT, _PacedTTS, _run, _spoken
 from .test_voice_ws import _make_tts_class
 
 
@@ -88,6 +89,69 @@ class TestClientUserIdleOverrides:
         assert voice_routes.merge_client_voice_overrides(base, {"user_idle": 7}).user_idle.text == "Still there?"
 
 
+PROMPT = "Are you still there? I can wait, or we can pick this up another time."
+
+
+class TestUserIdlePromptBargeIn:
+    """The prompt is interruptible like an interruptible opener: cut to what was heard, bubble sealed."""
+
+    def _session(self, tts: _PacedTTS) -> VoiceSession:
+        agent = Agent(name="idle_test", model=TestModel(responses=[REPLY]), tools=[])
+        return VoiceSession(agent, _OpenSTT(), tts, turn_detector="heuristic", user_idle={"text": PROMPT})
+
+    async def test_prompt_counts_as_active_before_playback_reports_anything(self) -> None:
+        """A callee answering in the prompt's first ~100ms must still barge in.
+
+        Regression: the prompt used to be invisible to ``interrupt()`` until
+        the client acked playback — it returned ``not_active`` and left the
+        prompt talking over the user.
+        """
+        session = self._session(_PacedTTS(num_chunks=40, every_secs=0.05))
+        speak = asyncio.create_task(session._speak_idle_prompt(PROMPT))
+        await asyncio.sleep(0.01)  # synthesis started, nothing played yet
+        assert session._assistant_active is True
+
+        await session.interrupt()
+        await asyncio.gather(speak, return_exceptions=True)
+
+        assert session._idle_prompt_speaking is False
+        assert session._is_speaking is False
+        assert session._idle_record is None
+        assert session.transcript == []  # nothing heard → it was never said
+        events = _drain_queue(session)
+        [interrupted] = [e for e in events if isinstance(e, SessionInterrupted)]
+        assert interrupted.heard_text == ""
+        assert _spoken(events) == [""]  # bubble sealed, not left hanging
+
+    async def test_prompt_is_cut_to_what_was_heard(self) -> None:
+        session = self._session(_PacedTTS(num_chunks=4))
+        speak = asyncio.create_task(session._speak_idle_prompt(PROMPT))
+        await asyncio.sleep(0.12)  # ~2 of 4 chunks out, playback far behind
+
+        await session.interrupt()
+        await asyncio.gather(speak, return_exceptions=True)
+
+        [entry] = session.transcript
+        assert entry.role == "assistant"
+        assert entry.text != PROMPT
+        assert PROMPT.startswith(entry.text)
+        events = _drain_queue(session)
+        [interrupted] = [e for e in events if isinstance(e, SessionInterrupted)]
+        assert interrupted.heard_text == entry.text
+        assert _spoken(events) == [entry.text]
+
+    async def test_prompt_does_not_touch_the_opener_record(self) -> None:
+        """Regression: the prompt used to synthesize as ``greeting=True`` and
+        overwrite ``_greeting_record``, so a barge-in rewrote the opener's entry."""
+        session = self._session(_PacedTTS(num_chunks=2, every_secs=0.0))
+        session._greeting_record = [GREETING, 32_000]
+        await session._speak_idle_prompt(PROMPT)
+        assert session._greeting_record == [GREETING, 32_000]
+        assert session.metrics == []  # not a turn
+        assert [e.text for e in session.transcript] == [PROMPT]
+        assert _spoken(_drain_queue(session)) == [PROMPT]
+
+
 class TestUserIdleBehaviour:
     async def test_prompts_after_silence_then_stops_at_max_count(self) -> None:
         stt = _OpenSTT()
@@ -108,14 +172,18 @@ class TestUserIdleBehaviour:
 
     async def test_user_speech_resets_the_clock(self) -> None:
         stt = _OpenSTT()
-        session = _session(stt, timeout_secs=0.3, text="Still there?", max_count=1)
+        # Wide margin on purpose: the idle clock starts when the reply's audio
+        # has drained (after AgentTextDone), the watcher polls at 100ms, and
+        # teardown after ``drive`` returns is not free on a loaded CI runner —
+        # 0.15s of slack against a 0.3s timeout produced a phantom prompt.
+        session = _session(stt, timeout_secs=1.5, text="Still there?", max_count=1)
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await asyncio.sleep(0.2)
             await stt.inject(TranscriptEvent(type="committed", text="One sec."))
             while not any(isinstance(e, AgentTextDone) for e in events):
                 await asyncio.sleep(0.01)
-            await asyncio.sleep(0.15)  # < timeout since the reply drained → no prompt yet
+            await asyncio.sleep(0.3)  # < timeout since the reply drained → no prompt yet
 
         events = await _run(session, stt, drive=drive)
         spoken = [e.text for e in events if isinstance(e, AgentTextDone)]
