@@ -78,6 +78,7 @@ A run whose process dies has nothing to replay. A replayable log is a ring: defa
 
 - **Embedded** (served by a running agent): `GET /voice` on a `timbal.server` — auto-dials that agent; the page injects the runnable meta at serve time.
 - **Standalone** (no agent required): `python -m timbal.server.playground` — serves the same HTML raw and opens a Target panel. Local target: enter an agent path (`path/to/agent.py::object`, optional fixed port) and press Start — the launcher spawns `uv run python -m timbal.server --import_spec …` from the agent file's directory, waits for the healthcheck, and the page dials it (changing agent/port respawns on the next Start). Platform target: a deployed workforce (`api.dev.timbal.ai` / `api.timbal.ai`) via ticket-authenticated WS / bearer-authenticated RTC. Fields persist in `localStorage`.
+- **What it exposes:** every client-settable `VoiceConfig` knob (pipeline, turn taking, greeting + outbound greeting, filler, user idle, `stt_extra` / `tts_extra` JSON) and nothing else — the page is a voice-config playground, not an agent override surface (there is no LLM picker; `model` stays client-settable on the wire for other clients). The Agent panel lists what the agent's own `voice_config` declares (`/voice/meta` → `voice_config`, same wire form as `GET /voice_config`), and each field's placeholder shows that declared value as its "server default". *Simulate* (inbound / outbound) sends `direction` on the hello so the outbound opener can be heard without placing a call.
 
 ---
 
@@ -131,7 +132,9 @@ Whether acks were received is reported per turn in `metrics.playback_acks_receiv
 
 Optional **first** text frame: a JSON object merged on top of `app.state.voice_config`, which is built at startup from environment defaults and optional `runnable.voice_config` on the loaded agent (`http` lifespan). Server-side `voice_config` (a dict, zero-arg callable, or `timbal.voice.VoiceConfig`) is validated strictly at startup — an unknown key fails server boot instead of being silently ignored.
 
-Only send keys you need; omitted keys keep server defaults. Client keys are allowlist-filtered (`CLIENT_SETTABLE_VOICE_FIELDS`): the table below plus `model` (per-session LLM override, `"provider/model"`), `turn_timeout_secs`, and `turn_timeout_fallback` (`""` disables the spoken apology). Anything else — notably `recording` — is server policy and is ignored with a log line.
+Only send keys you need; omitted keys keep server defaults. Client keys are allowlist-filtered (`CLIENT_SETTABLE_VOICE_FIELDS`): the table below plus `model` (per-session LLM override, `"provider/model"`), `turn_timeout_secs`, `turn_timeout_fallback` (`""` disables the spoken apology), and the nested blocks `filler`, `greeting`, `outbound_greeting` and `user_idle`. Nested blocks are deep-merged over the server's block and validated (an invalid patch keeps the server's); a bare string on `greeting` / `outbound_greeting` is a text override, and `""` on any of them switches that block off for this call (`filler` uses `{"enabled": false}`). Anything else — notably `recording` — is server policy and is ignored with a log line.
+
+Two hello keys are read by the transport rather than merged into `VoiceConfig`: `turn_detector` (below) and `direction` — `"inbound"` (default) or `"outbound"`, which tells the session who placed the call so it can pick `outbound_greeting` over `greeting` (`timbal.voice.config.greeting_for_direction`). The session cannot know this itself; the host that dialled or answered does (a LiveKit dial's `client_config`, or the playground's *Simulate* control). `session_started` echoes it back as `direction`.
 
 | Key           | Description |
 |---------------|-------------|

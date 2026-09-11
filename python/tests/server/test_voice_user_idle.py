@@ -1,0 +1,262 @@
+"""``VoiceConfig.user_idle`` — re-engage a silent user, hang up on a dead line.
+
+Same harness as the greeting tests: an STT that stays open until told to
+finish, a tiny fake TTS, a ``TestModel`` agent.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from pydantic import ValidationError
+from timbal import Agent
+from timbal.core.test_model import TestModel
+from timbal.voice import (
+    AgentTextDone,
+    SessionEnded,
+    SessionInterrupted,
+    TranscriptEvent,
+    UserIdleConfig,
+    VoiceConfig,
+    VoiceSession,
+    VoiceSessionEvent,
+)
+
+from .test_voice_greeting import GREETING, REPLY, _drain_queue, _OpenSTT, _PacedTTS, _run, _spoken
+from .test_voice_ws import _make_tts_class
+
+
+def _session(stt: _OpenSTT, **user_idle: object) -> VoiceSession:
+    agent = Agent(name="idle_test", model=TestModel(responses=[REPLY]), tools=[])
+    return VoiceSession(agent, stt, _make_tts_class()(), turn_detector="heuristic", user_idle=user_idle or None)
+
+
+class TestUserIdleConfig:
+    def test_defaults_and_rotation(self) -> None:
+        cfg = UserIdleConfig(text=["Still there?", "Hello?"])
+        assert cfg.timeout_secs == 8.0 and cfg.max_count == 2 and cfg.hangup_after_secs is None
+        assert [cfg.line_for(i) for i in range(3)] == ["Still there?", "Hello?", "Still there?"]
+        assert UserIdleConfig(text="One line").line_for(5) == "One line"
+        assert UserIdleConfig(instructions="check in").line_for(0) is None  # → generated
+
+    def test_rejects_configs_that_do_nothing(self) -> None:
+        with pytest.raises(ValidationError):
+            UserIdleConfig()  # no line, prompts enabled
+        with pytest.raises(ValidationError):
+            UserIdleConfig(max_count=0)  # nothing to say and nothing to hang up on
+        UserIdleConfig(max_count=0, hangup_after_secs=30)  # hang-up only: fine
+        with pytest.raises(ValidationError):
+            UserIdleConfig(text="x", timeout_secs=0)
+        with pytest.raises(ValidationError):
+            VoiceConfig(user_idle={"text": "x", "unknown": 1})
+
+    def test_rides_voice_config(self) -> None:
+        cfg = VoiceConfig(user_idle={"text": "Are you still there?", "timeout_secs": 6, "hangup_after_secs": 30})
+        assert isinstance(cfg.user_idle, UserIdleConfig)
+        assert cfg.user_idle.hangup_after_secs == 30
+        assert VoiceConfig().user_idle is None  # status quo: wait forever
+
+
+class TestClientUserIdleOverrides:
+    """Playground / hello: tune or switch off the idle watcher for one call."""
+
+    def test_is_client_settable(self) -> None:
+        from timbal.server import voice as voice_routes
+
+        assert "user_idle" in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
+
+    def test_dict_deep_merges_and_validates(self) -> None:
+        from timbal.server import voice as voice_routes
+
+        base = VoiceConfig(user_idle={"text": "Still there?", "timeout_secs": 6})
+        out = voice_routes.merge_client_voice_overrides(base, {"user_idle": {"hangup_after_secs": 30, "text": ["a", "b"]}})
+        assert out.user_idle.timeout_secs == 6
+        assert out.user_idle.hangup_after_secs == 30
+        assert out.user_idle.line_for(1) == "b"
+        # Invalid patch → server's block is kept, not dropped.
+        out = voice_routes.merge_client_voice_overrides(base, {"user_idle": {"nope": 1}})
+        assert out.user_idle.text == "Still there?"
+        # Enables from nothing when the patch is complete on its own.
+        out = voice_routes.merge_client_voice_overrides(VoiceConfig(), {"user_idle": {"instructions": "check in"}})
+        assert out.user_idle.instructions == "check in"
+
+    def test_empty_string_switches_off(self) -> None:
+        from timbal.server import voice as voice_routes
+
+        base = VoiceConfig(user_idle={"text": "Still there?"})
+        assert voice_routes.merge_client_voice_overrides(base, {"user_idle": ""}).user_idle is None
+        assert voice_routes.merge_client_voice_overrides(base, {"user_idle": 7}).user_idle.text == "Still there?"
+
+
+PROMPT = "Are you still there? I can wait, or we can pick this up another time."
+
+
+class TestUserIdlePromptBargeIn:
+    """The prompt is interruptible like an interruptible opener: cut to what was heard, bubble sealed."""
+
+    def _session(self, tts: _PacedTTS) -> VoiceSession:
+        agent = Agent(name="idle_test", model=TestModel(responses=[REPLY]), tools=[])
+        return VoiceSession(agent, _OpenSTT(), tts, turn_detector="heuristic", user_idle={"text": PROMPT})
+
+    async def test_prompt_counts_as_active_before_playback_reports_anything(self) -> None:
+        """A callee answering in the prompt's first ~100ms must still barge in.
+
+        Regression: the prompt used to be invisible to ``interrupt()`` until
+        the client acked playback — it returned ``not_active`` and left the
+        prompt talking over the user.
+        """
+        session = self._session(_PacedTTS(num_chunks=40, every_secs=0.05))
+        speak = asyncio.create_task(session._speak_idle_prompt(PROMPT))
+        await asyncio.sleep(0.01)  # synthesis started, nothing played yet
+        assert session._assistant_active is True
+
+        await session.interrupt()
+        await asyncio.gather(speak, return_exceptions=True)
+
+        assert session._idle_prompt_speaking is False
+        assert session._is_speaking is False
+        assert session._idle_record is None
+        assert session.transcript == []  # nothing heard → it was never said
+        events = _drain_queue(session)
+        [interrupted] = [e for e in events if isinstance(e, SessionInterrupted)]
+        assert interrupted.heard_text == ""
+        assert _spoken(events) == [""]  # bubble sealed, not left hanging
+
+    async def test_prompt_is_cut_to_what_was_heard(self) -> None:
+        session = self._session(_PacedTTS(num_chunks=4))
+        speak = asyncio.create_task(session._speak_idle_prompt(PROMPT))
+        await asyncio.sleep(0.12)  # ~2 of 4 chunks out, playback far behind
+
+        await session.interrupt()
+        await asyncio.gather(speak, return_exceptions=True)
+
+        [entry] = session.transcript
+        assert entry.role == "assistant"
+        assert entry.text != PROMPT
+        assert PROMPT.startswith(entry.text)
+        events = _drain_queue(session)
+        [interrupted] = [e for e in events if isinstance(e, SessionInterrupted)]
+        assert interrupted.heard_text == entry.text
+        assert _spoken(events) == [entry.text]
+
+    async def test_prompt_does_not_touch_the_opener_record(self) -> None:
+        """Regression: the prompt used to synthesize as ``greeting=True`` and
+        overwrite ``_greeting_record``, so a barge-in rewrote the opener's entry."""
+        session = self._session(_PacedTTS(num_chunks=2, every_secs=0.0))
+        session._greeting_record = [GREETING, 32_000]
+        await session._speak_idle_prompt(PROMPT)
+        assert session._greeting_record == [GREETING, 32_000]
+        assert session.metrics == []  # not a turn
+        assert [e.text for e in session.transcript] == [PROMPT]
+        assert _spoken(_drain_queue(session)) == [PROMPT]
+
+
+class TestUserIdleBehaviour:
+    async def test_prompts_after_silence_then_stops_at_max_count(self) -> None:
+        stt = _OpenSTT()
+        session = _session(stt, timeout_secs=0.2, text=["Still there?", "Hello?"], max_count=2)
+
+        async def drive(_events: list[VoiceSessionEvent]) -> None:
+            # Long enough for four timeouts; only two prompts may be spoken.
+            await asyncio.sleep(1.4)
+
+        events = await _run(session, stt, drive=drive)
+        spoken = [e.text for e in events if isinstance(e, AgentTextDone)]
+        assert spoken == ["Still there?", "Hello?"]
+        assert [(e.role, e.text) for e in session.transcript] == [
+            ("assistant", "Still there?"),
+            ("assistant", "Hello?"),
+        ]
+        assert session.metrics == []  # prompts are not turns
+
+    async def test_user_speech_resets_the_clock(self) -> None:
+        stt = _OpenSTT()
+        # Wide margin on purpose: the idle clock starts when the reply's audio
+        # has drained (after AgentTextDone), the watcher polls at 100ms, and
+        # teardown after ``drive`` returns is not free on a loaded CI runner —
+        # 0.15s of slack against a 0.3s timeout produced a phantom prompt.
+        session = _session(stt, timeout_secs=1.5, text="Still there?", max_count=1)
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await asyncio.sleep(0.2)
+            await stt.inject(TranscriptEvent(type="committed", text="One sec."))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.3)  # < timeout since the reply drained → no prompt yet
+
+        events = await _run(session, stt, drive=drive)
+        spoken = [e.text for e in events if isinstance(e, AgentTextDone)]
+        assert spoken == [REPLY]
+
+    async def test_hangup_after_secs_ends_the_session(self) -> None:
+        stt = _OpenSTT()
+        session = _session(stt, timeout_secs=0.15, text="Still there?", max_count=1, hangup_after_secs=0.6)
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            # Do not finish the STT ourselves: the hang-up must end the session.
+            while not any(isinstance(e, SessionEnded) for e in events):
+                await asyncio.sleep(0.02)
+
+        events = await _run(session, stt, drive=drive, timeout=3.0)
+        spoken = [e.text for e in events if isinstance(e, AgentTextDone)]
+        assert spoken == ["Still there?"]  # one prompt, then the line was dead
+        assert session.closed
+        assert isinstance(events[-1], SessionEnded)
+
+    async def test_our_own_prompt_does_not_reset_the_hangup_clock(self) -> None:
+        """Two prompts at 0.15s cadence would keep an agent-speech-reset clock
+        alive forever; the hang-up counts from the user's last word."""
+        stt = _OpenSTT()
+        session = _session(stt, timeout_secs=0.15, text="Hello?", max_count=5, hangup_after_secs=0.7)
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            while not any(isinstance(e, SessionEnded) for e in events):
+                await asyncio.sleep(0.02)
+
+        events = await _run(session, stt, drive=drive, timeout=3.0)
+        assert session.closed
+        assert len([e for e in events if isinstance(e, AgentTextDone)]) <= 4
+
+    async def test_generated_prompt_uses_instructions(self) -> None:
+        stt = _OpenSTT()
+        agent = Agent(name="idle_test", model=TestModel(responses=[REPLY]), tools=[])
+        session = VoiceSession(
+            agent,
+            stt,
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            user_idle={
+                "timeout_secs": 0.2,
+                "instructions": "Ask if they are still there.",
+                "model": TestModel(responses=["Are you still with me?"]),
+                "max_count": 1,
+            },
+        )
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.02)
+
+        events = await _run(session, stt, drive=drive)
+        assert [e.text for e in events if isinstance(e, AgentTextDone)] == ["Are you still with me?"]
+
+    async def test_greeting_and_idle_compose(self) -> None:
+        """Opener first; the idle clock starts only once it has drained."""
+        stt = _OpenSTT()
+        agent = Agent(name="idle_test", model=TestModel(responses=[REPLY]), tools=[])
+        session = VoiceSession(
+            agent,
+            stt,
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            greeting=GREETING,
+            user_idle={"timeout_secs": 0.2, "text": "Still there?", "max_count": 1},
+        )
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            while len([e for e in events if isinstance(e, AgentTextDone)]) < 2:
+                await asyncio.sleep(0.02)
+
+        events = await _run(session, stt, drive=drive)
+        assert [e.text for e in events if isinstance(e, AgentTextDone)] == [GREETING, "Still there?"]

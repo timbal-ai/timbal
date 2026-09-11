@@ -394,6 +394,86 @@ class TestClientGreetingOverrides:
         assert out.greeting.text == GREETING
 
 
+class TestClientOutboundGreetingAndDirection:
+    """The playground (or a dial) says which side placed the call; the server picks the opener."""
+
+    def test_outbound_greeting_is_client_settable(self) -> None:
+        assert "outbound_greeting" in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
+
+    def test_direction_is_read_off_the_hello(self) -> None:
+        assert voice_routes.client_call_direction({"direction": "outbound"}) == "outbound"
+        assert voice_routes.client_call_direction({"direction": " Inbound "}) == "inbound"
+        assert voice_routes.client_call_direction({"direction": "sideways"}) is None
+        assert voice_routes.client_call_direction({}) is None
+        assert voice_routes.client_call_direction({"direction": 3}) is None
+
+    def test_direction_is_not_reported_as_ignored(self, caplog) -> None:
+        with caplog.at_level("INFO"):
+            voice_routes.merge_client_voice_overrides(VoiceConfig(), {"direction": "outbound"})
+        assert "voice_client_config_ignored" not in caplog.text
+
+    def test_client_outbound_block_merges_over_declared_outbound(self) -> None:
+        base = VoiceConfig(greeting=GREETING, outbound_greeting={"text": "out", "delay_ms": 400})
+        out = voice_routes.merge_client_voice_overrides(base, {"outbound_greeting": {"after_user_silence_secs": 2}})
+        assert out.outbound_greeting.text == "out"
+        assert out.outbound_greeting.delay_ms == 400
+        assert out.outbound_greeting.after_user_silence_secs == 2
+        assert out.greeting.text == GREETING
+
+    def test_client_outbound_block_falls_back_to_inbound_base(self) -> None:
+        """No declared outbound → the patch is applied over ``greeting``, the opener outbound would use."""
+        base = VoiceConfig(greeting={"text": GREETING, "interruptible": True})
+        out = voice_routes.merge_client_voice_overrides(base, {"outbound_greeting": {"delay_ms": 250}})
+        assert out.outbound_greeting.text == GREETING
+        assert out.outbound_greeting.interruptible is True
+        assert out.outbound_greeting.delay_ms == 250
+
+    def test_client_empty_string_silences_outbound_only(self) -> None:
+        from timbal.voice.config import greeting_for_direction
+
+        base = VoiceConfig(greeting=GREETING)
+        out = voice_routes.merge_client_voice_overrides(base, {"outbound_greeting": ""})
+        assert "outbound_greeting" in out.model_fields_set
+        assert greeting_for_direction(out, outbound=True) is None
+        assert greeting_for_direction(out, outbound=False).text == GREETING
+
+    def test_unset_outbound_inherits_after_client_merge(self) -> None:
+        from timbal.voice.config import greeting_for_direction
+
+        base = VoiceConfig(greeting=GREETING)
+        out = voice_routes.merge_client_voice_overrides(base, {"greeting": {"delay_ms": 100}})
+        assert "outbound_greeting" not in out.model_fields_set
+        assert greeting_for_direction(out, outbound=True).delay_ms == 100
+
+    def test_build_voice_session_picks_opener_by_direction(self, monkeypatch) -> None:
+        captured: dict = {}
+
+        class FakeSession:
+            def __init__(self, **kw):
+                captured.update(kw)
+                self.session_id = "s"
+                self.parent_run_id = None
+
+        import timbal.voice as voice_pkg
+
+        monkeypatch.setattr(voice_pkg, "VoiceSession", FakeSession)
+        base = VoiceConfig(greeting="in line", outbound_greeting="out line")
+        agent = Agent(name="a", model=TestModel(responses=["x"]), tools=[])
+
+        _, meta = voice_routes.build_voice_session(agent, base, {"direction": "outbound"})
+        assert captured["greeting"].text == "out line"
+        assert meta["direction"] == "outbound"
+
+        captured.clear()
+        _, meta = voice_routes.build_voice_session(agent, base, {})
+        assert captured["greeting"].text == "in line"
+        assert meta["direction"] is None
+
+        captured.clear()
+        voice_routes.build_voice_session(agent, base, {"direction": "outbound", "outbound_greeting": ""})
+        assert "greeting" not in captured
+
+
 # ---------------------------------------------------------------------------
 # Speaking it
 # ---------------------------------------------------------------------------
@@ -460,6 +540,42 @@ class TestGreetingSpoken:
 
         assert [(e.role, e.text) for e in session.transcript] == [
             ("user", "Hello?"),
+            ("assistant", REPLY),
+        ]
+        assert session._greeting_text == ""
+
+    async def test_after_user_silence_speaks_the_opener_only_when_the_line_stays_quiet(self) -> None:
+        """Wait-for-pickup (Retell ``begin_after_user_silence_ms``, ElevenLabs
+        ``initial_wait_time``): on a call we placed the callee's "hello?" opens
+        turn one; only a silent line gets the opener."""
+        stt = _OpenSTT()
+        session = _make_session(greeting={"text": GREETING, "after_user_silence_secs": 0.3}, stt=stt)
+        silent_at_150ms: list[bool] = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await asyncio.sleep(0.15)
+            silent_at_150ms.append(not any(isinstance(e, AudioOutput) for e in events))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+
+        await _run(session, stt, drive=drive)
+        assert silent_at_150ms == [True]
+        assert [(e.role, e.text) for e in session.transcript] == [("assistant", GREETING)]
+
+    async def test_after_user_silence_yields_to_a_callee_who_speaks_first(self) -> None:
+        stt = _OpenSTT()
+        session = _make_session(greeting={"text": GREETING, "after_user_silence_secs": 0.4}, stt=stt)
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await asyncio.sleep(0.05)
+            await stt.inject(TranscriptEvent(type="committed", text="Yes, hello?"))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.5)  # outlive the window we skipped
+
+        await _run(session, stt, drive=drive)
+        assert [(e.role, e.text) for e in session.transcript] == [
+            ("user", "Yes, hello?"),
             ("assistant", REPLY),
         ]
         assert session._greeting_text == ""

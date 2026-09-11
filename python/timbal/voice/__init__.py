@@ -5,6 +5,7 @@ from .config import (
     FillerConfig,
     GreetingConfig,
     RecordingConfig,
+    UserIdleConfig,
     VoiceConfig,
 )
 from .endpointing import (
@@ -163,6 +164,7 @@ __all__ = [
     "TurnMetrics",
     "TurnMetricsEvent",
     "TurnState",
+    "UserIdleConfig",
     "VadEndpointer",
     "VoiceConfig",
     "VoiceSession",

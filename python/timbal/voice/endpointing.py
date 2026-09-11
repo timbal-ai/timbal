@@ -266,6 +266,19 @@ class VadEndpointer:
         pending endpoint is now stale."""
         self._cancel_pending()
 
+    def last_speech_at(self) -> float | None:
+        """Monotonic time of the last frame Silero called speech, or ``None``.
+
+        ``None`` when the VAD has no recent evidence (not started, starved, or
+        no speech yet) — same caveat as :meth:`speech_secs_in_window`. The
+        session uses this as the user's end-of-speech stamp for STT latency.
+        """
+        if not self._started or not self._recent_speech:
+            return None
+        if time.monotonic() - self._last_frame_at > 1.0:
+            return None
+        return self._recent_speech[-1]
+
     def speech_secs_in_window(self, window_secs: float) -> float | None:
         """Total Silero speech seconds in the trailing ``window_secs``.
 

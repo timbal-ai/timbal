@@ -272,8 +272,11 @@ class TestFillerRepeat:
             prompts.append(messages[-1].collect_text())
             return f"Filler {len(prompts)}."
 
+        # Generous tool time: the follow-up only fires after ``repeat_secs`` of
+        # silence *since the first filler finished*, and a loaded CI runner can
+        # take most of 0.5s just to produce that first one (seen: 1 >= 2).
         session = _make_session(
-            tool_sleep=0.5,
+            tool_sleep=1.5,
             filler={"model": TestModel(handler=handler), "delay_secs": 0.0, "repeat_secs": 0.08},
         )
         await session._run_turn("what is the answer?")

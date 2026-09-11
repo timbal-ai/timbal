@@ -926,6 +926,52 @@ class TestTurnMetrics:
         assert m.audio_bytes == len(chunk) * 2
 
         assert session.metrics == [m]
+        # Commit with no partial before it and no local VAD: nothing to measure from.
+        assert m.speech_end_to_transcript_ms is None and m.speech_end_source is None
+
+    async def test_asr_latency_is_measured_from_the_last_partial_without_a_vad(self) -> None:
+        """Per-user-message ASR latency: end of speech → committed transcript.
+        Without a local Silero VAD the STT's last interim is the stand-in for
+        end of speech, flagged as ``partial`` so a dashboard can label it."""
+        stt = DelayedMockSTT()
+        agent = Agent(name="t", model=TestModel(responses=["Hi!"]), tools=[])
+        session = VoiceSession(agent=agent, stt=stt, tts=MockTTS(), turn_detector="heuristic")
+
+        async def drive() -> None:
+            await asyncio.sleep(0.05)
+            await stt.inject(TranscriptEvent(type="partial", text="hel"))
+            await asyncio.sleep(0.2)  # the transcriber taking its time to finalize
+            await stt.inject(TranscriptEvent(type="committed", text="hello"))
+            await asyncio.sleep(0.3)
+            await stt.finish()
+
+        driver = asyncio.create_task(drive())
+        events = await _collect_events(session)
+        await driver
+        m = next(e for e in events if isinstance(e, TurnMetricsEvent)).metrics
+        assert m.speech_end_source == "partial"
+        assert m.speech_end_to_transcript_ms is not None
+        assert 150 <= m.speech_end_to_transcript_ms <= 600
+
+    async def test_ignored_commits_do_not_steal_the_pending_asr_latency(self) -> None:
+        """A noise commit the detector IGNOREs (mid-HOLD, say) must not overwrite
+        the measurement of the utterance that will actually open the turn."""
+
+        class _Ignoring(TurnDetector):
+            async def on_partial(self, text, state):
+                return None
+
+            async def on_committed(self, text, state):
+                return CommitDecision(action=CommitAction.IGNORE, text=text, reason="noise")
+
+        agent = Agent(name="t", model=TestModel(responses=["Hi!"]), tools=[])
+        session = VoiceSession(agent=agent, stt=DelayedMockSTT(), tts=MockTTS(), turn_detector=_Ignoring())
+        session._pending_stt_latency = (123.0, "partial")  # from an accepted (held) commit
+        session._last_partial_at = session._last_commit_at + 0.05  # something to measure from
+
+        await session._handle_committed("uh")
+
+        assert session._pending_stt_latency == (123.0, "partial")
 
     async def test_final_metrics_persisted_by_serializing_provider(self, tmp_path) -> None:
         """Regression: the agent run's trace is saved (provider put) when the

@@ -146,10 +146,16 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         if config.language:
             params["language_code"] = config.language
         for k, v in extra.items():
-            if v is not None and not k.startswith("_"):
-                params[k] = v
+            if v is None or k.startswith("_"):
+                continue
+            # Booleans go on the wire as ``true`` / ``false``, not ``True``.
+            params[k] = str(v).lower() if isinstance(v, bool) else v
 
-        query = urlencode(params)
+        # ``doseq``: list-valued knobs (``keyterms``, ``secondary_languages``)
+        # become repeated parameters — ``keyterms=Acme&keyterms=Timbal`` — which
+        # is the only spelling Scribe accepts. Without it a list is stringified
+        # into one bogus term (``keyterms=%5B%27Acme%27...``).
+        query = urlencode(params, doseq=True)
         uri = f"wss://{host}/v1/speech-to-text/realtime?{query}"
         self._ws = await ws_connect(
             uri,
