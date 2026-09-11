@@ -153,6 +153,7 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
 _SPARSE_NESTED: tuple[tuple[str, type], ...] = (
     ("filler", FillerConfig),
     ("greeting", GreetingConfig),
+    ("outbound_greeting", GreetingConfig),
     ("ambient", AmbientAudioConfig),
 )
 
@@ -229,7 +230,7 @@ def declared_voice_config(runnable: Any) -> dict[str, Any]:
         return {}
     if ambient is not None:
         out["ambient"] = ambient
-    for nested in ("filler", "greeting"):
+    for nested in ("filler", "greeting", "outbound_greeting"):
         block = out.get(nested)
         if isinstance(block, dict) and "model" in block and not isinstance(block["model"], str):
             block.pop("model")
@@ -250,11 +251,17 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
     vc = _normalize_declared_voice_config(runnable)
     if vc is None:
         return base
-    skip = frozenset({"stt_extra", "tts_extra", "filler", "greeting"})
+    skip = frozenset({"stt_extra", "tts_extra", "filler", "greeting", "outbound_greeting"})
     data = {
-        **base.model_dump(),
+        # ``outbound_greeting`` is tri-state and read via ``model_fields_set``
+        # (unset → inherit ``greeting``; ``""`` → silence; block → opener), so it
+        # must only be present here when the agent actually declared it — a
+        # dumped ``None`` from the env base would read as "declared: silence".
+        **base.model_dump(exclude={"outbound_greeting"}),
         **{k: v for k, v in vc.items() if v is not None and k not in skip},
     }
+    if "outbound_greeting" in vc:
+        data["outbound_greeting"] = vc["outbound_greeting"]
     if isinstance(vc.get("stt_extra"), dict):
         data["stt_extra"] = {**base.stt_extra, **vc["stt_extra"]}
     if isinstance(vc.get("tts_extra"), dict):

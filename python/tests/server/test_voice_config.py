@@ -699,6 +699,41 @@ class TestDeclaredVoiceConfig:
 
         assert voice_routes.declared_voice_config(Garbage()) == {"ambient": {"source": "cafe"}}
 
+    def test_outbound_greeting_is_declared_sparsely_and_resolved_by_direction(self):
+        """``greeting`` is the inbound opener; ``outbound_greeting`` says what to
+        do on a call we placed — a different line, or ``""`` for silence. The
+        session never knows the direction, so the resolver is for the host."""
+        from timbal.voice.config import greeting_for_direction
+
+        class Both:
+            voice_config = {
+                "greeting": "Hey, this is your calorie coach. What have you eaten today?",
+                "outbound_greeting": {"text": "Hi, it's your coach checking in — got a minute?", "delay_ms": 500},
+            }
+
+        declared = voice_routes.declared_voice_config(Both())
+        # A bare string travels as written (the consumer coerces, like ``""``); a block stays sparse.
+        assert declared["greeting"] == "Hey, this is your calorie coach. What have you eaten today?"
+        assert declared["outbound_greeting"] == {"text": "Hi, it's your coach checking in — got a minute?", "delay_ms": 500}
+        merged = voice_routes.merge_voice_config(Both())
+        assert greeting_for_direction(merged, outbound=False).text.startswith("Hey")
+        assert greeting_for_direction(merged, outbound=True).text.startswith("Hi, it's")
+
+        class Quiet:  # inbound opener, silence on outbound
+            voice_config = {"greeting": "Thanks for calling.", "outbound_greeting": ""}
+
+        assert voice_routes.declared_voice_config(Quiet()) == {"greeting": "Thanks for calling.", "outbound_greeting": ""}
+        merged = voice_routes.merge_voice_config(Quiet())
+        assert greeting_for_direction(merged, outbound=False).text == "Thanks for calling."
+        assert greeting_for_direction(merged, outbound=True) is None
+
+        class OnlyInbound:  # unset → the one opener serves both directions
+            voice_config = {"greeting": "Hello there."}
+
+        merged = voice_routes.merge_voice_config(OnlyInbound())
+        assert greeting_for_direction(merged, outbound=True).text == "Hello there."
+        assert "outbound_greeting" not in voice_routes.declared_voice_config(OnlyInbound())
+
     def test_callable_is_resolved(self):
         class R:
             @staticmethod

@@ -225,9 +225,31 @@ class VoiceConfig(BaseModel):
     """None → no spoken tool-call fillers. ``{}`` enables with defaults."""
     greeting: GreetingConfig | None = None
     """None → the session stays reactive (waits for the user to speak first).
-    A bare string is shorthand for ``{"text": ...}``; ``""`` means no greeting."""
+    A bare string is shorthand for ``{"text": ...}``; ``""`` means no greeting.
+    This is the opener for calls the *other side* started (inbound PSTN, a
+    browser joining) and the fallback for outbound — see ``outbound_greeting``."""
+    outbound_greeting: GreetingConfig | None = None
+    """Opener for calls *we* placed (outbound PSTN), where "thanks for calling"
+    is the wrong sentence. Unset → ``greeting`` applies to both directions;
+    ``""`` → speak nothing on outbound and wait for the callee's "hello"; a
+    string / block → that opener on outbound only. Only a host that knows the
+    call direction can apply it (:func:`greeting_for_direction`); the session
+    itself never sees a direction."""
 
-    @field_validator("greeting", mode="before")
+    @field_validator("greeting", "outbound_greeting", mode="before")
     @classmethod
     def _coerce_greeting(cls, v: Any) -> Any:
         return coerce_greeting(v)
+
+
+def greeting_for_direction(config: VoiceConfig, *, outbound: bool) -> GreetingConfig | None:
+    """The opener this call should use, given who placed it.
+
+    Inbound (and anything that is not a phone call we dialled) → ``greeting``.
+    Outbound → ``outbound_greeting`` when the agent set it — including an
+    explicit ``None`` from ``""``, which is how it says "stay quiet" — else
+    ``greeting``.
+    """
+    if outbound and "outbound_greeting" in config.model_fields_set:
+        return config.outbound_greeting
+    return config.greeting
