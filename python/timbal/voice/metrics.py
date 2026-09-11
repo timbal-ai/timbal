@@ -27,6 +27,15 @@ class TurnMetrics(BaseModel):
     run_id: str | None = None
     """Id of the agent run this turn produced, to join metrics against the trace."""
     user_text_chars: int
+    speech_end_to_transcript_ms: float | None = None
+    """The user's ASR latency: their last speech -> the STT's committed
+    transcript arriving. This is the time the user spends waiting on the
+    transcriber, before any ``eou_to_*`` clock starts. ``None`` when there was
+    no end-of-speech evidence to measure from."""
+    speech_end_source: Literal["vad", "partial"] | None = None
+    """What stamped the end of speech: the local Silero VAD's last speech frame
+    (``vad``), or — without a local VAD — the STT's last interim transcript
+    (``partial``), a later and coarser stand-in."""
     eou_to_llm_first_token_ms: float | None = None
     """Committed transcript -> first LLM text delta."""
     eou_to_tts_first_byte_ms: float | None = None

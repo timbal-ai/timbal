@@ -292,6 +292,10 @@ class VoiceSession:
         # committed transcript within a short window is attributed to it.
         self._endpoint_commit_sent_at: float | None = None
         self._turn_vad_endpointed = False
+        # (ms, "vad" | "partial") — the user's ASR wait for this turn's
+        # transcript; measured when the commit arrives, consumed by the turn.
+        self._pending_stt_latency: tuple[float, str] | None = None
+        self._turn_stt_latency: tuple[float, str] | None = None
         self._llm_warmup_task: asyncio.Task[None] | None = None
         # Tool-call filler: an LLM-generated phrase masks tool dead air (see
         # FillerConfig). The generator Agent is built lazily on first use.
@@ -1459,6 +1463,8 @@ class VoiceSession:
             logger.debug("stt_turn_dropped_session_closed", text_preview=final_text[:80])
             return
         self._turn_vad_endpointed = vad_endpointed
+        self._turn_stt_latency = self._pending_stt_latency
+        self._pending_stt_latency = None
         self._last_commit_at = time.monotonic()
         if replace_user_entry and self._transcript and self._transcript[-1].role == "user":
             self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
@@ -1475,10 +1481,36 @@ class VoiceSession:
             **_trace_debug_fields(),
         )
 
+    def _measure_stt_latency(self, transcript_at: float) -> tuple[float, str] | None:
+        """The user's ASR wait: last speech → this committed transcript, in ms.
+
+        End of speech comes from the local Silero VAD when it is running (its
+        last speech frame); without one, the STT's last interim transcript is
+        the coarser stand-in — it already includes some provider latency, so
+        the number reads low. ``None`` when there is nothing to measure from,
+        or the gap is not a plausible latency (a stale stamp from a previous
+        utterance).
+        """
+        speech_end: float | None = None
+        source = ""
+        last_speech_at = getattr(self._endpointer, "last_speech_at", None)
+        if callable(last_speech_at):
+            speech_end = last_speech_at()
+            source = "vad"
+        if speech_end is None and self._last_partial_at > self._last_commit_at:
+            speech_end, source = self._last_partial_at, "partial"
+        if speech_end is None:
+            return None
+        gap = transcript_at - speech_end
+        if gap < 0 or gap > 10.0:
+            return None
+        return round(gap * 1000, 1), source
+
     async def _handle_committed(self, text: str) -> None:
         if self._closed:
             return
         self._commit_event_at = time.monotonic()
+        self._pending_stt_latency = self._measure_stt_latency(self._commit_event_at)
         # Any commit (endpointer-forced or provider debounce) makes a pending
         # VAD endpoint stale — the STT segment it targeted is already closed.
         if self._endpointer is not None:
@@ -3242,10 +3274,13 @@ class VoiceSession:
         eou = self._turn_eou_at or None
         eou_to_first_audio = _ms(eou, self._turn_first_audio_at)
         ctx = get_run_context()
+        stt = self._turn_stt_latency
         return TurnMetrics(
             turn_index=self._turn_index,
             run_id=ctx.id if ctx is not None else None,
             user_text_chars=len(user_text),
+            speech_end_to_transcript_ms=stt[0] if stt else None,
+            speech_end_source=stt[1] if stt else None,  # type: ignore[arg-type]
             eou_to_llm_first_token_ms=_ms(eou, self._turn_first_token_at),
             eou_to_tts_first_byte_ms=eou_to_first_audio,
             eou_to_first_audio_ms=eou_to_first_audio,
