@@ -80,6 +80,10 @@ _CONFIG_PARAM_KEYS = (
     "language",
     "voice",
     "greeting",
+    "outbound_greeting",
+    # Who placed the call — the webhook that dialled knows, the session does
+    # not; ``build_voice_session`` reads it to pick the outbound opener.
+    "direction",
 )
 
 # First-party identity on *our* incoming URL — not Telnyx-logged PII (name,

@@ -199,15 +199,46 @@
     cursor: not-allowed;
     opacity: 0.65;
   }
-  .model-picker {
+  /* Read-only view of the agent's declared voice_config (from /voice/meta).
+     Key above value — the panel is 220px, too narrow for two columns once
+     keys like outbound_greeting.after_user_silence_secs show up. Nested
+     blocks are flattened to dotted keys so a greeting.delay_ms is one entry. */
+  .declared-list {
     display: flex;
     flex-direction: column;
-    gap: 0.55rem;
+    gap: 0.4rem;
+    margin: 0;
+    font-size: 0.6875rem;
+    line-height: 1.35;
   }
-  .model-count {
-    font-size: 0.65625rem;
+  .declared-list[hidden] { display: none !important; }
+  .declared-list dt {
     color: var(--text-muted);
-    margin-top: -0.15rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.625rem;
+    overflow-wrap: anywhere;
+  }
+  .declared-list dd {
+    margin: 0 0 0 0.5rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .declared-list dd.declared-empty { color: var(--text-muted); font-style: italic; }
+  /* Greeting sections: the one the simulated direction will not use is dimmed
+     (still editable — its values are sent, the server just picks the other). */
+  .panel-section.direction-idle { opacity: 0.55; }
+  .panel-section.direction-idle:hover,
+  .panel-section.direction-idle:focus-within { opacity: 1; }
+  .direction-tag {
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    margin-left: 0.35rem;
   }
   .panel-note {
     font-size: 0.6875rem;
@@ -236,8 +267,9 @@
     .panel { flex-basis: 220px; }
     .panel--session { flex-basis: 600px; }
     /* Explicit 2-track grid, not CSS columns: pairing is by section (pipeline
-       next to greeting, filler next to ambience) so the tops line up instead
-       of packing by height and leaving a ragged right edge. */
+       next to turn taking, inbound next to outbound greeting, filler next to
+       user idle, ambience next to advanced) so the tops line up instead of
+       packing by height and leaving a ragged right edge. */
     .panel-sections {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -740,23 +772,9 @@
             <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
           </div>
         </div>
-        <div class="model-picker" title="Agent LLM — applied on the next Start. Needs the matching provider API key on the server.">
-          <label class="field">
-            <span class="field-label">Provider</span>
-            <select id="model-provider-select" aria-label="LLM provider">
-              <option value="">All providers</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Model</span>
-            <select id="model-select" aria-label="LLM model">
-              <option value="">Agent default</option>
-            </select>
-          </label>
-          <span id="model-count" class="model-count"></span>
-        </div>
+        <dl id="conn-declared" class="declared-list" hidden aria-label="Agent voice_config"></dl>
       </section>
-      <p class="panel-note">Changes apply on the next session Start. Model overrides need the matching provider API key on the server.</p>
+      <p class="panel-note">The agent's own <code>voice_config</code> is listed above. Every knob on the right that says “Server default” defers to it; set one to override it for the next Start only.</p>
     </aside>
 
     <main id="card" class="card">
@@ -803,6 +821,13 @@
             <option value="ws">WebSocket (PCM)</option>
             <option value="webrtc">WebRTC (Opus)</option>
             <option value="livekit">LiveKit (SFU)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Simulate</span>
+          <select id="direction-select" aria-label="Call direction" title="Which side placed the call — applied on the next Start. Inbound: you dialled in, the agent answers with its greeting. Outbound: the agent called you, so it uses outbound_greeting (falling back to greeting when the agent declares none, staying silent when it declares ''). Only the opener changes; the rest of the session is identical.">
+            <option value="inbound">Inbound call</option>
+            <option value="outbound">Outbound call</option>
           </select>
         </label>
       </div>
@@ -853,14 +878,55 @@
                 <option value="">Server default</option>
               </select>
             </label>
+            <label class="field">
+              <span class="field-label">Language</span>
+              <input type="text" id="language-input" aria-label="Language" placeholder="auto" data-vc="language"
+                     title="ISO code passed to STT and TTS (en, es, ar…). Empty = server default; the agent's default is provider auto-detect.">
+            </label>
+            <label class="field">
+              <span class="field-label">Voice ID</span>
+              <input type="text" id="voice-input" aria-label="TTS voice id" placeholder="Server default" data-vc="voice"
+                     title="Provider voice id for TTS (ElevenLabs voice id, Fish reference id…). Applied on the next Start.">
+            </label>
           </div>
         </section>
-        <section class="panel-section" aria-label="Greeting">
-          <h3 class="panel-section-title">Greeting</h3>
+        <section class="panel-section" aria-label="Turn taking">
+          <h3 class="panel-section-title">Turn taking</h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">VAD endpointing</span>
+              <select id="vad-select" aria-label="VAD endpointing" title="Local Silero VAD fast path that commits the STT on silence — applied on the next Start. Auto = on when the turn detector has an audio EOU model. Always off for Flux/Munsit (they own end-of-turn).">
+                <option value="">Server default (auto)</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Turn timeout (s)</span>
+              <input type="number" id="turn-timeout" min="1" max="600" step="1" aria-label="Turn timeout" placeholder="Server default" data-vc="turn_timeout_secs"
+                     title="Wall-clock budget for one agent turn (LLM + tools). Past it the turn is cancelled and the fallback line is spoken.">
+            </label>
+            <label class="field">
+              <span class="field-label">Timeout apology</span>
+              <select id="turn-fallback-select" aria-label="Turn timeout fallback" title="What the agent says when a turn times out. Off = cancel silently; Custom = the line on the right.">
+                <option value="">Server default</option>
+                <option value="off">Off (silent)</option>
+                <option value="custom">Custom line</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Apology text</span>
+              <input type="text" id="turn-fallback-text" aria-label="Turn timeout fallback text" placeholder="Server default" data-vc="turn_timeout_fallback"
+                     title="Spoken when a turn times out. Only used when the apology is set to Custom.">
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" id="greeting-section" aria-label="Greeting (inbound)">
+          <h3 class="panel-section-title">Greeting <span class="direction-tag" id="greeting-tag"></span></h3>
           <div class="panel-grid">
             <label class="field">
               <span class="field-label">Enabled</span>
-              <select id="greeting-select" aria-label="Greeting" title="Agent speaks first, before you say anything. 'Server default' uses whatever the agent's voice_config sets; 'Off' silences the opener for this call only. Applied on the next Start.">
+              <select id="greeting-select" aria-label="Greeting" title="Agent speaks first, before you say anything. 'Server default' uses whatever the agent's voice_config sets; 'Off' silences the opener for this call only. Applied on the next Start. On an outbound call this block is the fallback when no outbound greeting is declared.">
                 <option value="">Server default</option>
                 <option value="off">Off</option>
                 <option value="on">On</option>
@@ -876,18 +942,74 @@
             </label>
             <label class="field">
               <span class="field-label">Delay (ms)</span>
-              <input type="number" id="greeting-delay" min="0" max="10000" step="100" aria-label="Greeting delay" placeholder="0"
+              <input type="number" id="greeting-delay" min="0" max="10000" step="100" aria-label="Greeting delay" placeholder="0" data-vc="greeting.delay_ms"
                      title="Silence held before the opener speaks. Mimics a carrier connecting the media stream before the callee has the handset up.">
             </label>
             <label class="field">
+              <span class="field-label">Wait for them (s)</span>
+              <input type="number" id="greeting-wait" min="0" max="30" step="0.5" aria-label="Greeting after user silence" placeholder="off" data-vc="greeting.after_user_silence_secs"
+                     title="Let the other side speak first: hold the opener this long after the delay, and skip it if they say anything (their words open turn one). Speak it anyway when the line stays silent — hesitant callee, voicemail beep. Empty = speak the opener right after the delay.">
+            </label>
+            <label class="field">
               <span class="field-label">Text</span>
-              <input type="text" id="greeting-text" aria-label="Greeting text" placeholder="Server default"
+              <input type="text" id="greeting-text" aria-label="Greeting text" placeholder="Server default" data-vc="greeting.text"
                      title="Exact words to say — straight to TTS, no LLM turn (~300ms to first audio). Wins over Instructions when both are set.">
+            </label>
+            <label class="field">
+              <span class="field-label">Generator model</span>
+              <input type="text" id="greeting-model" aria-label="Greeting generator model" placeholder="Session LLM" data-vc="greeting.model"
+                     title="provider/model used to write the opener from Instructions. Empty = the session's own LLM. Unused when Text is set.">
             </label>
             <label class="field field-wide">
               <span class="field-label">Instructions</span>
-              <input type="text" id="greeting-instructions" aria-label="Greeting instructions" placeholder="e.g. greet them by name and say why you are calling"
+              <input type="text" id="greeting-instructions" aria-label="Greeting instructions" placeholder="e.g. greet them by name and say why you are calling" data-vc="greeting.instructions"
                      title="Brief for an LLM-authored opener, written against the agent's own system prompt (~1.5s to first audio). Ignored when Text is set.">
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" id="outbound-section" aria-label="Greeting (outbound)">
+          <h3 class="panel-section-title">Outbound greeting <span class="direction-tag" id="outbound-tag"></span></h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Enabled</span>
+              <select id="outbound-select" aria-label="Outbound greeting" title="Opener for calls the agent placed — only used when Simulate is set to Outbound. 'Server default' = the agent's outbound_greeting, or its greeting when none is declared. 'Off' = say nothing and wait for the callee's hello. 'On' = the fields below, deep-merged over that default.">
+                <option value="">Server default</option>
+                <option value="off">Off (wait for hello)</option>
+                <option value="on">On</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Interruptible</span>
+              <select id="outbound-interruptible" aria-label="Outbound greeting interruptible" title="No = talking over the opener will not cut it off. Yes = barge-in truncates it like any reply.">
+                <option value="">Server default</option>
+                <option value="no">No (hold)</option>
+                <option value="yes">Yes (barge-in)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Delay (ms)</span>
+              <input type="number" id="outbound-delay" min="0" max="10000" step="100" aria-label="Outbound greeting delay" placeholder="0" data-vc="outbound_greeting.delay_ms"
+                     title="Silence held before the opener speaks — the beat between the carrier answering and the callee having the handset up.">
+            </label>
+            <label class="field">
+              <span class="field-label">Wait for them (s)</span>
+              <input type="number" id="outbound-wait" min="0" max="30" step="0.5" aria-label="Outbound greeting after user silence" placeholder="off" data-vc="outbound_greeting.after_user_silence_secs"
+                     title="The normal outbound pickup: hold the opener and let the callee's 'hello?' open turn one; speak the opener only if they stay silent this long (voicemail, hesitation).">
+            </label>
+            <label class="field">
+              <span class="field-label">Text</span>
+              <input type="text" id="outbound-text" aria-label="Outbound greeting text" placeholder="Server default" data-vc="outbound_greeting.text"
+                     title="Exact words to say — straight to TTS. Wins over Instructions when both are set.">
+            </label>
+            <label class="field">
+              <span class="field-label">Generator model</span>
+              <input type="text" id="outbound-model" aria-label="Outbound greeting generator model" placeholder="Session LLM" data-vc="outbound_greeting.model"
+                     title="provider/model used to write the opener from Instructions. Empty = the session's own LLM.">
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">Instructions</span>
+              <input type="text" id="outbound-instructions" aria-label="Outbound greeting instructions" placeholder="e.g. say who you are and why you are calling, then ask if now is a good time" data-vc="outbound_greeting.instructions"
+                     title="Brief for an LLM-authored opener. Ignored when Text is set.">
             </label>
           </div>
         </section>
@@ -904,23 +1026,76 @@
             </label>
             <label class="field">
               <span class="field-label">Delay (s)</span>
-              <input type="number" id="filler-delay" min="0" max="10" step="0.1" aria-label="Filler grace delay" placeholder="1.0"
+              <input type="number" id="filler-delay" min="0" max="10" step="0.1" aria-label="Filler grace delay" placeholder="1.0" data-vc="filler.delay_secs"
                      title="Grace period before the filler speaks — tools that finish sooner stay silent. Only used when filler speech is On.">
             </label>
             <label class="field">
               <span class="field-label">Repeat (s)</span>
-              <input type="number" id="filler-repeat" min="0" max="60" step="0.5" aria-label="Filler repeat interval" placeholder="off"
+              <input type="number" id="filler-repeat" min="0" max="60" step="0.5" aria-label="Filler repeat interval" placeholder="off" data-vc="filler.repeat_secs"
                      title="If the agent is still working this long after the previous filler with nothing spoken, say a short follow-up ('still on it…'). Empty or 0 = one filler max. Only used when filler speech is On.">
             </label>
             <label class="field">
               <span class="field-label">Max per turn</span>
-              <input type="number" id="filler-max" min="1" max="10" step="1" aria-label="Max fillers per turn" placeholder="3"
+              <input type="number" id="filler-max" min="1" max="10" step="1" aria-label="Max fillers per turn" placeholder="3" data-vc="filler.max_per_turn"
                      title="Hard cap on fillers per turn when repeating. Only used when filler speech is On.">
+            </label>
+            <label class="field">
+              <span class="field-label">Gen. timeout (s)</span>
+              <input type="number" id="filler-timeout" min="0.5" max="30" step="0.5" aria-label="Filler generation timeout" placeholder="5.0" data-vc="filler.timeout_secs"
+                     title="Deadline for the filler LLM after the grace delay; past it the filler is skipped silently. Only used when filler speech is On.">
+            </label>
+            <label class="field">
+              <span class="field-label">Generator model</span>
+              <input type="text" id="filler-model" aria-label="Filler generator model" placeholder="Session LLM" data-vc="filler.model"
+                     title="provider/model that writes the filler phrase — something fast and cheap is best. Empty = the session's own LLM. Only used when filler speech is On.">
             </label>
             <label class="field field-wide">
               <span class="field-label">Generator prompt</span>
-              <input type="text" id="filler-prompt" aria-label="Filler generator prompt" placeholder="Built-in generator prompt"
+              <input type="text" id="filler-prompt" aria-label="Filler generator prompt" placeholder="Built-in generator prompt" data-vc="filler.system_prompt"
                      title="System prompt for the filler-generating LLM. Empty keeps the server's prompt (or the built-in one). Only used when filler speech is On.">
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" aria-label="User idle">
+          <h3 class="panel-section-title">User idle</h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Enabled</span>
+              <select id="idle-select" aria-label="User idle re-engagement" title="What happens when you stop talking after the agent finishes: a spoken check-in ('still there?') after a silence, and optionally a hang-up. 'Server default' uses the agent's voice_config; 'Off' waits forever for this call. Applied on the next Start.">
+                <option value="">Server default</option>
+                <option value="off">Off (wait forever)</option>
+                <option value="on">On</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Silence (s)</span>
+              <input type="number" id="idle-timeout" min="1" max="120" step="0.5" aria-label="User idle timeout" placeholder="8" data-vc="user_idle.timeout_secs"
+                     title="Seconds of your silence — counted from when the agent's last audio drained — before it speaks a prompt. Re-arms after each prompt.">
+            </label>
+            <label class="field">
+              <span class="field-label">Max prompts</span>
+              <input type="number" id="idle-max" min="0" max="10" step="1" aria-label="User idle max prompts" placeholder="2" data-vc="user_idle.max_count"
+                     title="Prompts per call, then silence. 0 = never prompt, only hang up (needs Hang up after).">
+            </label>
+            <label class="field">
+              <span class="field-label">Hang up after (s)</span>
+              <input type="number" id="idle-hangup" min="1" max="600" step="1" aria-label="User idle hang-up" placeholder="never" data-vc="user_idle.hangup_after_secs"
+                     title="Seconds since your last word (or since the call started) after which the session ends. The agent's own prompts do not reset it. Empty = never hang up on silence.">
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">Text (| separates rotating lines)</span>
+              <input type="text" id="idle-text" aria-label="User idle text" placeholder="Server default" data-vc="user_idle.text"
+                     title="Static line(s) to say. Separate several with | to rotate through them in order. Wins over Instructions when set.">
+            </label>
+            <label class="field">
+              <span class="field-label">Instructions</span>
+              <input type="text" id="idle-instructions" aria-label="User idle instructions" placeholder="e.g. ask if they are still there" data-vc="user_idle.instructions"
+                     title="Brief for an LLM-authored check-in, in the agent's own voice and language. Ignored when Text is set.">
+            </label>
+            <label class="field">
+              <span class="field-label">Generator model</span>
+              <input type="text" id="idle-model" aria-label="User idle generator model" placeholder="Session LLM" data-vc="user_idle.model"
+                     title="provider/model that writes the check-in from Instructions. Empty = the session's own LLM.">
             </label>
           </div>
         </section>
@@ -942,6 +1117,26 @@
             <label class="field field-inline field-wide">
               <input type="checkbox" id="thinking-sound" aria-label="Thinking sound">
               <span class="field-label">Thinking sound while tools run</span>
+            </label>
+          </div>
+        </section>
+        <section class="panel-section" aria-label="Advanced">
+          <h3 class="panel-section-title">Advanced</h3>
+          <div class="panel-grid">
+            <label class="field field-wide">
+              <span class="field-label">STT model</span>
+              <input type="text" id="stt-model-input" aria-label="STT model" placeholder="Server default" data-vc="stt_model"
+                     title="Provider model id (scribe_v2_realtime, nova-3, flux-general-en…). Must match the selected STT provider — a foreign id falls back to the provider's default.">
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">STT extra (JSON)</span>
+              <input type="text" id="stt-extra-input" aria-label="STT extra" placeholder='{"vad_silence_threshold_secs": 0.8}'
+                     title="Tuning knobs merged over the server's stt_extra — allow-listed server-side (VAD thresholds, endpointing, keyterms…); hosts and callbacks are dropped.">
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">TTS extra (JSON)</span>
+              <input type="text" id="tts-extra-input" aria-label="TTS extra" placeholder='{"speed": 1.1, "stability": 0.5}'
+                     title="Tuning knobs merged over the server's tts_extra — allow-listed server-side (speed, stability, dialect, auto_mode…).">
             </label>
           </div>
         </section>
@@ -1004,72 +1199,276 @@ tdSelect.onchange = () => {
   localStorage.setItem(TD_STORAGE_KEY, tdSelect.value);
 };
 
-// Tool-call filler override — sent in the session config, applied on the next
-// Start. '' defers entirely to the server's voice_config.
+// --- Voice-config overrides -------------------------------------------------
+// Every control below maps onto a VoiceConfig key the server lets a client
+// set (CLIENT_SETTABLE_VOICE_FIELDS). They are sent in the session hello and
+// applied on the next Start; '' / empty always means "defer to the server's
+// voice_config", never "clear it" — the one exception is the explicit 'off'
+// option on nested blocks, which sends '' so the server drops its default.
+
+/** Restore an input/select from localStorage under `key` and save it on every change (`onChange` runs after each save). */
+function persist(el, key, onChange) {
+  el.value = localStorage.getItem(key) || '';
+  if (el.tagName === 'SELECT' && ![...el.options].some((o) => o.value === el.value)) el.value = '';
+  el.addEventListener('change', () => {
+    localStorage.setItem(key, el.value);
+    if (onChange) onChange();
+  });
+}
+function numOrNull(el, { min = -Infinity, integer = false } = {}) {
+  const raw = el.value.trim();
+  if (!raw) return null;
+  const n = integer ? parseInt(raw, 10) : parseFloat(raw);
+  return Number.isFinite(n) && n >= min ? n : null;
+}
+function jsonObjectOrNull(el) {
+  const raw = el.value.trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+/** Red border + hint on a JSON field that will not be sent. */
+function markJson(el, okTitle) {
+  const bad = el.value.trim() && !jsonObjectOrNull(el);
+  el.style.borderColor = bad ? 'var(--danger)' : '';
+  el.title = bad ? 'Not a JSON object — this will not be sent.' : okTitle;
+}
+
+// Pipeline: language + TTS voice id (plain VoiceConfig scalars).
+const languageInput = document.getElementById('language-input');
+const voiceInput = document.getElementById('voice-input');
+persist(languageInput, 'timbal-voice-language');
+persist(voiceInput, 'timbal-voice-voice-id');
+
+// Turn taking: vad_endpointing / turn_timeout_secs / turn_timeout_fallback.
+const vadSelect = document.getElementById('vad-select');
+const turnTimeoutInput = document.getElementById('turn-timeout');
+const turnFallbackSelect = document.getElementById('turn-fallback-select');
+const turnFallbackText = document.getElementById('turn-fallback-text');
+persist(vadSelect, 'timbal-voice-vad-endpointing');
+persist(turnTimeoutInput, 'timbal-voice-turn-timeout');
+persist(turnFallbackSelect, 'timbal-voice-turn-fallback-mode', syncTurnInputs);
+persist(turnFallbackText, 'timbal-voice-turn-fallback-text');
+function syncTurnInputs() {
+  turnFallbackText.disabled = turnFallbackSelect.value !== 'custom';
+}
+syncTurnInputs();
+
+// Tool-call filler override.
 const fillerSelect = document.getElementById('filler-select');
 const fillerPrompt = document.getElementById('filler-prompt');
 const fillerDelay = document.getElementById('filler-delay');
 const fillerRepeat = document.getElementById('filler-repeat');
 const fillerMax = document.getElementById('filler-max');
-const FILLER_MODE_STORAGE_KEY = 'timbal-voice-filler-mode';
-const FILLER_PROMPT_STORAGE_KEY = 'timbal-voice-filler-prompt';
-const FILLER_DELAY_STORAGE_KEY = 'timbal-voice-filler-delay';
-const FILLER_REPEAT_STORAGE_KEY = 'timbal-voice-filler-repeat';
-const FILLER_MAX_STORAGE_KEY = 'timbal-voice-filler-max';
-fillerSelect.value = localStorage.getItem(FILLER_MODE_STORAGE_KEY) || '';
-fillerPrompt.value = localStorage.getItem(FILLER_PROMPT_STORAGE_KEY) || '';
-fillerDelay.value = localStorage.getItem(FILLER_DELAY_STORAGE_KEY) || '';
-fillerRepeat.value = localStorage.getItem(FILLER_REPEAT_STORAGE_KEY) || '';
-fillerMax.value = localStorage.getItem(FILLER_MAX_STORAGE_KEY) || '';
+const fillerTimeout = document.getElementById('filler-timeout');
+const fillerModel = document.getElementById('filler-model');
+const FILLER_INPUTS = [fillerPrompt, fillerDelay, fillerRepeat, fillerMax, fillerTimeout, fillerModel];
+persist(fillerSelect, 'timbal-voice-filler-mode', syncFillerInputs);
+persist(fillerPrompt, 'timbal-voice-filler-prompt');
+persist(fillerDelay, 'timbal-voice-filler-delay');
+persist(fillerRepeat, 'timbal-voice-filler-repeat');
+persist(fillerMax, 'timbal-voice-filler-max');
+persist(fillerTimeout, 'timbal-voice-filler-timeout');
+persist(fillerModel, 'timbal-voice-filler-model');
 function syncFillerInputs() {
   const on = fillerSelect.value === 'on';
-  for (const el of [fillerPrompt, fillerDelay, fillerRepeat, fillerMax]) el.disabled = !on;
+  for (const el of FILLER_INPUTS) el.disabled = !on;
 }
 syncFillerInputs();
-fillerSelect.onchange = () => {
-  localStorage.setItem(FILLER_MODE_STORAGE_KEY, fillerSelect.value);
-  syncFillerInputs();
-};
-fillerPrompt.onchange = () => localStorage.setItem(FILLER_PROMPT_STORAGE_KEY, fillerPrompt.value);
-fillerDelay.onchange = () => localStorage.setItem(FILLER_DELAY_STORAGE_KEY, fillerDelay.value);
-fillerRepeat.onchange = () => localStorage.setItem(FILLER_REPEAT_STORAGE_KEY, fillerRepeat.value);
-fillerMax.onchange = () => localStorage.setItem(FILLER_MAX_STORAGE_KEY, fillerMax.value);
 
-// Greeting override — the agent-speaks-first opener. Same lifecycle as the
-// filler block: sent in the session config, applied on the next Start, ''
-// defers to the server's voice_config.
-const greetingSelect = document.getElementById('greeting-select');
-const greetingText = document.getElementById('greeting-text');
-const greetingInstructions = document.getElementById('greeting-instructions');
-const greetingInterruptible = document.getElementById('greeting-interruptible');
-const greetingDelay = document.getElementById('greeting-delay');
-const GREETING_FIELDS = [
-  [greetingSelect, 'timbal-voice-greeting-mode'],
-  [greetingText, 'timbal-voice-greeting-text'],
-  [greetingInstructions, 'timbal-voice-greeting-instructions'],
-  [greetingInterruptible, 'timbal-voice-greeting-interruptible'],
-  [greetingDelay, 'timbal-voice-greeting-delay'],
-];
-for (const [el, key] of GREETING_FIELDS) {
-  el.value = localStorage.getItem(key) || '';
-  el.onchange = () => {
-    localStorage.setItem(key, el.value);
-    syncGreetingInputs();
+// Greeting overrides — one block per call direction. `greeting` is the
+// inbound opener (and the outbound fallback); `outbound_greeting` is the
+// opener for calls the agent placed. Which one the server uses is decided by
+// the Simulate control, sent as `direction` on the hello.
+function greetingBlock(prefix, storagePrefix, defaultInstructions) {
+  const b = {
+    select: document.getElementById(`${prefix}-select`),
+    text: document.getElementById(`${prefix}-text`),
+    instructions: document.getElementById(`${prefix}-instructions`),
+    interruptible: document.getElementById(`${prefix}-interruptible`),
+    delay: document.getElementById(`${prefix}-delay`),
+    wait: document.getElementById(`${prefix}-wait`),
+    model: document.getElementById(`${prefix}-model`),
   };
+  b.inputs = [b.text, b.instructions, b.interruptible, b.delay, b.wait, b.model];
+  const sync = () => {
+    const on = b.select.value === 'on';
+    for (const el of b.inputs) el.disabled = !on;
+    // text wins over instructions server-side — say so rather than letting a
+    // filled-in brief look like it is being used.
+    b.instructions.placeholder = (on && b.text.value.trim()) ? 'Ignored — Text takes precedence' : defaultInstructions;
+    b.model.placeholder = (on && b.text.value.trim()) ? 'Unused — Text needs no LLM' : 'Session LLM';
+  };
+  persist(b.select, `${storagePrefix}-mode`, sync);
+  persist(b.text, `${storagePrefix}-text`, sync);
+  persist(b.instructions, `${storagePrefix}-instructions`);
+  persist(b.interruptible, `${storagePrefix}-interruptible`);
+  persist(b.delay, `${storagePrefix}-delay`);
+  persist(b.wait, `${storagePrefix}-wait`);
+  persist(b.model, `${storagePrefix}-model`);
+  b.text.addEventListener('input', sync);
+  sync();
+  /** Hello value for this block: '' (off), a sparse patch (on), or undefined (server default). */
+  b.payload = () => {
+    if (b.select.value === 'off') return ''; // the only spelling that subtracts a nested default
+    if (b.select.value !== 'on') return undefined;
+    // Deep-merged over the server's block, so empty fields keep its values. A
+    // server with nothing declared needs text or instructions here, otherwise
+    // the patch fails validation and the server keeps its default.
+    const g = {};
+    if (b.text.value.trim()) g.text = b.text.value.trim();
+    if (b.instructions.value.trim()) g.instructions = b.instructions.value.trim();
+    if (b.interruptible.value) g.interruptible = b.interruptible.value === 'yes';
+    const delay = numOrNull(b.delay, { min: 0, integer: true });
+    if (delay !== null) g.delay_ms = delay;
+    const wait = numOrNull(b.wait, { min: 0 });
+    if (wait !== null && wait > 0) g.after_user_silence_secs = wait;
+    if (b.model.value.trim().includes('/')) g.model = b.model.value.trim();
+    return g;
+  };
+  return b;
 }
-function syncGreetingInputs() {
-  const on = greetingSelect.value === 'on';
-  for (const el of [greetingText, greetingInstructions, greetingInterruptible, greetingDelay]) {
-    el.disabled = !on;
+const greeting = greetingBlock('greeting', 'timbal-voice-greeting', 'e.g. greet them by name and say why you are calling');
+const outbound = greetingBlock('outbound', 'timbal-voice-outbound-greeting', 'e.g. say who you are and why you are calling, then ask if now is a good time');
+
+// Simulated call direction. The session itself never knows who placed the
+// call; the host does, and in the playground that host is this page.
+const directionSelect = document.getElementById('direction-select');
+persist(directionSelect, 'timbal-voice-direction', syncDirection);
+if (!directionSelect.value) directionSelect.value = 'inbound';
+function syncDirection() {
+  const out = directionSelect.value === 'outbound';
+  document.getElementById('greeting-section').classList.toggle('direction-idle', out);
+  document.getElementById('outbound-section').classList.toggle('direction-idle', !out);
+  // Say which block the next Start will actually speak. Outbound falls back
+  // to the inbound block unless outbound_greeting is declared somewhere.
+  const outboundDeclared = outbound.select.value !== '' || (declaredVoiceConfig && 'outbound_greeting' in declaredVoiceConfig);
+  document.getElementById('greeting-tag').textContent = out
+    ? (outboundDeclared ? '— not used on outbound' : '— used: no outbound greeting declared')
+    : '— used on this call';
+  document.getElementById('outbound-tag').textContent = out
+    ? (outboundDeclared ? '— used on this call' : '— nothing declared, inbound block applies')
+    : '— not used on inbound';
+}
+outbound.select.addEventListener('change', syncDirection);
+
+// User idle re-engagement (`user_idle`). Same lifecycle as filler/greeting:
+// 'off' sends '' so the server drops its default for this call.
+const idleSelect = document.getElementById('idle-select');
+const idleTimeout = document.getElementById('idle-timeout');
+const idleMax = document.getElementById('idle-max');
+const idleHangup = document.getElementById('idle-hangup');
+const idleText = document.getElementById('idle-text');
+const idleInstructions = document.getElementById('idle-instructions');
+const idleModel = document.getElementById('idle-model');
+const IDLE_INPUTS = [idleTimeout, idleMax, idleHangup, idleText, idleInstructions, idleModel];
+persist(idleSelect, 'timbal-voice-idle-mode', syncIdleInputs);
+persist(idleTimeout, 'timbal-voice-idle-timeout');
+persist(idleMax, 'timbal-voice-idle-max');
+persist(idleHangup, 'timbal-voice-idle-hangup');
+persist(idleText, 'timbal-voice-idle-text', syncIdleInputs);
+persist(idleInstructions, 'timbal-voice-idle-instructions');
+persist(idleModel, 'timbal-voice-idle-model');
+function syncIdleInputs() {
+  const on = idleSelect.value === 'on';
+  for (const el of IDLE_INPUTS) el.disabled = !on;
+  idleInstructions.placeholder = (on && idleText.value.trim()) ? 'Ignored — Text takes precedence' : 'e.g. ask if they are still there';
+}
+idleText.addEventListener('input', syncIdleInputs);
+syncIdleInputs();
+function userIdlePayload() {
+  if (idleSelect.value === 'off') return '';
+  if (idleSelect.value !== 'on') return undefined;
+  const u = {};
+  const timeout = numOrNull(idleTimeout, { min: 0 });
+  if (timeout !== null && timeout > 0) u.timeout_secs = timeout;
+  const maxCount = numOrNull(idleMax, { min: 0, integer: true });
+  if (maxCount !== null) u.max_count = maxCount;
+  const hangup = numOrNull(idleHangup, { min: 0 });
+  if (hangup !== null && hangup > 0) u.hangup_after_secs = hangup;
+  const lines = idleText.value.split('|').map((s) => s.trim()).filter(Boolean);
+  if (lines.length === 1) u.text = lines[0];
+  else if (lines.length > 1) u.text = lines;
+  if (idleInstructions.value.trim()) u.instructions = idleInstructions.value.trim();
+  if (idleModel.value.trim().includes('/')) u.model = idleModel.value.trim();
+  return u;
+}
+
+// Advanced: stt_model + allow-listed stt_extra / tts_extra tuning.
+const sttModelInput = document.getElementById('stt-model-input');
+const sttExtraInput = document.getElementById('stt-extra-input');
+const ttsExtraInput = document.getElementById('tts-extra-input');
+persist(sttModelInput, 'timbal-voice-stt-model');
+persist(sttExtraInput, 'timbal-voice-stt-extra');
+persist(ttsExtraInput, 'timbal-voice-tts-extra');
+const STT_EXTRA_TITLE = sttExtraInput.title;
+const TTS_EXTRA_TITLE = ttsExtraInput.title;
+sttExtraInput.addEventListener('input', () => markJson(sttExtraInput, STT_EXTRA_TITLE));
+ttsExtraInput.addEventListener('input', () => markJson(ttsExtraInput, TTS_EXTRA_TITLE));
+markJson(sttExtraInput, STT_EXTRA_TITLE);
+markJson(ttsExtraInput, TTS_EXTRA_TITLE);
+
+// The agent's declared voice_config (from meta) — drives placeholders and the
+// read-only list in the Agent panel. null until a server answers.
+let declaredVoiceConfig = null;
+/** Flatten {greeting: {text: 'x'}} → [['greeting.text', 'x'], …] for display and placeholders. */
+function flattenDeclared(obj, prefix = '') {
+  const out = [];
+  for (const [k, v] of Object.entries(obj || {})) {
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (v && typeof v === 'object' && !Array.isArray(v)) out.push(...flattenDeclared(v, key));
+    else out.push([key, v]);
   }
-  // text wins over instructions server-side — say so rather than letting a
-  // filled-in brief look like it is being used.
-  greetingInstructions.placeholder = (on && greetingText.value.trim())
-    ? 'Ignored — Text takes precedence'
-    : 'e.g. greet them by name and say why you are calling';
+  return out;
 }
-syncGreetingInputs();
-greetingText.oninput = syncGreetingInputs;
+function declaredLabel(v) {
+  if (v === null || v === undefined) return 'none';
+  if (v === '') return '"" (off)';
+  if (Array.isArray(v)) return v.map(String).join(' | ');
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  return String(v);
+}
+function applyDeclaredVoiceConfig(vc) {
+  declaredVoiceConfig = vc && typeof vc === 'object' ? { ...vc } : null;
+  // A bare string is the agent's shorthand for {text: …}; '' declares silence.
+  for (const k of ['greeting', 'outbound_greeting']) {
+    if (declaredVoiceConfig && typeof declaredVoiceConfig[k] === 'string') {
+      declaredVoiceConfig[k] = declaredVoiceConfig[k].trim() ? { text: declaredVoiceConfig[k] } : '';
+    }
+  }
+  const flat = flattenDeclared(declaredVoiceConfig);
+  const byKey = new Map(flat);
+  // Placeholders: every input tagged data-vc shows the agent's own value as
+  // its "server default", so the label is a fact instead of a shrug.
+  for (const el of document.querySelectorAll('[data-vc]')) {
+    if (!el.dataset.defaultPlaceholder) el.dataset.defaultPlaceholder = el.placeholder;
+    const has = byKey.has(el.dataset.vc);
+    el.placeholder = has ? declaredLabel(byKey.get(el.dataset.vc)) : el.dataset.defaultPlaceholder;
+  }
+  const list = document.getElementById('conn-declared');
+  list.innerHTML = '';
+  if (!declaredVoiceConfig || !flat.length) {
+    list.hidden = true;
+    syncDirection();
+    return;
+  }
+  for (const [k, v] of flat) {
+    const dt = document.createElement('dt');
+    dt.textContent = k;
+    const dd = document.createElement('dd');
+    dd.textContent = declaredLabel(v);
+    if (v === null || v === undefined || v === '') dd.classList.add('declared-empty');
+    dd.title = typeof v === 'string' ? v : '';
+    list.append(dt, dd);
+  }
+  list.hidden = false;
+  syncDirection();
+}
+syncDirection();
 
 // Per-call identity for a callable system_prompt. Hidden unless the server
 // reports TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT — otherwise it would be a
@@ -1205,107 +1604,6 @@ ttsSelect.onchange = () => {
 ttsModelSelect.onchange = () => {
   localStorage.setItem(TTS_MODEL_STORAGE_KEY, ttsModelSelect.value);
 };
-
-const modelSelect = document.getElementById('model-select');
-const modelProviderSelect = document.getElementById('model-provider-select');
-const modelCountEl = document.getElementById('model-count');
-const MODEL_STORAGE_KEY = 'timbal-voice-llm-model';
-const PROVIDER_LABELS = {
-  anthropic: 'Anthropic',
-  openai: 'OpenAI',
-  google: 'Google',
-  togetherai: 'Together AI',
-  xai: 'xAI',
-  groq: 'Groq',
-  fireworks: 'Fireworks',
-  xiaomi: 'Xiaomi',
-  byteplus: 'BytePlus',
-  cerebras: 'Cerebras',
-  sambanova: 'SambaNova',
-  moonshot: 'Moonshot',
-};
-/** @type {{id: string, provider: string, display_name: string}[]} */
-let MODEL_CATALOG = [];
-
-function providerLabel(p) {
-  return PROVIDER_LABELS[p] || (p ? p.charAt(0).toUpperCase() + p.slice(1) : p);
-}
-
-function initModelPicker(models, agentDefault) {
-  MODEL_CATALOG = Array.isArray(models) ? models : [];
-  const providers = [...new Set(MODEL_CATALOG.map((m) => m.provider))].sort((a, b) =>
-    providerLabel(a).localeCompare(providerLabel(b)),
-  );
-  modelProviderSelect.innerHTML = '<option value="">All providers</option>';
-  for (const p of providers) {
-    const opt = document.createElement('option');
-    opt.value = p;
-    opt.textContent = providerLabel(p);
-    modelProviderSelect.appendChild(opt);
-  }
-
-  const stored = localStorage.getItem(MODEL_STORAGE_KEY) || '';
-  if (stored && stored.includes('/')) {
-    modelProviderSelect.value = stored.split('/', 1)[0];
-  }
-  renderModelOptions(stored, agentDefault);
-
-  modelProviderSelect.onchange = () => {
-    renderModelOptions(modelSelect.value, agentDefault);
-  };
-  modelSelect.onchange = () => {
-    localStorage.setItem(MODEL_STORAGE_KEY, modelSelect.value);
-    // Sync provider step when a concrete model is chosen.
-    if (modelSelect.value && modelSelect.value.includes('/')) {
-      const p = modelSelect.value.split('/', 1)[0];
-      if (modelProviderSelect.value && modelProviderSelect.value !== p) {
-        modelProviderSelect.value = p;
-        renderModelOptions(modelSelect.value, agentDefault);
-      }
-    }
-  };
-}
-
-function renderModelOptions(preferred, agentDefault) {
-  const provider = modelProviderSelect.value;
-  let list = MODEL_CATALOG;
-  if (provider) list = list.filter((m) => m.provider === provider);
-
-  const defaultLabel = agentDefault
-    ? `Agent default (${agentDefault})`
-    : 'Agent default';
-  modelSelect.innerHTML = '';
-  const defOpt = document.createElement('option');
-  defOpt.value = '';
-  defOpt.textContent = defaultLabel;
-  modelSelect.appendChild(defOpt);
-
-  for (const m of list) {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    // When browsing all providers, prefix so names don't collide visually.
-    opt.textContent = provider ? m.display_name : `${providerLabel(m.provider)} · ${m.display_name}`;
-    opt.title = m.id;
-    modelSelect.appendChild(opt);
-  }
-
-  // Preserve selection: preferred → stored → empty. Unknown ids stay selectable.
-  const want = preferred || '';
-  if (want && ![...modelSelect.options].some((o) => o.value === want)) {
-    const opt = document.createElement('option');
-    opt.value = want;
-    opt.textContent = want;
-    opt.title = want;
-    modelSelect.appendChild(opt);
-  }
-  modelSelect.value = [...modelSelect.options].some((o) => o.value === want) ? want : '';
-  if (modelCountEl) {
-    const total = MODEL_CATALOG.length;
-    modelCountEl.textContent = provider
-      ? `${list.length} of ${total} models`
-      : `${total} models`;
-  }
-}
 
 // --- Agent target (standalone mode) ---------------------------------------
 // Embedded pages keep dialing their own origin exactly as before. Standalone
@@ -1601,7 +1899,7 @@ function truncateMiddle(s, max) {
   return s.slice(0, front) + '…' + s.slice(s.length - back);
 }
 
-/** Render the runnable strip + model picker from a meta blob (injected or fetched); null clears both. */
+/** Render the runnable strip + declared voice_config from a meta blob (injected or fetched); null clears both. */
 function applyMeta(meta) {
   const strip = document.getElementById('conn-strip');
   const verEl = document.getElementById('conn-version');
@@ -1613,14 +1911,14 @@ function applyMeta(meta) {
   // it — an unreachable server (null meta) or an older one reports nothing.
   callContextSection.hidden = !(meta && meta.allow_client_call_context);
   if (!meta) {
-    initModelPicker([], '');
+    applyDeclaredVoiceConfig(null);
     verEl.textContent = '';
     verEl.hidden = true;
     wrap.hidden = true;
     strip.hidden = true; // no bare "Timbal" + no stacked border with TARGET
     return;
   }
-  initModelPicker(meta.models || [], (meta.model || '').trim());
+  applyDeclaredVoiceConfig(meta.voice_config || null);
   const v = (meta.version || '').trim();
   verEl.textContent = v;
   verEl.hidden = !v;
@@ -2168,7 +2466,21 @@ function sessionConfigPayload() {
   if (sttSelect.value) cfg.stt_provider = sttSelect.value;
   if (ttsSelect.value) cfg.tts_provider = ttsSelect.value;
   if (ttsModelSelect.value) cfg.tts_model = ttsModelSelect.value;
-  if (modelSelect.value) cfg.model = modelSelect.value;
+  if (sttModelInput.value.trim()) cfg.stt_model = sttModelInput.value.trim();
+  if (languageInput.value.trim()) cfg.language = languageInput.value.trim();
+  if (voiceInput.value.trim()) cfg.voice = voiceInput.value.trim();
+  const sttExtra = jsonObjectOrNull(sttExtraInput);
+  if (sttExtra) cfg.stt_extra = sttExtra;
+  const ttsExtra = jsonObjectOrNull(ttsExtraInput);
+  if (ttsExtra) cfg.tts_extra = ttsExtra;
+  if (vadSelect.value) cfg.vad_endpointing = vadSelect.value === 'on';
+  const turnTimeout = numOrNull(turnTimeoutInput, { min: 0 });
+  if (turnTimeout !== null && turnTimeout > 0) cfg.turn_timeout_secs = turnTimeout;
+  if (turnFallbackSelect.value === 'off') {
+    cfg.turn_timeout_fallback = ''; // '' = cancel the turn silently
+  } else if (turnFallbackSelect.value === 'custom' && turnFallbackText.value.trim()) {
+    cfg.turn_timeout_fallback = turnFallbackText.value.trim();
+  }
   if (fillerSelect.value === 'off') {
     cfg.filler = { enabled: false };
   } else if (fillerSelect.value === 'on') {
@@ -2176,27 +2488,26 @@ function sessionConfigPayload() {
     // fields keep the server's (or the built-in) values.
     cfg.filler = { enabled: true };
     if (fillerPrompt.value.trim()) cfg.filler.system_prompt = fillerPrompt.value.trim();
-    const delay = parseFloat(fillerDelay.value);
-    if (Number.isFinite(delay) && delay >= 0) cfg.filler.delay_secs = delay;
-    const repeat = parseFloat(fillerRepeat.value);
-    if (Number.isFinite(repeat) && repeat > 0) cfg.filler.repeat_secs = repeat;
-    const maxPerTurn = parseInt(fillerMax.value, 10);
-    if (Number.isFinite(maxPerTurn) && maxPerTurn >= 1) cfg.filler.max_per_turn = maxPerTurn;
+    const delay = numOrNull(fillerDelay, { min: 0 });
+    if (delay !== null) cfg.filler.delay_secs = delay;
+    const repeat = numOrNull(fillerRepeat, { min: 0 });
+    if (repeat !== null && repeat > 0) cfg.filler.repeat_secs = repeat;
+    const maxPerTurn = numOrNull(fillerMax, { min: 1, integer: true });
+    if (maxPerTurn !== null) cfg.filler.max_per_turn = maxPerTurn;
+    const timeout = numOrNull(fillerTimeout, { min: 0 });
+    if (timeout !== null && timeout > 0) cfg.filler.timeout_secs = timeout;
+    if (fillerModel.value.trim().includes('/')) cfg.filler.model = fillerModel.value.trim();
   }
-  if (greetingSelect.value === 'off') {
-    // '' is the only spelling that subtracts a nested server default.
-    cfg.greeting = '';
-  } else if (greetingSelect.value === 'on') {
-    // Deep-merged over the server's greeting, so empty fields keep its values.
-    // A server with no greeting configured needs text or instructions here,
-    // otherwise the block fails validation and the server keeps its default.
-    cfg.greeting = {};
-    if (greetingText.value.trim()) cfg.greeting.text = greetingText.value.trim();
-    if (greetingInstructions.value.trim()) cfg.greeting.instructions = greetingInstructions.value.trim();
-    if (greetingInterruptible.value) cfg.greeting.interruptible = greetingInterruptible.value === 'yes';
-    const greetDelay = parseInt(greetingDelay.value, 10);
-    if (Number.isFinite(greetDelay) && greetDelay >= 0) cfg.greeting.delay_ms = greetDelay;
-  }
+  // Both openers travel; `direction` tells the server which one this call
+  // uses (greeting_for_direction). The inbound block is also the outbound
+  // fallback, so it is never redundant to send.
+  cfg.direction = directionSelect.value === 'outbound' ? 'outbound' : 'inbound';
+  const greetingPayload = greeting.payload();
+  if (greetingPayload !== undefined) cfg.greeting = greetingPayload;
+  const outboundPayload = outbound.payload();
+  if (outboundPayload !== undefined) cfg.outbound_greeting = outboundPayload;
+  const idlePayload = userIdlePayload();
+  if (idlePayload !== undefined) cfg.user_idle = idlePayload;
   if (!callContextSection.hidden) {
     const callContext = callContextPayload();
     if (callContext) cfg.call_context = callContext;
@@ -2390,6 +2701,7 @@ function handleServerMessage(msg) {
         void applyAmbience();
         {
           const bits = [];
+          if (msg.direction) bits.push(msg.direction === 'outbound' ? 'outbound call' : 'inbound call');
           if (msg.model) bits.push(msg.model);
           if (msg.stt_provider) bits.push(`STT ${msg.stt_provider}${msg.stt_model ? `/${msg.stt_model}` : ''}`);
           if (msg.tts_provider) bits.push(`TTS ${msg.tts_provider}`);

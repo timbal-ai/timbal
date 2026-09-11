@@ -37,6 +37,7 @@ from ..voice.config import (
     RecordingConfig,
     UserIdleConfig,
     VoiceConfig,
+    greeting_for_direction,
 )
 from .capacity import acquire_session_slot, release_session_slot
 
@@ -315,7 +316,36 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     # the LiveKit hello both arrive through this allowlist, and "what this call
     # opens with" is per-call by nature (an outbound campaign sets it per dial).
     "greeting",
+    "outbound_greeting",
+    # Silence policy is per-call tuning too (a voicemail-heavy campaign wants a
+    # short hang-up; a support line wants patient re-engagement).
+    "user_idle",
 })
+
+#: Hello keys the transport reads directly — not ``VoiceConfig`` fields, so
+#: they must not be logged as "ignored" by the override merge.
+_HELLO_TRANSPORT_KEYS = frozenset({"turn_detector", "call_context", "parent_id", "direction"})
+
+
+def client_call_direction(config: dict[str, Any]) -> str | None:
+    """``"inbound"`` / ``"outbound"`` from the hello, or ``None`` when unsaid.
+
+    The session never knows who placed the call; the host that did tells it
+    here so :func:`greeting_for_direction` can pick the opener. On telephony
+    that host is the webhook / dial that minted the client config; in the
+    playground it is the browser, simulating either side. It selects between
+    two openers the agent already declared, nothing more — so unlike
+    ``call_context`` it needs no gate.
+    """
+    raw = config.get("direction")
+    if not isinstance(raw, str):
+        return None
+    d = raw.strip().lower()
+    if d in ("inbound", "outbound"):
+        return d
+    if d:
+        logger.info("voice_client_direction_ignored", value=raw[:40])
+    return None
 
 # Keys a client may set *inside* ``stt_extra`` / ``tts_extra``. Tuning only.
 #
@@ -404,12 +434,12 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     :data:`CLIENT_TUNING_TTS_EXTRA` — a caller never picks the provider host.
     """
     updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
-    # ``turn_detector``, ``call_context`` and ``parent_id`` are read straight
-    # off the hello by the transport, not through VoiceConfig — reporting them
-    # as ignored would be a lie in both directions.
+    # ``turn_detector``, ``call_context``, ``parent_id`` and ``direction`` are
+    # read straight off the hello by the transport, not through VoiceConfig —
+    # reporting them as ignored would be a lie in both directions.
     ignored = sorted(
         k for k, v in client.items()
-        if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k not in ("turn_detector", "call_context", "parent_id")
+        if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k not in _HELLO_TRANSPORT_KEYS
     )
     if ignored:
         logger.info("voice_client_config_ignored", keys=ignored)
@@ -428,12 +458,19 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
             logger.info("voice_client_filler_invalid", value=repr(updates["filler"]))
             del updates["filler"]
     if "greeting" in updates:
-        _merge_client_greeting(server_defaults, updates)
+        _merge_client_greeting(server_defaults, updates, "greeting")
+    if "outbound_greeting" in updates:
+        _merge_client_greeting(server_defaults, updates, "outbound_greeting")
+    if "user_idle" in updates:
+        _merge_client_user_idle(server_defaults, updates)
+    # ``model_copy`` marks every update key as set, so a client ``""`` on
+    # ``outbound_greeting`` reads as "declared: silence" in
+    # :func:`greeting_for_direction`, exactly like the agent's own ``""``.
     return server_defaults.model_copy(update=updates)
 
 
-def _merge_client_greeting(server_defaults: VoiceConfig, updates: dict[str, Any]) -> None:
-    """Resolve the client's ``greeting`` override in place.
+def _merge_client_greeting(server_defaults: VoiceConfig, updates: dict[str, Any], field: str) -> None:
+    """Resolve the client's ``greeting`` / ``outbound_greeting`` override in place.
 
     ``model_copy`` below runs no validators, so the coercion the ``VoiceConfig``
     field does for a bare string has to happen here too — and a bare string is
@@ -441,13 +478,19 @@ def _merge_client_greeting(server_defaults: VoiceConfig, updates: dict[str, Any]
     treated as a *text* override so the server keeps owning policy
     (``interruptible``, ``delay_ms``); ``""`` switches the opener off for this
     call, which is the one way a client can subtract a nested default.
+
+    An ``outbound_greeting`` patch merges over the opener outbound would
+    otherwise use — the agent's ``outbound_greeting`` when declared, else its
+    ``greeting`` — so a client tweaking one field keeps the rest of it.
     """
-    base = server_defaults.greeting
+    base = getattr(server_defaults, field)
+    if field == "outbound_greeting" and "outbound_greeting" not in server_defaults.model_fields_set:
+        base = server_defaults.greeting
     base_data = base.model_dump(include=base.model_fields_set) if base is not None else {}
-    raw = updates["greeting"]
+    raw = updates[field]
     if isinstance(raw, str):
         if not raw.strip():
-            updates["greeting"] = None
+            updates[field] = None
             return
         patch: Any = {"text": raw}
     elif isinstance(raw, GreetingConfig):
@@ -455,14 +498,41 @@ def _merge_client_greeting(server_defaults: VoiceConfig, updates: dict[str, Any]
     else:
         patch = raw
     if not isinstance(patch, dict):
-        logger.info("voice_client_greeting_invalid", value=repr(raw))
-        del updates["greeting"]
+        logger.info("voice_client_greeting_invalid", field=field, value=repr(raw))
+        del updates[field]
         return
     try:
-        updates["greeting"] = GreetingConfig.model_validate({**base_data, **patch})
+        updates[field] = GreetingConfig.model_validate({**base_data, **patch})
     except ValidationError:
-        logger.info("voice_client_greeting_invalid", value=repr(raw))
-        del updates["greeting"]
+        logger.info("voice_client_greeting_invalid", field=field, value=repr(raw))
+        del updates[field]
+
+
+def _merge_client_user_idle(server_defaults: VoiceConfig, updates: dict[str, Any]) -> None:
+    """Resolve the client's ``user_idle`` override in place.
+
+    Same contract as the greeting: a dict deep-merges over the server's block
+    and is validated (invalid → keep the server's); ``""`` switches the idle
+    watcher off for this call — ``UserIdleConfig`` has no ``enabled`` flag and
+    ``None`` cannot cross the override merge.
+    """
+    base = server_defaults.user_idle
+    base_data = base.model_dump(include=base.model_fields_set) if base is not None else {}
+    raw = updates["user_idle"]
+    if isinstance(raw, str) and not raw.strip():
+        updates["user_idle"] = None
+        return
+    if isinstance(raw, UserIdleConfig):
+        raw = raw.model_dump(include=raw.model_fields_set)
+    if not isinstance(raw, dict):
+        logger.info("voice_client_user_idle_invalid", value=repr(raw))
+        del updates["user_idle"]
+        return
+    try:
+        updates["user_idle"] = UserIdleConfig.model_validate({**base_data, **raw})
+    except ValidationError:
+        logger.info("voice_client_user_idle_invalid", value=repr(raw))
+        del updates["user_idle"]
 
 
 def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, Any]:
@@ -476,23 +546,15 @@ def runnable_meta_for_voice_page(runnable: Any, import_spec: str) -> dict[str, A
         kind = type(runnable).__name__
     model = getattr(runnable, "model", None)
     model_s = str(model).strip() if isinstance(model, str) else ""
-    # Slim catalog for the playground model picker (from models.yaml via codegen).
-    from ..codegen.model_discovery import get_models
-
-    models = [
-        {
-            "id": m["id"],
-            "provider": m["provider"],
-            "display_name": m.get("display_name") or m["id"].split("/", 1)[-1],
-        }
-        for m in get_models()
-    ]
     return {
         "name": name,
         "kind": kind,
         "import_spec": (import_spec or "").strip(),
         "model": model_s,
-        "models": models,
+        # What the agent's own ``voice_config`` declares (same wire form as
+        # ``GET /voice_config``): the page shows these as the "server default"
+        # behind each knob instead of an opaque label.
+        "voice_config": declared_voice_config(runnable),
         # Lets the page enable its call-context field instead of offering a
         # control the server would silently drop.
         "allow_client_call_context": client_call_context_allowed(),
@@ -986,6 +1048,10 @@ def build_voice_session(
     raw_model = merged.model
     model_override = raw_model.strip() if isinstance(raw_model, str) and "/" in raw_model.strip() else None
     llm_model = model_override or (str(runnable.model) if isinstance(getattr(runnable, "model", None), str) else None)
+    # The opener depends on who placed the call, which only the host knows
+    # (``direction`` on the hello / dial config). Unsaid → inbound rules.
+    direction = client_call_direction(client_config)
+    greeting = greeting_for_direction(merged, outbound=direction == "outbound")
     logger.info(
         "voice_session_config",
         stt=type(stt).__name__,
@@ -997,14 +1063,16 @@ def build_voice_session(
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
-        greeting=(None if merged.greeting is None else ((merged.greeting.text or "")[:80] or "<generated>")),
+        direction=direction,
+        greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
+        user_idle=merged.user_idle is not None,
     )
 
     session_kwargs: dict[str, Any] = {}
     if merged.filler is not None and merged.filler.enabled:
         session_kwargs["filler"] = merged.filler
-    if merged.greeting is not None:
-        session_kwargs["greeting"] = merged.greeting
+    if greeting is not None:
+        session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
         session_kwargs["user_idle"] = merged.user_idle
     if merged.turn_timeout_secs is not None:
@@ -1077,6 +1145,7 @@ def build_voice_session(
         "tts_provider": tts_provider,
         "model": llm_model,
         "turn_detector": turn_detector_label,
+        "direction": direction,
         # Server config, not client-settable. Phase 1: the browser mixes this
         # locally (fetch /voice/ambience/current); nothing is mixed server-side.
         "ambient": (

@@ -394,6 +394,86 @@ class TestClientGreetingOverrides:
         assert out.greeting.text == GREETING
 
 
+class TestClientOutboundGreetingAndDirection:
+    """The playground (or a dial) says which side placed the call; the server picks the opener."""
+
+    def test_outbound_greeting_is_client_settable(self) -> None:
+        assert "outbound_greeting" in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
+
+    def test_direction_is_read_off_the_hello(self) -> None:
+        assert voice_routes.client_call_direction({"direction": "outbound"}) == "outbound"
+        assert voice_routes.client_call_direction({"direction": " Inbound "}) == "inbound"
+        assert voice_routes.client_call_direction({"direction": "sideways"}) is None
+        assert voice_routes.client_call_direction({}) is None
+        assert voice_routes.client_call_direction({"direction": 3}) is None
+
+    def test_direction_is_not_reported_as_ignored(self, caplog) -> None:
+        with caplog.at_level("INFO"):
+            voice_routes.merge_client_voice_overrides(VoiceConfig(), {"direction": "outbound"})
+        assert "voice_client_config_ignored" not in caplog.text
+
+    def test_client_outbound_block_merges_over_declared_outbound(self) -> None:
+        base = VoiceConfig(greeting=GREETING, outbound_greeting={"text": "out", "delay_ms": 400})
+        out = voice_routes.merge_client_voice_overrides(base, {"outbound_greeting": {"after_user_silence_secs": 2}})
+        assert out.outbound_greeting.text == "out"
+        assert out.outbound_greeting.delay_ms == 400
+        assert out.outbound_greeting.after_user_silence_secs == 2
+        assert out.greeting.text == GREETING
+
+    def test_client_outbound_block_falls_back_to_inbound_base(self) -> None:
+        """No declared outbound → the patch is applied over ``greeting``, the opener outbound would use."""
+        base = VoiceConfig(greeting={"text": GREETING, "interruptible": True})
+        out = voice_routes.merge_client_voice_overrides(base, {"outbound_greeting": {"delay_ms": 250}})
+        assert out.outbound_greeting.text == GREETING
+        assert out.outbound_greeting.interruptible is True
+        assert out.outbound_greeting.delay_ms == 250
+
+    def test_client_empty_string_silences_outbound_only(self) -> None:
+        from timbal.voice.config import greeting_for_direction
+
+        base = VoiceConfig(greeting=GREETING)
+        out = voice_routes.merge_client_voice_overrides(base, {"outbound_greeting": ""})
+        assert "outbound_greeting" in out.model_fields_set
+        assert greeting_for_direction(out, outbound=True) is None
+        assert greeting_for_direction(out, outbound=False).text == GREETING
+
+    def test_unset_outbound_inherits_after_client_merge(self) -> None:
+        from timbal.voice.config import greeting_for_direction
+
+        base = VoiceConfig(greeting=GREETING)
+        out = voice_routes.merge_client_voice_overrides(base, {"greeting": {"delay_ms": 100}})
+        assert "outbound_greeting" not in out.model_fields_set
+        assert greeting_for_direction(out, outbound=True).delay_ms == 100
+
+    def test_build_voice_session_picks_opener_by_direction(self, monkeypatch) -> None:
+        captured: dict = {}
+
+        class FakeSession:
+            def __init__(self, **kw):
+                captured.update(kw)
+                self.session_id = "s"
+                self.parent_run_id = None
+
+        import timbal.voice as voice_pkg
+
+        monkeypatch.setattr(voice_pkg, "VoiceSession", FakeSession)
+        base = VoiceConfig(greeting="in line", outbound_greeting="out line")
+        agent = Agent(name="a", model=TestModel(responses=["x"]), tools=[])
+
+        _, meta = voice_routes.build_voice_session(agent, base, {"direction": "outbound"})
+        assert captured["greeting"].text == "out line"
+        assert meta["direction"] == "outbound"
+
+        captured.clear()
+        _, meta = voice_routes.build_voice_session(agent, base, {})
+        assert captured["greeting"].text == "in line"
+        assert meta["direction"] is None
+
+        captured.clear()
+        voice_routes.build_voice_session(agent, base, {"direction": "outbound", "outbound_greeting": ""})
+        assert "greeting" not in captured
+
+
 # ---------------------------------------------------------------------------
 # Speaking it
 # ---------------------------------------------------------------------------

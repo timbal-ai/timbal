@@ -57,6 +57,37 @@ class TestUserIdleConfig:
         assert VoiceConfig().user_idle is None  # status quo: wait forever
 
 
+class TestClientUserIdleOverrides:
+    """Playground / hello: tune or switch off the idle watcher for one call."""
+
+    def test_is_client_settable(self) -> None:
+        from timbal.server import voice as voice_routes
+
+        assert "user_idle" in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
+
+    def test_dict_deep_merges_and_validates(self) -> None:
+        from timbal.server import voice as voice_routes
+
+        base = VoiceConfig(user_idle={"text": "Still there?", "timeout_secs": 6})
+        out = voice_routes.merge_client_voice_overrides(base, {"user_idle": {"hangup_after_secs": 30, "text": ["a", "b"]}})
+        assert out.user_idle.timeout_secs == 6
+        assert out.user_idle.hangup_after_secs == 30
+        assert out.user_idle.line_for(1) == "b"
+        # Invalid patch → server's block is kept, not dropped.
+        out = voice_routes.merge_client_voice_overrides(base, {"user_idle": {"nope": 1}})
+        assert out.user_idle.text == "Still there?"
+        # Enables from nothing when the patch is complete on its own.
+        out = voice_routes.merge_client_voice_overrides(VoiceConfig(), {"user_idle": {"instructions": "check in"}})
+        assert out.user_idle.instructions == "check in"
+
+    def test_empty_string_switches_off(self) -> None:
+        from timbal.server import voice as voice_routes
+
+        base = VoiceConfig(user_idle={"text": "Still there?"})
+        assert voice_routes.merge_client_voice_overrides(base, {"user_idle": ""}).user_idle is None
+        assert voice_routes.merge_client_voice_overrides(base, {"user_idle": 7}).user_idle.text == "Still there?"
+
+
 class TestUserIdleBehaviour:
     async def test_prompts_after_silence_then_stops_at_max_count(self) -> None:
         stt = _OpenSTT()
