@@ -464,6 +464,42 @@ class TestGreetingSpoken:
         ]
         assert session._greeting_text == ""
 
+    async def test_after_user_silence_speaks_the_opener_only_when_the_line_stays_quiet(self) -> None:
+        """Wait-for-pickup (Retell ``begin_after_user_silence_ms``, ElevenLabs
+        ``initial_wait_time``): on a call we placed the callee's "hello?" opens
+        turn one; only a silent line gets the opener."""
+        stt = _OpenSTT()
+        session = _make_session(greeting={"text": GREETING, "after_user_silence_secs": 0.3}, stt=stt)
+        silent_at_150ms: list[bool] = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await asyncio.sleep(0.15)
+            silent_at_150ms.append(not any(isinstance(e, AudioOutput) for e in events))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+
+        await _run(session, stt, drive=drive)
+        assert silent_at_150ms == [True]
+        assert [(e.role, e.text) for e in session.transcript] == [("assistant", GREETING)]
+
+    async def test_after_user_silence_yields_to_a_callee_who_speaks_first(self) -> None:
+        stt = _OpenSTT()
+        session = _make_session(greeting={"text": GREETING, "after_user_silence_secs": 0.4}, stt=stt)
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await asyncio.sleep(0.05)
+            await stt.inject(TranscriptEvent(type="committed", text="Yes, hello?"))
+            while not any(isinstance(e, AgentTextDone) for e in events):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.5)  # outlive the window we skipped
+
+        await _run(session, stt, drive=drive)
+        assert [(e.role, e.text) for e in session.transcript] == [
+            ("user", "Yes, hello?"),
+            ("assistant", REPLY),
+        ]
+        assert session._greeting_text == ""
+
     async def test_generated_greeting_uses_instructions_and_agent_prompt(self) -> None:
         stt = _OpenSTT()
         seen: list[str] = []

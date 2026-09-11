@@ -38,8 +38,10 @@ from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
 from ..types.message import Message
 from .config import (
     DEFAULT_GREETING_SYSTEM_PROMPT,
+    DEFAULT_USER_IDLE_SYSTEM_PROMPT,
     FillerConfig,
     GreetingConfig,
+    UserIdleConfig,
     coerce_greeting,
 )
 from .events import (
@@ -241,6 +243,7 @@ class VoiceSession:
         model: str | None = None,
         filler: FillerConfig | dict[str, Any] | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
+        user_idle: UserIdleConfig | dict[str, Any] | None = None,
         call_context: dict[str, str] | None = None,
         parent_run_id: str | None = None,
     ):
@@ -323,6 +326,22 @@ class VoiceSession:
         # live so a barge-in can map played bytes back to heard words and the
         # first turn can account for audio still queued ahead of its reply.
         self._greeting_record: list | None = None
+
+        # User-idle re-engagement (see UserIdleConfig). A watchdog task started
+        # from run(); speaks a prompt after ``timeout_secs`` of user silence
+        # once the agent has drained, at most ``max_count`` times, and ends the
+        # session after ``hangup_after_secs`` without a word from the user.
+        self.user_idle: UserIdleConfig | None = (
+            user_idle if isinstance(user_idle, UserIdleConfig) or user_idle is None else UserIdleConfig.model_validate(user_idle)
+        )
+        self._idle_agent: Agent | None = None
+        self._idle_task: asyncio.Task[None] | None = None
+        self._idle_prompt_count = 0
+        self._idle_prompt_speaking = False
+        self._idle_since: float | None = None
+        # Monotonic time of the last thing the user did (partial or commit).
+        # Starts at run(); the hang-up clock is measured from here.
+        self._last_user_activity_at: float | None = None
         # The opener's transcript entry, held by identity so a barge-in can
         # rewrite it to the heard prefix after later entries have piled on top.
         self._greeting_entry: TranscriptEntry | None = None
@@ -614,6 +633,10 @@ class VoiceSession:
             audio_task = asyncio.create_task(self._forward_audio(audio_in))
             stt_task = asyncio.create_task(self._process_stt_events())
             sweep_task = asyncio.create_task(self._sweep_stale_partials())
+            self._last_user_activity_at = time.monotonic()
+            if self.user_idle is not None:
+                self._idle_task = asyncio.create_task(self._user_idle_watch())
+            background = [t for t in (audio_task, stt_task, sweep_task, self._idle_task) if t is not None]
 
             try:
                 while True:
@@ -622,10 +645,10 @@ class VoiceSession:
                         break
                     yield event
             finally:
-                for task in (audio_task, stt_task, sweep_task):
+                for task in background:
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(audio_task, stt_task, sweep_task, return_exceptions=True)
+                await asyncio.gather(*background, return_exceptions=True)
 
         except Exception as e:
             logger.error("voice_session_error", error=str(e), exc_info=True)
@@ -2448,13 +2471,32 @@ class VoiceSession:
             return False
         return True
 
+    def _user_has_spoken(self) -> bool:
+        """Any user speech at all this session — a partial counts, a commit counts."""
+        return self._last_partial_at > 0 or self._last_commit_at > 0
+
     async def _greeting_flow(self) -> None:
-        """Hold ``delay_ms``, resolve the line, speak it."""
+        """Hold ``delay_ms``, optionally give the other side first go, resolve the line, speak it."""
         try:
             if self.greeting.delay_ms:
                 await asyncio.sleep(self.greeting.delay_ms / 1000)
                 if not self._greeting_still_wanted():
                     return
+            if self.greeting.after_user_silence_secs:
+                # Wait-for-pickup: the callee's "hello?" opens turn one and the
+                # agent answers *that*; only a silent line gets the opener.
+                deadline = time.monotonic() + self.greeting.after_user_silence_secs
+                while time.monotonic() < deadline:
+                    if self._closed or self._user_has_spoken():
+                        logger.info("greeting_skipped", reason="user_spoke_first")
+                        return
+                    await asyncio.sleep(0.05)
+                if not self._greeting_still_wanted():
+                    return
+                logger.info(
+                    "greeting_after_user_silence",
+                    waited_secs=self.greeting.after_user_silence_secs,
+                )
             # Static text wins when both are set: ~300ms to first audio against
             # ~1.5s for a generated line, and the wording is known in advance.
             text = (self.greeting.text or "").strip()
@@ -2469,6 +2511,127 @@ class VoiceSession:
             # Silence at the top of the call is the status quo, not something to
             # surface to the caller as a session error.
             logger.warning("greeting_failed", error=str(e), exc_info=True)
+
+    # -- Internal: user-idle re-engagement ------------------------------------
+
+    def _agent_busy(self) -> bool:
+        """Anything that means "it is not the user's silence we are looking at"."""
+        if self._is_speaking or self._greeting_speaking or self._idle_prompt_speaking:
+            return True
+        if self._current_turn_task is not None and not self._current_turn_task.done():
+            return True
+        if self._greeting_task is not None and not self._greeting_task.done():
+            return True  # opener still pending (delay_ms / after_user_silence window)
+        if self._held_user_text is not None:
+            return True  # a commit is being held for the user to finish
+        if self._last_partial_at > self._last_commit_at:
+            return True  # the user is mid-utterance
+        return self.playback.is_playing or self._greeting_pending_bytes() > 0
+
+    def _user_last_active_at(self) -> float:
+        return max(self._last_partial_at, self._last_commit_at, self._last_user_activity_at or 0.0)
+
+    async def _user_idle_watch(self) -> None:
+        """Speak a prompt after ``timeout_secs`` of user silence; hang up after ``hangup_after_secs``.
+
+        Polls rather than hooking every state transition: the states that count
+        as "busy" live in five places (turn, greeting, filler, playback drain,
+        held commit) and a 100ms poll is invisible against an 8s timeout.
+        """
+        cfg = self.user_idle
+        if cfg is None:
+            return
+        try:
+            while not self._closed:
+                await asyncio.sleep(0.1)
+                if self._closed:
+                    return
+                now = time.monotonic()
+                if cfg.hangup_after_secs is not None and not self._agent_busy():
+                    silent_for = now - self._user_last_active_at()
+                    if silent_for >= cfg.hangup_after_secs:
+                        logger.info(
+                            "user_idle_hangup",
+                            silent_secs=round(silent_for, 1),
+                            prompts_spoken=self._idle_prompt_count,
+                        )
+                        await self.close()
+                        return
+                if self._agent_busy():
+                    self._idle_since = None
+                    continue
+                if self._idle_since is None:
+                    self._idle_since = now
+                    continue
+                if self._idle_prompt_count >= cfg.max_count:
+                    continue
+                if now - self._idle_since < cfg.timeout_secs:
+                    continue
+                text = cfg.line_for(self._idle_prompt_count) or (await self._generate_idle_prompt() or "").strip()
+                if not text or self._agent_busy() or self._closed:
+                    # The user spoke while we were generating — no prompt.
+                    self._idle_since = None
+                    continue
+                self._idle_prompt_count += 1
+                logger.info(
+                    "user_idle_prompt",
+                    count=self._idle_prompt_count,
+                    max_count=cfg.max_count,
+                    idle_secs=round(now - self._idle_since, 1),
+                    text_preview=text[:120],
+                )
+                await self._speak_idle_prompt(text)
+                self._idle_since = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # a re-engagement nicety must never end the call
+            logger.warning("user_idle_watch_failed", error=str(e), exc_info=True)
+
+    async def _speak_idle_prompt(self, text: str) -> None:
+        """Say ``text`` outside any turn: interruptible, transcribed, not a turn metric."""
+        self._idle_prompt_speaking = True
+        self._transcript.append(TranscriptEntry(role="assistant", text=text))
+        await self._emit(AgentTextDelta(text=text))
+        speak_task = asyncio.create_task(self._speak(text, greeting=True))
+        self._tts_tail = speak_task
+        self._tts_tasks.add(speak_task)
+        speak_task.add_done_callback(lambda t: self._tts_tasks.discard(t))
+        try:
+            await speak_task
+        except asyncio.CancelledError:
+            # Barged in — ``interrupt()`` already cleared the client buffer.
+            return
+        finally:
+            self._idle_prompt_speaking = False
+        await self._emit(AgentTextDone(text=text))
+
+    async def _generate_idle_prompt(self) -> str | None:
+        """One-shot LLM line for ``user_idle.instructions`` — same shape as the greeting generator."""
+        cfg = self.user_idle
+        instructions = (cfg.instructions or "").strip() if cfg else ""
+        if not instructions:
+            return None
+        parts = [p for p in (await self._agent_system_prompt(), DEFAULT_USER_IDLE_SYSTEM_PROMPT, instructions) if p]
+        if self._idle_agent is None:
+            self._idle_agent = Agent(
+                name="voice_user_idle",
+                model=cfg.model or self.model or self.agent.model,
+                system_prompt="\n\n".join(parts),
+                max_tokens=96,
+                tracing_provider=None,
+            )
+        recent = " / ".join(e.text for e in self._transcript[-4:] if e.text)[-600:]
+        prompt = f"Conversation so far: {recent}\n\nThe user has gone quiet. Say your line." if recent else "Say your line."
+        ambient_ctx = get_run_context()
+        set_run_context(None)
+        try:
+            out = await self._idle_agent(prompt=prompt).collect()
+        finally:
+            set_run_context(ambient_ctx)
+        if out.status.code != "success" or out.output is None:
+            logger.warning("user_idle_generation_failed", status=out.status.code, error=out.error)
+            return None
+        return out.output.collect_text().strip().strip('"').strip() or None
 
     def _claim_greeting(self, text: str) -> asyncio.Task[None]:
         """Stake the TTS chain for the opener and start synthesizing it.

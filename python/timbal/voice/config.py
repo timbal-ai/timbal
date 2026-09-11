@@ -112,6 +112,18 @@ class GreetingConfig(BaseModel):
     """Silence held before speaking. Telephony connects the media stream the
     moment the carrier answers, which can be before the callee has the handset
     to their ear; a beat here keeps the opener from landing under their "hello?"."""
+    after_user_silence_secs: float | None = Field(default=None, gt=0.0)
+    """Let the other side speak first; fall back to the opener if they don't.
+
+    Unset → speak the opener as soon as ``delay_ms`` has elapsed (the caller
+    dialled in and is waiting to hear who this is). Set → hold the opener and
+    listen: if the other side says anything within this many seconds, there is
+    no opener — their words open turn one and the agent answers *them* (on a
+    call we placed, "hello?" / "yes?" is the normal pickup). If the line stays
+    silent that long — a hesitant callee, a voicemail beep, a bad first second
+    of audio — speak the opener anyway rather than sit in mutual silence.
+    Retell's ``begin_after_user_silence_ms``, ElevenLabs' ``initial_wait_time``.
+    Counted from the end of ``delay_ms``."""
     model: Any = None
     """Generator LLM for ``instructions`` ("provider/model", or a TestModel in
     tests). None → the session's LLM. Unused by the ``text`` path."""
@@ -123,6 +135,76 @@ class GreetingConfig(BaseModel):
         if not (self.text or "").strip() and not (self.instructions or "").strip():
             raise ValueError("greeting needs 'text' or 'instructions'")
         return self
+
+
+DEFAULT_USER_IDLE_SYSTEM_PROMPT = (
+    "The other person on this live call has gone quiet after your last sentence. Say ONE short "
+    "spoken line to check they are still there or to gently move the conversation on — matching the "
+    "language of the conversation so far. Reply with only the words to say out loud; no quotes, no "
+    "stage directions."
+)
+
+
+class UserIdleConfig(BaseModel):
+    """What to do when the user stops talking mid-call.
+
+    A ``VoiceSession`` is reactive: after a reply it waits for the next
+    utterance, indefinitely. On a phone that is the difference between a call
+    that ends cleanly and one that burns ten minutes of STT on a caller who
+    walked away — or, just as common, a transcriber that missed what they said
+    so the agent *thinks* it is waiting. Every telephony stack re-engages after
+    a few seconds (Vapi ``idleMessages``, Retell ``reminder_trigger_ms``,
+    ElevenLabs ``turn_timeout``, Pipecat ``user_idle_timeout``) and hangs up
+    after a longer silence.
+
+    The clock starts once the agent has *finished being heard* (playback
+    drained, no turn in flight, no tool running) and is reset by any user
+    speech. After ``timeout_secs`` the agent speaks a prompt — ``text`` (one
+    line, or a list to rotate through) or an LLM-authored line from
+    ``instructions`` — at most ``max_count`` times per call. With
+    ``hangup_after_secs`` set, that long without a word from the user ends the
+    session; the agent's own prompts do not reset it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_secs: float = Field(default=8.0, gt=0.0)
+    """Seconds of user silence, measured from when the agent's last audio has
+    drained, before a prompt is spoken. Re-arms after each prompt."""
+    text: str | list[str] | None = None
+    """The line(s) to say. A list rotates in order; wraps around."""
+    instructions: str | None = None
+    """Brief for an LLM-authored line, in the agent's own voice and language.
+    Ignored when ``text`` is set."""
+    max_count: int = Field(default=2, ge=0)
+    """Prompts per call, then silence (until ``hangup_after_secs``, if set).
+    ``0`` → never prompt; only the hang-up applies."""
+    hangup_after_secs: float | None = Field(default=None, gt=0.0)
+    """Seconds since the user's last word (or since the call started, if they
+    never spoke) after which the session ends. Not reset by our own prompts.
+    Unset → never hang up on silence."""
+    model: Any = None
+    """Generator LLM for ``instructions``. None → the session's LLM."""
+
+    @model_validator(mode="after")
+    def _has_something_to_do(self) -> UserIdleConfig:
+        has_line = bool(self.instructions and self.instructions.strip()) or bool(
+            self.text if isinstance(self.text, str) and self.text.strip() else [t for t in (self.text or []) if str(t).strip()]
+        )
+        if self.max_count > 0 and not has_line:
+            raise ValueError("user_idle needs 'text' or 'instructions' (or max_count=0 with hangup_after_secs)")
+        if self.max_count == 0 and self.hangup_after_secs is None:
+            raise ValueError("user_idle with max_count=0 does nothing without hangup_after_secs")
+        return self
+
+    def line_for(self, count: int) -> str | None:
+        """The static line for the ``count``-th prompt (0-based), or ``None`` to generate."""
+        if isinstance(self.text, str):
+            return self.text.strip() or None
+        lines = [str(t).strip() for t in (self.text or []) if str(t).strip()]
+        if not lines:
+            return None
+        return lines[count % len(lines)]
 
 
 def coerce_greeting(value: Any) -> GreetingConfig | None:
@@ -223,6 +305,8 @@ class VoiceConfig(BaseModel):
     """None → no background audio."""
     filler: FillerConfig | None = None
     """None → no spoken tool-call fillers. ``{}`` enables with defaults."""
+    user_idle: UserIdleConfig | None = None
+    """None → wait for the user forever (status quo). See :class:`UserIdleConfig`."""
     greeting: GreetingConfig | None = None
     """None → the session stays reactive (waits for the user to speak first).
     A bare string is shorthand for ``{"text": ...}``; ``""`` means no greeting.

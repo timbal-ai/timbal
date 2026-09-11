@@ -35,6 +35,7 @@ from ..voice.config import (
     FillerConfig,
     GreetingConfig,
     RecordingConfig,
+    UserIdleConfig,
     VoiceConfig,
 )
 from .capacity import acquire_session_slot, release_session_slot
@@ -154,6 +155,7 @@ _SPARSE_NESTED: tuple[tuple[str, type], ...] = (
     ("filler", FillerConfig),
     ("greeting", GreetingConfig),
     ("outbound_greeting", GreetingConfig),
+    ("user_idle", UserIdleConfig),
     ("ambient", AmbientAudioConfig),
 )
 
@@ -230,7 +232,7 @@ def declared_voice_config(runnable: Any) -> dict[str, Any]:
         return {}
     if ambient is not None:
         out["ambient"] = ambient
-    for nested in ("filler", "greeting", "outbound_greeting"):
+    for nested in ("filler", "greeting", "outbound_greeting", "user_idle"):
         block = out.get(nested)
         if isinstance(block, dict) and "model" in block and not isinstance(block["model"], str):
             block.pop("model")
@@ -1003,6 +1005,8 @@ def build_voice_session(
         session_kwargs["filler"] = merged.filler
     if merged.greeting is not None:
         session_kwargs["greeting"] = merged.greeting
+    if merged.user_idle is not None:
+        session_kwargs["user_idle"] = merged.user_idle
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
