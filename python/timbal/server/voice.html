@@ -764,7 +764,6 @@
         </div>
       </section>
       <section id="agent-section" class="panel-section panel-section--top" aria-label="Agent">
-        <h3 id="agent-section-title" class="panel-section-title" hidden>Agent</h3>
         <div id="conn-strip" class="conn-strip" hidden>
           <span id="conn-version" class="conn-version" hidden></span>
           <div id="conn-agent" class="conn-agent" hidden>
@@ -1910,14 +1909,17 @@ function applyMeta(meta) {
   // Only offer the call-context field where the server will actually honour
   // it — an unreachable server (null meta) or an older one reports nothing.
   callContextSection.hidden = !(meta && meta.allow_client_call_context);
+  const section = document.getElementById('agent-section');
   if (!meta) {
     applyDeclaredVoiceConfig(null);
     verEl.textContent = '';
     verEl.hidden = true;
     wrap.hidden = true;
     strip.hidden = true; // no bare "Timbal" + no stacked border with TARGET
+    section.hidden = true; // standalone: nothing answered yet — no empty section under TARGET
     return;
   }
+  section.hidden = false;
   applyDeclaredVoiceConfig(meta.voice_config || null);
   const v = (meta.version || '').trim();
   verEl.textContent = v;
@@ -3328,9 +3330,10 @@ async function initStandalone() {
   targetSection.hidden = false;
   targetSection.classList.add('panel-section--top');
   document.getElementById('target-heading').className = 'panel-title';
-  const agentSection = document.getElementById('agent-section');
-  agentSection.classList.remove('panel-section--top'); // restore the section rule
-  document.getElementById('agent-section-title').hidden = false;
+  // The agent section has no heading of its own: the runnable strip and the
+  // declared voice_config *are* the content, and the section (with its rule)
+  // only shows once a server has answered (see applyMeta).
+  document.getElementById('agent-section').classList.remove('panel-section--top');
   targetModeSelect.value = localStorage.getItem(TGT_KEY('mode')) || 'local';
   if (!targetModeSelect.value) targetModeSelect.value = 'local';
   localUrlInput.value = localStorage.getItem(TGT_KEY('local-url')) || '';
