@@ -165,3 +165,32 @@ class SessionInterrupted(VoiceSessionEvent):
 class SessionError(VoiceSessionEvent):
     type: Literal["error"] = "error"
     message: str
+
+
+class DelegationCreated(VoiceSessionEvent):
+    """A full-duplex voice model asked the backend agent for help.
+
+    Emitted by :class:`~timbal.voice.openai_live.LiveSession` when GPT-Live
+    sends ``session.delegation.created``. The voice model keeps talking; the
+    :class:`~timbal.core.agent.Agent` runs concurrently and its result is fed
+    back as spoken commentary. ``prompt`` is the transcript-derived request
+    the agent receives (the wire event carries no task text)."""
+
+    type: Literal["delegation_created"] = "delegation_created"
+    delegation_id: str
+    prompt: str
+
+
+class DelegationResult(VoiceSessionEvent):
+    """The backend agent finished a delegated task.
+
+    ``text`` is what was handed to the voice model to paraphrase aloud — not
+    verbatim speech. ``run_id`` is the agent run behind it (pass as
+    ``parent_id`` to continue on another transport); ``None`` when the run
+    failed before starting."""
+
+    type: Literal["delegation_result"] = "delegation_result"
+    delegation_id: str
+    text: str
+    run_id: str | None = None
+    error: str | None = None
