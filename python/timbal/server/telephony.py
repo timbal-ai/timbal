@@ -556,7 +556,12 @@ async def serve_media_ws(
 
     if defaults is None:
         defaults = getattr(ws.app.state, "voice_config", None) or VoiceConfig()
-    session_rate = int(merge_client_voice_overrides(defaults, client_config).sample_rate)
+    merged = merge_client_voice_overrides(defaults, client_config)
+    # Paced live sessions are pinned to GPT-Live's 24 kHz by build_voice_session
+    # (same pin as LiveKit/WebRTC); the resamplers below must match it or the
+    # line audio is clocked wrong both ways. Re-read from the session after
+    # build — that is the authoritative wire rate.
+    session_rate = 24_000 if merged.pipeline == "live" else int(merged.sample_rate)
 
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
     send_lock = asyncio.Lock()
@@ -620,6 +625,14 @@ async def serve_media_ws(
     meta["session_id"] = session.session_id
     session.recording_meta = meta
 
+    built_rate = int(getattr(getattr(session, "audio_input", None), "sample_rate", session_rate))
+    if built_rate != session_rate:
+        # live → cascaded fallback (unsupported live audio format) or a
+        # session that picked a different rate: everything downstream of the
+        # session — resamplers and the mark-echo playback clock — follows it.
+        logger.warning("telephony_session_rate_adjusted", requested=session_rate, built=built_rate)
+        session_rate = built_rate
+        tracker.bytes_per_second = session_rate * 2
     up_resampler = PcmResampler(line_rate, session_rate) if line_rate != session_rate else None
     down_resampler = PcmResampler(session_rate, TELEPHONY_SAMPLE_RATE) if session_rate != TELEPHONY_SAMPLE_RATE else None
 

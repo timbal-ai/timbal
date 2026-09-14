@@ -1645,6 +1645,14 @@ syncNsForTransport();
 const pipelineSelect = document.getElementById('pipeline-select');
 const PIPELINE_STORAGE_KEY = 'timbal-voice-pipeline';
 pipelineSelect.value = localStorage.getItem(PIPELINE_STORAGE_KEY) || '';
+// What the *server* said it built (session_started.pipeline). The dropdown is
+// only a request: "Server default" resolves to whatever the agent's
+// voice_config says, and live falls back to cascaded on an unsupported audio
+// format. Transcript/caption behaviour must follow the answer, not the ask.
+let sessionPipeline = null;
+function isLivePipeline() {
+  return (sessionPipeline ?? pipelineSelect.value) === 'live';
+}
 /** GPT-Live owns STT, TTS and turn-taking: grey out the cascaded-only knobs,
  *  and the GPT-Live knobs when the cascaded pipeline is selected. */
 function syncCascadedFieldsForPipeline() {
@@ -2725,6 +2733,7 @@ function resetSessionUi() {
   suppressAssistantAudio = false;
   stopAssistantAudio();
   sessionReady = false;
+  sessionPipeline = null; // back to the dropdown until session_started answers
 }
 
 async function start() {
@@ -2895,6 +2904,7 @@ function handleServerMessage(msg) {
   switch (msg.type) {
       case 'session_started':
         sessionReady = true;
+        sessionPipeline = msg.pipeline || 'cascaded';
         serverAmbient = msg.ambient || null;
         void applyAmbience();
         {
@@ -2922,7 +2932,7 @@ function handleServerMessage(msg) {
         // A tool is running — mask the dead air. Not on GPT-Live: the voice
         // model keeps talking while the backend works, and reconnect notices
         // ("Reconnecting…") are not tool calls.
-        if (pipelineSelect.value !== 'live') void startThinkingSound();
+        if (!isLivePipeline()) void startThinkingSound();
         break;
       case 'delegation_created':
         // GPT-Live handed work to the Agent. The wire event has no task text;
@@ -2971,7 +2981,7 @@ function handleServerMessage(msg) {
         // Not on GPT-Live: full duplex, the user talking does not end the
         // assistant's row — the server sends agent_text_done when it does.
         // Sealing here split one reply across bubbles around every "mm-hm".
-        if (pipelineSelect.value !== 'live') {
+        if (!isLivePipeline()) {
           window._turnBubbles = [];
           window._replyDone = true;
           window._assistantEl = null;
@@ -2992,7 +3002,7 @@ function handleServerMessage(msg) {
       case 'agent_text_delta':
         // GPT-Live: speakers overlap, the caller's live caption must survive
         // the assistant's fragments (it is re-set by their next fragment).
-        if (pipelineSelect.value !== 'live') setPartial(null);
+        if (!isLivePipeline()) setPartial(null);
         setStatus(null);
         stopThinkingSound();
         suppressAssistantAudio = false;

@@ -784,6 +784,70 @@ class TestReconnect:
         assert [c["content"] for c in t.commands("session.commentary.append")] == ["late but valid"]
         assert [e for e in events if isinstance(e, DelegationResult)][0].spoken is True
 
+    @pytest.mark.parametrize("lag", [0.0, 0.1])
+    async def test_result_finishing_while_socket_is_down_lands_on_new_session(self, lag):
+        # Bugbot: a delegation that completes during the outage used to hit the
+        # dead transport, swallow the error and never speak. lag=0: the reader
+        # already noticed the drop (delivery waits for the reconnect). lag=0.1:
+        # the socket is dead but the reader has not returned yet — the first
+        # send raises and the retry lands on the replacement session.
+        gate = asyncio.Event()
+
+        class _DroppingTransport(FakeLiveTransport):
+            down = False
+
+            async def events(self):
+                async for ev in super().events():
+                    yield ev
+                if not self._finalized:
+                    self.down = True
+                    gate.set()
+                    if lag:
+                        await asyncio.sleep(lag)
+
+            async def reconnect(self, *, input=None):
+                await asyncio.sleep(0.2)
+                started = await super().reconnect(input=input)
+                self.down = False
+                return started
+
+            async def send(self, event):
+                if self.down:
+                    raise ConnectionError("socket closed")
+                await super().send(event)
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "late but valid"
+
+        first = [user(" order status", 1000, 1600), delegation("d1", 1600)]  # drop after
+        second = ["<wait:commentary>", CLOSED]
+        t = _DroppingTransport(first, more_scripts=[second])
+        s = LiveSession(t, on_delegation=slow, reconnect_backoff_secs=(0.0,))
+        events = await _collect(s)
+        assert s.reconnects == 1
+        assert [c["content"] for c in t.commands("session.commentary.append")] == ["late but valid"]
+        assert [e for e in events if isinstance(e, DelegationResult)][0].spoken is True
+
+    async def test_result_after_session_over_is_dropped_not_hung(self):
+        gate = asyncio.Event()
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "too late"
+
+        t = FakeLiveTransport([user(" hi", 1000, 1200), delegation("d1", 1200), 0.02])  # drop, no reconnect
+        s = LiveSession(t, on_delegation=slow, reconnect_attempts=0)
+
+        async def go():
+            async for _ in s.run(_mic()):
+                pass
+
+        await asyncio.wait_for(go(), 5)
+        gate.set()
+        await asyncio.sleep(0.05)
+        assert not t.commands("session.commentary.append")
+
     async def test_usage_accumulates_across_generations_and_is_unconfirmed(self):
         first = [
             {"type": "session.usage.updated", "usage": {"seconds": 12.0}, "context_window": {"usage_ratio": 0.01}},

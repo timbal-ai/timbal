@@ -643,6 +643,9 @@ class LiveSession:
 
         self._event_queue: asyncio.Queue[VoiceSessionEvent | None] = asyncio.Queue()
         self._closed = False
+        # Set while a session (any generation) is up; cleared for the span of
+        # a reconnect so result delivery waits instead of hitting a dead socket.
+        self._connected = asyncio.Event()
         self._rows: dict[str, _Row | None] = {"user": None, "assistant": None}
         # Most recently closed row per speaker. Fragments land unevenly behind
         # the session clock, so a row's tail routinely arrives after the row
@@ -794,6 +797,7 @@ class LiveSession:
         self.started_at = time.time()
         self.live_session_id = (started.get("session") or {}).get("id")
         self._prepared = True
+        self._connected.set()
 
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         try:
@@ -835,6 +839,8 @@ class LiveSession:
         if self._closed:
             return
         self._closed = True
+        # Wake anything parked on a reconnect that will now never happen.
+        self._connected.set()
         await self._emit(None)
 
     async def say(self, text: str) -> None:
@@ -899,6 +905,10 @@ class LiveSession:
                 # Stream ended. Requested close or a server-side final event: done.
                 if self._closed or self.transport.finalized:
                     break
+                # Delegation results finishing now would hit a dead socket:
+                # hold them (_deliver_result waits on this) until the
+                # replacement session is up, then they append there.
+                self._connected.clear()
                 if not await self._try_reconnect():
                     break
         except asyncio.CancelledError:
@@ -944,10 +954,23 @@ class LiveSession:
             logger.info(
                 "openai_live_reconnected", live_session_id=self.live_session_id, attempt=attempt + 1, seeded=len(seed)
             )
+            self._connected.set()
             await self._emit(AgentStatus(text="Reconnected"))
             return True
         await self._emit(SessionError(message=f"GPT-Live reconnect failed: {last_error}"))
         return False
+
+    async def _wait_connected(self) -> bool:
+        """Block while a reconnect is in progress. False once the session is over
+        (closed, or the reconnect budget ran out) — nothing to deliver to."""
+        # Bounded by the reconnect budget itself plus connect time; the event
+        # is set by the reconnect and never by a timer, so this is a backstop.
+        budget = sum(self.reconnect_backoff_secs) * max(1, self.reconnect_attempts) + 60.0
+        try:
+            await asyncio.wait_for(self._connected.wait(), budget)
+        except TimeoutError:
+            return False
+        return not self._closed
 
     def _bank_generation_usage(self) -> None:
         """Close the books on a generation that died without ``session.closed``.
@@ -1280,25 +1303,57 @@ class LiveSession:
             )
             chunks = split_for_append(note + text)
             logger.info("openai_live_stale_result_quiet", delegation_id=delegation_id, reason=stale_reason)
-        for i, chunk in enumerate(chunks):
-            try:
-                await self.transport.send(
-                    {
-                        "type": typ,
-                        "event_id": f"{delegation_id}_result_{i}",
-                        "delegation_id": delegation_id,
-                        "content": chunk,
-                    }
-                )
-            except Exception as e:
-                logger.warning("openai_live_result_append_failed", delegation_id=delegation_id, error=str(e))
+        # A result landing mid-reconnect waits for the replacement session and
+        # appends there. A send that dies mid-flight (socket dropped under us)
+        # is retried once, from the first chunk: whatever the dead session got
+        # is gone with it — the replacement is seeded with the transcript only.
+        for attempt in range(2):
+            if not await self._wait_connected():
+                logger.warning("openai_live_result_dropped_session_over", delegation_id=delegation_id)
                 return False
-        return stale_reason is None
+            try:
+                for i, chunk in enumerate(chunks):
+                    await self.transport.send(
+                        {
+                            "type": typ,
+                            "event_id": f"{delegation_id}_result_{attempt}_{i}",
+                            "delegation_id": delegation_id,
+                            "content": chunk,
+                        }
+                    )
+                return stale_reason is None
+            except Exception as e:
+                logger.warning(
+                    "openai_live_result_append_failed", delegation_id=delegation_id, attempt=attempt + 1, error=str(e)
+                )
+                if self._closed:
+                    return False
+                # Give the reader a beat to notice the drop and clear
+                # _connected; otherwise the retry races the same dead socket.
+                await asyncio.sleep(0.25)
+        return False
 
     async def _run_agent(self, delegation_id: str, prompt: str) -> tuple[str, str | None]:
         assert self.agent is not None
-        if self._last_run_context is not None:
-            set_run_context(self._last_run_context)
+        # Own the run's context instead of reading it back from the ambient
+        # var afterwards: on Python 3.11 ``asyncio.wait_for`` below runs each
+        # ``__anext__`` in a Task with a *copy* of the contextvars, so the
+        # ``set_run_context`` the agent does on its first step never reaches
+        # this frame and the next delegation would start without a parent
+        # (no memory). A fresh context with an empty trace is adopted by the
+        # top-level invoke as the run's own, whichever task drives it.
+        provider = getattr(self.agent, "tracing_provider", TRACING_UNSET)
+        prev = self._last_run_context
+        if prev is not None:
+            ctx = RunContext(parent_id=prev.id, tracing_provider=provider, platform_config=prev.platform_config)
+        else:
+            ambient = get_run_context()
+            # First delegation: keep the seed (parent_run_id + call_context
+            # session data) planted by _seed_call_context, if it is still unused.
+            ctx = ambient if ambient is not None and not ambient._trace else RunContext(
+                parent_id=self.parent_run_id, tracing_provider=provider
+            )
+        set_run_context(ctx)
         kwargs: dict[str, Any] = {"prompt": Message(role="user", content=[TextContent(text=prompt)])}
         if self.model:
             kwargs["model"] = self.model
@@ -1394,8 +1449,7 @@ class LiveSession:
         finally:
             with contextlib.suppress(Exception):
                 await agen.aclose()
-            ctx = get_run_context()
-            if ctx is not None and ctx._trace:
+            if ctx._trace:
                 self._last_run_context = ctx
         return (final_text if final_text is not None else text).strip(), run_id
 
