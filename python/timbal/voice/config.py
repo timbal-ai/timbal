@@ -221,7 +221,24 @@ def coerce_greeting(value: Any) -> GreetingConfig | None:
         return value
     if isinstance(value, str):
         return GreetingConfig(text=value) if value.strip() else None
+    if isinstance(value, dict) and _greeting_block_is_cleared(value):
+        return None
     return GreetingConfig.model_validate(value)
+
+
+def _greeting_block_is_cleared(block: dict[str, Any]) -> bool:
+    """A block that *names* ``text``/``instructions`` but leaves both blank.
+
+    That is what a form emits when the user empties the greeting field —
+    ``{"text": ""}`` — and it means the same as ``""``: no opener. Seen live
+    (2026-09-13): a Studio publish wrote ``{"text": ""}`` and the agent then
+    refused to boot for every inbound call, which the caller experienced as
+    endless ringing. Fail-fast still applies to a block with *no* speech key
+    at all (``{"delay_ms": 500}``): that is a typo, not a cleared field.
+    """
+    if not any(k in block for k in ("text", "instructions")):
+        return False
+    return all(not str(block.get(k) or "").strip() for k in ("text", "instructions"))
 
 
 class AmbientAudioConfig(BaseModel):
