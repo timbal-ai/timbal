@@ -6,10 +6,12 @@ where you pick a target:
 
 * **Local server** — pick an agent file (``path/to/agent.py::object``) and
   press Start: the page asks *this* launcher to spawn ``uv run python -m
-  timbal.server --import_spec … --port …`` from the agent file's directory (so
-  ``uv`` resolves that project's environment and ``.env``), waits for the
-  healthcheck, and dials it. The port is picked automatically unless fixed in
-  the form. Changing the agent or port respawns on the next Start. Transport
+  timbal.server --import_spec … --port …`` from the project root (walks up
+  from the agent file to ``pyproject.toml`` so ``uv`` and ``load_dotenv``
+  see the repo ``.env``). ``OPENAI_API_KEY`` from that ``.env`` is forced onto
+  the child (a stale shell export would otherwise 401 GPT-Live). The port is
+  picked automatically unless fixed in the form. Changing the agent or port
+  respawns on the next Start. Transport
   **LiveKit** is local-only: the launcher mints a room + caller JWT (stdlib
   HMAC, no PyJWT) from ``LIVEKIT_API_KEY`` / ``LIVEKIT_API_SECRET`` /
   ``TIMBAL_LIVEKIT_URL`` (or ``LIVEKIT_URL``) in the env, the playground
@@ -56,6 +58,46 @@ def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
         return value[1:-1]
     return value
+
+
+def _project_root(start: Path) -> Path:
+    """Directory containing ``pyproject.toml``, walking up from ``start``."""
+    here = start.resolve()
+    for _ in range(8):
+        if (here / "pyproject.toml").is_file():
+            return here
+        if here.parent == here:
+            return start.resolve()
+        here = here.parent
+    return start.resolve()
+
+
+def _dotenv_get(paths: list[Path], *names: str) -> str:
+    for path in paths:
+        file_env = _read_dotenv(path)
+        for n in names:
+            v = (file_env.get(n) or "").strip()
+            if v:
+                return v
+    return ""
+
+
+def _child_dotenv_paths(agent_dir: Path, launch_dir: Path | None = None) -> list[Path]:
+    """``.env`` files folded into a spawned child, highest priority first.
+
+    Launch-cwd first (what you edit when iterating), then the agent directory
+    walking up until ``pyproject.toml`` — so ``examples/foo.py`` still sees
+    the repo-root ``OPENAI_API_KEY``.
+    """
+    paths: list[Path] = [Path.cwd() if launch_dir is None else launch_dir]
+    here = agent_dir.resolve()
+    for _ in range(8):
+        if here not in paths:
+            paths.append(here)
+        if (here / "pyproject.toml").is_file() or here.parent == here:
+            break
+        here = here.parent
+    return [p / ".env" for p in paths]
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
@@ -237,21 +279,27 @@ class ChildServer:
                 "--port",
                 str(child_port),
             ]
+            child_cwd = _project_root(spec_path.parent)
+            dotenv_paths = _child_dotenv_paths(spec_path.parent)
             self._logs.clear()
-            self._logs.append(f"$ {' '.join(cmd)}  (cwd: {spec_path.parent})")
-            # cwd = the agent file's directory: `uv run` walks up from there to
-            # find the agent project's pyproject/venv, and the child's
-            # load_dotenv picks up *that* .env. The playground itself is often
-            # launched from a different tree (the monorepo root) whose .env
-            # holds LIVEKIT_* / provider keys — fold those in here so Play
-            # sees them without exporting anything. Process env still wins.
+            self._logs.append(f"$ {' '.join(cmd)}  (cwd: {child_cwd})")
+            # cwd = the project root (`pyproject.toml`), not the agent file's
+            # directory: `uv run` still finds the venv, and `load_dotenv()`
+            # sees the repo-root `.env`. `examples/foo.py` used to run with
+            # cwd=examples/ and miss OPENAI_API_KEY, then GPT-Live 401'd.
             # TIMBAL_VOICE_WARMUP=1: playground children pre-load the voice
             # stack so picking "Smart Turn" on first Start doesn't eat the
             # ONNX/HuggingFace cold path; production servers gate warmup on
             # actual voice intent (see server.voice.voice_warmup_intended).
             env = {**os.environ, "TIMBAL_VOICE_WARMUP": "1"}
-            for k, v in _read_dotenv(Path.cwd() / ".env").items():
-                env.setdefault(k, v)
+            for dotenv_path in dotenv_paths:
+                for k, v in _read_dotenv(dotenv_path).items():
+                    env.setdefault(k, v)
+            # Force OPENAI_API_KEY from .env onto the child — a stale shell
+            # export otherwise wins (`setdefault`) and GPT-Live returns 401.
+            openai_key = _dotenv_get(dotenv_paths, "OPENAI_API_KEY")
+            if openai_key:
+                env["OPENAI_API_KEY"] = openai_key
             for k in _LIVEKIT_CHILD_ENV_KEYS:
                 env.pop(k, None)
             livekit: dict[str, str] | None = None
@@ -289,7 +337,7 @@ class ChildServer:
                 self._logs.append(f"livekit room {room} @ {url}")
             proc = subprocess.Popen(  # noqa: S603
                 cmd,
-                cwd=spec_path.parent,
+                cwd=child_cwd,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

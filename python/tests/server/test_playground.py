@@ -234,3 +234,34 @@ class TestSpawnLoadsLaunchDotenv:
         assert captured["env"]["TIMBAL_LIVEKIT_URL"] == "wss://lk.timbal.ai"
         assert captured["env"]["TIMBAL_LIVEKIT_TOKEN"]
         assert captured["env"]["TIMBAL_VOICE_TRANSPORT"] == "livekit"
+
+    def test_repo_root_env_reaches_an_examples_agent(self, tmp_path, monkeypatch) -> None:
+        """Agent file in examples/, OPENAI_API_KEY only in the project-root .env,
+        launcher started from a directory with no .env of its own."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        repo = tmp_path / "repo"
+        examples = repo / "examples"
+        examples.mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+        (repo / ".env").write_text("OPENAI_API_KEY=sk-from-root\n", encoding="utf-8")
+        agent = examples / "demo.py"
+        agent.write_text("agent = None\n", encoding="utf-8")
+        launch = tmp_path / "launch"
+        launch.mkdir()
+        monkeypatch.chdir(launch)
+        captured = self._spawn(monkeypatch, agent)
+        assert captured["env"]["OPENAI_API_KEY"] == "sk-from-root"
+        assert captured["cwd"] == repo.resolve()
+
+    def test_openai_dotenv_overrides_stale_process_env(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-stale-from-shell")
+        repo = tmp_path / "repo"
+        examples = repo / "examples"
+        examples.mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+        (repo / ".env").write_text("OPENAI_API_KEY=sk-from-root\n", encoding="utf-8")
+        agent = examples / "demo.py"
+        agent.write_text("agent = None\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        captured = self._spawn(monkeypatch, agent)
+        assert captured["env"]["OPENAI_API_KEY"] == "sk-from-root"

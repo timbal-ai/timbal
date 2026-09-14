@@ -243,7 +243,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
     pc: Any = None
     try:
         defaults = getattr(request.app.state, "voice_config", None) or VoiceConfig()
-        sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
+        merged = merge_client_voice_overrides(defaults, config)
+        sample_rate = 24_000 if merged.pipeline == "live" else int(merged.sample_rate)
 
         downlink = PcmQueueTrack(sample_rate=sample_rate)
         session, meta = build_voice_session(

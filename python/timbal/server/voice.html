@@ -172,7 +172,8 @@
   }
   .panel input[type="text"],
   .panel input[type="password"],
-  .panel input[type="number"] {
+  .panel input[type="number"],
+  .panel textarea {
     width: 100%;
     min-width: 0;
     font: inherit;
@@ -184,15 +185,18 @@
     padding: 0.5rem 0.65rem;
     outline: none;
   }
+  .panel textarea { resize: vertical; min-height: 4.5rem; line-height: 1.35; }
   .panel input[type="text"]:focus,
   .panel input[type="password"]:focus,
-  .panel input[type="number"]:focus {
+  .panel input[type="number"]:focus,
+  .panel textarea:focus {
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(0,0,0,.07);
   }
   .panel input[type="text"]:disabled,
   .panel input[type="password"]:disabled,
-  .panel input[type="number"]:disabled {
+  .panel input[type="number"]:disabled,
+  .panel textarea:disabled {
     color: var(--text-muted);
     background: var(--bg);
     border-color: var(--border);
@@ -888,7 +892,7 @@
             <label class="field">
               <span class="field-label">Language</span>
               <input type="text" id="language-input" aria-label="Language" placeholder="auto" data-vc="language"
-                     title="ISO code passed to STT and TTS (en, es, ar…). Empty = server default; the agent's default is provider auto-detect.">
+                     title="ISO code passed to STT and TTS (en, es, ar…). Empty = server default; the agent's default is provider auto-detect. GPT-Live has its own Language picker below.">
             </label>
             <label class="field">
               <span class="field-label">Voice ID</span>
@@ -896,6 +900,98 @@
                      title="Provider voice id for TTS (ElevenLabs voice id, Fish reference id…). Applied on the next Start.">
             </label>
           </div>
+        </section>
+        <section class="panel-section" id="live-section" aria-label="GPT-Live">
+          <h3 class="panel-section-title">GPT-Live</h3>
+          <div class="panel-grid">
+            <label class="field">
+              <span class="field-label">Voice</span>
+              <select id="live-voice-select" aria-label="GPT-Live voice" data-vc="live_voice"
+                      title="audio.output.voice — fixed for the session (change = next Start). Regional influence is a speaking style, not an accent guarantee; the language is set by the prompt, not the voice.">
+                <option value="">Server default (marin)</option>
+                <optgroup label="General">
+                  <option value="marin">Marin</option>
+                  <option value="cedar">Cedar</option>
+                </optgroup>
+                <optgroup label="English · North American">
+                  <option value="gleam">Gleam · feminine</option>
+                  <option value="meridian">Meridian · masculine</option>
+                </optgroup>
+                <optgroup label="English · Southern U.S.">
+                  <option value="delta">Delta · feminine</option>
+                  <option value="cinder">Cinder · masculine</option>
+                </optgroup>
+                <optgroup label="English · British">
+                  <option value="vesper">Vesper · masculine</option>
+                </optgroup>
+                <optgroup label="English · Irish">
+                  <option value="willow">Willow · feminine</option>
+                  <option value="stone">Stone · masculine</option>
+                </optgroup>
+                <optgroup label="English · Australian">
+                  <option value="quartz">Quartz · feminine</option>
+                  <option value="ripple">Ripple · masculine</option>
+                </optgroup>
+                <optgroup label="English · Filipino">
+                  <option value="beacon">Beacon · masculine</option>
+                </optgroup>
+                <optgroup label="Portuguese · Brazilian">
+                  <option value="bossa">Bossa · feminine</option>
+                  <option value="tempo">Tempo · masculine</option>
+                </optgroup>
+                <option value="custom">Custom voice…</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Language</span>
+              <select id="live-language-select" aria-label="GPT-Live language"
+                      title="Becomes a prompt rule ('Speak Spanish unless the user asks to switch') and the opener is spoken in it — gpt-live-1 has no language parameter. Auto = the model follows the caller.">
+                <option value="">Auto (follow the caller)</option>
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="ca">Catalan</option>
+                <option value="pt">Portuguese</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="it">Italian</option>
+                <option value="nl">Dutch</option>
+                <option value="pl">Polish</option>
+                <option value="sv">Swedish</option>
+                <option value="da">Danish</option>
+                <option value="no">Norwegian</option>
+                <option value="fi">Finnish</option>
+                <option value="el">Greek</option>
+                <option value="cs">Czech</option>
+                <option value="ro">Romanian</option>
+                <option value="hu">Hungarian</option>
+                <option value="tr">Turkish</option>
+                <option value="ru">Russian</option>
+                <option value="uk">Ukrainian</option>
+                <option value="ar">Arabic</option>
+                <option value="he">Hebrew</option>
+                <option value="hi">Hindi</option>
+                <option value="id">Indonesian</option>
+                <option value="tl">Filipino</option>
+                <option value="vi">Vietnamese</option>
+                <option value="th">Thai</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="zh">Chinese</option>
+              </select>
+            </label>
+            <label class="field field-wide" id="live-voice-custom-field" hidden>
+              <span class="field-label">Custom voice name</span>
+              <input type="text" id="live-voice-custom-input" aria-label="Custom GPT-Live voice" placeholder="approved custom voice name"
+                     title="Sent as audio.output.voice verbatim. A name the API doesn't know fails the session start — the error shows in the transcript.">
+            </label>
+            <label class="field field-wide">
+              <span class="field-label">Voice-model instructions</span>
+              <textarea id="live-instructions-input" rows="4" aria-label="GPT-Live instructions" data-vc="live_instructions"
+                        placeholder="Server default: role, backchannel / interruption policy, and a delegation policy listing your agent's tools."
+                        title="session.instructions for the voice model (≤16k tokens): personality, pace, backchannels, when to delegate. Keep procedures in the Agent's own system prompt — this is the mouth, the Agent is the brain. Write it in the language you want spoken. Replaces the server default; the Language rule is appended either way."></textarea>
+            </label>
+          </div>
+          <p class="panel-note" id="live-hint">gpt-live-1 has no speed, temperature or language parameter — pace and language are prompt rules. Voice and instructions are fixed at session start; the opener is sent as an instruction append.</p>
         </section>
         <section class="panel-section" aria-label="Turn taking">
           <h3 class="panel-section-title">Turn taking</h3>
@@ -1549,16 +1645,47 @@ syncNsForTransport();
 const pipelineSelect = document.getElementById('pipeline-select');
 const PIPELINE_STORAGE_KEY = 'timbal-voice-pipeline';
 pipelineSelect.value = localStorage.getItem(PIPELINE_STORAGE_KEY) || '';
-/** GPT-Live owns STT, TTS and turn-taking: grey out the cascaded-only knobs. */
+/** GPT-Live owns STT, TTS and turn-taking: grey out the cascaded-only knobs,
+ *  and the GPT-Live knobs when the cascaded pipeline is selected. */
 function syncCascadedFieldsForPipeline() {
   const live = pipelineSelect.value === 'live';
-  for (const id of ['stt-select', 'stt-model-input', 'td-select', 'tts-select', 'tts-model-select', 'vad-select', 'voice-input']) {
+  for (const id of ['stt-select', 'stt-model-input', 'td-select', 'tts-select', 'tts-model-select', 'vad-select', 'voice-input',
+                    'language-input', 'stt-extra-input', 'tts-extra-input', 'turn-timeout', 'turn-fallback-select', 'turn-fallback-text']) {
     const el = document.getElementById(id);
     if (!el) continue;
     el.disabled = live;
     const field = el.closest('.field');
     if (field) field.style.opacity = live ? '0.45' : '';
   }
+  // "Server default" pipeline is cascaded unless the agent's voice_config
+  // says otherwise — only an explicit cascaded pick greys GPT-Live out.
+  const cascaded = pipelineSelect.value === 'cascaded';
+  for (const id of ['live-voice-select', 'live-voice-custom-input', 'live-language-select', 'live-instructions-input']) {
+    const el = document.getElementById(id);
+    el.disabled = cascaded;
+    const field = el.closest('.field');
+    if (field) field.style.opacity = cascaded ? '0.45' : '';
+  }
+  const fillerSection = document.getElementById('filler-select')?.closest('.panel-section');
+  if (fillerSection) fillerSection.style.opacity = live ? '0.45' : '';
+}
+const liveVoiceSelect = document.getElementById('live-voice-select');
+const liveVoiceCustomInput = document.getElementById('live-voice-custom-input');
+const liveVoiceCustomField = document.getElementById('live-voice-custom-field');
+const liveLanguageSelect = document.getElementById('live-language-select');
+const liveInstructionsInput = document.getElementById('live-instructions-input');
+function syncLiveVoiceCustom() {
+  liveVoiceCustomField.hidden = liveVoiceSelect.value !== 'custom';
+}
+persist(liveVoiceSelect, 'timbal-voice-live-voice', syncLiveVoiceCustom);
+persist(liveVoiceCustomInput, 'timbal-voice-live-voice-custom');
+persist(liveLanguageSelect, 'timbal-voice-live-language');
+persist(liveInstructionsInput, 'timbal-voice-live-instructions');
+syncLiveVoiceCustom();
+/** The voice name that goes on the wire, or '' for the server default. */
+function liveVoiceValue() {
+  if (liveVoiceSelect.value === 'custom') return liveVoiceCustomInput.value.trim();
+  return liveVoiceSelect.value;
 }
 pipelineSelect.onchange = () => {
   localStorage.setItem(PIPELINE_STORAGE_KEY, pipelineSelect.value);
@@ -1975,6 +2102,8 @@ function applyMeta(meta) {
 }
 
 let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
+let lkMicTrack = null;
+let lkTrackNs = null; // livekit-client `Track` namespace, set once the module is imported
 /** WebRTC transport state: the peer connection and the element playing the server's TTS track. */
 let pc = null, remoteAudioEl = null, lkRoom = null;
 let lkTranscriptChunks = null;
@@ -2254,6 +2383,11 @@ async function startMic(deviceId) {
   if (currentSource) { currentSource.disconnect(); currentSource = null; }
   if (worklet) { worklet.disconnect(); worklet = null; }
   if (analyser) { analyser.disconnect(); analyser = null; }
+  // The published clone is left running: a mid-session mic change swaps it
+  // on the sender first (micSelect.onchange), then stops it. Stopping it here
+  // would leave LiveKit/WebRTC publishing an ended track = silence upstream.
+  const prevLkMicTrack = lkMicTrack;
+  lkMicTrack = null;
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
 
   // WebRTC ships the raw getUserMedia track; RNNoise lives in the worklet
@@ -2285,6 +2419,11 @@ async function startMic(deviceId) {
     }
   };
   micStream = await navigator.mediaDevices.getUserMedia(constraints);
+  // Clone before the original hits the Web Audio graph. Chrome mutes a
+  // MediaStreamTrack for WebRTC if that same track is already a MediaStreamSource.
+  if (isRtcLikeTransport()) {
+    lkMicTrack = micStream.getAudioTracks()[0].clone();
+  }
 
   if (!audioCtx) {
     audioCtx = new AudioContext({ sampleRate: useRnnoise ? RNNOISE_RATE : SAMPLE_RATE });
@@ -2355,15 +2494,25 @@ async function startMic(deviceId) {
   } catch (_) { /* autoplay policy may block until user gesture */ }
 
   await populateDevices();
+  return prevLkMicTrack;
 }
 
 micSelect.onchange = () => {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'mic_change'}));
-  void startMic(micSelect.value).then(() => {
-    // On WebRTC the pc holds the (now stopped) old track — swap in the new one.
-    const track = micStream?.getAudioTracks()[0];
-    const sender = pc?.getSenders?.().find((s) => s.track?.kind === 'audio');
-    if (sender && track) void sender.replaceTrack(track);
+  void startMic(micSelect.value).then(async (prev) => {
+    // The transport still holds the previous track — swap in the new one
+    // before stopping it, on whichever peer is live. Before this, LiveKit
+    // kept publishing the stopped track: opener audible, then silence upstream.
+    const track = lkMicTrack || micStream?.getAudioTracks()[0];
+    try {
+      const sender = pc?.getSenders?.().find((s) => s.track?.kind === 'audio');
+      if (sender && track) await sender.replaceTrack(track);
+      const lkTrack = lkTrackNs && lkRoom?.localParticipant?.getTrackPublication?.(lkTrackNs.Source.Microphone)?.track;
+      if (lkTrack && track) await lkTrack.replaceTrack(track, true);
+    } catch (err) {
+      console.warn('mic swap on the live transport failed', err);
+    }
+    if (prev) { try { prev.stop(); } catch (_) {} }
   });
 };
 
@@ -2438,11 +2587,12 @@ async function endSession({ userInitiated = false, silent = false } = {}) {
   lkTranscriptChunks = null;
   lkChunks = {};
   if (remoteAudioEl) {
-    try { remoteAudioEl.pause(); remoteAudioEl.srcObject = null; } catch (_) {}
+    try { remoteAudioEl.pause(); remoteAudioEl.srcObject = null; remoteAudioEl.remove(); } catch (_) {}
     remoteAudioEl = null;
   }
   if (worklet) { try { worklet.disconnect(); } catch (_) {} worklet = null; }
   if (currentSource) { try { currentSource.disconnect(); } catch (_) {} currentSource = null; }
+  if (lkMicTrack) { try { lkMicTrack.stop(); } catch (_) {} lkMicTrack = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   if (audioCtx) {
     try { await audioCtx.close(); } catch (_) {}
@@ -2467,6 +2617,11 @@ async function startSession() {
   sessionBusy = true;
   btnSession.disabled = true;
   try {
+    // Unlock autoplay on the click, before spawn/warmup burns the gesture.
+    try {
+      const beep = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=');
+      await beep.play();
+    } catch (_) {}
     // Always a fresh session: tear down mic/WS/graph, then open a new one.
     await endSession({ userInitiated: false, silent: true });
     userEndedSession = false;
@@ -2498,8 +2653,18 @@ function sessionConfigPayload() {
   if (ttsSelect.value) cfg.tts_provider = ttsSelect.value;
   if (ttsModelSelect.value) cfg.tts_model = ttsModelSelect.value;
   if (sttModelInput.value.trim()) cfg.stt_model = sttModelInput.value.trim();
-  if (languageInput.value.trim()) cfg.language = languageInput.value.trim();
+  // On GPT-Live the STT/TTS language box is greyed out and ignored — the
+  // section's own picker decides (Auto = no rule at all).
+  if (pipelineSelect.value !== 'live' && languageInput.value.trim()) cfg.language = languageInput.value.trim();
   if (voiceInput.value.trim()) cfg.voice = voiceInput.value.trim();
+  if (pipelineSelect.value !== 'cascaded') {
+    // "Server default" may resolve to live on the agent side, so these travel
+    // unless cascaded is explicit (cascaded ignores live_*). The GPT-Live
+    // language picker wins over the STT/TTS code when set.
+    if (liveLanguageSelect.value) cfg.language = liveLanguageSelect.value;
+    if (liveVoiceValue()) cfg.live_voice = liveVoiceValue();
+    if (liveInstructionsInput.value.trim()) cfg.live_instructions = liveInstructionsInput.value.trim();
+  }
   const sttExtra = jsonObjectOrNull(sttExtraInput);
   if (sttExtra) cfg.stt_extra = sttExtra;
   const ttsExtra = jsonObjectOrNull(ttsExtraInput);
@@ -2586,7 +2751,9 @@ async function start() {
   const preferred = pickPreferredMic(mics);
   const activeId = micStream?.getAudioTracks()[0]?.getSettings().deviceId;
   if (preferred && preferred !== activeId) {
-    await startMic(preferred);
+    // Nothing published yet — the first clone can just go.
+    const prev = await startMic(preferred);
+    if (prev) { try { prev.stop(); } catch (_) {} }
     if (gen !== startGen) return;
     await populateDevices();
   }
@@ -2733,7 +2900,9 @@ function handleServerMessage(msg) {
         {
           const bits = [];
           if (msg.direction) bits.push(msg.direction === 'outbound' ? 'outbound call' : 'inbound call');
-          if (msg.pipeline === 'live') bits.push(`${msg.live_model || 'GPT-Live'} · voice ${msg.live_voice || '?'} · backend`);
+          if (msg.pipeline === 'live') {
+            bits.push(`${msg.live_model || 'GPT-Live'} · voice ${msg.live_voice || '?'}${msg.language ? ` · ${msg.language}` : ''} · backend`);
+          }
           if (msg.model) bits.push(msg.model);
           if (msg.stt_provider) bits.push(`STT ${msg.stt_provider}${msg.stt_model ? `/${msg.stt_model}` : ''}`);
           if (msg.tts_provider) bits.push(`TTS ${msg.tts_provider}`);
@@ -2799,9 +2968,14 @@ function handleServerMessage(msg) {
         // CONTINUE rewrite arrives after this commit's predecessor already
         // sealed — without sealing here, an empty heard_text interrupt can
         // wipe the *previous* completed reply (still in _turnBubbles).
-        window._turnBubbles = [];
-        window._replyDone = true;
-        window._assistantEl = null;
+        // Not on GPT-Live: full duplex, the user talking does not end the
+        // assistant's row — the server sends agent_text_done when it does.
+        // Sealing here split one reply across bubbles around every "mm-hm".
+        if (pipelineSelect.value !== 'live') {
+          window._turnBubbles = [];
+          window._replyDone = true;
+          window._assistantEl = null;
+        }
         window._sawUserCommit = true;
         if (msg.replace) {
           const users = transcriptEl.querySelectorAll('.msg.user');
@@ -2816,10 +2990,21 @@ function handleServerMessage(msg) {
         log('user', msg.text);
         break;
       case 'agent_text_delta':
-        setPartial(null);
+        // GPT-Live: speakers overlap, the caller's live caption must survive
+        // the assistant's fragments (it is re-set by their next fragment).
+        if (pipelineSelect.value !== 'live') setPartial(null);
         setStatus(null);
         stopThinkingSound();
         suppressAssistantAudio = false;
+        if (msg.continues && !window._assistantEl && window._lastAssistantEl && window._lastAssistantEl.isConnected) {
+          // Tail of a row that already got its agent_text_done (late
+          // fragment) — grow that bubble; another agent_text_done follows.
+          window._assistantEl = window._lastAssistantEl;
+          window._replyDone = false;
+          if (!(window._turnBubbles || []).includes(window._assistantEl)) {
+            window._turnBubbles = [window._assistantEl];
+          }
+        }
         // First delta after a finished reply starts a new turn's bubble set.
         if (window._replyDone) { window._turnBubbles = []; window._replyDone = false; }
         if (!window._assistantEl) {
@@ -2930,6 +3115,7 @@ async function mintPlatformLivekitDial() {
 async function startLivekit(gen, dial) {
   setConn('connecting', 'Connecting', `Joining LiveKit room ${dial.room}…`);
   const { Room, RoomEvent, Track } = await import(LIVEKIT_CLIENT_ESM);
+  lkTrackNs = Track;
   if (gen !== startGen) return;
   const room = new Room();
   lkRoom = room;
@@ -2986,10 +3172,24 @@ async function startLivekit(gen, dial) {
   room.on(RoomEvent.TrackSubscribed, (track) => {
     if (gen !== startGen) return;
     if (track.kind !== Track.Kind.Audio) return;
-    remoteAudioEl = remoteAudioEl || new Audio();
+    try { remoteAudioEl?.remove(); } catch (_) {}
+    remoteAudioEl = track.attach();
     remoteAudioEl.autoplay = true;
-    remoteAudioEl.srcObject = new MediaStream([track.mediaStreamTrack]);
-    remoteAudioEl.play?.().catch(() => { /* autoplay policy — resumes on gesture */ });
+    remoteAudioEl.setAttribute('playsinline', '');
+    // display:none / detached Audio() are autoplay-blocked — keep it in the
+    // layout, just off-screen.
+    remoteAudioEl.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;';
+    document.body.appendChild(remoteAudioEl);
+    remoteAudioEl.play?.().catch(() => {});
+  });
+  room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+    if (gen !== startGen || room.canPlaybackAudio) return;
+    setConn('live', 'Click to hear', 'Browser blocked audio — click this page once.');
+    const unlock = async () => {
+      document.removeEventListener('click', unlock, true);
+      try { await room.startAudio(); } catch (_) {}
+    };
+    document.addEventListener('click', unlock, true);
   });
 
   room.on(RoomEvent.Disconnected, () => {
@@ -3021,6 +3221,7 @@ async function startLivekit(gen, dial) {
   room.on(RoomEvent.ParticipantConnected, () => sendHello());
 
   await room.connect(dial.url, dial.token);
+  try { await room.startAudio(); } catch (_) {}
   if (gen !== startGen) {
     try { await room.disconnect(); } catch (_) {}
     if (lkRoom === room) lkRoom = null;
@@ -3030,7 +3231,8 @@ async function startLivekit(gen, dial) {
   // canPublishSources:["microphone"] (platform preview) reject that with
   // "failed to publish track, insufficient permissions" — join already
   // succeeded; this is not the browser mic prompt.
-  await room.localParticipant.publishTrack(micStream.getAudioTracks()[0], {
+  const pubTrack = lkMicTrack || micStream.getAudioTracks()[0];
+  await room.localParticipant.publishTrack(pubTrack, {
     source: Track.Source.Microphone,
   });
   if (gen !== startGen) return;
@@ -3066,7 +3268,7 @@ async function startRtc(gen) {
   // Raw mic track (browser AEC/NS applied via getUserMedia constraints). The
   // worklet graph from startMic keeps driving the level meter; its PCM output
   // goes nowhere because micAudioToWs stays false on this transport.
-  pc.addTrack(micStream.getAudioTracks()[0], micStream);
+  pc.addTrack(lkMicTrack || micStream.getAudioTracks()[0], micStream);
 
   // The server binds to whatever channel the offer carries — creating it
   // here puts the SCTP m-line in the offer.
