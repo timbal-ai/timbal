@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from uuid_extensions import uuid7
 
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
@@ -95,6 +96,9 @@ LIVE_URL = "wss://api.openai.com/v1/live/sessions"
 DEFAULT_MODEL = "gpt-live-1"
 DEFAULT_VOICE = "marin"
 PRICE_PER_MINUTE_USD = 0.05
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+SESSION_RUN_NAME = "voice_live_session"
+"""Path of the per-call run persisted at close (see :attr:`LiveSession.session_run`)."""
 
 _PCM16 = frozenset({"pcm_s16le", "linear16", "pcm16", "pcm"})
 _PCMU = frozenset({"pcmu", "mulaw", "ulaw", "g711_ulaw", "g711u"})
@@ -286,10 +290,21 @@ class OpenAILiveClient(LiveTransport):
         self._started = loop.create_future()
         self._closed_event = loop.create_future()
         t0 = time.monotonic()
-        self._ws = await asyncio.wait_for(
-            ws_connect(self.url, additional_headers=headers, max_size=None, ping_interval=20, ping_timeout=20),
-            self.connect_timeout,
-        )
+        from websockets.exceptions import InvalidStatus
+
+        try:
+            self._ws = await asyncio.wait_for(
+                ws_connect(self.url, additional_headers=headers, max_size=None, ping_interval=20, ping_timeout=20),
+                self.connect_timeout,
+            )
+        except InvalidStatus as e:
+            status = e.response.status_code
+            if status in (401, 403):
+                raise ConnectionError(
+                    f"GPT-Live rejected OPENAI_API_KEY (HTTP {status}). "
+                    "Check the key in the repo-root .env (playground injects it into the child)."
+                ) from e
+            raise ConnectionError(f"GPT-Live WebSocket handshake failed (HTTP {status})") from e
         self._reader = asyncio.create_task(self._read_loop(), name="openai-live-reader")
         await self.send({"type": "session.start", "event_id": "session_start", "session": self.session_config()})
         try:
@@ -453,14 +468,33 @@ class TranscriptFragment(BaseModel):
     end_ms: int
 
 
+# Punctuation GPT-Live ships as the *next* fragment ("Fine" / ". Actually"):
+# it belongs to the row that just closed, not at the head of a new one.
+_LEADING_PUNCT = " .,;:!?"
+_SPACE_BEFORE_PUNCT = re.compile(r"\s+([.,;:!?])")
+# "Um.I tried" → "Um. I tried" — only lower→Upper across a mark, so "e.g." and ".com" stay.
+_MISSING_SPACE_AFTER_PUNCT = re.compile(r"(?<=[a-zà-ÿ])([.!?])(?=[A-ZÀ-Ý])")
+
+
+def _tidy_row_text(text: str) -> str:
+    """Row text for prompts: no head punctuation, no ``"Um ."`` (space before a mark), trimmed."""
+    t = _SPACE_BEFORE_PUNCT.sub(r"\1", text)
+    t = _MISSING_SPACE_AFTER_PUNCT.sub(r"\1 ", t)
+    return (t.lstrip(_LEADING_PUNCT) if t.strip(_LEADING_PUNCT) else t).strip()
+
+
 class _Row:
-    __slots__ = ("end_ms", "fragments", "start_ms", "text")
+    __slots__ = ("end_ms", "entry", "fragments", "metrics_done", "start_ms", "text")
 
     def __init__(self, frag: TranscriptFragment):
-        self.text = frag.delta
+        self.text = frag.delta.lstrip(_LEADING_PUNCT) if frag.delta.strip(_LEADING_PUNCT) else frag.delta
         self.start_ms = frag.start_ms
         self.end_ms = frag.end_ms
         self.fragments = [frag]
+        # Set once the row has been emitted as committed/done; a late fragment
+        # re-opening the row then rewrites this entry instead of adding another.
+        self.entry: TranscriptEntry | None = None
+        self.metrics_done = False
 
     def add(self, frag: TranscriptFragment) -> None:
         self.text += frag.delta
@@ -519,12 +553,17 @@ class LiveSession:
 
     Rows split when the next fragment starts more than ``row_gap_ms`` after
     the previous one ended on the *session clock* — the precise signal. A
-    wall-clock timer of ``row_gap_ms + row_close_slack_ms`` only finalizes a
-    row once fragments stop arriving; the slack absorbs delivery jitter
-    (fragments land ~1–1.5 s behind the clock, unevenly), so it must not be
-    the thing that decides splits. Speakers overlap freely — a user row may
-    close while an assistant row is open. There is no :class:`SessionInterrupted`:
-    barge-in is server-side, and the assistant row text is what was heard.
+    row also closes when the *other* speaker starts after its last known
+    speech (turn boundary), so a user commit always precedes the reply's
+    first delta. A wall-clock timer of ``row_gap_ms + row_close_slack_ms``
+    finalizes a row once fragments stop arriving. Fragments land ~1–1.5 s
+    behind the clock, unevenly, so a row's tail routinely arrives after
+    either close: a timeline-contiguous late fragment re-opens the row —
+    :class:`TranscriptCommitted` ``replace=True`` / :class:`AgentTextDelta`
+    ``continues=True`` then a second :class:`AgentTextDone` — instead of
+    starting a new one. Speakers overlap freely. There is no
+    :class:`SessionInterrupted`: barge-in is server-side, and the assistant
+    row text is what was heard.
 
     Delegations are serialized so agent memory chains ``parent_id`` in order;
     a delegation arriving while one runs waits and the model is told so.
@@ -569,6 +608,9 @@ class LiveSession:
         stale_policy: Literal["thinking", "drop", "speak"] = "thinking",
         greeting: str | None = None,
         call_context: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        recorder: Any = None,
+        session_run: bool = True,
     ) -> None:
         self.transport = transport
         self.agent = agent
@@ -602,6 +644,10 @@ class LiveSession:
         self._event_queue: asyncio.Queue[VoiceSessionEvent | None] = asyncio.Queue()
         self._closed = False
         self._rows: dict[str, _Row | None] = {"user": None, "assistant": None}
+        # Most recently closed row per speaker. Fragments land unevenly behind
+        # the session clock, so a row's tail routinely arrives after the row
+        # was closed; if the tail is timeline-contiguous it re-opens this row.
+        self._closed_rows: dict[str, _Row | None] = {"user": None, "assistant": None}
         self._row_timers: dict[str, asyncio.TimerHandle | None] = {"user": None, "assistant": None}
         self._fragments: list[TranscriptFragment] = []
         self._transcript: list[TranscriptEntry] = []
@@ -632,7 +678,52 @@ class LiveSession:
         """False when a generation ended without ``session.closed``: its seconds
         are the larger of the last snapshot and wall-clock elapsed, not billed truth."""
         self.close_reason: str | None = None
-        self.session_id: str | None = None
+        # Ours, minted before the socket opens: recording stem, manifest and
+        # platform upload path all key on it. Same contract as VoiceSession.
+        self._session_id = session_id or uuid7(as_type="hex")
+        self.live_session_id: str | None = None
+        """OpenAI's ``live_…`` id for the current generation (after connect)."""
+        self.started_at: float | None = None
+        """Wall clock (``time.time()``) of ``session.started``; transcript offsets are relative to it."""
+        self._recorder = recorder
+        self.recording_meta: dict[str, Any] | None = None
+        self.session_run = session_run
+        """Persist one ``voice_live_session`` run at close (usage seconds, summary,
+        recording). Delegations are runs of their own; this is the one that
+        exists when the model never delegated."""
+        self.session_run_id: str | None = None
+        self._prepared = False
+
+    # -- Public: identity ------------------------------------------------------
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        """Pin identity (host ``on_session_built`` hook). Retargets an opened
+        recorder onto ``{id}.mp3``; refused after audio was written — see
+        :attr:`VoiceSession.session_id`."""
+        if not isinstance(value, str) or not _SESSION_ID_RE.fullmatch(value):
+            raise ValueError(f"session_id must match [A-Za-z0-9_-]{{1,128}}, got {value!r}")
+        recorder = self._recorder
+        if recorder is not None:
+            current = recorder.audio_path
+            if current.stem != value:
+                recorder.retarget(current.with_name(f"{value}{current.suffix}"))
+        self._session_id = value
+
+    @property
+    def recorder(self) -> Any:
+        return self._recorder
+
+    @property
+    def closed(self) -> bool:
+        """``True`` once :meth:`close` ran. LiveKit checks this before putting
+        the session on the air — ``VoiceSession`` exposes it; missing it here
+        was an immediate ``AttributeError`` after ``pipeline=live`` joined."""
+        return self._closed
 
     @property
     def usage_seconds(self) -> float | None:
@@ -682,23 +773,41 @@ class LiveSession:
             else:
                 merged.append(f)
         return [
-            TranscriptFragment(role=m.role, delta=m.delta.strip(), start_ms=m.start_ms, end_ms=m.end_ms) for m in merged
+            TranscriptFragment(role=m.role, delta=_tidy_row_text(m.delta), start_ms=m.start_ms, end_ms=m.end_ms)
+            for m in merged
         ]
 
     # -- Public: control -------------------------------------------------------
 
+    async def prepare(self) -> None:
+        """Open the GPT-Live socket. SIP answers after this returns so the 200
+        OK is not dead air. ``run()`` skips ``connect()`` when already prepared."""
+        if self._closed:
+            return
+        await self._ensure_connected()
+
+    async def _ensure_connected(self) -> None:
+        if self._prepared:
+            return
+        started = await self.transport.connect()
+        self._generation_started_at = time.monotonic()
+        self.started_at = time.time()
+        self.live_session_id = (started.get("session") or {}).get("id")
+        self._prepared = True
+
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         try:
-            started = await self.transport.connect()
-            self._generation_started_at = time.monotonic()
-            self.session_id = (started.get("session") or {}).get("id")
+            await self._ensure_connected()
             await self._seed_call_context()
             await self._emit(SessionStarted())
+            # Uplink + event drain before the opener: GPT-Live times speech
+            # against the input clock, and greeting audio would otherwise sit
+            # on the transport queue until we start listening.
+            audio_task = asyncio.create_task(self._forward_audio(audio_in), name="openai-live-uplink")
+            events_task = asyncio.create_task(self._process_events(), name="openai-live-events")
             if self.greeting:
                 await self.greet(self.greeting)
 
-            audio_task = asyncio.create_task(self._forward_audio(audio_in), name="openai-live-uplink")
-            events_task = asyncio.create_task(self._process_events(), name="openai-live-events")
             try:
                 while True:
                     ev = await self._event_queue.get()
@@ -749,9 +858,30 @@ class LiveSession:
 
     async def _forward_audio(self, audio_in: AsyncIterable[bytes]) -> None:
         try:
+            first = True
+            n_chunks = 0
+            n_nonzero = 0
             async for chunk in audio_in:
+                nz = sum(1 for b in chunk if b)
+                if nz:
+                    n_nonzero += 1
+                n_chunks += 1
+                if first:
+                    first = False
+                    logger.info("openai_live_uplink_open", bytes=len(chunk), nonzero=nz)
+                elif n_chunks == 20:
+                    logger.info(
+                        "openai_live_uplink_probe",
+                        chunks=n_chunks,
+                        voiced=n_nonzero,
+                        last_bytes=len(chunk),
+                        last_nonzero=nz,
+                    )
                 if self._record_audio:
                     self._in_chunks.append(chunk)
+                if self._recorder is not None:
+                    # Mic is the recording's master clock (1x, silence included).
+                    self._recorder.add_mic(chunk)
                 await self.transport.send_audio(chunk)
         except asyncio.CancelledError:
             pass
@@ -788,6 +918,7 @@ class LiveSession:
         for role in ("user", "assistant"):
             await self._close_row(role)
         seed = self.history_items()
+        self._closed_rows = {"user": None, "assistant": None}
         last_error: Exception | None = None
         for attempt in range(self.reconnect_attempts):
             if self._closed:
@@ -809,8 +940,10 @@ class LiveSession:
             self._generation += 1
             self._generation_started_at = time.monotonic()
             self._last_user_end_ms = None
-            self.session_id = (started.get("session") or {}).get("id")
-            logger.info("openai_live_reconnected", session_id=self.session_id, attempt=attempt + 1, seeded=len(seed))
+            self.live_session_id = (started.get("session") or {}).get("id")
+            logger.info(
+                "openai_live_reconnected", live_session_id=self.live_session_id, attempt=attempt + 1, seeded=len(seed)
+            )
             await self._emit(AgentStatus(text="Reconnected"))
             return True
         await self._emit(SessionError(message=f"GPT-Live reconnect failed: {last_error}"))
@@ -836,7 +969,12 @@ class LiveSession:
         for role in ("user", "assistant"):
             row = self._rows[role]
             if row is not None and row.text.strip():
-                entries.append(TranscriptEntry(role=role, text=row.text.strip()))  # type: ignore[arg-type]
+                if row.entry is not None:
+                    # Re-opened row: already listed, carry its latest text.
+                    idx = next(i for i, e in enumerate(entries) if e is row.entry)
+                    entries[idx] = TranscriptEntry(role=role, text=row.text.strip())  # type: ignore[arg-type]
+                else:
+                    entries.append(TranscriptEntry(role=role, text=row.text.strip()))  # type: ignore[arg-type]
         items: list[dict[str, Any]] = []
         budget = max_chars
         for e in reversed(entries[-max_items:]):
@@ -861,8 +999,15 @@ class LiveSession:
                     self._assistant_turn_speech_bytes += len(data)
             if self._record_audio:
                 self._out_chunks.append(data)
+            if self._recorder is not None:
+                # Zeros included: the output stream *is* the agent's timeline
+                # (1x paced), so what lands here is exactly what was heard —
+                # no barge-in tail to drop. Fed before drop_silence on purpose.
+                self._recorder.add_agent(data)
             if silent and self.drop_silence:
                 return
+            if self.speech_output_bytes == len(data) and not silent:
+                logger.info("openai_live_downlink_open", bytes=len(data))
             await self._emit(AudioOutput(data=data))
         elif typ == "session.input_transcript.delta":
             await self._on_fragment("user", ev)
@@ -917,22 +1062,42 @@ class LiveSession:
             role=role, delta=delta, start_ms=int(ev.get("start_ms") or 0), end_ms=int(ev.get("end_ms") or 0)
         )
         self._fragments.append(frag)
+        # Turn boundary on the session clock: the other speaker's row ends
+        # when this speaker starts after its last known speech. Closing the
+        # user row *before* the assistant's first delta is what keeps "user
+        # asks → assistant answers" in that order downstream (the playground
+        # otherwise labels the reply an opener and paints it above the ask).
+        other = "assistant" if role == "user" else "user"
+        orow = self._rows[other]
+        if orow is not None and frag.start_ms >= orow.end_ms:
+            await self._close_row(other)
         row = self._rows[role]
         if row is not None and frag.start_ms - row.end_ms > self.row_gap_ms:
             await self._close_row(role)
             row = None
+        reopened = False
         if row is None:
-            row = _Row(frag)
-            self._rows[role] = row
-            if role == "assistant":
-                self._begin_assistant_turn(frag)
+            prev = self._closed_rows[role]
+            if prev is not None and prev.start_ms <= frag.start_ms and frag.start_ms - prev.end_ms <= self.row_gap_ms:
+                # Tail of the row we already closed (wall-clock timer or the
+                # other speaker got there first): extend it, don't start another.
+                row = prev
+                self._closed_rows[role] = None
+                self._rows[role] = row
+                row.add(frag)
+                reopened = True
+            else:
+                row = _Row(frag)
+                self._rows[role] = row
+                if role == "assistant":
+                    self._begin_assistant_turn(frag)
         else:
             row.add(frag)
         self._arm_row_timer(role)
         if role == "user":
             await self._emit(TranscriptPartial(text=row.text.strip()))
         else:
-            await self._emit(AgentTextDelta(text=delta))
+            await self._emit(AgentTextDelta(text=delta, continues=reopened))
 
     def _arm_row_timer(self, role: str) -> None:
         h = self._row_timers[role]
@@ -948,21 +1113,41 @@ class LiveSession:
         if row is None:
             return
         self._rows[role] = None
+        self._closed_rows[role] = row
         h = self._row_timers[role]
         if h is not None:
             h.cancel()
             self._row_timers[role] = None
         text = row.text.strip()
+        if not text:
+            return
+        # A re-opened row rewrites the entry it already has; the wire event says
+        # "replace"/"done again" so clients update the bubble in place.
+        extended = row.entry is not None
+        if extended:
+            row.entry.text = text
+        else:
+            # Stamp with when the speech *started* on the session clock, not
+            # when the row closed (fragments lag 1–1.5 s, the timer adds more):
+            # the recording manifest's offset_ms then lines up with the audio.
+            # Only for the first generation — a replacement session's clock
+            # restarts at 0 and does not map onto started_at.
+            ts = (
+                self.started_at + row.start_ms / 1000
+                if self._generation == 0 and self.started_at is not None
+                else time.time()
+            )
+            row.entry = TranscriptEntry(role=role, text=text, timestamp=ts)  # type: ignore[arg-type]
+            self._transcript.append(row.entry)
         if role == "user":
             self._last_user_end_ms = row.end_ms
             self._last_user_text = text
-            if text:
-                self._transcript.append(TranscriptEntry(role="user", text=text))
-                await self._emit(TranscriptCommitted(text=text))
-        elif text:
-            self._transcript.append(TranscriptEntry(role="assistant", text=text))
+            await self._emit(TranscriptCommitted(text=text, replace=extended))
+        else:
             await self._emit(AgentTextDone(text=text, run_id=None))
-            await self._emit_turn_metrics(row)
+            if not row.metrics_done:
+                row.metrics_done = True
+                await self._emit_turn_metrics(row)
 
     def _begin_assistant_turn(self, first: TranscriptFragment) -> None:
         self._turn_index += 1
@@ -1261,36 +1446,203 @@ class LiveSession:
             logger.info(
                 "openai_live_session_closed",
                 session_id=self.session_id,
+                live_session_id=self.live_session_id,
                 seconds=self.usage_seconds,
                 est_usd=round(self.usage_seconds / 60 * PRICE_PER_MINUTE_USD, 4),
                 reason=self.close_reason,
             )
+        # One id is minted up front so the manifest can name the run and the
+        # run can name the recording — the platform joins them on session_id
+        # either way, the ids are a convenience for humans reading one of them.
+        run_ctx = self._session_run_context() if self.session_run else None
+        if run_ctx is not None:
+            self.session_run_id = run_ctx.id
+        recording = await self._finalize_recording()
+        if run_ctx is not None:
+            await self._persist_session_run(run_ctx, recording)
+
+    @property
+    def last_run_id(self) -> str | None:
+        """Run id of the most recent delegation that got a run — the pointer a
+        client continues the *conversation* from (text after voice). The
+        session run is not it: it carries no agent memory."""
+        for rec in reversed(list(self._delegations.values())):
+            if rec.get("run_id"):
+                return rec["run_id"]
+        return None
+
+    @property
+    def est_usd(self) -> float | None:
+        return None if self.usage_seconds is None else round(self.usage_seconds / 60 * PRICE_PER_MINUTE_USD, 4)
+
+    def _delegations_brief(self) -> dict[str, dict[str, Any]]:
+        keep = ("status", "run_id", "error", "stale", "stale_reason", "spoken", "backend_ms", "offset_ms")
+        return {did: {k: rec[k] for k in keep if k in rec} for did, rec in self._delegations.items()}
+
+    async def _finalize_recording(self) -> dict[str, Any] | None:
+        """Flush the call recording + manifest, fire ``on_saved``. Never raises.
+
+        Returns ``{"file", "duration_secs", "layout"}`` for the session run, or None.
+        """
+        if self._recorder is None:
+            return None
+        try:
+            from .recording import build_manifest
+
+            meta: dict[str, Any] = {
+                **(self.recording_meta or {}),
+                "pipeline": "live",
+                "live_session_id": self.live_session_id,
+                "usage_seconds": self.usage_seconds,
+                "usage_confirmed": self.usage_confirmed,
+                "est_usd": self.est_usd,
+                "reconnects": self.reconnects,
+                "close_reason": self.close_reason,
+                "delegations": self._delegations_brief(),
+                "last_run_id": self.last_run_id,
+                "session_run_id": self.session_run_id,
+            }
+            if self.parent_run_id:
+                meta["parent_run_id"] = self.parent_run_id
+            manifest = build_manifest(
+                session_id=self.session_id,
+                started_at=self.started_at,
+                meta=meta,
+                transcript=self._transcript,
+                turns=self._metrics,
+                recorder=self._recorder,
+            )
+            result = self._recorder.close(manifest=manifest)
+        except Exception as e:
+            logger.error("recording_finalize_failed", error=str(e), exc_info=True)
+            return None
+        if result is None:
+            return None
+        hook = getattr(self._recorder, "on_saved", None)
+        if hook is not None:
+            try:
+                await hook(result)
+            except Exception as e:
+                logger.error("recording_on_saved_failed", error=str(e), exc_info=True)
+        return {
+            "file": result.audio_path.name,
+            "duration_secs": round(result.duration_secs, 3),
+            "layout": getattr(self._recorder, "layout", None),
+        }
+
+    def _session_run_context(self) -> RunContext | None:
+        """Fresh context for the session run, chained behind the call's last
+        delegation run (else the run this call continued) so the platform
+        threads every run of one call together."""
+        try:
+            return RunContext(
+                parent_id=self.last_run_id or self.parent_run_id,
+                tracing_provider=getattr(self.agent, "tracing_provider", TRACING_UNSET),
+            )
+        except Exception as e:
+            logger.error("openai_live_session_run_context_failed", error=str(e), exc_info=True)
+            return None
+
+    async def _persist_session_run(self, ctx: RunContext, recording: dict[str, Any] | None) -> None:
+        """Persist the call as one ``voice_live_session`` run.
+
+        Voice seconds land in the run's ``usage`` (``openai/{live_model}:seconds``)
+        so the platform's cost rollup sees the $0.05/min that the delegation
+        runs — Agent tokens only — never carried; the :class:`LiveSessionSummary`
+        goes on the root span's metadata and is the run's output. Never raises.
+        """
+        from ..core.tool import Tool
+
+        summary = LiveSessionSummary.from_session(self, recording=recording)
+        seconds = self.usage_seconds
+        live_model = getattr(self.transport, "model", None) or "gpt-live-1"
+        usage_key = f"openai/{live_model}:seconds"
+        started_at = self.started_at
+
+        def handler() -> dict[str, Any]:
+            rc = get_run_context()
+            if rc is not None:
+                if seconds is not None:
+                    rc.update_usage(usage_key, int(round(seconds)))
+                root = rc.root_span()
+                if root is not None:
+                    root.metadata["voice_live_session"] = summary.model_dump(mode="json")
+                    if started_at is not None:
+                        # The run *is* the call: span it from session.started.
+                        root.t0 = int(started_at * 1000)
+            return summary.model_dump(mode="json")
+
+        prev_ctx = get_run_context()
+        try:
+            tool = Tool(
+                name=SESSION_RUN_NAME,
+                handler=handler,
+                description="GPT-Live voice call: usage, transcript, delegations and recording.",
+                tracing_provider=getattr(self.agent, "tracing_provider", TRACING_UNSET),
+            )
+            # Fresh context with an empty trace: the top-level invoke adopts it
+            # as the run's own (same bootstrap as _seed_call_context).
+            set_run_context(ctx)
+            out = await tool().collect()
+            if out.status.code != "success":
+                logger.warning("openai_live_session_run_not_ok", status=out.status.code, error=out.error)
+            logger.info(
+                "openai_live_session_run_saved",
+                run_id=out.run_id,
+                session_id=self.session_id,
+                seconds=seconds,
+                parent_id=ctx.parent_id,
+            )
+        except Exception as e:
+            logger.error("openai_live_session_run_failed", error=str(e), exc_info=True)
+        finally:
+            set_run_context(prev_ctx)
 
 
 class LiveSessionSummary(BaseModel):
-    """Serializable end-of-session snapshot (transcript, metrics, delegations, usage)."""
+    """Serializable end-of-session snapshot (transcript, metrics, delegations, usage).
+
+    Output and root-span metadata of the ``voice_live_session`` run; also what a
+    host can hand to its own store.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     session_id: str | None
+    live_session_id: str | None = None
+    started_at: float | None = None
+    ended_at: float | None = None
     usage_seconds: float | None
     usage_confirmed: bool = True
     reconnects: int = 0
     est_usd: float | None
     close_reason: str | None
+    parent_run_id: str | None = None
+    last_run_id: str | None = None
+    """Continue the conversation from here (agent memory), not from the session run."""
+    session_run_id: str | None = None
+    recording: dict[str, Any] | None = None
+    """``{"file", "duration_secs", "layout"}`` when a recorder was attached."""
     transcript: list[TranscriptEntry]
     delegations: dict[str, dict[str, Any]] = Field(default_factory=dict)
     metrics: list[TurnMetrics] = Field(default_factory=list)
 
     @classmethod
-    def from_session(cls, s: LiveSession) -> LiveSessionSummary:
+    def from_session(cls, s: LiveSession, *, recording: dict[str, Any] | None = None) -> LiveSessionSummary:
         return cls(
             session_id=s.session_id,
+            live_session_id=s.live_session_id,
+            started_at=s.started_at,
+            ended_at=time.time(),
             usage_seconds=s.usage_seconds,
             usage_confirmed=s.usage_confirmed,
             reconnects=s.reconnects,
-            est_usd=None if s.usage_seconds is None else round(s.usage_seconds / 60 * PRICE_PER_MINUTE_USD, 4),
+            est_usd=s.est_usd,
             close_reason=s.close_reason,
+            parent_run_id=s.parent_run_id,
+            last_run_id=s.last_run_id,
+            session_run_id=s.session_run_id,
+            recording=recording,
             transcript=s.transcript,
             delegations=s.delegations,
             metrics=s.metrics,

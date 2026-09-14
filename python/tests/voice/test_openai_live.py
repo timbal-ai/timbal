@@ -6,6 +6,7 @@ against ``wss://api.openai.com/v1/live/sessions`` (2026-09-14). No network.
 
 import asyncio
 import base64
+import re
 
 import pytest
 from timbal import Agent
@@ -88,6 +89,7 @@ class FakeLiveTransport(LiveTransport):
         self.sent: list[dict] = []
         self.audio: list[bytes] = []
         self.connected = False
+        self.connect_count = 0
         self.closed = False
         self.reconnect_inputs: list[list[dict]] = []
         self.fail_reconnects = 0
@@ -97,6 +99,7 @@ class FakeLiveTransport(LiveTransport):
         self._release = asyncio.Event()
 
     async def connect(self):
+        self.connect_count += 1
         self.connected = True
         return STARTED
 
@@ -203,6 +206,19 @@ class TestAudioAndTranscripts:
         assert t.audio and all(c == SILENCE for c in t.audio)
         assert t.connected and t.closed
 
+    async def test_prepare_connects_once_and_run_does_not_reconnect(self):
+        t = FakeLiveTransport([CLOSED])
+        s = LiveSession(t)
+        assert s.closed is False
+        await s.prepare()
+        assert t.connect_count == 1 and s.live_session_id == "live_test"
+        assert re.fullmatch(r"[0-9a-f]{32}", s.session_id)  # ours, minted before connect
+        events = await _collect(s)
+        assert t.connect_count == 1
+        assert events[0].type == "session_started" and events[-1].type == "session_ended"
+        await s.close()
+        assert s.closed is True
+
     async def test_client_close_takes_reason_from_transport(self):
         # Client-initiated close: the dispatcher never sees session.closed.
         t = FakeLiveTransport(["<hold>"], end_after=False)
@@ -233,11 +249,16 @@ class TestAudioAndTranscripts:
         assert [e.text for e in events if isinstance(e, TranscriptCommitted)] == ["One", "two"]
 
     async def test_wallclock_gap_closes_row_before_session_end(self):
-        # Fragment, then wall-clock silence longer than row_gap_ms, then more speech.
+        # Fragment, then wall-clock silence longer than row_gap_ms: the timer
+        # finalizes the row so the UI gets a bubble without waiting for the
+        # session to end. The next fragment is contiguous on the session clock
+        # (100 ms), i.e. late delivery, not a new turn — it extends that row.
         script = [user(" First", 1000, 1200), 0.25, user(" Second", 1300, 1500), CLOSED]
         s = LiveSession(FakeLiveTransport(script), row_gap_ms=100, row_close_slack_ms=50)
         events = await _collect(s)
-        assert [e.text for e in events if isinstance(e, TranscriptCommitted)] == ["First", "Second"]
+        committed = [(e.text, e.replace) for e in events if isinstance(e, TranscriptCommitted)]
+        assert committed == [("First", False), ("First Second", True)]
+        assert [e.text for e in s.transcript] == ["First Second"]
 
     async def test_delivery_jitter_does_not_split_a_row(self):
         # 400 ms on the session clock, but the second fragment arrives 0.9 s late (wall clock).
@@ -270,6 +291,64 @@ class TestAudioAndTranscripts:
         assert m[0].audio_bytes == 4800  # only the non-silent frame during the row
         assert m[0].user_text_chars == len("Weather please")
         assert [(e.role, e.text) for e in s.transcript] == [("user", "Weather please"), ("assistant", "Checking.")]
+
+    async def test_reply_start_commits_user_row_first(self):
+        # Observed in the playground: the user row's wall-clock timer fired *after*
+        # the reply's first fragment, so the reply came out before the ask and was
+        # labelled an opener. The assistant starting after the user's last speech
+        # is the turn boundary — commit, then delta.
+        script = [user(" How are", 1000, 1200), user(" you?", 1200, 1500), agent_tx(" Great", 1900, 2100), CLOSED]
+        s = LiveSession(FakeLiveTransport(script), row_gap_ms=1000, row_close_slack_ms=5000)
+        events = await _collect(s)
+        kinds = [e.type for e in events if e.type in ("transcript_committed", "agent_text_delta")]
+        assert kinds == ["transcript_committed", "agent_text_delta"]
+
+    async def test_late_user_fragment_extends_committed_row(self):
+        # Tail of the user row lands after the reply already committed it.
+        script = [
+            user(" I live in", 1000, 1400),
+            agent_tx(" Nice", 2000, 2200),  # commits "I live in"
+            user(" Barcelona", 1400, 1800),  # contiguous with the closed row
+            0.3,
+            CLOSED,
+        ]
+        s = LiveSession(FakeLiveTransport(script), row_gap_ms=800, row_close_slack_ms=100)
+        events = await _collect(s)
+        committed = [(e.text, e.replace) for e in events if isinstance(e, TranscriptCommitted)]
+        assert committed == [("I live in", False), ("I live in Barcelona", True)]
+        assert [(e.role, e.text) for e in s.transcript if e.role == "user"] == [("user", "I live in Barcelona")]
+
+    async def test_late_assistant_fragment_continues_done_row(self):
+        # "How are you" ... [row closed by the timer] ... "?" — one bubble, not two.
+        script = [
+            agent_tx(" How are you", 1000, 1600),
+            0.3,  # timer closes the row
+            agent_tx("?", 1600, 1700),
+            0.3,
+            CLOSED,
+        ]
+        s = LiveSession(FakeLiveTransport(script), row_gap_ms=100, row_close_slack_ms=100)
+        events = await _collect(s)
+        deltas = [(e.text, e.continues) for e in events if isinstance(e, AgentTextDelta)]
+        assert deltas == [(" How are you", False), ("?", True)]
+        assert [e.text for e in events if isinstance(e, AgentTextDone)] == ["How are you", "How are you?"]
+        assert len([e for e in events if isinstance(e, TurnMetricsEvent)]) == 1
+        assert [(e.role, e.text) for e in s.transcript] == [("assistant", "How are you?")]
+        # Seed for a replacement session carries the merged row once.
+        assert [i["content"][0]["text"] for i in s.history_items()] == ["How are you?"]
+
+    async def test_delegation_view_tidies_fragment_punctuation(self):
+        # Real fragments: " Um", " .", "I tried..." → prompt line "Um. I tried" not "Um .I tried".
+        script = [user(" Um", 1000, 1200), user(" .", 1200, 1250), user("I tried", 1300, 1700), CLOSED]
+        s = LiveSession(FakeLiveTransport(script), row_gap_ms=800)
+        await _collect(s)
+        assert [f.delta for f in s.transcript_since_last_delegation()] == ["Um. I tried"]
+
+    async def test_new_row_drops_leading_punctuation(self):
+        script = [user(" Fine", 1000, 1200), user(". Actually", 3000, 3400), CLOSED]
+        s = LiveSession(FakeLiveTransport(script), row_gap_ms=800)
+        events = await _collect(s)
+        assert [e.text for e in events if isinstance(e, TranscriptCommitted)] == ["Fine", "Actually"]
 
     async def test_overlapping_speakers_keep_independent_rows(self):
         script = [
@@ -306,7 +385,8 @@ class TestAudioAndTranscripts:
         assert s.usage_seconds == 20.0 and s.close_reason == "close_requested"
         summary = LiveSessionSummary.from_session(s)
         assert summary.est_usd == round(20 / 60 * 0.05, 4)
-        assert summary.session_id == "live_test"
+        assert summary.live_session_id == "live_test" and summary.session_id == s.session_id
+        assert summary.started_at is not None and summary.ended_at >= summary.started_at
 
 
 class TestDelegation:
@@ -623,7 +703,7 @@ class TestReconnect:
         statuses = [e.text for e in events if isinstance(e, AgentStatus)]
         assert statuses == ["Reconnecting…", "Reconnected"]
         assert not [e for e in events if isinstance(e, SessionError)]
-        assert s.reconnects == 1 and s.session_id == "live_test_1"
+        assert s.reconnects == 1 and s.live_session_id == "live_test_1"
         seed = t.reconnect_inputs[0]
         assert [(i["role"], i["content"][0]["type"], i["content"][0]["text"]) for i in seed] == [
             ("user", "input_text", "Hi there"),
@@ -731,6 +811,127 @@ class TestReconnect:
         assert LiveSession(FakeLiveTransport([]), reconnect_attempts=0).row_gap_ms == 800
 
 
+class FakeRecorder:
+    """Stand-in for CallRecorder: records the feed, captures the manifest."""
+
+    def __init__(self, path: str = "/tmp/rec/abc.mp3"):
+        from pathlib import Path
+
+        self.audio_path = Path(path)
+        self.layout = "mixed"
+        self.sample_rate = 24_000
+        self.bitrate_kbps = 32
+        self.duration_secs = 1.5
+        self.meta = {"org_id": "o1"}
+        self.mic = b""
+        self.agent = b""
+        self.manifest: dict | None = None
+        self.saved: list = []
+        self.retargeted: list = []
+        self.on_saved = self._on_saved
+
+    def add_mic(self, chunk: bytes) -> None:
+        self.mic += chunk
+
+    def add_agent(self, chunk: bytes) -> None:
+        self.agent += chunk
+
+    def retarget(self, path) -> None:
+        self.retargeted.append(path)
+        self.audio_path = path
+
+    def close(self, manifest=None):
+        from timbal.voice.recording import RecordingResult
+
+        self.manifest = manifest
+        return RecordingResult(audio_path=self.audio_path, manifest_path=None, duration_secs=1.5)
+
+    async def _on_saved(self, result) -> None:
+        self.saved.append(result)
+
+
+class TestRecordingAndSessionRun:
+    async def test_recorder_fed_both_directions_and_manifest_written(self):
+        script = [audio(SILENCE), audio(SPEECH), agent_tx(" Hello", 1000, 1400), CLOSED]
+        rec = FakeRecorder()
+        s = LiveSession(FakeLiveTransport(script), recorder=rec, session_id="abc", session_run=False)
+        await _collect(s)
+        # Mic drives the clock (3 silence frames from _mic); agent gets *every*
+        # frame, zeros included — the output stream is the timeline.
+        assert rec.mic == SILENCE * 3
+        assert rec.agent == SILENCE + SPEECH
+        m = rec.manifest
+        assert m is not None and m["session_id"] == "abc"
+        assert m["meta"]["pipeline"] == "live" and m["meta"]["live_session_id"] == "live_test"
+        assert m["meta"]["usage_seconds"] == 20.0 and m["meta"]["est_usd"] == round(20 / 60 * 0.05, 4)
+        assert [(e["role"], e["text"]) for e in m["transcript"]] == [("assistant", "Hello")]
+        # Session-clock start of the row, not the wall clock of its close.
+        assert m["transcript"][0]["offset_ms"] == 1000
+        assert len(rec.saved) == 1 and rec.saved[0].audio_path.name == "abc.mp3"
+
+    def test_session_id_setter_retargets_recorder(self):
+        rec = FakeRecorder()
+        s = LiveSession(FakeLiveTransport([]), recorder=rec, session_id="abc", reconnect_attempts=0)
+        s.session_id = "call-42"
+        assert s.session_id == "call-42" and rec.audio_path.name == "call-42.mp3"
+        with pytest.raises(ValueError):
+            s.session_id = "bad id!"
+
+    async def test_session_run_carries_voice_seconds_and_summary(self):
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        script = [
+            user(" Hi", 1000, 1200),
+            {"type": "session.usage.updated", "usage": {"seconds": 13.0}},
+            CLOSED,
+        ]
+        rec = FakeRecorder()
+        s = LiveSession(FakeLiveTransport(script), recorder=rec, parent_run_id=None)
+        await _collect(s)
+        assert s.session_run_id is not None
+        trace = InMemoryTracingProvider._storage[s.session_run_id]
+        root = trace.get(trace._root_call_id)
+        assert root.path == "voice_live_session"
+        assert root.usage["openai/gpt-live-1:seconds"] == 20
+        summary = root.metadata["voice_live_session"]
+        assert summary["session_id"] == s.session_id and summary["live_session_id"] == "live_test"
+        assert summary["usage_seconds"] == 20.0 and summary["recording"]["file"] == rec.audio_path.name
+        assert [e["text"] for e in summary["transcript"]] == ["Hi"]
+        # The run spans the call, not the millisecond it took to persist it.
+        assert root.t0 == int(s.started_at * 1000) and root.t1 >= root.t0
+        # Manifest names the run; the run names the recording.
+        assert rec.manifest["meta"]["session_run_id"] == s.session_run_id
+
+    async def test_session_run_chains_behind_last_delegation(self):
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        script = [
+            user(" Book it", 1000, 1400),
+            delegation("d1", 1400),
+            "<wait:commentary>",
+            CLOSED,
+        ]
+        agent = Agent(name="backend", model=TestModel(responses=["Booked."]), tools=[])
+        s = LiveSession(FakeLiveTransport(script), agent, parent_run_id="run_prev")
+        await _collect(s)
+        deleg_run = s.delegations["d1"]["run_id"]
+        assert deleg_run and s.last_run_id == deleg_run
+        # Both the delegation run and the session run are persisted; the
+        # delegation run chains to the call's parent, the session run to it.
+        assert deleg_run in InMemoryTracingProvider._storage
+        trace = InMemoryTracingProvider._storage[s.session_run_id]
+        root = trace.get(trace._root_call_id)
+        assert root.path == "voice_live_session"
+        summary = root.metadata["voice_live_session"]
+        assert summary["parent_run_id"] == "run_prev" and summary["last_run_id"] == deleg_run
+        assert summary["delegations"]["d1"]["run_id"] == deleg_run
+
+    async def test_session_run_can_be_disabled(self):
+        s = LiveSession(FakeLiveTransport([CLOSED]), session_run=False)
+        await _collect(s)
+        assert s.session_run_id is None
+
+
 class TestClientConfig:
     def test_session_config_pcm_default(self):
         c = OpenAILiveClient(api_key="k", instructions="Be terse.")
@@ -767,6 +968,19 @@ class TestClientConfig:
 
         with pytest.raises(ValueError):
             _resolve_api_key(None)
+
+    async def test_connect_401_names_the_api_key(self, monkeypatch):
+        from unittest.mock import AsyncMock, patch
+
+        from websockets.datastructures import Headers
+        from websockets.exceptions import InvalidStatus
+        from websockets.http11 import Response
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        rejection = InvalidStatus(Response(401, "Unauthorized", Headers()))
+        with patch("websockets.asyncio.client.connect", AsyncMock(side_effect=rejection)):
+            with pytest.raises(ConnectionError, match="OPENAI_API_KEY"):
+                await OpenAILiveClient().connect()
 
     def test_split_for_append(self):
         assert split_for_append("") == []

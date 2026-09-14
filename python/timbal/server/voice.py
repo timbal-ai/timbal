@@ -301,6 +301,9 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset(
     {
         "pipeline",
         "live_voice",
+        # The voice model's conversational prompt (≤16k tokens server-side).
+        # Same trust level as ``model``: the playground edits it live.
+        "live_instructions",
         "stt_provider",
         "stt_model",
         "tts_provider",
@@ -962,7 +965,13 @@ def build_voice_session(
     if merged.pipeline == "live":
         try:
             return _build_live_session(
-                runnable, defaults, merged, client_config, call_context=call_context, parent_run_id=parent_run_id
+                runnable,
+                defaults,
+                merged,
+                client_config,
+                call_context=call_context,
+                parent_run_id=parent_run_id,
+                playback_tracker=playback_tracker,
             )
         except ValueError as e:
             # Unsupported audio format for GPT-Live (PCM is 16/24 kHz only): fall
@@ -1110,42 +1119,10 @@ def build_voice_session(
     if parent_run_id:
         session_kwargs["parent_run_id"] = parent_run_id
 
-    # Call recording is read from *server* config only — env (per session,
-    # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).
-    # ``recording`` is not in CLIENT_SETTABLE_VOICE_FIELDS: a browser must not
-    # be able to switch recording on or off.
-    user_recording = defaults.recording
-    recording_data = {
-        **_recording_config_from_env(),
-        **(user_recording.model_dump(include=user_recording.model_fields_set) if user_recording else {}),
-    }
-    if recording_data.get("dir"):
-        try:
-            from uuid_extensions import uuid7
-
-            from ..voice.recording import CallRecorder
-
-            recording_cfg = RecordingConfig(**recording_data)
-            on_saved = recording_cfg.on_saved
-            if on_saved is None and os.environ.get("TIMBAL_VOICE_RECORDING_UPLOAD") == "platform":
-                from .recording_upload import platform_recording_upload_hook
-
-                on_saved = platform_recording_upload_hook()
-            session_id = uuid7(as_type="hex")
-            session_kwargs["session_id"] = session_id
-            session_kwargs["recorder"] = CallRecorder(
-                Path(recording_cfg.dir) / f"{session_id}.mp3",
-                sample_rate=int(merged.sample_rate),
-                layout=recording_cfg.layout,
-                bitrate_kbps=recording_cfg.bitrate_kbps,
-                on_saved=on_saved,
-                meta={k: v for env_key, k in _RECORDING_IDENTITY_ENV if (v := os.environ.get(env_key))} or None,
-            )
-        except ImportError:
-            logger.warning("voice_recording_unavailable", hint="call recording requires timbal[voice] (av + numpy)")
-        except Exception as e:
-            # A misconfigured recorder must not take voice down with it.
-            logger.error("voice_recording_setup_failed", error=str(e), exc_info=True)
+    recorder_id, recorder = _build_recorder(defaults, sample_rate=int(merged.sample_rate))
+    if recorder is not None:
+        session_kwargs["session_id"] = recorder_id
+        session_kwargs["recorder"] = recorder
 
     session = VoiceSession(
         agent=runnable,
@@ -1178,12 +1155,162 @@ def build_voice_session(
     return session, meta
 
 
-_DEFAULT_LIVE_INSTRUCTIONS = (
-    "You are the voice of an assistant. Be natural, warm and concise. You do not have tools or data yourself: "
-    "for anything that needs information you don't have, a lookup, an action, or a decision that depends on "
-    "the caller's account, delegate to the backend and tell the caller briefly that you're checking. Relay "
-    "backend results in your own words. Never invent facts or claim an action succeeded."
-)
+# Language codes the playground / STT config use → names for the prompt rule.
+# GPT-Live has no language parameter: the docs' recipe is a prompt line, and
+# an opener append that states the language explicitly.
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "es": "Spanish",
+    "ca": "Catalan",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "sv": "Swedish",
+    "da": "Danish",
+    "no": "Norwegian",
+    "fi": "Finnish",
+    "ru": "Russian",
+    "uk": "Ukrainian",
+    "tr": "Turkish",
+    "ar": "Arabic",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "el": "Greek",
+    "cs": "Czech",
+    "ro": "Romanian",
+    "hu": "Hungarian",
+    "id": "Indonesian",
+    "vi": "Vietnamese",
+    "th": "Thai",
+    "tl": "Filipino",
+}
+
+
+def live_language_name(code: str | None) -> str | None:
+    """``"es"`` / ``"es-ES"`` → ``"Spanish"``; an unknown code is used verbatim; ``None``/auto → None."""
+    if not code:
+        return None
+    c = code.strip()
+    if not c or c.lower() in ("auto", "multi"):
+        return None
+    return _LANGUAGE_NAMES.get(c.lower().split("-")[0].split("_")[0], c)
+
+
+def _build_recorder(defaults: VoiceConfig, *, sample_rate: int) -> tuple[str | None, Any]:
+    """``(session_id, CallRecorder)`` from server recording config, or ``(None, None)``.
+
+    Call recording is read from *server* config only — env (per session,
+    CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).
+    ``recording`` is not in CLIENT_SETTABLE_VOICE_FIELDS: a browser must not
+    be able to switch recording on or off. The uuid7 minted here is the
+    session's identity: file stem, manifest ``session_id`` and the platform
+    upload path all derive from it. Shared by the cascaded and live builders.
+    """
+    user_recording = defaults.recording
+    recording_data = {
+        **_recording_config_from_env(),
+        **(user_recording.model_dump(include=user_recording.model_fields_set) if user_recording else {}),
+    }
+    if not recording_data.get("dir"):
+        return None, None
+    try:
+        from uuid_extensions import uuid7
+
+        from ..voice.recording import CallRecorder
+
+        recording_cfg = RecordingConfig(**recording_data)
+        on_saved = recording_cfg.on_saved
+        if on_saved is None and os.environ.get("TIMBAL_VOICE_RECORDING_UPLOAD") == "platform":
+            from .recording_upload import platform_recording_upload_hook
+
+            on_saved = platform_recording_upload_hook()
+        session_id = uuid7(as_type="hex")
+        recorder = CallRecorder(
+            Path(recording_cfg.dir) / f"{session_id}.mp3",
+            sample_rate=sample_rate,
+            layout=recording_cfg.layout,
+            bitrate_kbps=recording_cfg.bitrate_kbps,
+            on_saved=on_saved,
+            meta={k: v for env_key, k in _RECORDING_IDENTITY_ENV if (v := os.environ.get(env_key))} or None,
+        )
+        return session_id, recorder
+    except ImportError:
+        logger.warning("voice_recording_unavailable", hint="call recording requires timbal[voice] (av + numpy)")
+    except Exception as e:
+        # A misconfigured recorder must not take voice down with it.
+        logger.error("voice_recording_setup_failed", error=str(e), exc_info=True)
+    return None, None
+
+
+def default_live_instructions(runnable: Any, *, max_tools: int = 12) -> str:
+    """The recommended GPT-Live prompt skeleton, with the delegation policy built from the Agent's tools.
+
+    Follows OpenAI's structure (role → backchannel policy → interruption policy →
+    delegation policy with the three labels). The live model has a small context
+    window and is the *mouth*: procedures stay in the Agent's system prompt. Tool
+    names/descriptions are listed as capabilities so the model knows *when* to
+    hand off — they are not call instructions. ``ToolSet``s (MCP servers, runtime
+    tool sources) have no static list and are summarised generically.
+    """
+    caps: list[str] = []
+    dynamic = False
+    for t in getattr(runnable, "tools", None) or []:
+        name = getattr(t, "name", None)
+        if not isinstance(name, str) or not name:
+            dynamic = True
+            continue
+        if name.startswith(("get_background_task", "list_background_tasks", "cancel_background_task", "read_")):
+            continue
+        # Plain-function tools keep description=None; their docstring is the next best summary.
+        desc = getattr(t, "description", None) or getattr(getattr(t, "handler", None), "__doc__", None) or ""
+        desc = desc.strip().split("\n", 1)[0]
+        desc = desc[:110].rstrip() + ("…" if len(desc) > 110 else "")
+        caps.append(f"- {name.replace('_', ' ')}: {desc}" if desc else f"- {name.replace('_', ' ')}")
+    extra = len(caps) - max_tools
+    caps = caps[:max_tools]
+    if extra > 0:
+        caps.append(f"- …and {extra} more")
+    if dynamic or not caps:
+        caps.append("- Look up information and take actions on the caller's behalf.")
+    tools_block = "\n".join(caps)
+    return (
+        "You are the voice of an assistant. Speak warmly and naturally, at an unhurried pace. Be clear and "
+        "direct, not overly cheerful. If the user is frustrated, acknowledge it briefly and focus on the next "
+        "helpful step. One or two short sentences per reply; no lists.\n\n"
+        "Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with the main "
+        "response.\n\n"
+        "Interruption policy: Stop speaking when the user interrupts. Listen to what they say.\n\n"
+        "Delegation policy:\n"
+        f"Backend tools:\n{tools_block}\n\n"
+        "Delegate to the backend when:\n"
+        "- The request needs a backend capability, account data, or careful reasoning.\n"
+        "- A correction changes work already requested.\n\n"
+        "Do not delegate to the backend when:\n"
+        "- You can answer from the conversation or a still-current result.\n"
+        "- You need a brief clarification to understand the request.\n\n"
+        "Delegate before giving an answer that depends on backend work. Do not guess the result while waiting; "
+        "tell the caller briefly that you are checking. Relay backend results in your own words. Never invent "
+        "facts or claim an action succeeded before the backend confirms it."
+    )
+
+
+def live_instructions_for(runnable: Any, merged: VoiceConfig) -> str:
+    """``live_instructions`` (client/agent) or the tool-aware default, plus the language rule."""
+    base = (merged.live_instructions or "").strip() or default_live_instructions(runnable)
+    lang = live_language_name(merged.language)
+    if lang:
+        base += f"\n\nSpeak {lang} unless the user asks to switch. If a name is unclear, ask how to spell it."
+    return base
+
+
+# Kept for callers/tests that import the old constant; the tool-aware builder supersedes it.
+_DEFAULT_LIVE_INSTRUCTIONS = default_live_instructions(None)
 
 
 def _build_live_session(
@@ -1194,6 +1321,7 @@ def _build_live_session(
     *,
     call_context: dict[str, Any] | None,
     parent_run_id: str | None,
+    playback_tracker: Any = None,
 ) -> tuple[Any, dict[str, Any]]:
     """``pipeline="live"``: GPT-Live full duplex, the Agent answers delegations.
 
@@ -1212,6 +1340,7 @@ def _build_live_session(
     direction = client_call_direction(client_config)
     greeting_cfg = greeting_for_direction(merged, outbound=direction == "outbound")
     greeting: str | None = None
+    lang = live_language_name(merged.language)
     if greeting_cfg is not None:
         text = (greeting_cfg.text or "").strip()
         instructions = (getattr(greeting_cfg, "instructions", None) or "").strip()
@@ -1222,14 +1351,24 @@ def _build_live_session(
             greeting = instructions
         else:
             greeting = "Greet the caller briefly and ask how you can help."
+        if lang:
+            # Docs: the opener append should carry the language rule — the
+            # model must not infer it from a name or number before anyone spoke.
+            greeting = f"Speak {lang}. {greeting}"
 
-    # Client mic may run at 16 kHz (browser default here) or 24 kHz; GPT-Live PCM
-    # supports exactly those two, one format for both directions.
+    # WS hello is often 16 kHz (RNNoise). LiveKit/WebRTC resample, so pin 24 kHz
+    # — GPT-Live's native rate, the one the probe actually spoke and heard.
+    # drop_silence is a WS bandwidth trick; a paced track needs the 1x stream
+    # including zeros or the source underruns into digital silence and the
+    # browser plays nothing.
+    paced = playback_tracker is not None
+    rate = 24_000 if paced else int(merged.sample_rate)
+    live_instructions = live_instructions_for(runnable, merged)
     client = OpenAILiveClient(
         model=merged.live_model,
-        instructions=merged.live_instructions or _DEFAULT_LIVE_INSTRUCTIONS,
+        instructions=live_instructions,
         voice=merged.live_voice,
-        sample_rate=int(merged.sample_rate),
+        sample_rate=rate,
         encoding=merged.encoding,
     )
     client.session_config()  # validate the audio format now, not on the first frame
@@ -1239,28 +1378,39 @@ def _build_live_session(
         pipeline="live",
         live_model=merged.live_model,
         live_voice=merged.live_voice,
-        sample_rate=merged.sample_rate,
+        language=lang,
+        live_instructions_chars=len(live_instructions),
+        live_instructions_custom=bool((merged.live_instructions or "").strip()),
+        sample_rate=rate,
         model=llm_model,
         direction=direction,
         greeting=(greeting or "")[:80] or None,
     )
+    # Recorder at the wire rate: both directions are 1x-paced PCM at ``rate``.
+    live_kwargs: dict[str, Any] = {}
+    recorder_id, recorder = _build_recorder(defaults, sample_rate=rate)
+    if recorder is not None:
+        live_kwargs["session_id"] = recorder_id
+        live_kwargs["recorder"] = recorder
     session = LiveSession(
         client,
         runnable,
-        audio_input=AudioInputConfig(sample_rate=int(merged.sample_rate), encoding=merged.encoding),
-        audio_output=AudioOutputConfig(sample_rate=int(merged.sample_rate), encoding=merged.encoding),
+        audio_input=AudioInputConfig(sample_rate=rate, encoding=merged.encoding),
+        audio_output=AudioOutputConfig(sample_rate=rate, encoding=merged.encoding),
         model=model_override,
         parent_run_id=parent_run_id,
-        # Browser WS clients play as-they-arrive: skip the all-zero frames.
-        drop_silence=True,
+        drop_silence=not paced,
         greeting=greeting,
         call_context=call_context,
+        **live_kwargs,
     )
     meta: dict[str, Any] = {
-        "session_id": None,  # GPT-Live's id, known after connect → session_started payload
+        "session_id": session.session_id,
+        "live_session_id": None,  # GPT-Live's id, known after connect → session_started payload
         "pipeline": "live",
         "live_model": merged.live_model,
         "live_voice": merged.live_voice,
+        "language": lang,
         "stt_provider": None,
         "stt_model": None,
         "tts_provider": None,
@@ -1316,8 +1466,9 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
             "vad_endpointing": getattr(session, "_endpointer", None) is not None,
         }
         if meta.get("pipeline") == "live":
-            # GPT-Live's own session id is only known after connect.
-            payload["session_id"] = getattr(session, "session_id", None)
+            # ``session_id`` is ours (recording/manifest/upload key); GPT-Live's
+            # own id is only known after connect.
+            payload["live_session_id"] = getattr(session, "live_session_id", None)
         return [payload]
     if isinstance(event, DelegationCreated):
         return [{"type": "delegation_created", "delegation_id": event.delegation_id, "prompt": event.prompt}]
@@ -1342,7 +1493,10 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
     if isinstance(event, FillerSpoken):
         return [{"type": "filler", "text": event.text}]
     if isinstance(event, AgentTextDelta):
-        return [{"type": "agent_text_delta", "text": event.text}]
+        payload = {"type": "agent_text_delta", "text": event.text}
+        if event.continues:
+            payload["continues"] = True
+        return [payload]
     if isinstance(event, AgentTextDone):
         # run_id → parent_id on POST /stream continues this conversation on
         # another transport. None for text with no run behind it (greeting,

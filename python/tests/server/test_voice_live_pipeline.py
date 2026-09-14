@@ -57,6 +57,44 @@ class TestBuild:
         assert session.transport.session_config()["instructions"] == "Speak like a pirate."
         assert session.model == "openai/gpt-5.4-nano" and meta["model"] == "openai/gpt-5.4-nano"
 
+    def test_default_instructions_list_the_agents_tools(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+
+        def book_appointment(day: str) -> str:
+            """Book a dental appointment on the given day."""
+            return day
+
+        agent = Agent(name="backend", model=TestModel(responses=["ok"]), tools=[book_appointment])
+        session, _ = build_voice_session(agent, VoiceConfig(pipeline="live"), {})
+        text = session.transport.session_config()["instructions"]
+        assert "Backchannel policy:" in text and "Interruption policy:" in text
+        assert "Backend tools:\n- book appointment: Book a dental appointment on the given day." in text
+        # No tools → a generic capability line, never an empty list.
+        session, _ = build_voice_session(_agent(), VoiceConfig(pipeline="live"), {})
+        assert (
+            "- Look up information and take actions on the caller's behalf."
+            in (session.transport.session_config()["instructions"])
+        )
+
+    def test_language_becomes_prompt_rule_and_opener_language(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        assert "live_instructions" in CLIENT_SETTABLE_VOICE_FIELDS
+        defaults = VoiceConfig(pipeline="live", greeting="Welcome.")
+        session, meta = build_voice_session(
+            _agent(), defaults, {"language": "es-ES", "live_instructions": "Eres Sam, de Northwind Dental."}
+        )
+        text = session.transport.session_config()["instructions"]
+        assert text.startswith("Eres Sam, de Northwind Dental.")
+        assert "Speak Spanish unless the user asks to switch." in text
+        assert session.greeting.startswith("Speak Spanish. ")
+        assert meta["language"] == "Spanish"
+        # Unknown code is passed through verbatim; auto means no rule.
+        session, _ = build_voice_session(_agent(), VoiceConfig(pipeline="live"), {"language": "xx"})
+        assert "Speak xx unless" in session.transport.session_config()["instructions"]
+        session, meta = build_voice_session(_agent(), VoiceConfig(pipeline="live"), {"language": "auto"})
+        assert "unless the user asks to switch" not in session.transport.session_config()["instructions"]
+        assert meta["language"] is None
+
     def test_no_greeting_config_means_no_opener(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "k")
         session, _ = build_voice_session(_agent(), VoiceConfig(pipeline="live"), {})
@@ -64,6 +102,27 @@ class TestBuild:
         defaults = VoiceConfig(pipeline="live", greeting={"instructions": "Greet in Catalan, then listen."})
         session, _ = build_voice_session(_agent(), defaults, {})
         assert session.greeting == "Greet in Catalan, then listen."
+
+    def test_live_session_matches_livekit_host_contract(self, monkeypatch):
+        # livekit_session.py reads session.closed / recording_meta and may
+        # await prepare() before publishing. Missing any of these used to
+        # ClientInitiated-disconnect the room ~200ms after pipeline=live.
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        session, _ = build_voice_session(_agent(), VoiceConfig(pipeline="live"), {})
+        assert session.closed is False
+        assert session.recording_meta is None
+        session.recording_meta = {"transport": "livekit"}
+        assert session.recording_meta["transport"] == "livekit"
+        assert callable(session.prepare)
+
+    def test_paced_transport_pins_24k_and_keeps_silence(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        session, meta = build_voice_session(
+            _agent(), VoiceConfig(pipeline="live"), {"sample_rate": 16000}, playback_tracker=object()
+        )
+        assert session.transport.session_config()["audio"]["format"]["rate"] == 24000
+        assert session.drop_silence is False
+        assert session.audio_input.sample_rate == 24000
 
 
 class TestPayloads:
@@ -74,11 +133,13 @@ class TestPayloads:
 
     def test_session_started_has_no_endpointer_and_live_id(self, monkeypatch):
         session, meta = self._session(monkeypatch)
-        session.session_id = "live_abc"
+        session.live_session_id = "live_abc"
         (payload,) = event_to_payloads(SessionStarted(), session, meta)
         assert payload["type"] == "session_started"
         assert payload["vad_endpointing"] is False
-        assert payload["pipeline"] == "live" and payload["session_id"] == "live_abc"
+        assert payload["pipeline"] == "live" and payload["live_session_id"] == "live_abc"
+        # Ours: the recording / manifest / platform-session key, known before connect.
+        assert payload["session_id"] == session.session_id and len(session.session_id) == 32
 
     def test_delegation_events_are_forwarded(self, monkeypatch):
         session, meta = self._session(monkeypatch)

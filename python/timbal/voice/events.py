@@ -54,6 +54,10 @@ class TranscriptCommitted(VoiceSessionEvent):
 class AgentTextDelta(VoiceSessionEvent):
     type: Literal["agent_text_delta"] = "agent_text_delta"
     text: str
+    # True → this text extends the assistant turn that already got its
+    # AgentTextDone (a transcript fragment delivered after the row closed —
+    # GPT-Live). Append to the last assistant bubble; another AgentTextDone follows.
+    continues: bool = False
 
 
 class AgentTextDone(VoiceSessionEvent):
