@@ -567,6 +567,8 @@ class LiveSession:
         reconnect_attempts: int = 3,
         reconnect_backoff_secs: tuple[float, ...] = (0.5, 1.0, 2.0),
         stale_policy: Literal["thinking", "drop", "speak"] = "thinking",
+        greeting: str | None = None,
+        call_context: dict[str, Any] | None = None,
     ) -> None:
         self.transport = transport
         self.agent = agent
@@ -583,6 +585,13 @@ class LiveSession:
         self.reconnect_attempts = reconnect_attempts
         self.reconnect_backoff_secs = reconnect_backoff_secs
         self.stale_policy = stale_policy
+        self.call_context = dict(call_context or {})
+        """Per-call identity (``rep_id``, ``from``, ...) planted on the run's
+        session bag before the first delegation, for callable system prompts."""
+        self.greeting = greeting
+        """Opener instruction spoken before the caller talks (e.g. "Greet the
+        caller in Spanish and ask how you can help"). Sent once, on the first
+        session only — a replacement session is seeded with the transcript."""
         self.reconnects = 0
         # Bumped on every replacement session: the server timeline restarts at 0,
         # so ``*_ms`` values are only comparable within one generation.
@@ -685,6 +694,8 @@ class LiveSession:
             self.session_id = (started.get("session") or {}).get("id")
             await self._seed_call_context()
             await self._emit(SessionStarted())
+            if self.greeting:
+                await self.greet(self.greeting)
 
             audio_task = asyncio.create_task(self._forward_audio(audio_in), name="openai-live-uplink")
             events_task = asyncio.create_task(self._process_events(), name="openai-live-events")
@@ -1206,7 +1217,9 @@ class LiveSession:
     # -- Internal: run context seed ---------------------------------------------
 
     async def _seed_call_context(self) -> None:
-        if not self.parent_run_id:
+        # Same contract as VoiceSession._seed_call_context: the parent run and
+        # per-call identity must be *on the ambient context* before turn one.
+        if not self.parent_run_id and not self.call_context:
             return
         ctx = get_run_context()
         if ctx is None:
@@ -1214,8 +1227,11 @@ class LiveSession:
                 parent_id=self.parent_run_id,
                 tracing_provider=getattr(self.agent, "tracing_provider", TRACING_UNSET),
             )
-        elif ctx.parent_id is None and not ctx._trace:
+        elif self.parent_run_id and ctx.parent_id is None and not ctx._trace:
             ctx.parent_id = self.parent_run_id
+        if self.call_context:
+            session_data = await ctx.get_session()
+            session_data.update(self.call_context)
         set_run_context(ctx)
 
     # -- Internal: helpers -------------------------------------------------------

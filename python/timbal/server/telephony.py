@@ -684,7 +684,9 @@ async def serve_media_ws(
                         played_ms = int(name) / (TELEPHONY_SAMPLE_RATE / 1000)
                     except ValueError:
                         continue
-                    session.playback.on_playback_ack(played_ms)
+                    playback = getattr(session, "playback", None)  # None on the live pipeline
+                    if playback is not None:
+                        playback.on_playback_ack(played_ms)
                 elif event == "stop":
                     logger.info("telephony_call_stopped", provider=dialect.name, call_id=info.get("call_id"))
                     break

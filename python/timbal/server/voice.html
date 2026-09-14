@@ -843,6 +843,14 @@
               </select>
             </label>
             <label class="field">
+              <span class="field-label">Pipeline</span>
+              <select id="pipeline-select" aria-label="Voice pipeline" title="Cascaded: STT → Agent → TTS. GPT-Live: OpenAI full-duplex voice model, your Agent answers its delegations (needs OPENAI_API_KEY on the server). Applied on the next Start.">
+                <option value="">Server default</option>
+                <option value="cascaded">Cascaded (STT → Agent → TTS)</option>
+                <option value="live">GPT-Live (full duplex)</option>
+              </select>
+            </label>
+            <label class="field">
               <span class="field-label">Speech-to-text</span>
               <select id="stt-select" aria-label="STT provider" title="Speech-to-text provider — applied on the next Start. Deepgram needs DEEPGRAM_API_KEY on the server.">
                 <option value="">Server default</option>
@@ -1537,6 +1545,26 @@ transportSelect.onchange = () => {
   syncNsForTransport();
 };
 syncNsForTransport();
+
+const pipelineSelect = document.getElementById('pipeline-select');
+const PIPELINE_STORAGE_KEY = 'timbal-voice-pipeline';
+pipelineSelect.value = localStorage.getItem(PIPELINE_STORAGE_KEY) || '';
+/** GPT-Live owns STT, TTS and turn-taking: grey out the cascaded-only knobs. */
+function syncCascadedFieldsForPipeline() {
+  const live = pipelineSelect.value === 'live';
+  for (const id of ['stt-select', 'stt-model-input', 'td-select', 'tts-select', 'tts-model-select', 'vad-select', 'voice-input']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.disabled = live;
+    const field = el.closest('.field');
+    if (field) field.style.opacity = live ? '0.45' : '';
+  }
+}
+pipelineSelect.onchange = () => {
+  localStorage.setItem(PIPELINE_STORAGE_KEY, pipelineSelect.value);
+  syncCascadedFieldsForPipeline();
+};
+syncCascadedFieldsForPipeline();
 
 const sttSelect = document.getElementById('stt-select');
 const STT_STORAGE_KEY = 'timbal-voice-stt-provider';
@@ -2464,6 +2492,7 @@ btnSession.onclick = () => {
 /** Config keys shared by the WS hello and the RTC offer body. */
 function sessionConfigPayload() {
   const cfg = {};
+  if (pipelineSelect.value) cfg.pipeline = pipelineSelect.value;
   if (tdSelect.value) cfg.turn_detector = tdSelect.value;
   if (sttSelect.value) cfg.stt_provider = sttSelect.value;
   if (ttsSelect.value) cfg.tts_provider = ttsSelect.value;
@@ -2704,6 +2733,7 @@ function handleServerMessage(msg) {
         {
           const bits = [];
           if (msg.direction) bits.push(msg.direction === 'outbound' ? 'outbound call' : 'inbound call');
+          if (msg.pipeline === 'live') bits.push(`${msg.live_model || 'GPT-Live'} · voice ${msg.live_voice || '?'} · backend`);
           if (msg.model) bits.push(msg.model);
           if (msg.stt_provider) bits.push(`STT ${msg.stt_provider}${msg.stt_model ? `/${msg.stt_model}` : ''}`);
           if (msg.tts_provider) bits.push(`TTS ${msg.tts_provider}`);
@@ -2720,8 +2750,23 @@ function handleServerMessage(msg) {
         break;
       case 'agent_status':
         setStatus(msg.text || '');
-        void startThinkingSound(); // a tool is running — mask the dead air
+        // A tool is running — mask the dead air. Not on GPT-Live: the voice
+        // model keeps talking while the backend works, and reconnect notices
+        // ("Reconnecting…") are not tool calls.
+        if (pipelineSelect.value !== 'live') void startThinkingSound();
         break;
+      case 'delegation_created':
+        // GPT-Live handed work to the Agent. The wire event has no task text;
+        // the prompt shows what the backend was told (transcript-derived).
+        log('status', `→ backend (${msg.delegation_id})`);
+        console.info('delegation prompt', msg.prompt);
+        break;
+      case 'delegation_result': {
+        const tag = msg.error ? 'error' : msg.stale ? (msg.spoken ? 'stale' : 'stale → quiet') : 'spoken';
+        log('status', `← backend [${tag}]: ${msg.text}${msg.run_id ? `  (run ${msg.run_id})` : ''}`);
+        setStatus(null);
+        break;
+      }
       case 'agent_interaction':
       case 'agent_approval': {
         // The run is parked waiting for us, so it is not working: drop the

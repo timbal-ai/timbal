@@ -189,7 +189,9 @@ class UserIdleConfig(BaseModel):
     @model_validator(mode="after")
     def _has_something_to_do(self) -> UserIdleConfig:
         has_line = bool(self.instructions and self.instructions.strip()) or bool(
-            self.text if isinstance(self.text, str) and self.text.strip() else [t for t in (self.text or []) if str(t).strip()]
+            self.text
+            if isinstance(self.text, str) and self.text.strip()
+            else [t for t in (self.text or []) if str(t).strip()]
         )
         if self.max_count > 0 and not has_line:
             raise ValueError("user_idle needs 'text' or 'instructions' (or max_count=0 with hangup_after_secs)")
@@ -262,6 +264,19 @@ class VoiceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    pipeline: Literal["cascaded", "live"] = "cascaded"
+    """``"cascaded"``: STT → Agent → TTS (:class:`~timbal.voice.VoiceSession`).
+    ``"live"``: OpenAI GPT-Live full-duplex voice with the Agent as the
+    delegation backend (:class:`~timbal.voice.openai_live.LiveSession`) — STT,
+    TTS and turn-detection settings are ignored; requires ``OPENAI_API_KEY``."""
+    live_model: str = "gpt-live-1"
+    live_voice: str = "marin"
+    """GPT-Live voice (``marin``, ``vesper``, ``quartz``, ...). Separate from
+    ``voice`` (a TTS provider voice id)."""
+    live_instructions: str | None = None
+    """Short conversational prompt for the *voice* model (style, when to
+    delegate). None → a default that tells it to delegate anything needing
+    data, tools or actions. The Agent keeps its own full system prompt."""
     stt_provider: str = "elevenlabs"
     stt_model: str = "scribe_v2_realtime"
     tts_provider: str = "elevenlabs"

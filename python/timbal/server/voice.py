@@ -189,6 +189,7 @@ def _portable_ambient(block: Any) -> dict[str, Any] | None:
         out["volume"] = float(block["volume"])
     return out
 
+
 _DROP = object()
 
 
@@ -296,31 +297,35 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
 # separately in :func:`select_turn_detector_spec` (mode names only, never
 # callables). ``model`` is deliberately client-settable for the playground
 # model picker; trim this set in deployments where the client is untrusted.
-CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
-    "stt_provider",
-    "stt_model",
-    "tts_provider",
-    "tts_model",
-    "voice",
-    "language",
-    "sample_rate",
-    "encoding",
-    "stt_extra",
-    "tts_extra",
-    "vad_endpointing",
-    "model",
-    "turn_timeout_secs",
-    "turn_timeout_fallback",
-    "filler",
-    # Per-call opener: the telephony webhook's <Parameter name="greeting"> and
-    # the LiveKit hello both arrive through this allowlist, and "what this call
-    # opens with" is per-call by nature (an outbound campaign sets it per dial).
-    "greeting",
-    "outbound_greeting",
-    # Silence policy is per-call tuning too (a voicemail-heavy campaign wants a
-    # short hang-up; a support line wants patient re-engagement).
-    "user_idle",
-})
+CLIENT_SETTABLE_VOICE_FIELDS = frozenset(
+    {
+        "pipeline",
+        "live_voice",
+        "stt_provider",
+        "stt_model",
+        "tts_provider",
+        "tts_model",
+        "voice",
+        "language",
+        "sample_rate",
+        "encoding",
+        "stt_extra",
+        "tts_extra",
+        "vad_endpointing",
+        "model",
+        "turn_timeout_secs",
+        "turn_timeout_fallback",
+        "filler",
+        # Per-call opener: the telephony webhook's <Parameter name="greeting"> and
+        # the LiveKit hello both arrive through this allowlist, and "what this call
+        # opens with" is per-call by nature (an outbound campaign sets it per dial).
+        "greeting",
+        "outbound_greeting",
+        # Silence policy is per-call tuning too (a voicemail-heavy campaign wants a
+        # short hang-up; a support line wants patient re-engagement).
+        "user_idle",
+    }
+)
 
 #: Hello keys the transport reads directly — not ``VoiceConfig`` fields, so
 #: they must not be logged as "ignored" by the override merge.
@@ -347,6 +352,7 @@ def client_call_direction(config: dict[str, Any]) -> str | None:
         logger.info("voice_client_direction_ignored", value=raw[:40])
     return None
 
+
 # Keys a client may set *inside* ``stt_extra`` / ``tts_extra``. Tuning only.
 #
 # The adapters read the provider WebSocket host off these dicts (``stt_host``
@@ -360,44 +366,48 @@ def client_call_direction(config: dict[str, Any]) -> str | None:
 # pin like ``dialect: emirati``). Server-side config (``runnable.voice_config``,
 # env, org overrides) is unaffected and can still point at a self-hosted
 # Munsit, on-prem Deepgram or a residency endpoint.
-CLIENT_TUNING_STT_EXTRA = frozenset({
-    # Deepgram Flux / Nova
-    "eot_timeout_ms",
-    "eot_threshold",
-    "eager_eot_threshold",
-    "endpointing",
-    "smart_format",
-    "punctuate",
-    "interim_results",
-    "keyterm",
-    "keywords",
-    # ElevenLabs Scribe + local VAD knobs (build_voice_session pops these for native-EOU providers)
-    "commit_strategy",
-    "audio_format",
-    "min_speech_duration_ms",
-    "vad_silence_threshold_secs",
-    "vad_threshold",
-    # Munsit
-    "smart_turn",
-    "hotwords",
-    "channels",
-})
-CLIENT_TUNING_TTS_EXTRA = frozenset({
-    # ElevenLabs
-    "output_format",
-    "audio_format",
-    "auto_mode",
-    "inactivity_timeout",
-    "tts_keepalive_interval",
-    "apply_text_normalization",
-    # Munsit / Fish
-    "stability",
-    "speed",
-    "dialect",
-    "latency",
-    "volume",
-    "condition_on_previous_chunks",
-})
+CLIENT_TUNING_STT_EXTRA = frozenset(
+    {
+        # Deepgram Flux / Nova
+        "eot_timeout_ms",
+        "eot_threshold",
+        "eager_eot_threshold",
+        "endpointing",
+        "smart_format",
+        "punctuate",
+        "interim_results",
+        "keyterm",
+        "keywords",
+        # ElevenLabs Scribe + local VAD knobs (build_voice_session pops these for native-EOU providers)
+        "commit_strategy",
+        "audio_format",
+        "min_speech_duration_ms",
+        "vad_silence_threshold_secs",
+        "vad_threshold",
+        # Munsit
+        "smart_turn",
+        "hotwords",
+        "channels",
+    }
+)
+CLIENT_TUNING_TTS_EXTRA = frozenset(
+    {
+        # ElevenLabs
+        "output_format",
+        "audio_format",
+        "auto_mode",
+        "inactivity_timeout",
+        "tts_keepalive_interval",
+        "apply_text_normalization",
+        # Munsit / Fish
+        "stability",
+        "speed",
+        "dialect",
+        "latency",
+        "volume",
+        "condition_on_previous_chunks",
+    }
+)
 
 _CLIENT_TUNING_EXTRA = {"stt_extra": CLIENT_TUNING_STT_EXTRA, "tts_extra": CLIENT_TUNING_TTS_EXTRA}
 
@@ -438,7 +448,8 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     # read straight off the hello by the transport, not through VoiceConfig —
     # reporting them as ignored would be a lie in both directions.
     ignored = sorted(
-        k for k, v in client.items()
+        k
+        for k, v in client.items()
         if v is not None and k not in CLIENT_SETTABLE_VOICE_FIELDS and k not in _HELLO_TRANSPORT_KEYS
     )
     if ignored:
@@ -719,9 +730,8 @@ async def warmup_voice_stack(voice_config: VoiceConfig, *, livekit: bool | None 
       :func:`voice_onnx_warmup_intended`.
     """
     if livekit is None:
-        livekit = (
-            os.environ.get("TIMBAL_VOICE_TRANSPORT", "").strip().lower() == "livekit"
-            or bool(os.environ.get("TIMBAL_LIVEKIT_URL", "").strip())
+        livekit = os.environ.get("TIMBAL_VOICE_TRANSPORT", "").strip().lower() == "livekit" or bool(
+            os.environ.get("TIMBAL_LIVEKIT_URL", "").strip()
         )
     loop = asyncio.get_running_loop()
 
@@ -949,6 +959,16 @@ def build_voice_session(
 
     merged = merge_client_voice_overrides(defaults, client_config)
 
+    if merged.pipeline == "live":
+        try:
+            return _build_live_session(
+                runnable, defaults, merged, client_config, call_context=call_context, parent_run_id=parent_run_id
+            )
+        except ValueError as e:
+            # Unsupported audio format for GPT-Live (PCM is 16/24 kHz only): fall
+            # back to the cascaded pipeline rather than a socket that never speaks.
+            logger.warning("voice_live_unavailable", error=str(e), hint="falling back to cascaded pipeline")
+
     stt_provider = merged.stt_provider
     stt_model_requested = merged.stt_model
     try:
@@ -1158,6 +1178,104 @@ def build_voice_session(
     return session, meta
 
 
+_DEFAULT_LIVE_INSTRUCTIONS = (
+    "You are the voice of an assistant. Be natural, warm and concise. You do not have tools or data yourself: "
+    "for anything that needs information you don't have, a lookup, an action, or a decision that depends on "
+    "the caller's account, delegate to the backend and tell the caller briefly that you're checking. Relay "
+    "backend results in your own words. Never invent facts or claim an action succeeded."
+)
+
+
+def _build_live_session(
+    runnable: Any,
+    defaults: VoiceConfig,
+    merged: VoiceConfig,
+    client_config: dict[str, Any],
+    *,
+    call_context: dict[str, Any] | None,
+    parent_run_id: str | None,
+) -> tuple[Any, dict[str, Any]]:
+    """``pipeline="live"``: GPT-Live full duplex, the Agent answers delegations.
+
+    No STT/TTS/turn detector: the model owns the mouth, ears and turn-taking;
+    ``turn_detector`` / ``vad_endpointing`` / ``filler`` / ``user_idle`` /
+    ``turn_timeout_*`` do not apply. ``greeting`` text becomes an opener
+    instruction. The playback-ack protocol is accepted and ignored (nothing to
+    truncate: what was voiced is the transcript).
+    """
+    from ..voice.openai_live import LiveSession, OpenAILiveClient
+    from ..voice.providers import AudioInputConfig, AudioOutputConfig
+
+    raw_model = merged.model
+    model_override = raw_model.strip() if isinstance(raw_model, str) and "/" in raw_model.strip() else None
+    llm_model = model_override or (str(runnable.model) if isinstance(getattr(runnable, "model", None), str) else None)
+    direction = client_call_direction(client_config)
+    greeting_cfg = greeting_for_direction(merged, outbound=direction == "outbound")
+    greeting: str | None = None
+    if greeting_cfg is not None:
+        text = (greeting_cfg.text or "").strip()
+        instructions = (getattr(greeting_cfg, "instructions", None) or "").strip()
+        if text:
+            greeting = f"Open the conversation with this greeting (adapt naturally, keep the meaning): {text}"
+        elif instructions:
+            # GPT-Live openers are instructions by nature — pass them through.
+            greeting = instructions
+        else:
+            greeting = "Greet the caller briefly and ask how you can help."
+
+    # Client mic may run at 16 kHz (browser default here) or 24 kHz; GPT-Live PCM
+    # supports exactly those two, one format for both directions.
+    client = OpenAILiveClient(
+        model=merged.live_model,
+        instructions=merged.live_instructions or _DEFAULT_LIVE_INSTRUCTIONS,
+        voice=merged.live_voice,
+        sample_rate=int(merged.sample_rate),
+        encoding=merged.encoding,
+    )
+    client.session_config()  # validate the audio format now, not on the first frame
+
+    logger.info(
+        "voice_session_config",
+        pipeline="live",
+        live_model=merged.live_model,
+        live_voice=merged.live_voice,
+        sample_rate=merged.sample_rate,
+        model=llm_model,
+        direction=direction,
+        greeting=(greeting or "")[:80] or None,
+    )
+    session = LiveSession(
+        client,
+        runnable,
+        audio_input=AudioInputConfig(sample_rate=int(merged.sample_rate), encoding=merged.encoding),
+        audio_output=AudioOutputConfig(sample_rate=int(merged.sample_rate), encoding=merged.encoding),
+        model=model_override,
+        parent_run_id=parent_run_id,
+        # Browser WS clients play as-they-arrive: skip the all-zero frames.
+        drop_silence=True,
+        greeting=greeting,
+        call_context=call_context,
+    )
+    meta: dict[str, Any] = {
+        "session_id": None,  # GPT-Live's id, known after connect → session_started payload
+        "pipeline": "live",
+        "live_model": merged.live_model,
+        "live_voice": merged.live_voice,
+        "stt_provider": None,
+        "stt_model": None,
+        "tts_provider": None,
+        "model": llm_model,
+        "turn_detector": None,
+        "direction": direction,
+        "ambient": (
+            {"source": defaults.ambient.source, "volume": defaults.ambient.volume} if defaults.ambient else None
+        ),
+    }
+    if parent_run_id:
+        meta["parent_run_id"] = parent_run_id
+    return session, meta
+
+
 def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[dict[str, Any]]:
     """Map one ``VoiceSessionEvent`` to the JSON payloads a transport sends.
 
@@ -1176,6 +1294,8 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         AgentTextDelta,
         AgentTextDone,
         AudioOutput,
+        DelegationCreated,
+        DelegationResult,
         FillerSpoken,
         SessionEnded,
         SessionError,
@@ -1187,16 +1307,22 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
     )
 
     if isinstance(event, SessionStarted):
-        return [
-            {
-                "type": "session_started",
-                **meta,
-                # The endpointer arms during session startup (before this event
-                # is emitted), so this reflects the real state — not the
-                # requested config.
-                "vad_endpointing": session._endpointer is not None,
-            }
-        ]
+        payload = {
+            "type": "session_started",
+            **meta,
+            # The endpointer arms during session startup (before this event
+            # is emitted), so this reflects the real state — not the
+            # requested config. Absent on the live pipeline (no endpointer).
+            "vad_endpointing": getattr(session, "_endpointer", None) is not None,
+        }
+        if meta.get("pipeline") == "live":
+            # GPT-Live's own session id is only known after connect.
+            payload["session_id"] = getattr(session, "session_id", None)
+        return [payload]
+    if isinstance(event, DelegationCreated):
+        return [{"type": "delegation_created", "delegation_id": event.delegation_id, "prompt": event.prompt}]
+    if isinstance(event, DelegationResult):
+        return [event.model_dump()]
     if isinstance(event, TranscriptPartial):
         return [{"type": "transcript_partial", "text": event.text}]
     if isinstance(event, TranscriptCommitted):
@@ -1346,7 +1472,11 @@ async def _serve_voice_ws(ws: WebSocket, runnable: Any) -> None:
         call_context=client_call_context(config),
         parent_run_id=client_parent_run_id(config),
     )
-    meta = {"playback_acks": "recommended", "transport": "websocket", **meta}
+    meta = {
+        "playback_acks": "ignored" if meta.get("pipeline") == "live" else "recommended",
+        "transport": "websocket",
+        **meta,
+    }
     session.recording_meta = meta
 
     async def _recv_loop() -> None:
@@ -1364,10 +1494,13 @@ async def _serve_voice_ws(ws: WebSocket, runnable: Any) -> None:
                         await audio_queue.put(base64.b64decode(data["data"]))
                     elif data.get("type") == "playback":
                         # Cumulative ms of TTS audio the client actually played.
-                        try:
-                            session.playback.on_playback_ack(float(data["played_ms"]))
-                        except (KeyError, TypeError, ValueError):
-                            logger.debug("voice_ws_bad_playback_ack", data=str(data)[:120])
+                        # No playback tracker on the live pipeline: nothing to truncate.
+                        playback = getattr(session, "playback", None)
+                        if playback is not None:
+                            try:
+                                playback.on_playback_ack(float(data["played_ms"]))
+                            except (KeyError, TypeError, ValueError):
+                                logger.debug("voice_ws_bad_playback_ack", data=str(data)[:120])
         except WebSocketDisconnect:
             pass
         finally:
@@ -1412,7 +1545,13 @@ async def _serve_voice_ws(ws: WebSocket, runnable: Any) -> None:
     async def _handle(event: VoiceSessionEvent) -> None:
         """Forward session events to the browser over WebSocket."""
         nonlocal warned_ack_degraded
-        if isinstance(event, SessionInterrupted) and not warned_ack_degraded and not session.playback.ack_received:
+        playback = getattr(session, "playback", None)
+        if (
+            isinstance(event, SessionInterrupted)
+            and not warned_ack_degraded
+            and playback is not None
+            and not playback.ack_received
+        ):
             warned_ack_degraded = True
             logger.warning(
                 "voice_ws_truncation_degraded",
