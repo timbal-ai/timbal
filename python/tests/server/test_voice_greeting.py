@@ -262,6 +262,24 @@ class TestGreetingConfig:
         with pytest.raises(ValidationError):
             VoiceConfig(greeting={"delay_ms": 500})
 
+    def test_cleared_block_means_no_greeting(self) -> None:
+        """A form that empties the greeting field emits ``{"text": ""}``. That
+        is ``""`` spelled as a dict — no opener — not a boot failure. Seen live:
+        a Studio publish wrote it and every inbound call rang into the void."""
+        assert VoiceConfig(greeting={"text": ""}).greeting is None
+        assert VoiceConfig(greeting={"text": "   "}).greeting is None
+        assert VoiceConfig(greeting={"text": None}).greeting is None
+        assert VoiceConfig(greeting={"text": "", "instructions": ""}).greeting is None
+        # Blank text but the form kept its knobs: still "cleared".
+        assert VoiceConfig(greeting={"text": "", "delay_ms": 800}).greeting is None
+        assert VoiceConfig(outbound_greeting={"text": ""}).outbound_greeting is None
+        # One blank, one set → the set one wins, as before.
+        cfg = VoiceConfig(greeting={"text": "", "instructions": "greet them"})
+        assert cfg.greeting is not None and cfg.greeting.instructions == "greet them"
+        # No speech key at all is still a typo.
+        with pytest.raises(ValidationError):
+            VoiceConfig(greeting={"interruptible": True})
+
     def test_session_coerces_bare_string(self) -> None:
         session = _make_session(greeting=GREETING)
         assert isinstance(session.greeting, GreetingConfig)
