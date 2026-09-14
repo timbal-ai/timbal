@@ -784,14 +784,10 @@ class TestReconnect:
         assert [c["content"] for c in t.commands("session.commentary.append")] == ["late but valid"]
         assert [e for e in events if isinstance(e, DelegationResult)][0].spoken is True
 
-    @pytest.mark.parametrize("lag", [0.0, 0.1])
-    async def test_result_finishing_while_socket_is_down_lands_on_new_session(self, lag):
-        # Bugbot: a delegation that completes during the outage used to hit the
-        # dead transport, swallow the error and never speak. lag=0: the reader
-        # already noticed the drop (delivery waits for the reconnect). lag=0.1:
-        # the socket is dead but the reader has not returned yet — the first
-        # send raises and the retry lands on the replacement session.
-        gate = asyncio.Event()
+    @staticmethod
+    def _dropping_transport(gate: asyncio.Event, *, lag: float, reconnect_delay: float = 0.2):
+        """Socket dies after the first script; ``lag`` is how long the reader
+        takes to notice (events() returning) after sends already fail."""
 
         class _DroppingTransport(FakeLiveTransport):
             down = False
@@ -806,7 +802,7 @@ class TestReconnect:
                         await asyncio.sleep(lag)
 
             async def reconnect(self, *, input=None):
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(reconnect_delay)
                 started = await super().reconnect(input=input)
                 self.down = False
                 return started
@@ -816,18 +812,48 @@ class TestReconnect:
                     raise ConnectionError("socket closed")
                 await super().send(event)
 
+        return _DroppingTransport
+
+    @pytest.mark.parametrize("lag", [0.0, 0.1, 0.6])
+    async def test_result_finishing_while_socket_is_down_lands_on_new_session(self, lag):
+        # Bugbot: a delegation that completes during the outage used to hit the
+        # dead transport, swallow the error and never speak. lag=0: the reader
+        # already noticed the drop (delivery waits for the reconnect). lag>0:
+        # the socket is dead but the reader has not returned yet — the first
+        # send raises and the retry waits for the *next generation*, however
+        # long the reader takes (0.6 s beat the old fixed 0.25 s grace).
+        gate = asyncio.Event()
+
         async def slow(_s, _d, _p):
             await gate.wait()
             return "late but valid"
 
         first = [user(" order status", 1000, 1600), delegation("d1", 1600)]  # drop after
         second = ["<wait:commentary>", CLOSED]
-        t = _DroppingTransport(first, more_scripts=[second])
+        t = self._dropping_transport(gate, lag=lag)(first, more_scripts=[second])
         s = LiveSession(t, on_delegation=slow, reconnect_backoff_secs=(0.0,))
         events = await _collect(s)
         assert s.reconnects == 1
         assert [c["content"] for c in t.commands("session.commentary.append")] == ["late but valid"]
         assert [e for e in events if isinstance(e, DelegationResult)][0].spoken is True
+
+    async def test_result_retry_gives_up_promptly_when_reconnect_fails(self):
+        # Send fails, reader notices late, reconnect never succeeds: the retry
+        # must drop when the session ends — not sit out the reconnect budget.
+        gate = asyncio.Event()
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "never spoken"
+
+        first = [user(" hi", 1000, 1200), delegation("d1", 1200)]
+        t = self._dropping_transport(gate, lag=0.1)(first)  # no more scripts → reconnect raises
+        t.fail_reconnects = 0
+        s = LiveSession(t, on_delegation=slow, reconnect_attempts=1, reconnect_backoff_secs=(0.0,))
+        events = await asyncio.wait_for(_collect(s, timeout=5.0), 6.0)
+        assert not t.commands("session.commentary.append")
+        result = [e for e in events if isinstance(e, DelegationResult)]
+        assert result and result[0].spoken is False
 
     async def test_result_after_session_over_is_dropped_not_hung(self):
         gate = asyncio.Event()

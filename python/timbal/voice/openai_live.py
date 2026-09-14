@@ -646,6 +646,10 @@ class LiveSession:
         # Set while a session (any generation) is up; cleared for the span of
         # a reconnect so result delivery waits instead of hitting a dead socket.
         self._connected = asyncio.Event()
+        # Fires when a replacement session comes up (or the session ends);
+        # a fresh Event is swapped in per generation so a waiter that captured
+        # the current one sees exactly "the next generation started".
+        self._generation_event = asyncio.Event()
         self._rows: dict[str, _Row | None] = {"user": None, "assistant": None}
         # Most recently closed row per speaker. Fragments land unevenly behind
         # the session clock, so a row's tail routinely arrives after the row
@@ -841,6 +845,7 @@ class LiveSession:
         self._closed = True
         # Wake anything parked on a reconnect that will now never happen.
         self._connected.set()
+        self._generation_event.set()
         await self._emit(None)
 
     async def say(self, text: str) -> None:
@@ -955,19 +960,39 @@ class LiveSession:
                 "openai_live_reconnected", live_session_id=self.live_session_id, attempt=attempt + 1, seeded=len(seed)
             )
             self._connected.set()
+            self._bump_generation_event()
             await self._emit(AgentStatus(text="Reconnected"))
             return True
         await self._emit(SessionError(message=f"GPT-Live reconnect failed: {last_error}"))
         return False
 
+    def _bump_generation_event(self) -> None:
+        prev, self._generation_event = self._generation_event, asyncio.Event()
+        prev.set()
+
+    @property
+    def _reconnect_budget_secs(self) -> float:
+        # Backoff sum plus generous connect time; the events are set by the
+        # reconnect / close and never by a timer, so this is only a backstop.
+        return sum(self.reconnect_backoff_secs) * max(1, self.reconnect_attempts) + 60.0
+
     async def _wait_connected(self) -> bool:
         """Block while a reconnect is in progress. False once the session is over
         (closed, or the reconnect budget ran out) — nothing to deliver to."""
-        # Bounded by the reconnect budget itself plus connect time; the event
-        # is set by the reconnect and never by a timer, so this is a backstop.
-        budget = sum(self.reconnect_backoff_secs) * max(1, self.reconnect_attempts) + 60.0
         try:
-            await asyncio.wait_for(self._connected.wait(), budget)
+            await asyncio.wait_for(self._connected.wait(), self._reconnect_budget_secs)
+        except TimeoutError:
+            return False
+        return not self._closed
+
+    async def _wait_next_generation(self, gen_event: asyncio.Event) -> bool:
+        """Block until the generation current when ``gen_event`` was captured is
+        replaced (reconnect) or the session ends. False when there is nothing
+        to deliver to. Unlike polling ``_connected`` this cannot race the
+        reader: whether or not it has noticed the drop yet, the event fires
+        exactly once the replacement session is up."""
+        try:
+            await asyncio.wait_for(gen_event.wait(), self._reconnect_budget_secs)
         except TimeoutError:
             return False
         return not self._closed
@@ -1304,13 +1329,17 @@ class LiveSession:
             chunks = split_for_append(note + text)
             logger.info("openai_live_stale_result_quiet", delegation_id=delegation_id, reason=stale_reason)
         # A result landing mid-reconnect waits for the replacement session and
-        # appends there. A send that dies mid-flight (socket dropped under us)
-        # is retried once, from the first chunk: whatever the dead session got
-        # is gone with it — the replacement is seeded with the transcript only.
+        # appends there. A send that dies mid-flight (socket dropped under us,
+        # whether or not the reader has noticed yet) waits for the *next
+        # generation* and is retried once, from the first chunk: whatever the
+        # dead session got is gone with it — the replacement is seeded with the
+        # transcript only. The transport only raises on connection trouble, so
+        # "wait for a new session" is the right reaction to any send failure.
         for attempt in range(2):
             if not await self._wait_connected():
                 logger.warning("openai_live_result_dropped_session_over", delegation_id=delegation_id)
                 return False
+            gen_event = self._generation_event  # captured *before* the send
             try:
                 for i, chunk in enumerate(chunks):
                     await self.transport.send(
@@ -1326,11 +1355,9 @@ class LiveSession:
                 logger.warning(
                     "openai_live_result_append_failed", delegation_id=delegation_id, attempt=attempt + 1, error=str(e)
                 )
-                if self._closed:
+                if attempt == 0 and not await self._wait_next_generation(gen_event):
+                    logger.warning("openai_live_result_dropped_session_over", delegation_id=delegation_id)
                     return False
-                # Give the reader a beat to notice the drop and clear
-                # _connected; otherwise the retry races the same dead socket.
-                await asyncio.sleep(0.25)
         return False
 
     async def _run_agent(self, delegation_id: str, prompt: str) -> tuple[str, str | None]:
@@ -1350,8 +1377,10 @@ class LiveSession:
             ambient = get_run_context()
             # First delegation: keep the seed (parent_run_id + call_context
             # session data) planted by _seed_call_context, if it is still unused.
-            ctx = ambient if ambient is not None and not ambient._trace else RunContext(
-                parent_id=self.parent_run_id, tracing_provider=provider
+            ctx = (
+                ambient
+                if ambient is not None and not ambient._trace
+                else RunContext(parent_id=self.parent_run_id, tracing_provider=provider)
             )
         set_run_context(ctx)
         kwargs: dict[str, Any] = {"prompt": Message(role="user", content=[TextContent(text=prompt)])}
