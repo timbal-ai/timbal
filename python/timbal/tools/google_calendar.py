@@ -28,6 +28,28 @@ def _meet_create_request() -> dict[str, Any]:
     }
 
 
+_SEND_UPDATES = ("all", "externalOnly", "none")
+
+
+def _with_send_updates(params: dict[str, Any], send_updates: Any) -> None:
+    """Put Google's `sendUpdates` on the query string, when the caller chose one.
+
+    It is a query parameter, not a body field, and Google's default when it is
+    absent is to notify nobody: the event appears silently on the calendars of
+    guests who use Google Calendar and never reaches guests who do not. Left
+    alone unless asked for, so a caller that never heard of it keeps the
+    behaviour it had; a value Google would reject is refused here, before the
+    write, rather than after the event exists.
+    """
+    # Callers going through the tool get a validated string; the handler called
+    # bare (tests) gets the `Field` default object, which means "unset" too.
+    if not isinstance(send_updates, str) or not send_updates:
+        return
+    if send_updates not in _SEND_UPDATES:
+        raise ValueError(f"send_updates must be one of {_SEND_UPDATES}, got {send_updates!r}")
+    params["sendUpdates"] = send_updates
+
+
 async def _await_conference(
     client: Any,
     token: str,
@@ -153,6 +175,16 @@ class GoogleCalendarCreateEvent(Tool):
                     "link in 'hangoutLink'. Each event gets its own room."
                 ),
             ),
+            send_updates: str | None = Field(
+                None,
+                description=(
+                    "Whether Google emails the attendees about this event: 'all', 'externalOnly' "
+                    "(guests outside Google Calendar only) or 'none'. Google's default when "
+                    "unset is to send nothing — the event lands on Google Calendar guests' "
+                    "calendars silently and guests on other calendars never hear of it — so pass "
+                    "'all' when the attendees are being invited."
+                ),
+            ),
         ) -> Any:
             token = await _resolve_token(self)
             import httpx
@@ -175,6 +207,7 @@ class GoogleCalendarCreateEvent(Tool):
             if add_google_meet:
                 body["conferenceData"] = _meet_create_request()
                 params["conferenceDataVersion"] = 1
+            _with_send_updates(params, send_updates)
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
@@ -225,6 +258,13 @@ class GoogleCalendarUpdateEvent(Tool):
                     "link in 'hangoutLink'. Events that already have one keep it."
                 ),
             ),
+            send_updates: str | None = Field(
+                None,
+                description=(
+                    "Whether Google emails the attendees about the change: 'all', 'externalOnly' "
+                    "or 'none'. Unset, Google sends nothing, so a moved meeting moves silently."
+                ),
+            ),
         ) -> Any:
             token = await _resolve_token(self)
             import httpx
@@ -245,6 +285,7 @@ class GoogleCalendarUpdateEvent(Tool):
             if add_google_meet:
                 body["conferenceData"] = _meet_create_request()
                 params["conferenceDataVersion"] = 1
+            _with_send_updates(params, send_updates)
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
@@ -280,14 +321,26 @@ class GoogleCalendarDeleteEvent(Tool):
         async def _delete_event(
             event_id: str = Field(..., description="Event ID to delete."),
             calendar_id: str = Field("primary", description="Calendar ID, e.g. 'primary' or 'user@example.com'"),
+            send_updates: str | None = Field(
+                None,
+                description=(
+                    "Whether Google emails the attendees a cancellation: 'all', 'externalOnly' "
+                    "or 'none'. Unset, Google sends nothing, and guests keep a meeting that no "
+                    "longer exists."
+                ),
+            ),
         ) -> Any:
             token = await _resolve_token(self)
             import httpx
+
+            params: dict[str, Any] = {}
+            _with_send_updates(params, send_updates)
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
                     headers={"Authorization": f"Bearer {token}"},
+                    params=params,
                 )
                 response.raise_for_status()
                 return {"deleted": True, "event_id": event_id}
