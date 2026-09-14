@@ -24,6 +24,7 @@ from timbal.voice import (
     SessionError,
     SessionStarted,
     TranscriptCommitted,
+    TranscriptEntry,
     TranscriptPartial,
     TurnMetricsEvent,
 )
@@ -74,21 +75,44 @@ CLOSED = {"type": "session.closed", "event_id": "e", "reason": "close_requested"
 
 
 class FakeLiveTransport(LiveTransport):
-    """Replays a script; ``"<wait:did>"`` entries block until a commentary for ``did`` arrived."""
+    """Replays a script. Markers: ``"<wait:commentary>"`` blocks until a commentary
+    append arrived, ``"<wait:append>"`` until any commentary/thinking append,
+    ``"<hold>"`` until :meth:`release`, a float sleeps. Ending a script without
+    ``CLOSED`` simulates a socket drop; ``reconnect()`` moves on to the next
+    script in ``more_scripts``."""
 
-    def __init__(self, script: list, *, end_after: bool = True):
-        self.script = script
+    def __init__(self, script: list, *, end_after: bool = True, more_scripts: list[list] | None = None):
+        self.scripts = [script, *(more_scripts or [])]
+        self.gen = 0
         self.end_after = end_after
         self.sent: list[dict] = []
         self.audio: list[bytes] = []
         self.connected = False
         self.closed = False
+        self.reconnect_inputs: list[list[dict]] = []
+        self.fail_reconnects = 0
+        self._finalized = False
         self._commentary = asyncio.Event()
+        self._append = asyncio.Event()
         self._release = asyncio.Event()
 
     async def connect(self):
         self.connected = True
         return STARTED
+
+    async def reconnect(self, *, input=None):
+        if self.fail_reconnects > 0:
+            self.fail_reconnects -= 1
+            raise ConnectionError("still down")
+        self.reconnect_inputs.append(list(input or []))
+        self.gen += 1
+        if self.gen >= len(self.scripts):
+            raise ConnectionError("no more scripts")
+        return {"type": "session.started", "session": {"id": f"live_test_{self.gen}"}}
+
+    @property
+    def finalized(self) -> bool:
+        return self._finalized
 
     async def send_audio(self, chunk: bytes) -> None:
         self.audio.append(chunk)
@@ -97,11 +121,16 @@ class FakeLiveTransport(LiveTransport):
         self.sent.append(event)
         if event["type"] == "session.commentary.append":
             self._commentary.set()
+        if event["type"] in ("session.commentary.append", "session.thinking.append"):
+            self._append.set()
 
     async def events(self):
-        for ev in self.script:
+        for ev in self.scripts[self.gen]:
             if ev == "<wait:commentary>":
                 await asyncio.wait_for(self._commentary.wait(), 5)
+                continue
+            if ev == "<wait:append>":
+                await asyncio.wait_for(self._append.wait(), 5)
                 continue
             if ev == "<hold>":
                 await self._release.wait()
@@ -109,6 +138,8 @@ class FakeLiveTransport(LiveTransport):
             if isinstance(ev, float):
                 await asyncio.sleep(ev)
                 continue
+            if ev.get("type") == "session.closed":
+                self._finalized = True
             yield ev
         if self.end_after:
             return
@@ -204,9 +235,17 @@ class TestAudioAndTranscripts:
     async def test_wallclock_gap_closes_row_before_session_end(self):
         # Fragment, then wall-clock silence longer than row_gap_ms, then more speech.
         script = [user(" First", 1000, 1200), 0.25, user(" Second", 1300, 1500), CLOSED]
-        s = LiveSession(FakeLiveTransport(script), row_gap_ms=100)
+        s = LiveSession(FakeLiveTransport(script), row_gap_ms=100, row_close_slack_ms=50)
         events = await _collect(s)
         assert [e.text for e in events if isinstance(e, TranscriptCommitted)] == ["First", "Second"]
+
+    async def test_delivery_jitter_does_not_split_a_row(self):
+        # 400 ms on the session clock, but the second fragment arrives 0.9 s late (wall clock).
+        # Timeline decides splits; the wall-clock timer (gap + slack) only finalizes.
+        script = [user(" I live in", 1000, 1400), 0.9, user(" Barcelona", 1800, 2200), CLOSED]
+        s = LiveSession(FakeLiveTransport(script), row_gap_ms=800, row_close_slack_ms=700)
+        events = await _collect(s)
+        assert [e.text for e in events if isinstance(e, TranscriptCommitted)] == ["I live in Barcelona"]
 
     async def test_assistant_row_emits_delta_done_and_timeline_metrics(self):
         script = [
@@ -428,6 +467,268 @@ class TestDelegation:
         types = [e["type"] for e in t.sent]
         assert types[:3] == ["session.instructions.append", "session.commentary.append", "session.thinking.append"]
         assert all(e["delegation_id"] is None for e in t.sent[:3])
+
+
+class TestStaleResults:
+    async def test_substantive_caller_speech_routes_result_to_thinking(self):
+        gate = asyncio.Event()
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "Barcelona: 24C and sunny."
+
+        script = [
+            user(" weather in Barcelona", 1000, 1600),
+            delegation("d1", 1600),
+            # Caller changes their mind while the backend works.
+            user(" actually forget that, book me a table for two tonight", 3000, 5000),
+            0.05,
+            "<release>",
+            "<wait:append>",
+            CLOSED,
+        ]
+        t = _ReleasingTransport(script, gate)
+        events = await _collect(LiveSession(t, on_delegation=slow))
+        assert not t.commands("session.commentary.append")
+        th = t.commands("session.thinking.append")
+        assert len(th) == 1 and th[0]["delegation_id"] == "d1"
+        assert "Late result" in th[0]["content"] and "book me a table" in th[0]["content"]
+        assert th[0]["content"].endswith("Barcelona: 24C and sunny.")
+        res = [e for e in events if isinstance(e, DelegationResult)][0]
+        assert res.stale is True and res.spoken is False and res.text == "Barcelona: 24C and sunny."
+
+    async def test_backchannel_does_not_make_result_stale(self):
+        gate = asyncio.Event()
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "Sunny."
+
+        script = [
+            user(" weather", 1000, 1400),
+            delegation("d1", 1400),
+            user(" okay,", 3000, 3200),
+            user(" thanks", 3200, 3400),
+            0.05,
+            "<release>",
+            "<wait:commentary>",
+            CLOSED,
+        ]
+        t = _ReleasingTransport(script, gate)
+        events = await _collect(LiveSession(t, on_delegation=slow))
+        assert [c["content"] for c in t.commands("session.commentary.append")] == ["Sunny."]
+        res = [e for e in events if isinstance(e, DelegationResult)][0]
+        assert res.stale is False and res.spoken is True
+
+    async def test_drop_policy_discards_stale_result(self):
+        gate = asyncio.Event()
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "Sunny."
+
+        script = [
+            delegation("d1", 1000),
+            user(" never mind, different question entirely", 2000, 3500),
+            0.05,
+            "<release>",
+            0.05,
+            CLOSED,
+        ]
+        t = _ReleasingTransport(script, gate)
+        events = await _collect(LiveSession(t, on_delegation=slow, stale_policy="drop"))
+        assert not t.commands("session.commentary.append") and not t.commands("session.thinking.append")
+        res = [e for e in events if isinstance(e, DelegationResult)][0]
+        assert res.stale is True and res.spoken is False
+
+    async def test_speak_policy_ignores_staleness(self):
+        gate = asyncio.Event()
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "Sunny."
+
+        script = [
+            delegation("d1", 1000),
+            user(" never mind, different question entirely", 2000, 3500),
+            0.05,
+            "<release>",
+            "<wait:commentary>",
+            CLOSED,
+        ]
+        t = _ReleasingTransport(script, gate)
+        events = await _collect(LiveSession(t, on_delegation=slow, stale_policy="speak"))
+        assert [c["content"] for c in t.commands("session.commentary.append")] == ["Sunny."]
+        assert [e for e in events if isinstance(e, DelegationResult)][0].stale is False
+
+    async def test_newer_delegation_makes_earlier_result_quiet(self):
+        async def handler(_s, did, _p):
+            await asyncio.sleep(0.02)
+            return f"answer for {did}"
+
+        script = [delegation("d1", 1000), delegation("d2", 1100), 0.3, CLOSED]
+        t = FakeLiveTransport(script)
+        events = await _collect(LiveSession(t, on_delegation=handler))
+        th = t.commands("session.thinking.append")
+        comm = t.commands("session.commentary.append")
+        # d1 (superseded) → thinking; d2 (latest) → spoken. The "queued" note for d2 is thinking too.
+        assert [c["delegation_id"] for c in comm] == ["d2"]
+        assert any(c["delegation_id"] == "d1" and "answer for d1" in c["content"] for c in th)
+        results = {e.delegation_id: e for e in events if isinstance(e, DelegationResult)}
+        assert results["d1"].stale and not results["d1"].spoken
+        assert not results["d2"].stale and results["d2"].spoken
+
+
+class _ReleasingTransport(FakeLiveTransport):
+    """``"<release>"`` marker sets the given gate (lets a blocked backend finish mid-script)."""
+
+    def __init__(self, script, gate: asyncio.Event, **kw):
+        super().__init__(script, **kw)
+        self._gate = gate
+
+    async def events(self):
+        for ev in self.scripts[self.gen]:
+            if ev == "<release>":
+                self._gate.set()
+                await asyncio.sleep(0)
+                continue
+            if ev == "<wait:commentary>":
+                await asyncio.wait_for(self._commentary.wait(), 5)
+                continue
+            if ev == "<wait:append>":
+                await asyncio.wait_for(self._append.wait(), 5)
+                continue
+            if isinstance(ev, float):
+                await asyncio.sleep(ev)
+                continue
+            if ev.get("type") == "session.closed":
+                self._finalized = True
+            yield ev
+
+
+class TestReconnect:
+    async def test_drop_reconnects_with_transcript_seed_and_continues(self):
+        first = [
+            user(" Hi", 1000, 1200),
+            user(" there", 1200, 1400),
+            agent_tx(" Hello!", 2000, 2400),
+            0.05,
+            # socket drops here (no CLOSED)
+        ]
+        second = [user(" still here?", 500, 900), CLOSED]
+        t = FakeLiveTransport(first, more_scripts=[second])
+        s = LiveSession(t, reconnect_backoff_secs=(0.0,))
+        events = await _collect(s)
+
+        statuses = [e.text for e in events if isinstance(e, AgentStatus)]
+        assert statuses == ["Reconnecting…", "Reconnected"]
+        assert not [e for e in events if isinstance(e, SessionError)]
+        assert s.reconnects == 1 and s.session_id == "live_test_1"
+        seed = t.reconnect_inputs[0]
+        assert [(i["role"], i["content"][0]["type"], i["content"][0]["text"]) for i in seed] == [
+            ("user", "input_text", "Hi there"),
+            ("assistant", "output_text", "Hello!"),
+        ]
+        # Rows straddling the drop were closed; the new session's fragments start fresh rows.
+        assert [e.text for e in events if isinstance(e, TranscriptCommitted)] == ["Hi there", "still here?"]
+        assert [(e.role, e.text) for e in s.transcript] == [
+            ("user", "Hi there"),
+            ("assistant", "Hello!"),
+            ("user", "still here?"),
+        ]
+        assert isinstance(events[-1], SessionEnded)
+
+    async def test_open_row_is_seeded_and_mic_keeps_flowing(self):
+        first = [user(" unfinished", 1000, 1400)]  # drop with an open user row
+        second = [CLOSED]
+        t = FakeLiveTransport(first, more_scripts=[second])
+        s = LiveSession(t, reconnect_backoff_secs=(0.0,), row_gap_ms=10_000)
+        await _collect(s)
+        assert t.reconnect_inputs[0][0]["content"][0]["text"] == "unfinished"
+        assert len(t.audio) >= 3  # uplink was never torn down
+
+    async def test_reconnect_retries_with_backoff_then_succeeds(self):
+        t = FakeLiveTransport([0.01], more_scripts=[[CLOSED]])
+        t.fail_reconnects = 2
+        s = LiveSession(t, reconnect_attempts=3, reconnect_backoff_secs=(0.0, 0.01, 0.01))
+        events = await _collect(s)
+        assert s.reconnects == 1
+        assert not [e for e in events if isinstance(e, SessionError)]
+
+    async def test_reconnect_gives_up_after_attempts(self):
+        t = FakeLiveTransport([0.01], more_scripts=[[CLOSED]])
+        t.fail_reconnects = 5
+        s = LiveSession(t, reconnect_attempts=2, reconnect_backoff_secs=(0.0,))
+        events = await _collect(s)
+        errs = [e.message for e in events if isinstance(e, SessionError)]
+        assert len(errs) == 1 and "reconnect failed" in errs[0]
+        assert s.reconnects == 0 and isinstance(events[-1], SessionEnded)
+
+    async def test_reconnect_disabled_reports_lost_connection(self):
+        t = FakeLiveTransport([0.01])
+        events = await _collect(LiveSession(t, reconnect_attempts=0))
+        assert [e.message for e in events if isinstance(e, SessionError)] == ["GPT-Live connection lost"]
+        assert not t.reconnect_inputs
+
+    async def test_transport_without_reconnect_support(self):
+        class Plain(FakeLiveTransport):
+            async def reconnect(self, *, input=None):
+                raise NotImplementedError
+
+        events = await _collect(LiveSession(Plain([0.01]), reconnect_backoff_secs=(0.0,)))
+        errs = [e.message for e in events if isinstance(e, SessionError)]
+        assert len(errs) == 1 and "cannot reconnect" in errs[0]
+
+    async def test_server_initiated_close_is_final(self):
+        closed = {**CLOSED, "reason": "safety_violation"}
+        t = FakeLiveTransport([user(" hi", 0, 200), closed], more_scripts=[[CLOSED]])
+        s = LiveSession(t, reconnect_backoff_secs=(0.0,))
+        events = await _collect(s)
+        errs = [e.message for e in events if isinstance(e, SessionError)]
+        assert errs == ["GPT-Live session closed by server: safety_violation"]
+        assert s.reconnects == 0 and not t.reconnect_inputs
+
+    async def test_delegation_in_flight_answers_into_new_session(self):
+        gate = asyncio.Event()
+
+        async def slow(_s, _d, _p):
+            await gate.wait()
+            return "late but valid"
+
+        first = [user(" order status", 1000, 1600), delegation("d1", 1600), 0.02]  # drop
+        second = [0.02, "<release>", "<wait:commentary>", CLOSED]
+        t = _ReleasingTransport(first, gate, more_scripts=[second])
+        s = LiveSession(t, on_delegation=slow, reconnect_backoff_secs=(0.0,))
+        events = await _collect(s)
+        assert s.reconnects == 1
+        assert [c["content"] for c in t.commands("session.commentary.append")] == ["late but valid"]
+        assert [e for e in events if isinstance(e, DelegationResult)][0].spoken is True
+
+    async def test_usage_accumulates_across_generations_and_is_unconfirmed(self):
+        first = [
+            {"type": "session.usage.updated", "usage": {"seconds": 12.0}, "context_window": {"usage_ratio": 0.01}},
+            0.01,  # drop
+        ]
+        second = [CLOSED]  # usage 20.0
+        t = FakeLiveTransport(first, more_scripts=[second])
+        s = LiveSession(t, reconnect_backoff_secs=(0.0,))
+        await _collect(s)
+        assert s.usage_seconds == 32.0 and s.usage_confirmed is False
+        summary = LiveSessionSummary.from_session(s)
+        assert summary.reconnects == 1 and summary.usage_confirmed is False
+        assert summary.est_usd == round(32 / 60 * 0.05, 4)
+
+    def test_history_items_are_bounded_from_the_tail(self):
+        s = LiveSession(FakeLiveTransport([]), reconnect_attempts=0)
+        for i in range(100):
+            s._transcript.append(TranscriptEntry(role="user" if i % 2 == 0 else "assistant", text=f"line {i}"))
+        items = s.history_items(max_items=10)
+        assert len(items) == 10 and items[-1]["content"][0]["text"] == "line 99"
+        items = s.history_items(max_items=10, max_chars=10)
+        assert [i["content"][0]["text"] for i in items] == ["line 99"]
+
+    def test_default_row_gap(self):
+        assert LiveSession(FakeLiveTransport([]), reconnect_attempts=0).row_gap_ms == 800
 
 
 class TestClientConfig:

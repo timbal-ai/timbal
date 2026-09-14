@@ -103,6 +103,14 @@ _PCMA = frozenset({"pcma", "alaw", "g711_alaw", "g711a"})
 # Appends are capped at 500 tokens by the API. ~4 chars/token, with headroom.
 _APPEND_MAX_CHARS = 1400
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
+# Caller speech that does not make a pending result stale: acknowledgments and
+# fillers, one to four of them ("okay", "yeah sure", "mm-hm thanks", ...).
+_BACKCHANNEL = re.compile(
+    r"(?:(?:ok(?:ay)?|k|yes|yeah|yep|yup|sure|right|alright|fine|great|good|cool|thanks?|thank you|please|"
+    r"go ahead|got it|i see|mm+-?hm+|mhm+|uh-?huh|hm+|mm+|oh|ah|aha|wow|nice|perfect|exactly|no|nope|wait|"
+    r"one (?:sec|second|moment)|hold on|hello|hi|hey|vale|sí|si|claro|bueno|bien|gracias|d'accord|oui|ja|okey)"
+    r"[.,!?…]*\s*){1,4}"
+)
 
 
 def _wire_format(sample_rate: int, encoding: str) -> dict[str, Any]:
@@ -184,6 +192,22 @@ class LiveTransport(ABC):
 
     @abstractmethod
     async def close(self, timeout: float = 15.0) -> dict[str, Any] | None: ...
+
+    async def reconnect(self, *, input: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Open a *replacement* session after an unexpected drop.
+
+        A fork (``/live/sessions/{id}/fork``) needs a finalized stored
+        recording, which does not exist mid-call, so recovery is a fresh
+        ``session.start`` seeded with ``input`` (Responses-style message items
+        rebuilt from the transcript). New session id, timeline restarts at 0.
+        Default: unsupported.
+        """
+        raise NotImplementedError("transport does not support reconnect")
+
+    @property
+    def finalized(self) -> bool:
+        """True once ``session.closed`` was received — the drop was not unexpected."""
+        return False
 
 
 class OpenAILiveClient(LiveTransport):
@@ -283,9 +307,23 @@ class OpenAILiveClient(LiveTransport):
         return started
 
     async def send_audio(self, chunk: bytes) -> None:
+        # Audio is a lossy uplink by nature: a chunk that lands on a dead or
+        # reconnecting socket is dropped, not an error (the mic keeps running).
         if not chunk or self._ws is None:
             return
-        await self.send({"type": "session.input_audio.append", "audio": base64.b64encode(chunk).decode("ascii")})
+        with contextlib.suppress(ConnectionError):
+            await self.send({"type": "session.input_audio.append", "audio": base64.b64encode(chunk).decode("ascii")})
+
+    async def reconnect(self, *, input: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        await self._abort()
+        if input is not None:
+            self.input = input
+        self.close_reason = None
+        return await self.connect()
+
+    @property
+    def finalized(self) -> bool:
+        return self._closed_event is not None and self._closed_event.done()
 
     async def send(self, event: dict[str, Any]) -> None:
         if self._ws is None:
@@ -479,14 +517,35 @@ class LiveSession:
       :class:`AgentApproval`; the final text goes back as ``commentary.append``
       chunks and :class:`DelegationResult`.
 
-    Rows close when the next fragment starts more than ``row_gap_ms`` after
-    the previous one ended (session clock), or ``row_gap_ms`` of wall clock
-    passes without a fragment. Speakers overlap freely — a user row may close
-    while an assistant row is open. There is no :class:`SessionInterrupted`:
+    Rows split when the next fragment starts more than ``row_gap_ms`` after
+    the previous one ended on the *session clock* — the precise signal. A
+    wall-clock timer of ``row_gap_ms + row_close_slack_ms`` only finalizes a
+    row once fragments stop arriving; the slack absorbs delivery jitter
+    (fragments land ~1–1.5 s behind the clock, unevenly), so it must not be
+    the thing that decides splits. Speakers overlap freely — a user row may
+    close while an assistant row is open. There is no :class:`SessionInterrupted`:
     barge-in is server-side, and the assistant row text is what was heard.
 
     Delegations are serialized so agent memory chains ``parent_id`` in order;
     a delegation arriving while one runs waits and the model is told so.
+
+    **Stale results.** Speech is not cancelled by backend work and vice versa,
+    so an answer can land after the caller has moved on. If the caller said
+    something substantive (not a backchannel like "okay"/"mm-hm") after the
+    delegation was created, ``stale_policy`` decides: ``"thinking"`` (default)
+    hands the answer to the model as quiet context with a note of what the
+    caller said since — it speaks it only if still relevant; ``"drop"``
+    discards it; ``"speak"`` ignores staleness. A newer delegation queued
+    behind this one also marks it stale.
+
+    **Reconnect.** An unexpected socket drop (no ``session.closed``) opens a
+    replacement session up to ``reconnect_attempts`` times, seeded with the
+    transcript so far as ``session.input`` (a fork needs a finalized stored
+    recording, which does not exist mid-call). The mic uplink keeps running
+    and drops chunks while disconnected; open rows are closed; in-flight
+    delegations continue and answer into the new session. Clients see
+    :class:`AgentStatus` ``"Reconnecting…"`` / ``"Reconnected"``. A
+    ``session.closed`` the client did not request (safety, expiry) is final.
     """
 
     def __init__(
@@ -498,12 +557,16 @@ class LiveSession:
         audio_output: AudioOutputConfig | None = None,
         model: str | None = None,
         parent_run_id: str | None = None,
-        row_gap_ms: int = 1200,
+        row_gap_ms: int = 800,
+        row_close_slack_ms: int = 700,
         drop_silence: bool = False,
         record_audio: bool = False,
         delegation_prompt: DelegationPromptBuilder = default_delegation_prompt,
         delegation_timeout_secs: float | None = 120.0,
         on_delegation: Callable[[LiveSession, str, str], Awaitable[str | None]] | None = None,
+        reconnect_attempts: int = 3,
+        reconnect_backoff_secs: tuple[float, ...] = (0.5, 1.0, 2.0),
+        stale_policy: Literal["thinking", "drop", "speak"] = "thinking",
     ) -> None:
         self.transport = transport
         self.agent = agent
@@ -512,10 +575,18 @@ class LiveSession:
         self.model = model
         self.parent_run_id = parent_run_id
         self.row_gap_ms = row_gap_ms
+        self.row_close_slack_ms = row_close_slack_ms
         self.drop_silence = drop_silence
         self.delegation_prompt = delegation_prompt
         self.delegation_timeout_secs = delegation_timeout_secs
         self.on_delegation = on_delegation
+        self.reconnect_attempts = reconnect_attempts
+        self.reconnect_backoff_secs = reconnect_backoff_secs
+        self.stale_policy = stale_policy
+        self.reconnects = 0
+        # Bumped on every replacement session: the server timeline restarts at 0,
+        # so ``*_ms`` values are only comparable within one generation.
+        self._generation = 0
         if agent is None and on_delegation is None:
             logger.warning("openai_live_no_backend", hint="delegations will be answered with a 'no backend' note")
 
@@ -542,9 +613,24 @@ class LiveSession:
         self._delegations: dict[str, dict[str, Any]] = {}
         self._last_delegation_fragment_idx = 0
         self._last_run_context: RunContext | None = None
-        self.usage_seconds: float | None = None
+        # Voice-duration accounting across replacement sessions: snapshots are
+        # per-session cumulative, so the dropped generations' totals are banked
+        # in ``_usage_prior`` and the live one tracked in ``_usage_current``.
+        self._usage_prior = 0.0
+        self._usage_current: float | None = None
+        self._generation_started_at = 0.0
+        self.usage_confirmed = True
+        """False when a generation ended without ``session.closed``: its seconds
+        are the larger of the last snapshot and wall-clock elapsed, not billed truth."""
         self.close_reason: str | None = None
         self.session_id: str | None = None
+
+    @property
+    def usage_seconds(self) -> float | None:
+        """Total voice seconds this session, all generations (None before any report)."""
+        if self._usage_current is None and not self._usage_prior:
+            return None
+        return round(self._usage_prior + (self._usage_current or 0.0), 3)
 
     # -- Public: recording -----------------------------------------------------
 
@@ -595,6 +681,7 @@ class LiveSession:
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         try:
             started = await self.transport.connect()
+            self._generation_started_at = time.monotonic()
             self.session_id = (started.get("session") or {}).get("id")
             await self._seed_call_context()
             await self._emit(SessionStarted())
@@ -665,14 +752,90 @@ class LiveSession:
 
     async def _process_events(self) -> None:
         try:
-            async for ev in self.transport.events():
-                await self._dispatch(ev)
+            while True:
+                async for ev in self.transport.events():
+                    await self._dispatch(ev)
+                # Stream ended. Requested close or a server-side final event: done.
+                if self._closed or self.transport.finalized:
+                    break
+                if not await self._try_reconnect():
+                    break
         except asyncio.CancelledError:
             return
         except Exception as e:
             logger.error("openai_live_event_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"GPT-Live error: {e}"))
         await self.close()
+
+    async def _try_reconnect(self) -> bool:
+        """Replace a dropped session. Returns True when events may resume."""
+        if self.reconnect_attempts <= 0:
+            await self._emit(SessionError(message="GPT-Live connection lost"))
+            return False
+        await self._emit(AgentStatus(text="Reconnecting…"))
+        # Rows straddling the gap cannot be extended: timelines do not line up.
+        for role in ("user", "assistant"):
+            await self._close_row(role)
+        seed = self.history_items()
+        last_error: Exception | None = None
+        for attempt in range(self.reconnect_attempts):
+            if self._closed:
+                return False
+            delay = self.reconnect_backoff_secs[min(attempt, len(self.reconnect_backoff_secs) - 1)]
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                started = await self.transport.reconnect(input=seed)
+            except NotImplementedError:
+                await self._emit(SessionError(message="GPT-Live connection lost (transport cannot reconnect)"))
+                return False
+            except Exception as e:
+                last_error = e
+                logger.warning("openai_live_reconnect_failed", attempt=attempt + 1, error=str(e))
+                continue
+            self._bank_generation_usage()
+            self.reconnects += 1
+            self._generation += 1
+            self._generation_started_at = time.monotonic()
+            self._last_user_end_ms = None
+            self.session_id = (started.get("session") or {}).get("id")
+            logger.info("openai_live_reconnected", session_id=self.session_id, attempt=attempt + 1, seeded=len(seed))
+            await self._emit(AgentStatus(text="Reconnected"))
+            return True
+        await self._emit(SessionError(message=f"GPT-Live reconnect failed: {last_error}"))
+        return False
+
+    def _bank_generation_usage(self) -> None:
+        """Close the books on a generation that died without ``session.closed``.
+
+        Its last snapshot may be up to one reporting interval stale, so take the
+        larger of snapshot and wall-clock elapsed and flag the total unconfirmed.
+        """
+        elapsed = max(0.0, time.monotonic() - self._generation_started_at) if self._generation_started_at else 0.0
+        self._usage_prior += max(self._usage_current or 0.0, elapsed)
+        self._usage_current = None
+        self.usage_confirmed = False
+
+    def history_items(self, *, max_items: int = 64, max_chars: int = 24_000) -> list[dict[str, Any]]:
+        """Transcript so far as ``session.input`` message items (committed rows + open rows).
+
+        Bounded from the tail: the service caps startup history (8,192 tokens).
+        """
+        entries = list(self._transcript)
+        for role in ("user", "assistant"):
+            row = self._rows[role]
+            if row is not None and row.text.strip():
+                entries.append(TranscriptEntry(role=role, text=row.text.strip()))  # type: ignore[arg-type]
+        items: list[dict[str, Any]] = []
+        budget = max_chars
+        for e in reversed(entries[-max_items:]):
+            if budget - len(e.text) < 0:
+                break
+            budget -= len(e.text)
+            kind = "input_text" if e.role == "user" else "output_text"
+            items.append({"type": "message", "role": e.role, "content": [{"type": kind, "text": e.text}]})
+        items.reverse()
+        return items
 
     async def _dispatch(self, ev: dict[str, Any]) -> None:
         typ = ev.get("type")
@@ -705,7 +868,12 @@ class LiveSession:
                 # beyond surfacing it. Nested ``response.event`` envelopes follow.
                 await self._emit(DelegationCreated(delegation_id=did, prompt=""))
                 return
-            task = asyncio.create_task(self._run_delegation(did, ev.get("offset_ms")), name=f"live-delegation-{did}")
+            # Cursor captured *here*: the task body runs a tick later, by which time
+            # fragments that arrived after the delegation may already be dispatched.
+            task = asyncio.create_task(
+                self._run_delegation(did, ev.get("offset_ms"), created_frag_idx=len(self._fragments)),
+                name=f"live-delegation-{did}",
+            )
             self._delegation_tasks.add(task)
             task.add_done_callback(self._delegation_tasks.discard)
         elif typ == "response.event":
@@ -713,10 +881,13 @@ class LiveSession:
             if inner == "response.output_text.delta":
                 await self._emit(AgentStatus(text=(ev["event"].get("delta") or "")))
         elif typ == "session.usage.updated":
-            self.usage_seconds = (ev.get("usage") or {}).get("seconds", self.usage_seconds)
+            self._usage_current = (ev.get("usage") or {}).get("seconds", self._usage_current)
         elif typ == "session.closed":
-            self.usage_seconds = (ev.get("usage") or {}).get("seconds", self.usage_seconds)
+            self._usage_current = (ev.get("usage") or {}).get("seconds", self._usage_current)
             self.close_reason = ev.get("reason")
+            if not self._closed and self.close_reason not in (None, "close_requested"):
+                # Server-initiated (safety termination, expiry, ...): final, no reconnect.
+                await self._emit(SessionError(message=f"GPT-Live session closed by server: {self.close_reason}"))
             await self.close()
         elif typ == "error":
             err = ev.get("error") or {}
@@ -758,7 +929,7 @@ class LiveSession:
             h.cancel()
         loop = asyncio.get_running_loop()
         self._row_timers[role] = loop.call_later(
-            self.row_gap_ms / 1000, lambda: asyncio.ensure_future(self._close_row(role))
+            (self.row_gap_ms + self.row_close_slack_ms) / 1000, lambda: asyncio.ensure_future(self._close_row(role))
         )
 
     async def _close_row(self, role: str) -> None:
@@ -809,8 +980,17 @@ class LiveSession:
 
     # -- Internal: delegation ----------------------------------------------------
 
-    async def _run_delegation(self, delegation_id: str, offset_ms: int | None) -> None:
-        rec: dict[str, Any] = {"offset_ms": offset_ms, "created_at": time.time(), "status": "pending"}
+    async def _run_delegation(self, delegation_id: str, offset_ms: int | None, *, created_frag_idx: int) -> None:
+        rec: dict[str, Any] = {
+            "offset_ms": offset_ms,
+            "generation": self._generation,
+            "created_at": time.time(),
+            "seq": len(self._delegations),
+            # Fragment cursor at *creation* (not at run start): anything the caller
+            # says from here on happened while this work was pending.
+            "created_frag_idx": created_frag_idx,
+            "status": "pending",
+        }
         self._delegations[delegation_id] = rec
         if self._delegation_lock.locked():
             with contextlib.suppress(Exception):
@@ -844,28 +1024,80 @@ class LiveSession:
                 logger.error("openai_live_delegation_failed", delegation_id=delegation_id, error=str(e), exc_info=True)
                 error = str(e)
                 text = "Something went wrong while handling that. Apologize briefly and offer to try again."
-            chunks = split_for_append(text)
-            for i, chunk in enumerate(chunks):
-                try:
-                    await self.transport.send(
-                        {
-                            "type": "session.commentary.append",
-                            "event_id": f"{delegation_id}_result_{i}",
-                            "delegation_id": delegation_id,
-                            "content": chunk,
-                        }
-                    )
-                except Exception as e:
-                    logger.warning("openai_live_commentary_failed", delegation_id=delegation_id, error=str(e))
-                    break
+            stale_reason = None if error else self._stale_reason(rec)
+            spoken = await self._deliver_result(delegation_id, text, stale_reason)
             rec.update(
                 status="error" if error else "done",
                 result=text,
                 run_id=run_id,
                 error=error,
+                stale=stale_reason is not None,
+                stale_reason=stale_reason,
+                spoken=spoken,
                 backend_ms=round((time.monotonic() - t0) * 1000, 1),
             )
-            await self._emit(DelegationResult(delegation_id=delegation_id, text=text, run_id=run_id, error=error))
+            await self._emit(
+                DelegationResult(
+                    delegation_id=delegation_id,
+                    text=text,
+                    run_id=run_id,
+                    error=error,
+                    stale=stale_reason is not None,
+                    spoken=spoken,
+                )
+            )
+
+    def _stale_reason(self, rec: dict[str, Any]) -> str | None:
+        """Why this result may no longer be wanted, or None.
+
+        Two signals: substantive caller speech after the delegation was created
+        (a backchannel — "okay", "sure", "mm-hm" — does not count), or a newer
+        delegation created after it (the model asked for something else).
+        """
+        if self.stale_policy == "speak":
+            return None
+        newer_user = " ".join(
+            f.delta for f in self._fragments[rec["created_frag_idx"] :] if f.role == "user" and f.delta.strip()
+        ).strip()
+        newer_user = re.sub(r"\s+", " ", newer_user)
+        if newer_user and not _BACKCHANNEL.fullmatch(newer_user.lower()):
+            return f"the caller has since said: {newer_user!r}"
+        if any(o["seq"] > rec["seq"] for o in self._delegations.values()):
+            return "a newer request was delegated after this one"
+        return None
+
+    async def _deliver_result(self, delegation_id: str, text: str, stale_reason: str | None) -> bool:
+        """Append the backend text to the live session. Returns True when sent as commentary."""
+        if not text.strip():
+            return False
+        if stale_reason is None:
+            typ = "session.commentary.append"
+            chunks = split_for_append(text)
+        elif self.stale_policy == "drop":
+            logger.info("openai_live_stale_result_dropped", delegation_id=delegation_id, reason=stale_reason)
+            return False
+        else:
+            typ = "session.thinking.append"
+            note = (
+                f"Late result for an earlier request; {stale_reason}. "
+                "Mention it only if it is still what the caller wants; otherwise stay with the current topic. Result: "
+            )
+            chunks = split_for_append(note + text)
+            logger.info("openai_live_stale_result_quiet", delegation_id=delegation_id, reason=stale_reason)
+        for i, chunk in enumerate(chunks):
+            try:
+                await self.transport.send(
+                    {
+                        "type": typ,
+                        "event_id": f"{delegation_id}_result_{i}",
+                        "delegation_id": delegation_id,
+                        "content": chunk,
+                    }
+                )
+            except Exception as e:
+                logger.warning("openai_live_result_append_failed", delegation_id=delegation_id, error=str(e))
+                return False
+        return stale_reason is None
 
     async def _run_agent(self, delegation_id: str, prompt: str) -> tuple[str, str | None]:
         assert self.agent is not None
@@ -1003,7 +1235,7 @@ class LiveSession:
         try:
             usage = await self.transport.close()
             if usage and "seconds" in usage:
-                self.usage_seconds = usage["seconds"]
+                self._usage_current = usage["seconds"]
             # The dispatcher is already cancelled here; the final event's reason
             # lands on the transport.
             self.close_reason = self.close_reason or getattr(self.transport, "close_reason", None)
@@ -1026,6 +1258,8 @@ class LiveSessionSummary(BaseModel):
 
     session_id: str | None
     usage_seconds: float | None
+    usage_confirmed: bool = True
+    reconnects: int = 0
     est_usd: float | None
     close_reason: str | None
     transcript: list[TranscriptEntry]
@@ -1037,6 +1271,8 @@ class LiveSessionSummary(BaseModel):
         return cls(
             session_id=s.session_id,
             usage_seconds=s.usage_seconds,
+            usage_confirmed=s.usage_confirmed,
+            reconnects=s.reconnects,
             est_usd=None if s.usage_seconds is None else round(s.usage_seconds / 60 * PRICE_PER_MINUTE_USD, 4),
             close_reason=s.close_reason,
             transcript=s.transcript,

@@ -194,3 +194,10 @@ class DelegationResult(VoiceSessionEvent):
     text: str
     run_id: str | None = None
     error: str | None = None
+    stale: bool = False
+    """The caller moved on (substantive speech after the delegation, or a newer
+    delegation) before this landed. Per ``stale_policy`` it went to the model as
+    quiet context or was dropped."""
+    spoken: bool = True
+    """False when the text was not handed over as spoken commentary (stale,
+    dropped, empty, or the append failed)."""
