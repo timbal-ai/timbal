@@ -8,7 +8,9 @@ from timbal.core.agent import Agent
 from timbal.core.test_model import TestModel
 from timbal.core.tool import Tool
 from timbal.core.tool_result_offload import (
+    OFFLOAD_DIR_ENV,
     OFFLOAD_MARKER,
+    OFFLOAD_UNAVAILABLE_MARKER,
     LocalOffloadStore,
     Spill,
     ToolResultLimit,
@@ -17,6 +19,8 @@ from timbal.core.tool_result_offload import (
     _truncate_text,
     apply_tool_result_limit,
     create_read_tool_result,
+    reconcile_offload_handles,
+    store_has_handle,
 )
 from timbal.state import set_run_context
 from timbal.state.context import RunContext
@@ -125,6 +129,38 @@ class TestLocalOffloadStore:
             pytest.skip("symlink creation requires elevated privileges on this platform")
         with pytest.raises((ValueError, FileNotFoundError)):
             await store.read("link")
+
+    def test_root_from_env(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv(OFFLOAD_DIR_ENV, str(tmp_path / "shared"))
+        assert LocalOffloadStore().root == (tmp_path / "shared").resolve()
+        # An explicit root always wins over the environment.
+        assert LocalOffloadStore(root=tmp_path / "explicit").root == (tmp_path / "explicit").resolve()
+
+    def test_root_default_without_env(self, monkeypatch) -> None:
+        monkeypatch.delenv(OFFLOAD_DIR_ENV, raising=False)
+        assert LocalOffloadStore().root.name == "offload"
+
+    @pytest.mark.asyncio
+    async def test_exists(self, tmp_path) -> None:
+        store = LocalOffloadStore(root=tmp_path)
+        handle = await store.write("run/c1", b"x")
+        assert store.exists(handle) is True
+        assert store.exists("run/missing") is False
+        assert store.exists("/abs") is False
+        assert store.exists("../up") is False
+        assert await store_has_handle(store, handle) is True
+        assert await store_has_handle(store, "run/missing") is False
+
+    @pytest.mark.asyncio
+    async def test_store_without_exists_is_unknown(self) -> None:
+        class Opaque:
+            async def write(self, key, _data):
+                return key
+
+            async def read(self, _handle):
+                return b""
+
+        assert await store_has_handle(Opaque(), "h") is None
 
     @pytest.mark.asyncio
     async def test_unknown_handle_raises(self, tmp_path) -> None:
@@ -353,10 +389,22 @@ class TestReadToolResult:
         assert "[lines 1-500 of 2000" in out
 
     @pytest.mark.asyncio
-    async def test_unknown_handle_errors(self, tmp_path) -> None:
+    async def test_unknown_handle_returns_notice_not_error(self, tmp_path) -> None:
+        """A dead handle (earlier run, other instance) is reported as text the model can act
+        on — not as a tool error it will retry."""
         store = LocalOffloadStore(root=tmp_path)
         tool = create_read_tool_result(store)
         result = await tool(handle="run/nope").collect()
+        assert result.status.code == "success"
+        assert result.output.startswith(OFFLOAD_UNAVAILABLE_MARKER)
+        assert "run/nope" in result.output
+        assert "re-run the tool" in result.output
+
+    @pytest.mark.asyncio
+    async def test_escaping_handle_still_errors(self, tmp_path) -> None:
+        store = LocalOffloadStore(root=tmp_path)
+        tool = create_read_tool_result(store)
+        result = await tool(handle="/etc/passwd").collect()
         assert result.status.code == "error"
 
     @pytest.mark.asyncio
@@ -824,4 +872,147 @@ class TestAgentOffload:
         assert len(dumped_tool_results) == 1
         assert dumped_tool_results[0].get("offload_handle")
         assert dumped_tool_results[0]["content"][0]["text"].startswith(OFFLOAD_MARKER)
+        InMemoryTracingProvider._storage.clear()
+
+
+# ---------------------------------------------------------------------------
+# Handles inherited from earlier runs
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileOffloadHandles:
+    @pytest.mark.asyncio
+    async def test_dead_handles_neutralized_live_ones_kept(self, tmp_path) -> None:
+        from timbal.types.content import FileContent
+
+        store = LocalOffloadStore(root=tmp_path)
+        live = await store.write("run1/c1", b"payload")
+        kept_file = FileContent.validate({"type": "file", "file": "https://example.com/report.xlsx"})
+        memory = [
+            Message(role="user", content=[TextContent(text="go")]),
+            Message(
+                role="tool",
+                content=[
+                    ToolResultContent(id="c1", content=[TextContent(text="[placeholder]")], offload_handle=live),
+                    ToolResultContent(
+                        id="c2",
+                        content=[TextContent(text="[placeholder]"), kept_file],
+                        offload_handle="otherhost/c2",
+                    ),
+                    ToolResultContent(id="c3", content=[TextContent(text="plain result")]),
+                ],
+            ),
+        ]
+        cleared = await reconcile_offload_handles(memory, store)
+        assert cleared == ["otherhost/c2"]
+        c1, c2, c3 = memory[1].content
+        assert c1.offload_handle == live and c1.content[0].text == "[placeholder]"
+        assert c2.offload_handle is None
+        assert c2.content[0].text.startswith(OFFLOAD_UNAVAILABLE_MARKER)
+        assert "otherhost/c2" in c2.content[0].text
+        assert c2.content[1] is kept_file  # deliverable references survive
+        assert c3.content[0].text == "plain result"
+
+    @pytest.mark.asyncio
+    async def test_store_without_probe_is_left_alone(self) -> None:
+        class Opaque:
+            async def write(self, key, _data):
+                return key
+
+            async def read(self, _handle):
+                return b""
+
+        result = ToolResultContent(id="c", content=[TextContent(text="p")], offload_handle="x/c")
+        memory = [Message(role="tool", content=[result])]
+        assert await reconcile_offload_handles(memory, Opaque()) == []
+        assert memory[0].content[0].offload_handle == "x/c"
+        assert await reconcile_offload_handles(memory, None) == []
+
+    @pytest.mark.asyncio
+    async def test_next_turn_on_another_instance_does_not_page_dead_handle(self, tmp_path) -> None:
+        """Turn 1 spills a result. Turn 2 runs where that payload does not exist (a fresh
+        machine / recycled container): the inherited placeholder must be rewritten so the
+        model is not invited to call read_tool_result on a handle that cannot resolve."""
+        turn2_reads: list[str] = []
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "user" and last.collect_text() == "turn 1":
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            if last.role == "user" and last.collect_text() == "turn 2":
+                # Behave like a model that follows the placeholder: if history still tells it
+                # to page a handle, it will try. Record what the tool results say instead.
+                for m in messages:
+                    for c in m.content:
+                        if isinstance(c, ToolResultContent):
+                            turn2_reads.append(c.content[0].text)
+                return "done"
+            return "done"
+
+        def make_agent(store_root):
+            return Agent(
+                name="hop_agent",
+                model=TestModel(handler=handler),
+                tools=[Tool(name="fetch", handler=lambda: _big_payload())],
+                tool_result_limit=ToolResultLimit(threshold=10_000, store=LocalOffloadStore(root=store_root)),
+            )
+
+        agent1 = make_agent(tmp_path / "host_a")
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        out1 = await agent1(prompt="turn 1").collect()
+        assert out1.status.code == "success", out1.error
+        await ctx1._save_trace()
+
+        # Same agent definition, different machine: the store root has no payloads.
+        agent2 = make_agent(tmp_path / "host_b")
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        out2 = await agent2(prompt="turn 2").collect()
+        assert out2.status.code == "success", out2.error
+
+        assert len(turn2_reads) == 1
+        assert turn2_reads[0].startswith(OFFLOAD_UNAVAILABLE_MARKER)
+        span2 = ctx2._trace.get_path(agent2._path)[0]
+        assert len(span2.metadata.get("offload_unreadable", [])) == 1
+        inherited = [c for m in span2.memory if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
+        assert inherited and all(c.offload_handle is None for c in inherited)
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_next_turn_on_same_store_keeps_handles(self, tmp_path) -> None:
+        """Control: when the payload is still there, nothing is rewritten."""
+
+        def handler(messages):
+            if messages[-1].role == "user" and messages[-1].collect_text() == "turn 1":
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="same_store_agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="fetch", handler=lambda: _big_payload())],
+            tool_result_limit=ToolResultLimit(threshold=10_000, store=LocalOffloadStore(root=tmp_path)),
+        )
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="turn 1").collect()
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        out2 = await agent(prompt="turn 2").collect()
+        assert out2.status.code == "success", out2.error
+        span2 = ctx2._trace.get_path(agent._path)[0]
+        assert "offload_unreadable" not in span2.metadata
+        inherited = [c for m in span2.memory if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
+        assert inherited and all(c.offload_handle for c in inherited)
         InMemoryTracingProvider._storage.clear()
