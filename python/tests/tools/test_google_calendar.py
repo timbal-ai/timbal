@@ -6,6 +6,7 @@ import pytest
 from pydantic import SecretStr
 from timbal.tools.google_calendar import (
     GoogleCalendarCreateEvent,
+    GoogleCalendarDeleteEvent,
     GoogleCalendarUpdateEvent,
     _meet_create_request,
 )
@@ -227,3 +228,126 @@ async def test_update_event_leaves_an_existing_conference_alone():
     # send conferenceData — the event keeps whatever link it already had.
     assert "conferenceData" not in call.kwargs["json"]
     assert call.kwargs["params"] == {}
+
+
+@pytest.mark.asyncio
+async def test_create_event_send_updates_goes_on_the_query_string():
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=_response({"id": "evt1"}))
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = GoogleCalendarCreateEvent(token=SecretStr("token"))
+        await tool.handler(
+            summary="Demo",
+            start="2026-01-01T10:00:00Z",
+            end="2026-01-01T10:30:00Z",
+            calendar_id="primary",
+            description=None,
+            location=None,
+            attendees=["guest@example.com"],
+            timezone="UTC",
+            add_google_meet=True,
+            send_updates="all",
+        )
+
+    call = mock_client.post.await_args
+    # A query parameter beside conferenceDataVersion, never a body field: Google
+    # ignores it in the body and then invites nobody.
+    assert call.kwargs["params"] == {"conferenceDataVersion": 1, "sendUpdates": "all"}
+    assert "sendUpdates" not in call.kwargs["json"]
+
+
+@pytest.mark.asyncio
+async def test_create_event_without_send_updates_keeps_the_old_request():
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=_response({"id": "evt1"}))
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = GoogleCalendarCreateEvent(token=SecretStr("token"))
+        await tool.handler(
+            summary="Demo",
+            start="2026-01-01T10:00:00Z",
+            end="2026-01-01T10:30:00Z",
+            calendar_id="primary",
+            description=None,
+            location=None,
+            attendees=None,
+            timezone="UTC",
+            add_google_meet=False,
+            send_updates=None,
+        )
+
+    assert mock_client.post.await_args.kwargs["params"] == {}
+
+
+@pytest.mark.asyncio
+async def test_create_event_refuses_a_send_updates_google_would_reject():
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=_response({"id": "evt1"}))
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = GoogleCalendarCreateEvent(token=SecretStr("token"))
+        with pytest.raises(ValueError, match="send_updates"):
+            await tool.handler(
+                summary="Demo",
+                start="2026-01-01T10:00:00Z",
+                end="2026-01-01T10:30:00Z",
+                calendar_id="primary",
+                description=None,
+                location=None,
+                attendees=None,
+                timezone="UTC",
+                add_google_meet=False,
+                send_updates="everyone",
+            )
+
+    mock_client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_event_send_updates_goes_on_the_query_string():
+    mock_client = MagicMock()
+    mock_client.patch = AsyncMock(return_value=_response({"id": "evt1"}))
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = GoogleCalendarUpdateEvent(token=SecretStr("token"))
+        await tool.handler(
+            event_id="evt1",
+            calendar_id="primary",
+            summary=None,
+            start="2026-01-02T10:00:00Z",
+            end="2026-01-02T10:30:00Z",
+            description=None,
+            location=None,
+            timezone=None,
+            add_google_meet=False,
+            send_updates="externalOnly",
+        )
+
+    assert mock_client.patch.await_args.kwargs["params"] == {"sendUpdates": "externalOnly"}
+
+
+@pytest.mark.asyncio
+async def test_delete_event_send_updates_goes_on_the_query_string():
+    mock_client = MagicMock()
+    mock_client.delete = AsyncMock(return_value=_response({}))
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = GoogleCalendarDeleteEvent(token=SecretStr("token"))
+        out = await tool.handler(event_id="evt1", calendar_id="primary", send_updates="all")
+
+    assert out == {"deleted": True, "event_id": "evt1"}
+    call = mock_client.delete.await_args
+    assert call.kwargs["params"] == {"sendUpdates": "all"}
+
+
+@pytest.mark.asyncio
+async def test_delete_event_without_send_updates_sends_no_params():
+    mock_client = MagicMock()
+    mock_client.delete = AsyncMock(return_value=_response({}))
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = GoogleCalendarDeleteEvent(token=SecretStr("token"))
+        await tool.handler(event_id="evt1", calendar_id="primary", send_updates=None)
+
+    assert mock_client.delete.await_args.kwargs["params"] == {}
