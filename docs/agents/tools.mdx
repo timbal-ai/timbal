@@ -41,7 +41,8 @@ result = await run_python(
 ).collect()
 # result.output:
 # {"stdout": "Calculated mean\n", "stderr": "", "returncode": 0,
-#  "return_value": 2.0, "status": "success", "error": None}
+#  "return_value": 2.0, "status": "success", "error": None,
+#  "artifacts": [], "artifact_error": None}
 
 # Or pass the same tool to an Agent:
 # Agent(..., tools=[run_python])
@@ -65,6 +66,69 @@ cannot replace their versions, sources, or markers. Different constraints for th
 same package are rejected before building, even if potentially compatible. Package
 names are normalized, and new packages can be added per call. Imports are not
 automatically converted to package names. Modal builds and caches the dependency image.
+
+### File inputs and artifacts
+
+Pass `files` as a mapping of relative filenames to file URLs, data URLs, or
+application-supplied Timbal `File` objects. Inputs are copied into
+`/workspace/inputs/<filename>`. Python runs with `/workspace` as its working
+directory. Write deliverables under `/workspace/outputs`; the tool exports regular
+files there, including nested directories, before terminating the sandbox.
+
+```python
+from pathlib import Path
+from timbal.tools import RunPython
+from timbal.types import File
+
+run_python = RunPython()
+result = await run_python(
+    files={"sales.csv": File(Path("sales.csv"))},
+    code="""
+import csv
+from pathlib import Path
+
+with Path('inputs/sales.csv').open() as source:
+    total = sum(float(row['amount']) for row in csv.DictReader(source))
+Path('outputs/summary.txt').write_text(f'Total sales: {total}')
+total
+""",
+).collect()
+
+artifact = result.output["artifacts"][0]
+# {"name": "summary.txt", "size": ..., "content_type": "text/plain", "file": ...}
+# The file reference is a platform URL when platform storage is configured,
+# or a local temporary-file path otherwise. It survives sandbox termination.
+report = File(artifact["file"])
+await report.load()
+print(report.read().decode())
+```
+
+Agents pass file URLs from the conversation, for example
+`files={"sales.csv": "https://example.com/sales.csv"}`. Raw host paths are rejected;
+application code must explicitly wrap local files in `File`. File downloads happen
+on the host and uploads use Modal's API, so `block_network=True` still allows file
+transfer while blocking outbound connections from executed Python. Only supplied
+files are copied; credentials and host directories are not mounted.
+
+`artifacts` contains file references and metadata, not base64 blobs in the model's
+context. To reuse an artifact in a later call, pass its URL as another input, or
+wrap its local reference in `File` from application code. Each call still starts
+with a fresh sandbox.
+
+The defaults are `max_files=20` and `max_file_bytes=10_000_000`, applied separately
+to the input and output totals. `transfer_timeout=60` bounds input loading,
+sandbox upload, and artifact retrieval separately. Filenames must be relative,
+use forward slashes, and fit within 240 UTF-8 bytes. Output scanning is limited to
+1000 directory entries; symlinks and special files are rejected. Output files are
+read with byte limits even if background processes keep writing.
+
+Completed executions export files even when Python raises an exception or exits
+with a nonzero code. Execution timeouts and cancellation do not export files.
+If export fails or exceeds a limit, `artifacts` is empty and `artifact_error`
+explains the failure. The status is `error`, while stdout, stderr, return value,
+and any original Python error remain available. Files are exported as observed;
+finish writing them before the code returns. Invalid inputs and upload/API failures
+use Timbal's normal tool error handling.
 
 ### System packages and browser setup
 
@@ -92,7 +156,7 @@ again when the relevant cached image layers change. Treat setup commands as trus
 developer configuration; they are not agent-call parameters. Build-time network
 access is separate from the sandbox's runtime `block_network` policy.
 
-The agent still supplies only `code` and optional `dependencies`. Its description
+The agent supplies `code`, optional `dependencies`, and optional `files`. Its description
 includes configured Python/system packages, the execution timeout, and the actual
 network policy. Use `description` to explain capabilities installed by arbitrary
 setup commands, such as Chromium; command contents are not shown to the agent.
@@ -109,10 +173,10 @@ its beginning and end. `max_result_bytes` bounds the result envelope (default
 1,000,000); exceeding it produces an `OutputLimitError`. Source code is limited to
 100,000 UTF-8 bytes.
 
-Calls do not share variables or files. This tool does not mount the host filesystem,
-export artifacts, or expose Timbal tools inside Python. It always uses Modal, with
-no local execution fallback. Remote filesystem and persistent workspace support
-are separate concerns.
+Calls do not share variables or sandbox files; exported artifacts can be supplied
+explicitly to later calls. This tool does not mount the host filesystem or expose
+Timbal tools inside Python. It always uses Modal, with no local execution fallback.
+Shared remote filesystems and persistent workspaces are separate concerns.
 
 ## Tool Configuration
 

@@ -1,17 +1,22 @@
 """Python execution in a fresh Modal Sandbox per call (install ``timbal[modal]``)."""
 
 import asyncio
+import base64
 import json
 import logging
 import math
-from pathlib import Path
+import mimetypes
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator
+from pydantic import BeforeValidator, Field, WithJsonSchema, field_validator, model_validator
 
 from ..core.tool import Tool
+from ..types import File
+from ._run_python_transfer import read_file, validate_file, validate_path
 
 _RUNNER = Path(__file__).with_name("_run_python_runner.py")
+_EXPORTER = Path(__file__).with_name("_run_python_files.py")
 _MAX_CODE_BYTES = 100_000
 _TRUNCATED = "\n... [truncated] ...\n"
 _logger = logging.getLogger(__name__)
@@ -163,20 +168,75 @@ async def _collect(
     return stdout.result(), stderr.result(), wait.result()
 
 
+async def _read_artifacts(sandbox: Any, max_files: int, max_bytes: int, timeout: float = 60) -> list[dict[str, Any]]:
+    # Both the exporter and the host enforce limits. Do not trust a stat followed
+    # by an unbounded filesystem.read_bytes: background writers can grow a file.
+    reader = await sandbox.exec.aio(
+        "python",
+        "-I",
+        "-c",
+        _EXPORTER.read_text(),
+        "/workspace/outputs",
+        str(max_files),
+        str(max_bytes),
+        timeout=math.ceil(timeout),
+    )
+    wire_limit = 4 * ((max_bytes + 2) // 3) + max_files * 2048 + 4096
+    raw, _, returncode = await _collect(reader, wire_limit)
+    if returncode == -1:
+        raise TimeoutError("Artifact retrieval timed out.")
+    if returncode != 0:
+        raise ValueError("Could not retrieve output files.")
+    result = json.loads(raw)
+    if result["error"]:
+        raise ValueError(result["error"]["message"])
+    entries = result["artifacts"]
+    if not isinstance(entries, list) or len(entries) > max_files:
+        raise ValueError("Outputs exceed max_files or contain an invalid manifest.")
+    artifacts = []
+    names = set()
+    total = 0
+    for entry in entries:
+        name = validate_path(entry["name"])
+        if name in names:
+            raise ValueError("Duplicate output file name.")
+        names.add(name)
+        data = base64.b64decode(entry["data"], validate=True)
+        total += len(data)
+        if total > max_bytes:
+            raise ValueError("Outputs exceed max_file_bytes.")
+        file = File(data, name=Path(name).name, extension=Path(name).suffix)
+        artifacts.append(
+            {
+                "name": name,
+                "size": len(data),
+                "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
+                "file": file,
+            }
+        )
+    # Persist only after validating the entire manifest. File references survive
+    # sandbox teardown and appear as usable URLs/paths in agent tool results.
+    for artifact in artifacts:
+        artifact["file"] = await artifact["file"].persist()
+    return artifacts
+
+
 class RunPython(Tool):
     """Execute Python using Modal's configured credentials; no local fallback.
 
     Dependencies are explicit pip requirements, baked into Modal's cached image.
-    Calls are independent: variables and files do not persist between invocations.
-    ``timeout`` bounds execution; setup and result retrieval have separate deadlines.
+    Calls are independent; explicitly supplied files are staged for each call.
+    Files written to /workspace/outputs are exported before sandbox teardown.
+    Setup, execution, file transfer, and result retrieval have separate deadlines.
     """
 
     name: str = "run_python"
     description: str | None = (
         "Execute Python 3.11 in a fresh, isolated Modal sandbox. Returns stdout, stderr, "
-        "the final expression as return_value, returncode, status, and a structured error. "
+        "the final expression as return_value, returncode, status, artifacts, and a structured error. "
         "Supports top-level await. Specify third-party pip dependencies explicitly. "
-        "Files and variables do not persist between calls."
+        "Input files are available under /workspace/inputs. Write files to /workspace/outputs to return them as artifacts. "
+        "The working directory is /workspace. Other files and variables do not persist between calls."
     )
     dependencies: list[str] = Field(default_factory=list, description="Default pip requirements for every call.")
     system_dependencies: list[str] = Field(
@@ -194,6 +254,17 @@ class RunPython(Tool):
     block_network: bool = True
     max_output_chars: int = Field(default=20_000, ge=100)
     max_result_bytes: int = Field(default=1_000_000, ge=1024)
+    max_files: int = Field(default=20, ge=1, le=1000, description="Maximum file count in each transfer direction.")
+    max_file_bytes: int = Field(
+        default=10_000_000, ge=1, le=100_000_000, description="Total input or output file bytes per call, separately."
+    )
+    transfer_timeout: float = Field(default=60, gt=0, le=3600, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _validate_lifetime(self) -> "RunPython":
+        if self.timeout + 2 * self.transfer_timeout + 60 > 86400:
+            raise ValueError("Execution and transfer timeouts plus cleanup must fit Modal's 24-hour sandbox lifetime.")
+        return self
 
     @field_validator("dependencies", "system_dependencies", "setup_commands")
     @classmethod
@@ -223,6 +294,27 @@ class RunPython(Tool):
                     )
                 ),
             ] = None,
+            files: Annotated[
+                dict[
+                    str,
+                    Annotated[
+                        str | File,
+                        BeforeValidator(validate_file),
+                        WithJsonSchema(
+                            {"type": "string", "format": "uri", "description": "Supplied HTTP(S) file URL or data URL."}
+                        ),
+                    ],
+                ]
+                | None,
+                Field(
+                    description=(
+                        "Input files: map relative filenames to supplied file URLs or data URLs, "
+                        "e.g. {'sales.csv': 'https://.../sales.csv'}. Read them at /workspace/inputs/<filename>. "
+                        "Use actual file references from the conversation; do not invent URLs or host paths. "
+                        "Write deliverables to /workspace/outputs; they are returned as artifacts automatically."
+                    )
+                ),
+            ] = None,
         ) -> dict[str, Any]:
             if len(code.encode()) > _MAX_CODE_BYTES:
                 raise ValueError(f"Code exceeds {_MAX_CODE_BYTES} bytes.")
@@ -232,6 +324,15 @@ class RunPython(Tool):
                 raise ImportError("RunPython requires Modal. Install it with: pip install 'timbal[modal]'") from exc
 
             requirements = _resolve_dependencies(self.dependencies, dependencies or [])
+            inputs = {}
+            if files:
+                if len(files) > self.max_files:
+                    raise ValueError("Inputs exceed max_files.")
+                for name, file in files.items():
+                    inputs[validate_path(name)] = File(validate_file(file))
+                for name in inputs:
+                    if any(str(parent) in inputs for parent in PurePosixPath(name).parents):
+                        raise ValueError("An input file cannot also be another input's directory.")
             image = modal.Image.debian_slim(python_version="3.11")
             if self.system_dependencies:
                 image = image.apt_install(*self.system_dependencies)
@@ -246,17 +347,29 @@ class RunPython(Tool):
             stdout_buffer = _OutputBuffer(self.max_output_chars)
             stderr_buffer = _OutputBuffer(self.max_output_chars)
             try:
+                input_data = {}
+                async with asyncio.timeout(self.transfer_timeout):
+                    total = 0
+                    for name, file in inputs.items():
+                        data = await read_file(file, self.max_file_bytes - total)
+                        total += len(data)
+                        input_data[name] = data
                 async with asyncio.timeout(self.setup_timeout):
                     app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
                     sandbox = await modal.Sandbox.create.aio(
                         app=app,
                         image=image,
                         # Provider TTL also bounds orphan lifetime if the client disappears.
-                        timeout=math.ceil(self.timeout + 60),
+                        timeout=math.ceil(self.timeout + 2 * self.transfer_timeout + 60),
                         cpu=(self.cpu, self.cpu),
                         memory=(self.memory, self.memory),
                         block_network=self.block_network,
                     )
+                async with asyncio.timeout(self.transfer_timeout):
+                    await sandbox.filesystem.make_directory.aio("/workspace/inputs")
+                    await sandbox.filesystem.make_directory.aio("/workspace/outputs")
+                    for name, data in input_data.items():
+                        await sandbox.filesystem.write_bytes.aio(data, f"/workspace/inputs/{name}")
                 async with asyncio.timeout(self.timeout):
                     process = await sandbox.exec.aio(
                         "python",
@@ -264,6 +377,7 @@ class RunPython(Tool):
                         "-c",
                         _RUNNER.read_text(),
                         timeout=math.ceil(self.timeout),
+                        workdir="/workspace",
                     )
                     process.stdin.write(json.dumps({"code": code, "max_result_bytes": self.max_result_bytes}))
                     process.stdin.write_eof()
@@ -282,14 +396,26 @@ class RunPython(Tool):
                     result = _error_result("ExecutionError", f"Python exited with code {returncode}.")
                 else:
                     result = await _read_result(sandbox, self.max_result_bytes)
+                artifacts = []
+                artifact_error = None
+                try:
+                    async with asyncio.timeout(self.transfer_timeout):
+                        artifacts = await _read_artifacts(
+                            sandbox, self.max_files, self.max_file_bytes, self.transfer_timeout
+                        )
+                except Exception as exc:
+                    artifact_error = {"type": "ArtifactError", "message": str(exc) or "Artifact retrieval timed out."}
+                    _logger.warning("Could not export Python artifacts.", exc_info=True)
                 error = result["error"]
                 return {
                     "stdout": stdout,
                     "stderr": stderr,
                     "returncode": returncode,
                     "return_value": result["return_value"],
-                    "error": error,
-                    "status": "error" if error else "success",
+                    "artifacts": artifacts,
+                    "artifact_error": artifact_error,
+                    "error": error or artifact_error,
+                    "status": "error" if error or artifact_error else "success",
                 }
             except TimeoutError:
                 return {
@@ -297,10 +423,12 @@ class RunPython(Tool):
                     "stderr": stderr_buffer.value(),
                     "returncode": returncode,
                     "return_value": None,
+                    "artifacts": [],
+                    "artifact_error": None,
                     "status": "error",
                     "error": {
                         "type": "TimeoutError",
-                        "message": "Modal setup, execution, or result retrieval timed out.",
+                        "message": "Modal setup, execution, input transfer, or result retrieval timed out.",
                     },
                 }
             finally:
@@ -316,6 +444,7 @@ class RunPython(Tool):
             f"{'blocked' if self.block_network else 'enabled'}. "
             f"Configured Python requirements: {', '.join(self.dependencies) or 'none'}. "
             f"Configured system packages: {', '.join(self.system_dependencies) or 'none'}."
+            f" File limits: {self.max_files} files and {self.max_file_bytes} bytes per direction."
         )
         self.description = (self.description or "") + environment
 
@@ -337,6 +466,9 @@ class RunPython(Tool):
                         "block_network",
                         "max_output_chars",
                         "max_result_bytes",
+                        "max_files",
+                        "max_file_bytes",
+                        "transfer_timeout",
                     )
                 }
             ),

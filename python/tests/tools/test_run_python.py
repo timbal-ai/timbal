@@ -1,6 +1,7 @@
 """Runner semantics and Modal lifecycle tests; no remote compute in unit tests."""
 
 import asyncio
+import base64
 import json
 import os
 import subprocess
@@ -12,7 +13,10 @@ import pytest
 from pydantic import ValidationError
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
 from timbal.tools import RunPython
-from timbal.tools.run_python import _RUNNER, _read_output, _resolve_dependencies
+from timbal.tools._run_python_files import export_files
+from timbal.tools._run_python_transfer import read_file
+from timbal.tools.run_python import _RUNNER, _read_artifacts, _read_output, _resolve_dependencies
+from timbal.types import File, Message
 
 
 def run_code(code):
@@ -93,7 +97,13 @@ def process(stdout="", stderr="", returncode=0):
 def modal_mock(monkeypatch):
     execution = process("hello\n", "warning\n")
     result = process(json.dumps({"return_value": 42, "error": None}))
-    sandbox = SimpleNamespace(exec=aio(side_effect=[execution, result]), terminate=aio())
+    sandbox = SimpleNamespace(
+        exec=aio(side_effect=[execution, result]),
+        terminate=aio(),
+        filesystem=SimpleNamespace(make_directory=aio(), write_bytes=aio()),
+    )
+    artifacts = AsyncMock(return_value=[])
+    monkeypatch.setattr("timbal.tools.run_python._read_artifacts", artifacts)
     image = Mock()
     image.apt_install.return_value = image
     image.pip_install.return_value = image
@@ -104,7 +114,7 @@ def modal_mock(monkeypatch):
         Image=SimpleNamespace(debian_slim=Mock(return_value=image)),
     )
     monkeypatch.setitem(sys.modules, "modal", module)
-    return SimpleNamespace(module=module, sandbox=sandbox, image=image, execution=execution)
+    return SimpleNamespace(module=module, sandbox=sandbox, image=image, execution=execution, artifacts=artifacts)
 
 
 async def test_tool_contract_and_isolation(modal_mock, monkeypatch):
@@ -119,19 +129,21 @@ async def test_tool_contract_and_isolation(modal_mock, monkeypatch):
         "return_value": 42,
         "error": None,
         "status": "success",
+        "artifacts": [],
+        "artifact_error": None,
     }
     modal_mock.image.pip_install.assert_called_once_with("numpy==2.2.6", "pandas")
     config = modal_mock.module.Sandbox.create.aio.call_args.kwargs
     assert config["block_network"] is True
     assert config["memory"] == (512, 512)
     assert config["cpu"] == (1, 1)
-    assert config["timeout"] == 70
+    assert config["timeout"] == 190
     assert "env" not in config and "secrets" not in config and "volumes" not in config
     assert "must-not-forward" not in str(modal_mock.execution.stdin.write.call_args)
     request = json.loads(modal_mock.execution.stdin.write.call_args.args[0])
     assert request["code"] == "21 * 2"
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
-    assert set(tool.params_model.model_fields) == {"code", "dependencies"}
+    assert set(tool.params_model.model_fields) == {"code", "dependencies", "files"}
     assert tool.get_config()["timeout"]["value"] == 10
 
 
@@ -148,7 +160,7 @@ async def test_image_build_order_and_agent_schema(modal_mock):
     modal_mock.image.apt_install.assert_called_once_with("ffmpeg")
     modal_mock.image.run_commands.assert_called_once_with("playwright install --with-deps chromium")
     schema = tool.params_model.model_json_schema()["properties"]
-    assert set(schema) == {"code", "dependencies"}
+    assert set(schema) == {"code", "dependencies", "files"}
     assert "Markdown" in schema["code"]["description"]
     assert "cannot be overridden" in schema["dependencies"]["description"]
     assert "playwright==1.58.0" in tool.description
@@ -429,6 +441,217 @@ async def test_setup_failure_does_not_execute(modal_mock):
     modal_mock.sandbox.terminate.aio.assert_not_awaited()
 
 
+async def test_file_inputs_use_modal_transfer_without_runtime_network(modal_mock):
+    source = File(b"a,b\n1,2\n", name="data.csv")
+    source.seek(2)
+    tool = RunPython(max_file_bytes=100, tracing_provider=InMemoryTracingProvider)
+    event = await tool(code="42", files={"nested/data.csv": source}).collect()
+    assert event.error is None, event.error
+    assert event.output["status"] == "success"
+    modal_mock.sandbox.filesystem.write_bytes.aio.assert_awaited_once_with(
+        b"a,b\n1,2\n", "/workspace/inputs/nested/data.csv"
+    )
+    assert modal_mock.sandbox.exec.aio.call_args_list[0].kwargs["workdir"] == "/workspace"
+    assert modal_mock.module.Sandbox.create.aio.call_args.kwargs["block_network"] is True
+
+
+@pytest.mark.parametrize("name", ["../secret", "/tmp/file", "a/../../b", "a\\b", "a//b", "a/./b", "", "C:/x", "a\x00b"])
+async def test_reject_input_path_escape_before_creation(modal_mock, name):
+    with pytest.raises(ValueError, match="relative paths"):
+        await RunPython().handler("1", files={name: File(b"x")})
+    modal_mock.module.Sandbox.create.aio.assert_not_awaited()
+
+
+async def test_reject_ambiguous_input_paths(modal_mock):
+    with pytest.raises(ValueError, match="directory"):
+        await RunPython().handler("1", files={"a/b": File(b"x"), "a/b/c": File(b"y")})
+    modal_mock.module.Sandbox.create.aio.assert_not_awaited()
+
+
+async def test_agent_cannot_supply_host_path(modal_mock, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host-only")
+    tool = RunPython()
+    with pytest.raises(ValidationError, match="file URL"):
+        tool.params_model(code="1", files={"data.txt": str(secret)})
+    with pytest.raises(ValueError, match="file URL"):
+        await tool.handler("1", files={"data.txt": str(secret)})
+    # Explicit File objects supplied by application code are supported.
+    assert await read_file(File(secret), 20) == b"host-only"
+    modal_mock.module.Sandbox.create.aio.assert_not_awaited()
+
+
+async def test_input_file_count_and_aggregate_size_limits(modal_mock):
+    files = {"a": File(b"12"), "b": File(b"34")}
+    with pytest.raises(ValueError, match="max_files"):
+        await RunPython(max_files=1).handler("1", files=files)
+    with pytest.raises(ValueError, match="max_file_bytes"):
+        await RunPython(max_file_bytes=3).handler("1", files=files)
+    modal_mock.module.Sandbox.create.aio.assert_not_awaited()
+
+
+async def test_bounded_data_url_and_stream_position():
+    source = File(b"hello")
+    source.seek(2)
+    assert await read_file(source, 5) == b"hello"
+    assert source.tell() == 2
+    with pytest.raises(ValueError, match="max_file_bytes"):
+        await read_file(File("data:text/plain;base64,aGVsbG8="), 4)
+
+
+async def test_http_input_limit_without_content_length(monkeypatch):
+    import httpx
+
+    consumed = 0
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal consumed
+            for _ in range(100):
+                consumed += 1
+                yield b"x" * 65536
+
+    client_type = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, stream=Stream()))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_type(transport=transport, **kwargs))
+    with pytest.raises(ValueError, match="max_file_bytes"):
+        await read_file(File("https://example.com/input.bin"), 100)
+    assert consumed == 1
+
+
+async def test_url_input_stays_a_reference_until_bounded_download(modal_mock, monkeypatch):
+    import httpx
+
+    client_type = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, content=b"hello"))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_type(transport=transport, **kwargs))
+    persist = AsyncMock(side_effect=AssertionError("Input URL should not be persisted or fetched by tracing"))
+    monkeypatch.setattr(File, "persist", persist)
+    tool = RunPython(tracing_provider=InMemoryTracingProvider)
+    params = tool.params_model(code="1", files={"data.txt": "https://example.com/data.txt"})
+    assert isinstance(params.files["data.txt"], str)
+    event = await tool(**params.model_dump()).collect()
+    assert event.error is None, event.error
+    assert event.output["status"] == "success"
+    persist.assert_not_awaited()
+    modal_mock.sandbox.filesystem.write_bytes.aio.assert_awaited_once_with(b"hello", "/workspace/inputs/data.txt")
+
+
+async def test_upload_failure_terminates_sandbox(modal_mock):
+    modal_mock.sandbox.filesystem.write_bytes.aio.side_effect = RuntimeError("upload failed")
+    with pytest.raises(RuntimeError, match="upload failed"):
+        await RunPython().handler("1", files={"data": File(b"x")})
+    modal_mock.sandbox.exec.aio.assert_not_awaited()
+    modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
+@pytest.mark.parametrize("phase", ["upload", "download"])
+async def test_transfer_deadline_terminates_sandbox(modal_mock, phase):
+    async def hang(*_args):
+        await asyncio.Event().wait()
+
+    if phase == "upload":
+        modal_mock.sandbox.filesystem.write_bytes.aio.side_effect = hang
+    else:
+        modal_mock.artifacts.side_effect = hang
+    result = await RunPython(transfer_timeout=0.01).handler("1", files={"data": File(b"x")})
+    assert result["error"]["type"] == ("TimeoutError" if phase == "upload" else "ArtifactError")
+    modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
+@pytest.mark.parametrize("python_error", [False, True])
+async def test_artifact_failure_preserves_execution_result(modal_mock, python_error):
+    if python_error:
+        modal_mock.sandbox.exec.aio.side_effect = [process("before crash", returncode=7)]
+    modal_mock.artifacts.side_effect = ValueError("Outputs exceed max_file_bytes.")
+    result = await RunPython().handler("1")
+    assert result["status"] == "error"
+    assert result["stdout"] == ("before crash" if python_error else "hello\n")
+    assert result["return_value"] == (None if python_error else 42)
+    assert result["error"]["type"] == ("ExecutionError" if python_error else "ArtifactError")
+    assert result["artifact_error"]["type"] == "ArtifactError"
+    assert result["artifacts"] == []
+    modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
+async def test_artifact_persistence_and_agent_visible_reference(modal_mock, monkeypatch):
+    payload = b"\x00\xff\x01"
+    manifest = {"artifacts": [{"name": "nested/data.bin", "data": base64.b64encode(payload).decode()}], "error": None}
+    modal_mock.sandbox.exec.aio.side_effect = [process(json.dumps(manifest))]
+    persisted = []
+
+    async def persist(file):
+        persisted.append(file.read())
+        return "https://example.com/data.bin"
+
+    monkeypatch.setattr(File, "persist", persist)
+    artifacts = await _read_artifacts(modal_mock.sandbox, 20, 100)
+    assert persisted == [payload]
+    assert artifacts == [
+        {
+            "name": "nested/data.bin",
+            "size": 3,
+            "content_type": "application/octet-stream",
+            "file": "https://example.com/data.bin",
+        }
+    ]
+    message = Message.validate(
+        {"role": "tool", "content": [{"type": "tool_result", "id": "test", "content": {"artifacts": artifacts}}]}
+    )
+    assert "https://example.com/data.bin" in message.content[0].content[0].text
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [{"name": "../escape", "data": "eA=="}],
+        [{"name": "a", "data": "not base64"}],
+        [{"name": "a", "data": "eHh4eA=="}],
+        [{"name": "a", "data": "eA=="}, {"name": "a", "data": "eA=="}],
+    ],
+)
+async def test_artifact_manifest_is_validated_on_host(modal_mock, entries):
+    modal_mock.sandbox.exec.aio.side_effect = [process(json.dumps({"artifacts": entries, "error": None}))]
+    with pytest.raises(ValueError):
+        await _read_artifacts(modal_mock.sandbox, 2, 3)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Exporter runs inside Linux Modal sandboxes.")
+def test_exporter_nested_binary_and_empty_files(tmp_path):
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "data.bin").write_bytes(b"\x00\xff")
+    (tmp_path / "empty.txt").write_bytes(b"")
+    result = export_files(str(tmp_path), 2, 2)
+    assert {item["name"]: base64.b64decode(item["data"]) for item in result} == {
+        "nested/data.bin": b"\x00\xff",
+        "empty.txt": b"",
+    }
+    with pytest.raises(ValueError, match="max_files"):
+        export_files(str(tmp_path), 1, 2)
+    with pytest.raises(ValueError, match="max_file_bytes"):
+        export_files(str(tmp_path), 2, 1)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Exporter runs inside Linux Modal sandboxes.")
+@pytest.mark.parametrize("kind", ["file-link", "directory-link", "fifo", "root-link"])
+def test_exporter_rejects_links_and_special_files(tmp_path, kind):
+    root = tmp_path / "outputs"
+    root.mkdir()
+    if kind == "file-link":
+        (tmp_path / "secret").write_bytes(b"secret")
+        (root / "link").symlink_to(tmp_path / "secret")
+    elif kind == "directory-link":
+        (root / "link").symlink_to(tmp_path, target_is_directory=True)
+    elif kind == "fifo":
+        os.mkfifo(root / "pipe")
+    else:
+        link = tmp_path / "root-link"
+        link.symlink_to(root, target_is_directory=True)
+        root = link
+    with pytest.raises((ValueError, OSError)):
+        export_files(str(root), 20, 100)
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize(
     ("code", "dependencies", "timeout", "expected_value", "expected_error"),
@@ -524,6 +747,7 @@ async with async_playwright() as p:
     try:
         page = await browser.new_page()
         await page.set_content("<title>Timbal Chromium</title><h1>42</h1>")
+        await page.screenshot(path="/workspace/outputs/page.png")
         result = {"title": await page.title(), "value": await page.locator("h1").inner_text()}
     finally:
         await browser.close()
@@ -533,10 +757,77 @@ result
         assert event.error is None, event.error
         assert event.output["status"] == "success", event.output
         assert event.output["return_value"] == {"title": "Timbal Chromium", "value": "42"}
+        assert event.output["artifacts"][0]["name"] == "page.png"
+        screenshot = File(event.output["artifacts"][0]["file"])
+        await screenshot.load()
+        assert screenshot.read(8) == b"\x89PNG\r\n\x1a\n"
         assert len(sandboxes) == 1
         async with asyncio.timeout(15):
             while await sandboxes[0].poll.aio() is None:
                 await asyncio.sleep(0.25)
+    finally:
+        for sandbox in sandboxes:
+            await sandbox.terminate.aio()
+
+
+@pytest.mark.integration
+async def test_live_modal_file_roundtrip(monkeypatch):
+    if os.environ.get("TIMBAL_TEST_MODAL") != "1":
+        pytest.skip("Set TIMBAL_TEST_MODAL=1 with Modal credentials to run paid remote compute.")
+    import modal
+
+    sandboxes = []
+    create = modal.Sandbox.create.aio
+
+    async def track_creation(*args, **kwargs):
+        sandbox = await create(*args, **kwargs)
+        sandboxes.append(sandbox)
+        return sandbox
+
+    monkeypatch.setattr(modal.Sandbox.create, "aio", track_creation)
+    tool = RunPython(max_result_bytes=1024, tracing_provider=InMemoryTracingProvider)
+    binary_payload = bytes(range(256)) * 4096
+    try:
+        event = await tool(
+            files={
+                "data.csv": File(b"value\n2\n3\n", name="data.csv"),
+                "nested/blob.bin": File(binary_payload, name="blob.bin"),
+            },
+            code="""
+import csv
+from pathlib import Path
+assert Path.cwd() == Path('/workspace')
+total = sum(int(row['value']) for row in csv.DictReader(Path('inputs/data.csv').open()))
+Path('outputs/result.txt').write_text(str(total))
+Path('outputs/nested').mkdir()
+Path('outputs/nested/blob.bin').write_bytes(Path('inputs/nested/blob.bin').read_bytes())
+total
+""",
+        ).collect()
+        assert event.error is None, event.error
+        assert event.output["status"] == "success", event.output
+        assert event.output["return_value"] == 5
+        artifacts = {item["name"]: item for item in event.output["artifacts"]}
+        binary = File(artifacts["nested/blob.bin"]["file"])
+        await binary.load()
+        assert binary.read() == binary_payload
+        # A second fresh sandbox can consume a persisted output from the first.
+        followup = await tool(
+            files={"previous.txt": File(artifacts["result.txt"]["file"])},
+            code="from pathlib import Path\nassert not Path('inputs/data.csv').exists()\n"
+            "Path('outputs/partial.txt').write_text(Path('inputs/previous.txt').read_text())\n1/0",
+        ).collect()
+        assert followup.error is None, followup.error
+        assert followup.output["error"]["type"] == "ZeroDivisionError"
+        assert followup.output["artifacts"][0]["name"] == "partial.txt"
+        partial = File(followup.output["artifacts"][0]["file"])
+        await partial.load()
+        assert partial.read() == b"5"
+        assert len(sandboxes) == 2
+        for sandbox in sandboxes:
+            async with asyncio.timeout(15):
+                while await sandbox.poll.aio() is None:
+                    await asyncio.sleep(0.25)
     finally:
         for sandbox in sandboxes:
             await sandbox.terminate.aio()
