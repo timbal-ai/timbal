@@ -42,6 +42,10 @@ class FallbackModel:
     Pass ``fallback_on=`` (an exception class, tuple/list of classes, or a
     predicate) to narrow the default. Use :func:`is_retryable_provider_error`
     for the conservative "transient provider errors only" behavior.
+
+    Shared ``api_key`` and ``base_url`` apply only to the primary provider.
+    Other providers resolve their own credentials and endpoint unless their
+    ``ModelEntry`` supplies an explicit override.
     """
 
     __timbal_fallback_model__ = True
@@ -72,6 +76,7 @@ class FallbackModel:
         **llm_router_kwargs: Any,
     ) -> AsyncGenerator[Any, None]:
         errors: list[tuple[str, BaseException]] = []
+        primary_provider = self.entries[0].model.split("/", 1)[0]
 
         for index, entry in enumerate(self.entries):
             started = False
@@ -87,6 +92,11 @@ class FallbackModel:
                 # The last entry has nowhere to go, so it retries normally.
                 "fail_fast_rate_limit": has_fallback,
             }
+            if entry.model.split("/", 1)[0] != primary_provider:
+                # Never send the primary provider's credentials or endpoint
+                # to a different provider. Let the router resolve its defaults.
+                kwargs.pop("api_key", None)
+                kwargs.pop("base_url", None)
             if entry.api_key is not None:
                 kwargs["api_key"] = entry.api_key
             if entry.base_url is not None:

@@ -109,6 +109,33 @@ class TestFallbackModel:
         assert calls == ["openai/primary", "openai/backup"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("primary,other", [("openai", "anthropic"), ("anthropic", "openai")])
+    async def test_scopes_shared_auth_to_primary_provider(self, primary, other):
+        model = FallbackModel(
+            f"{primary}/primary",
+            f"{other}/backup",
+            ModelEntry(f"{other}/custom", api_key="custom_key", base_url="https://custom"),
+            f"{primary}/last",
+        )
+        calls = []
+
+        async def router(**kwargs):
+            calls.append(kwargs)
+            if kwargs["model"] != f"{primary}/last":
+                raise _status_error(401)
+            yield "ok"
+
+        chunks = [chunk async for chunk in model.route(router, api_key="primary_key", base_url="https://primary")]
+
+        assert chunks == ["ok"]
+        assert [(call.get("api_key"), call.get("base_url")) for call in calls] == [
+            ("primary_key", "https://primary"),
+            (None, None),
+            ("custom_key", "https://custom"),
+            ("primary_key", "https://primary"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_default_falls_back_on_auth_error(self):
         """401/403 should trigger fallback by default — conservative behavior is opt-in."""
         from timbal.core.fallback_model import is_retryable_provider_error
