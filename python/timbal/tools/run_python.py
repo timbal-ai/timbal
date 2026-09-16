@@ -58,6 +58,9 @@ async def _read_result(sandbox: Any, limit: int) -> dict[str, Any]:
                 timeout=30,
             )
             raw, _, returncode = await _collect(reader, limit + 1)
+        # Modal's ContainerProcess.wait returns -1 when the exec deadline fires.
+        if returncode == -1:
+            raise TimeoutError
         if returncode != 0:
             return _error_result("ExecutionError", "Python exited without a readable execution result.")
         if len(raw.encode()) > limit:

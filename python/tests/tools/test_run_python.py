@@ -268,6 +268,16 @@ async def test_missing_result_is_not_an_output_limit_error(modal_mock):
     assert result["returncode"] == 0
 
 
+async def test_result_read_timeout_is_reported_as_timeout(modal_mock):
+    modal_mock.sandbox.exec.aio.side_effect = [process("execution complete\n"), process(returncode=-1)]
+    result = await RunPython().handler("42")
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "TimeoutError"
+    assert result["stdout"] == "execution complete\n"
+    assert result["returncode"] == 0
+    modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
 @pytest.mark.parametrize("cancel_execution", [False, True])
 async def test_cancellation_during_cleanup_waits_for_termination(modal_mock, cancel_execution):
     execution_started = asyncio.Event()
