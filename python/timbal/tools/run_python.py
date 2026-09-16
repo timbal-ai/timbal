@@ -117,27 +117,48 @@ def _resolve_dependencies(configured: list[str], requested: list[str]) -> list[s
     return [str(requirement) for requirement in resolved.values()]
 
 
-async def _read_output(stream: Any, limit: int) -> str:
-    """Drain the stream while retaining only a bounded head and tail."""
-    head_size = (limit - len(_TRUNCATED)) // 2
-    tail_size = limit - len(_TRUNCATED) - head_size
-    head = tail = ""
-    total = 0
+class _OutputBuffer:
+    """Retain a bounded output head and tail while a stream is being read."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.head_size = (limit - len(_TRUNCATED)) // 2
+        self.tail_size = limit - len(_TRUNCATED) - self.head_size
+        self.head = self.tail = ""
+        self.total = 0
+
+    def append(self, chunk: str) -> None:
+        self.total += len(chunk)
+        take = min(len(chunk), self.head_size - len(self.head))
+        self.head += chunk[:take]
+        self.tail = (self.tail + chunk[take:])[-(self.limit - self.head_size) :]
+
+    def value(self) -> str:
+        if self.total <= self.limit:
+            return self.head + self.tail
+        return self.head + _TRUNCATED + self.tail[-self.tail_size :]
+
+
+async def _read_output(stream: Any, limit: int, buffer: _OutputBuffer | None = None) -> str:
+    """Drain the stream into a buffer that remains readable after cancellation."""
+    buffer = buffer or _OutputBuffer(limit)
     async for chunk in stream:
-        total += len(chunk)
-        take = min(len(chunk), head_size - len(head))
-        head += chunk[:take]
-        tail = (tail + chunk[take:])[-(limit - head_size) :]
-    if total <= limit:
-        return head + tail
-    return head + _TRUNCATED + tail[-tail_size:]
+        buffer.append(chunk)
+    return buffer.value()
 
 
-async def _collect(process: Any, limit: int) -> tuple[str, str, int]:
+async def _collect(
+    process: Any,
+    limit: int,
+    stdout_buffer: _OutputBuffer | None = None,
+    stderr_buffer: _OutputBuffer | None = None,
+) -> tuple[str, str, int]:
     # TaskGroup cancels sibling readers on failure/cancellation; no orphaned reads.
+    stdout_buffer = stdout_buffer or _OutputBuffer(limit)
+    stderr_buffer = stderr_buffer or _OutputBuffer(limit)
     async with asyncio.TaskGroup() as group:
-        stdout = group.create_task(_read_output(process.stdout, limit))
-        stderr = group.create_task(_read_output(process.stderr, limit))
+        stdout = group.create_task(_read_output(process.stdout, limit, stdout_buffer))
+        stderr = group.create_task(_read_output(process.stderr, limit, stderr_buffer))
         wait = group.create_task(process.wait.aio())
     return stdout.result(), stderr.result(), wait.result()
 
@@ -222,6 +243,8 @@ class RunPython(Tool):
             sandbox = None
             stdout = stderr = ""
             returncode = None
+            stdout_buffer = _OutputBuffer(self.max_output_chars)
+            stderr_buffer = _OutputBuffer(self.max_output_chars)
             try:
                 async with asyncio.timeout(self.setup_timeout):
                     app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
@@ -245,7 +268,12 @@ class RunPython(Tool):
                     process.stdin.write(json.dumps({"code": code, "max_result_bytes": self.max_result_bytes}))
                     process.stdin.write_eof()
                     await process.stdin.drain.aio()
-                    stdout, stderr, returncode = await _collect(process, self.max_output_chars)
+                    stdout, stderr, returncode = await _collect(
+                        process,
+                        self.max_output_chars,
+                        stdout_buffer,
+                        stderr_buffer,
+                    )
                     # Modal's ContainerProcess.wait currently returns -1 on exec timeout.
                     if returncode == -1:
                         raise TimeoutError
@@ -265,8 +293,8 @@ class RunPython(Tool):
                 }
             except TimeoutError:
                 return {
-                    "stdout": stdout,
-                    "stderr": stderr,
+                    "stdout": stdout_buffer.value(),
+                    "stderr": stderr_buffer.value(),
                     "returncode": returncode,
                     "return_value": None,
                     "status": "error",

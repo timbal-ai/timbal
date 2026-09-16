@@ -212,6 +212,37 @@ async def test_timeout_cleanup(modal_mock):
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
 
 
+async def test_host_timeout_preserves_bounded_partial_output(modal_mock):
+    stdout_value = "start:" + "x" * 200 + ":end"
+
+    async def output_then_hang(value):
+        yield value
+        await asyncio.Event().wait()
+
+    async def wait_forever():
+        await asyncio.Event().wait()
+
+    execution = SimpleNamespace(
+        stdout=output_then_hang(stdout_value),
+        stderr=output_then_hang("warning before timeout\n"),
+        wait=SimpleNamespace(aio=wait_forever),
+        stdin=SimpleNamespace(write=Mock(), write_eof=Mock(), drain=aio()),
+    )
+    modal_mock.sandbox.exec.aio.side_effect = [execution]
+
+    result = await RunPython(timeout=0.01, max_output_chars=100).handler("while True: pass")
+
+    assert result["error"]["type"] == "TimeoutError"
+    assert result["returncode"] is None
+    assert len(result["stdout"]) == 100
+    assert result["stdout"].startswith("start:")
+    assert result["stdout"].endswith(":end")
+    assert "[truncated]" in result["stdout"]
+    assert result["stderr"] == "warning before timeout\n"
+    modal_mock.sandbox.exec.aio.assert_awaited_once()
+    modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
 async def test_provider_timeout_preserves_logs(modal_mock):
     modal_mock.sandbox.exec.aio.side_effect = [process("before timeout\n", returncode=-1)]
     result = await RunPython().handler("while True: pass")
