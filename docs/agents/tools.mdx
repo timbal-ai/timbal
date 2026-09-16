@@ -19,6 +19,95 @@ agent = Agent(
 )
 ```
 
+## Sandboxed Python with Modal
+
+`RunPython` executes Python in a fresh Modal sandbox for each call. Install the
+optional dependency and configure Modal authentication on the machine running Timbal:
+
+```bash
+pip install 'timbal[modal]'
+modal setup
+```
+
+In deployments, use Modal's `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` environment
+variables instead. These authenticate the host SDK; they are not forwarded to the sandbox.
+
+```python
+from timbal.tools import RunPython
+
+run_python = RunPython(dependencies=["numpy==2.2.6"], timeout=60)
+result = await run_python(
+    code="import numpy as np\nprint('Calculated mean')\nfloat(np.mean([1, 2, 3]))"
+).collect()
+# result.output:
+# {"stdout": "Calculated mean\n", "stderr": "", "returncode": 0,
+#  "return_value": 2.0, "status": "success", "error": None}
+
+# Or pass the same tool to an Agent:
+# Agent(..., tools=[run_python])
+```
+
+The final expression becomes `return_value`; top-level `await` works too. Values
+that cannot be represented as JSON use their Python representation. Python errors
+are returned in `error` with a type, message, and traceback. Setup/API failures
+surface through Timbal's usual tool error handling.
+
+Supply pip requirements through the tool's `dependencies` configuration or the
+per-call `dependencies` argument. Configured requirements are authoritative:
+per-call requests may omit them, repeat the same constraints, or add extras, but
+cannot replace their versions, sources, or markers. Different constraints for the
+same package are rejected before building, even if potentially compatible. Package
+names are normalized, and new packages can be added per call. Imports are not
+automatically converted to package names. Modal builds and caches the dependency image.
+
+### System packages and browser setup
+
+Use `system_dependencies` for Debian apt packages and `setup_commands` for trusted
+image-build commands. The build order is **apt packages → Python packages → setup
+commands**. All steps run on Modal. No system packages are installed on the host.
+
+```python
+run_python = RunPython(
+    dependencies=["playwright==1.58.0"],
+    system_dependencies=["fonts-dejavu-core"],
+    setup_commands=["playwright install --with-deps chromium"],
+    description=(
+        "Run Python with Playwright and preinstalled Chromium. Use async Playwright APIs."
+    ),
+    block_network=False,  # Enable access to external websites at runtime.
+    memory=1024,
+    setup_timeout=600,
+)
+```
+
+The setup command installs Chromium and its required Linux libraries. Pinning
+Playwright keeps its Python package and downloaded browser aligned. Commands run
+again when the relevant cached image layers change. Treat setup commands as trusted
+developer configuration; they are not agent-call parameters. Build-time network
+access is separate from the sandbox's runtime `block_network` policy.
+
+The agent still supplies only `code` and optional `dependencies`. Its description
+includes configured Python/system packages, the execution timeout, and the actual
+network policy. Use `description` to explain capabilities installed by arbitrary
+setup commands, such as Chromium; command contents are not shown to the agent.
+
+Network access is blocked by default (`block_network=False` enables it). Dependencies
+are installed during image building, before that execution policy applies. CPU and
+memory are bounded by `cpu` (cores, default 1) and `memory` (MiB, default 512).
+`timeout` bounds execution, `setup_timeout` bounds setup (default 300 seconds), and
+result retrieval and cleanup each have a 30-second deadline. The provider also
+enforces a sandbox lifetime limit if the host disconnects.
+
+`max_output_chars` bounds each captured output stream (default 20,000), retaining
+its beginning and end. `max_result_bytes` bounds the result envelope (default
+1,000,000); exceeding it produces an `OutputLimitError`. Source code is limited to
+100,000 UTF-8 bytes.
+
+Calls do not share variables or files. This tool does not mount the host filesystem,
+export artifacts, or expose Timbal tools inside Python. It always uses Modal, with
+no local execution fallback. Remote filesystem and persistent workspace support
+are separate concerns.
+
 ## Tool Configuration
 
 Use the `Tool` type for custom descriptions and parameter control. The `handler` parameter is required and must be the function:
