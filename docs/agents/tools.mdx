@@ -110,6 +110,15 @@ on the host and uploads use Modal's API, so `block_network=True` still allows fi
 transfer while blocking outbound connections from executed Python. Only supplied
 files are copied; credentials and host directories are not mounted.
 
+URL downloads accept only public Internet destinations. Every DNS answer and
+redirect target is checked; loopback, private networks, cloud metadata, and
+special-purpose addresses are rejected before connecting. Connections use a
+validated IP with the original HTTPS hostname, preventing DNS rebinding while
+retaining certificate verification. Downloads ignore environment proxies, reject
+URL credentials, and follow at most five redirects. For private-source files,
+application code can fetch them through its own authorized integration and pass
+the contents as `File` objects.
+
 `artifacts` contains file references and metadata, not base64 blobs in the model's
 context. To reuse an artifact in a later call, pass its URL as another input, or
 wrap its local reference in `File` from application code. Each call still starts

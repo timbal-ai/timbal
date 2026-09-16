@@ -301,7 +301,11 @@ class RunPython(Tool):
                         str | File,
                         BeforeValidator(validate_file),
                         WithJsonSchema(
-                            {"type": "string", "format": "uri", "description": "Supplied HTTP(S) file URL or data URL."}
+                            {
+                                "type": "string",
+                                "format": "uri",
+                                "description": "Supplied public HTTP(S) file URL or data URL.",
+                            }
                         ),
                     ],
                 ]
@@ -311,6 +315,7 @@ class RunPython(Tool):
                         "Input files: map relative filenames to supplied file URLs or data URLs, "
                         "e.g. {'sales.csv': 'https://.../sales.csv'}. Read them at /workspace/inputs/<filename>. "
                         "Use actual file references from the conversation; do not invent URLs or host paths. "
+                        "URLs must resolve to public Internet addresses; private networks and metadata endpoints are blocked. "
                         "Write deliverables to /workspace/outputs; they are returned as artifacts automatically."
                     )
                 ),

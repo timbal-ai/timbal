@@ -502,6 +502,9 @@ async def test_bounded_data_url_and_stream_position():
 async def test_http_input_limit_without_content_length(monkeypatch):
     import httpx
 
+    monkeypatch.setattr(
+        asyncio.get_running_loop(), "getaddrinfo", AsyncMock(return_value=[(2, 1, 6, "", ("93.184.215.14", 443))])
+    )
     consumed = 0
 
     class Stream(httpx.AsyncByteStream):
@@ -522,6 +525,9 @@ async def test_http_input_limit_without_content_length(monkeypatch):
 async def test_url_input_stays_a_reference_until_bounded_download(modal_mock, monkeypatch):
     import httpx
 
+    monkeypatch.setattr(
+        asyncio.get_running_loop(), "getaddrinfo", AsyncMock(return_value=[(2, 1, 6, "", ("93.184.215.14", 443))])
+    )
     client_type = httpx.AsyncClient
     transport = httpx.MockTransport(lambda _request: httpx.Response(200, content=b"hello"))
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_type(transport=transport, **kwargs))
