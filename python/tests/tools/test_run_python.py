@@ -239,9 +239,68 @@ async def test_cancellation_cleanup(modal_mock):
 
 @pytest.mark.parametrize("raw", ["[]", '{"error": null}', '{"return_value": 1, "error": 123}', "not json", "x" * 1025])
 async def test_invalid_remote_result_cleanup(modal_mock, raw):
-    modal_mock.sandbox.exec.aio.side_effect = [process(), process(raw)]
-    with pytest.raises(ValueError):
-        await RunPython(max_result_bytes=1024).handler("1")
+    modal_mock.sandbox.exec.aio.side_effect = [process("captured output"), process(raw)]
+    result = await RunPython(max_result_bytes=1024).handler("1")
+    assert result["error"]["type"] == ("OutputLimitError" if len(raw) > 1024 else "ResultError")
+    assert result["stdout"] == "captured output"
+    modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
+@pytest.mark.parametrize("returncode", [7, 137])
+async def test_crash_preserves_execution_details(modal_mock, returncode):
+    modal_mock.sandbox.exec.aio.side_effect = [process("before crash\n", "native failure\n", returncode)]
+    event = await RunPython()(code="import os; os._exit(7)").collect()
+    assert event.error is None
+    assert event.output["status"] == "error"
+    assert event.output["error"]["type"] == "ExecutionError"
+    assert event.output["returncode"] == returncode
+    assert event.output["stdout"] == "before crash\n"
+    assert event.output["stderr"] == "native failure\n"
+    modal_mock.sandbox.exec.aio.assert_awaited_once()
+    modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
+async def test_missing_result_is_not_an_output_limit_error(modal_mock):
+    modal_mock.sandbox.exec.aio.side_effect = [process("before exit\n"), process(returncode=1)]
+    result = await RunPython().handler("import os; os._exit(0)")
+    assert result["error"]["type"] == "ExecutionError"
+    assert result["stdout"] == "before exit\n"
+    assert result["returncode"] == 0
+
+
+@pytest.mark.parametrize("cancel_execution", [False, True])
+async def test_cancellation_during_cleanup_waits_for_termination(modal_mock, cancel_execution):
+    execution_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def hang(*_args, **_kwargs):
+        execution_started.set()
+        await asyncio.Event().wait()
+
+    async def terminate():
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+
+    modal_mock.sandbox.terminate.aio.side_effect = terminate
+    if cancel_execution:
+        modal_mock.sandbox.exec.aio.side_effect = hang
+    task = asyncio.create_task(RunPython().handler("1"))
+    if cancel_execution:
+        await execution_started.wait()
+        task.cancel()
+    await cleanup_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_finished.is_set()
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
 
 
@@ -286,6 +345,29 @@ async def test_cleanup_failure_preserves_original_error(modal_mock):
         await RunPython().handler("1")
 
 
+async def test_cleanup_failure_preserves_success(modal_mock, caplog):
+    modal_mock.sandbox.terminate.aio.side_effect = RuntimeError("cleanup failed")
+    result = await RunPython().handler("1")
+    assert result["status"] == "success"
+    assert result["return_value"] == 42
+    assert result["stdout"] == "hello\n"
+    assert result["stderr"] == "warning\n"
+    assert "cleanup failed" in caplog.text
+
+
+async def test_cleanup_deadline_preserves_success(modal_mock, monkeypatch, caplog):
+    monkeypatch.setattr("timbal.tools.run_python._CLEANUP_TIMEOUT", 0.01)
+
+    async def hang():
+        await asyncio.Event().wait()
+
+    modal_mock.sandbox.terminate.aio.side_effect = hang
+    result = await asyncio.wait_for(RunPython().handler("1"), timeout=1)
+    assert result["status"] == "success"
+    assert result["return_value"] == 42
+    assert "cleanup failed" in caplog.text
+
+
 async def test_python_error_envelope(modal_mock):
     error = {"type": "ZeroDivisionError", "message": "division by zero", "traceback": "example"}
     modal_mock.sandbox.exec.aio.side_effect = [
@@ -321,9 +403,10 @@ async def test_setup_failure_does_not_execute(modal_mock):
             None,
         ),
         ("print('hello')\n1 / 0", None, 60, None, "ZeroDivisionError"),
+        ("import os\nprint('hello')\nos._exit(7)", None, 60, None, "ExecutionError"),
         ("import time\ntime.sleep(30)", None, 5, None, "TimeoutError"),
     ],
-    ids=["await-and-output", "dependency-and-secret-isolation", "python-error", "timeout"],
+    ids=["await-and-output", "dependency-and-secret-isolation", "python-error", "hard-exit", "timeout"],
 )
 async def test_live_modal(monkeypatch, code, dependencies, timeout, expected_value, expected_error):
     if os.environ.get("TIMBAL_TEST_MODAL") != "1":
@@ -353,6 +436,8 @@ async def test_live_modal(monkeypatch, code, dependencies, timeout, expected_val
             assert result["error"] is None
         if expected_error != "TimeoutError":
             assert result["stdout"] == "hello\n"
+        if expected_error == "ExecutionError":
+            assert result["returncode"] == 7
         assert len(sandboxes) == 1
         async with asyncio.timeout(15):
             while await sandboxes[0].poll.aio() is None:

@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import math
-import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -16,6 +15,64 @@ _RUNNER = Path(__file__).with_name("_run_python_runner.py")
 _MAX_CODE_BYTES = 100_000
 _TRUNCATED = "\n... [truncated] ...\n"
 _logger = logging.getLogger(__name__)
+_CLEANUP_TIMEOUT = 30
+
+
+async def _terminate_sandbox(sandbox: Any) -> None:
+    """Finish bounded teardown before propagating caller cancellation."""
+
+    async def terminate() -> None:
+        try:
+            async with asyncio.timeout(_CLEANUP_TIMEOUT):
+                await sandbox.terminate.aio()
+        except Exception:
+            # Teardown must not discard completed output or the original error.
+            _logger.warning("Modal sandbox cleanup failed; provider TTL remains active.", exc_info=True)
+
+    task = asyncio.create_task(terminate())
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    await task
+    if cancellation is not None:
+        raise cancellation
+
+
+def _error_result(kind: str, message: str) -> dict[str, Any]:
+    return {"return_value": None, "error": {"type": kind, "message": message}}
+
+
+async def _read_result(sandbox: Any, limit: int) -> dict[str, Any]:
+    """Keep missing, invalid, and oversized results distinct without losing logs."""
+    try:
+        async with asyncio.timeout(30):
+            # Bound the read inside Modal even if code left a writer running.
+            reader = await sandbox.exec.aio(
+                "python",
+                "-c",
+                "import sys; sys.stdout.buffer.write(open('/tmp/timbal-result.json', 'rb').read(int(sys.argv[1])))",
+                str(limit + 1),
+                timeout=30,
+            )
+            raw, _, returncode = await _collect(reader, limit + 1)
+        if returncode != 0:
+            return _error_result("ExecutionError", "Python exited without a readable execution result.")
+        if len(raw.encode()) > limit:
+            return _error_result("OutputLimitError", "Result exceeds max_result_bytes.")
+        result = json.loads(raw)
+        if not isinstance(result, dict) or "return_value" not in result or "error" not in result:
+            raise ValueError("Python produced an invalid result envelope.")
+        if result["error"] is not None and not isinstance(result["error"], dict):
+            raise ValueError("Python produced an invalid error envelope.")
+        return result
+    except TimeoutError:
+        raise
+    except Exception:
+        _logger.warning("Could not read the Python execution result.", exc_info=True)
+        return _error_result("ResultError", "Could not retrieve a valid Python execution result.")
 
 
 def _resolve_dependencies(configured: list[str], requested: list[str]) -> list[str]:
@@ -190,28 +247,11 @@ class RunPython(Tool):
                     if returncode == -1:
                         raise TimeoutError
 
-                async with asyncio.timeout(30):
-                    # Read at most limit+1 bytes inside Modal, even if user code replaced
-                    # the result file or left a background process writing to it.
-                    reader = await sandbox.exec.aio(
-                        "python",
-                        "-c",
-                        "import sys; "
-                        "sys.stdout.buffer.write(open('/tmp/timbal-result.json', 'rb').read(int(sys.argv[1])))",
-                        str(self.max_result_bytes + 1),
-                        timeout=30,
-                    )
-                    raw, _, read_returncode = await _collect(reader, self.max_result_bytes + 1)
-                if read_returncode != 0 or len(raw.encode()) > self.max_result_bytes:
-                    raise ValueError("Python did not produce a valid result within max_result_bytes.")
-                result = json.loads(raw)
-                if not isinstance(result, dict) or "return_value" not in result or "error" not in result:
-                    raise ValueError("Python produced an invalid result envelope.")
+                if returncode != 0:
+                    result = _error_result("ExecutionError", f"Python exited with code {returncode}.")
+                else:
+                    result = await _read_result(sandbox, self.max_result_bytes)
                 error = result["error"]
-                if error is not None and not isinstance(error, dict):
-                    raise ValueError("Python produced an invalid error envelope.")
-                if returncode != 0 and error is None:
-                    error = {"type": "ExecutionError", "message": f"Python exited with code {returncode}."}
                 return {
                     "stdout": stdout,
                     "stderr": stderr,
@@ -236,14 +276,7 @@ class RunPython(Tool):
                 if sandbox is not None:
                     # The finally block also runs on caller cancellation. Server TTL is
                     # the fallback if termination cannot reach Modal.
-                    original_error = sys.exception()
-                    try:
-                        async with asyncio.timeout(30):
-                            await sandbox.terminate.aio()
-                    except Exception:
-                        if original_error is None:
-                            raise
-                        _logger.warning("Modal sandbox cleanup failed; provider TTL remains active.", exc_info=True)
+                    await _terminate_sandbox(sandbox)
 
         super().__init__(handler=_run_python, **kwargs)
         # Do not expose shell commands: they can contain developer-only build details.

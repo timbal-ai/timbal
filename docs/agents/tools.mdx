@@ -52,6 +52,12 @@ that cannot be represented as JSON use their Python representation. Python error
 are returned in `error` with a type, message, and traceback. Setup/API failures
 surface through Timbal's usual tool error handling.
 
+Hard process exits return an `ExecutionError` alongside captured stdout, stderr,
+and the exit code. Missing or malformed results are distinguished from oversized
+results. Cleanup failures are logged without replacing completed results. Caller
+cancellation waits for sandbox termination to finish or reach its cleanup deadline
+before propagating; the provider lifetime limit remains the fallback.
+
 Supply pip requirements through the tool's `dependencies` configuration or the
 per-call `dependencies` argument. Configured requirements are authoritative:
 per-call requests may omit them, repeat the same constraints, or add extras, but
