@@ -60,7 +60,7 @@ ANTHROPIC_API_KEY=your_claude_api_key
 
 ### Fallback Models
 
-Use `FallbackModel` when you want an agent to try another model if the primary provider is rate limited, temporarily unavailable, times out, or returns a retryable server error.
+Use `FallbackModel` when you want an agent to try another model if the primary provider fails, including authentication errors, rate limits, timeouts, and server errors.
 
 ```python
 from timbal import Agent, FallbackModel
@@ -76,7 +76,7 @@ agent = Agent(
 )
 ```
 
-Models are tried in order. By default, each model gets two retries before Timbal moves to the next model in the chain. If every model fails with a retryable provider error, Timbal raises `FallbackExhausted` with the per-model errors.
+Models are tried in order. By default, each model gets up to two retries for transient errors. Authentication errors trigger fallback immediately, as do rate limits when another model is available. If every model fails, Timbal raises `FallbackExhausted` with the per-model errors.
 
 For per-model settings, use `ModelEntry`:
 
@@ -101,6 +101,8 @@ agent = Agent(
 ```
 
 Fallback only switches models before the first streamed chunk is emitted. If a stream fails after output has started, Timbal raises the error instead of silently switching models and risking duplicated or inconsistent output.
+
+The agent's `api_key` and `base_url` apply only to models from the primary provider. When the chain switches providers, Timbal resolves that provider's own credentials and endpoint from its environment variables or the platform proxy. Use `ModelEntry(api_key=..., base_url=...)` to override these for an individual model, including when multiple providers share a gateway.
 
 ### Thinking and reasoning
 
