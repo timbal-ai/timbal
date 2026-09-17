@@ -19,7 +19,7 @@ except ImportError as e:
     raise ImportError(
         "fastapi and uvicorn are required to run the timbal server. Install them with: pip install 'timbal[server]'"
     ) from e
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
 from ..logs import setup_logging
@@ -378,7 +378,9 @@ def run_server_cli(argv: list[str] | None = None) -> None:
         print(f"timbal.server.http {__version__}")  # noqa: T201
         sys.exit(0)
 
-    load_dotenv()
+    # Walk up from cwd so a playground child whose cwd is ``examples/`` still
+    # loads the repo-root ``.env`` (OPENAI_API_KEY for GPT-Live, etc.).
+    load_dotenv(find_dotenv(usecwd=True))
 
     # We can overwrite the env configuration with the --import_spec flag
     import_spec = args.import_spec

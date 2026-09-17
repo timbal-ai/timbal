@@ -265,6 +265,67 @@ class TestTwilioBridge:
         # μ-law 0xFF decodes to digital zero — silence in, silence out.
         assert set(pushed) == {0}
 
+    def test_live_pipeline_resamples_to_the_session_rate(self, monkeypatch, tmp_path) -> None:
+        # Bugbot: build_voice_session pins a paced live session to 24 kHz (as
+        # LiveKit/WebRTC do) but the bridge kept resampling with the configured
+        # 16 kHz — line audio clocked wrong both ways. Fake the session at the
+        # boundary; everything else (start frame, μ-law, resamplers) is real.
+        pytest.importorskip("av")
+        from timbal.voice import AudioOutput, SessionEnded, SessionStarted
+        from timbal.voice.providers import AudioInputConfig as _In
+
+        received: list[bytes] = []
+
+        class _FakeLive:
+            audio_input = _In(sample_rate=24_000)
+            session_id = "abc"
+            recording_meta = None
+            closed = False
+
+            async def run(self, audio_in):
+                yield SessionStarted()
+                async for chunk in audio_in:
+                    received.append(chunk)
+                    # Echo 100 ms of 24 kHz PCM per uplink chunk so the downlink
+                    # resampler runs too (4800 bytes @ 24k → ~800 μ-law bytes).
+                    yield AudioOutput(data=b"\x00\x10" * 2400)
+                yield SessionEnded()
+
+            async def close(self):
+                self.closed = True
+
+        def _fake_build(*_args, **kw):
+            assert kw["playback_tracker"].bytes_per_second == 24_000 * 2
+            return _FakeLive(), {"pipeline": "live"}
+
+        # telephony imports it inside serve_media_ws → patch the source module.
+        monkeypatch.setattr("timbal.server.voice.build_voice_session", _fake_build)
+        app = _setup_app(monkeypatch, tmp_path, _make_manual_stt_class(), _make_tts_class(_TTS_CHUNK))
+
+        # 40 ms of μ-law silence @ 8k → 640 PCM bytes → 1920 bytes at 24 kHz.
+        payload = base64.b64encode(b"\xff" * 320).decode()
+        with TestClient(app) as client:
+            # voice_config is built in the lifespan; the agent's says live.
+            app.state.voice_config = app.state.voice_config.model_copy(update={"pipeline": "live"})
+            ws = client.websocket_connect("/voice/twilio/stream").__enter__()
+            ws.send_json({"event": "connected"})
+            ws.send_json(_twilio_start_frame())
+            ws.send_json({
+                "event": "media",
+                "streamSid": "MZ_test_stream",
+                "media": {"track": "inbound", "chunk": "1", "timestamp": "5", "payload": payload},
+            })
+            ws.send_json({"event": "stop", "streamSid": "MZ_test_stream", "stop": {}})
+            frames = _collect_frames(ws)
+            ws.__exit__(None, None, None)
+
+        pushed = b"".join(received)
+        assert 1800 <= len(pushed) <= 2000, len(pushed)  # 24 kHz, not 16 kHz (~1280)
+        media = [f for f in frames if f["event"] == "media"]
+        total_ulaw = sum(len(base64.b64decode(f["media"]["payload"])) for f in media)
+        # 100 ms at 24 kHz → 100 ms of μ-law at 8 kHz (~800 bytes), not 24k/16k·100 ms (~1200).
+        assert 700 <= total_ulaw <= 900, total_ulaw
+
     def test_outbound_track_media_is_ignored(self, monkeypatch, tmp_path) -> None:
         pytest.importorskip("av")
         stt_cls = _make_manual_stt_class()

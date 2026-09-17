@@ -25,6 +25,8 @@ from .events import (
     AgentTextDelta,
     AgentTextDone,
     AudioOutput,
+    DelegationCreated,
+    DelegationResult,
     FillerSpoken,
     SessionEnded,
     SessionError,
@@ -93,6 +95,10 @@ def __getattr__(name: str):
         from .fish_audio import FishAudioStreamTTS
 
         return FishAudioStreamTTS
+    if name in ("LiveSession", "LiveSessionSummary", "LiveTransport", "OpenAILiveClient", "TranscriptFragment"):
+        from . import openai_live
+
+        return getattr(openai_live, name)
     if name == "SmartTurnEouModel":
         from .smart_turn import SmartTurnEouModel
 
@@ -124,6 +130,8 @@ __all__ = [
     "CommitDecision",
     "DeepgramFluxSTT",
     "DeepgramNovaSTT",
+    "DelegationCreated",
+    "DelegationResult",
     "ElevenLabsRealtimeSTT",
     "EouPredictor",
     "FillerConfig",
@@ -132,10 +140,14 @@ __all__ = [
     "GreetingConfig",
     "HeuristicTurnDetector",
     "LexicalTurnDetector",
+    "LiveSession",
+    "LiveSessionSummary",
+    "LiveTransport",
     "LocalAudioTurnDetector",
     "MunsitStreamSTT",
     "MunsitStreamTTS",
     "NamoTextEouPredictor",
+    "OpenAILiveClient",
     "PartialDecision",
     "PlaybackTracker",
     "ProviderTurnDetector",
@@ -158,6 +170,7 @@ __all__ = [
     "TranscriptCommitted",
     "TranscriptEntry",
     "TranscriptEvent",
+    "TranscriptFragment",
     "TranscriptPartial",
     "TTSStream",
     "TurnDetector",

@@ -119,6 +119,22 @@ class BufferedPlaybackTracker(PlaybackTracker):
         return self._last_ack is not None
 
     @property
+    def bytes_per_second(self) -> int:
+        return self._bps
+
+    @bytes_per_second.setter
+    def bytes_per_second(self, value: int) -> None:
+        """Re-clock the tracker. Only valid before any audio was emitted — a
+        transport builds the tracker before the session decides its wire rate
+        (GPT-Live pins 24 kHz; a live→cascaded fallback goes back to the
+        configured rate) and corrects it once the session exists."""
+        if value <= 0:
+            raise ValueError("bytes_per_second must be positive")
+        if self._scheduled_bytes or self._last_ack is not None:
+            raise RuntimeError("cannot re-clock a tracker that has already tracked audio")
+        self._bps = value
+
+    @property
     def played_bytes(self) -> int:
         now = self._clock()
         remaining = max(0.0, self._playing_until - now) * self._bps

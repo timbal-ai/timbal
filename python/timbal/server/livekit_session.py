@@ -902,7 +902,10 @@ async def _run_livekit_session(
                 attrs = dict(getattr(caller_participant, "attributes", None) or {})
                 sip_ctx = sip_call_context(attrs)
                 sip_meta.update(sip_recording_meta(attrs))
-        sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
+        merged = merge_client_voice_overrides(defaults, config)
+        # GPT-Live's native PCM rate. Browser hello is often 16 kHz (RNNoise);
+        # LiveKit resamples the published track to this.
+        sample_rate = 24_000 if merged.pipeline == "live" else int(merged.sample_rate)
 
         downlink = LkPacedSource(sample_rate=sample_rate)
         session_runnable = runnable
@@ -969,7 +972,12 @@ async def _run_livekit_session(
             # we pick it up here instead of ending the session's audio_in.
             while True:
                 remote = await mic_tracks.get()
-                stream = rtc.AudioStream(remote, sample_rate=sample_rate, num_channels=1)
+                stream_kwargs: dict[str, Any] = {"sample_rate": sample_rate, "num_channels": 1}
+                if merged.pipeline == "live":
+                    # GPT-Live's own frames are 100 ms; 10 ms LiveKit ticks
+                    # never produced an input transcript in the playground.
+                    stream_kwargs["frame_size_ms"] = 100
+                stream = rtc.AudioStream(remote, **stream_kwargs)
                 async for chunk in audio_stream_to_pcm(stream):
                     yield chunk
 
@@ -993,6 +1001,10 @@ async def _run_livekit_session(
         # (a cancel here is a shutdown or the 504 path, not news).
         if join is not None and not join.done.is_set() and not isinstance(e, asyncio.CancelledError):
             logger.error("voice_livekit_join_failed", room=room_name, error=str(e), exc_info=True)
+        elif not isinstance(e, asyncio.CancelledError):
+            # Post-join failures (session.closed AttributeError, publish_track,
+            # …) used to unwind with no log — playground just saw ClientInitiated.
+            logger.error("voice_livekit_session_error", error=str(e), exc_info=True)
         _reject("the agent could not join the room")
         # Before the caller's mic subscribed, the idle timer is still armed —
         # release the claim and let it own the exit. After subscribe,

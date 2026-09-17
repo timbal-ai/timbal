@@ -189,7 +189,9 @@ class UserIdleConfig(BaseModel):
     @model_validator(mode="after")
     def _has_something_to_do(self) -> UserIdleConfig:
         has_line = bool(self.instructions and self.instructions.strip()) or bool(
-            self.text if isinstance(self.text, str) and self.text.strip() else [t for t in (self.text or []) if str(t).strip()]
+            self.text
+            if isinstance(self.text, str) and self.text.strip()
+            else [t for t in (self.text or []) if str(t).strip()]
         )
         if self.max_count > 0 and not has_line:
             raise ValueError("user_idle needs 'text' or 'instructions' (or max_count=0 with hangup_after_secs)")
@@ -279,6 +281,27 @@ class VoiceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    pipeline: Literal["cascaded", "live"] = "cascaded"
+    """``"cascaded"``: STT → Agent → TTS (:class:`~timbal.voice.VoiceSession`).
+    ``"live"``: OpenAI GPT-Live full-duplex voice with the Agent as the
+    delegation backend (:class:`~timbal.voice.openai_live.LiveSession`) — STT,
+    TTS and turn-detection settings are ignored; requires ``OPENAI_API_KEY``."""
+    live_model: str = "gpt-live-1"
+    live_voice: str = "marin"
+    """GPT-Live ``audio.output.voice``, fixed for the session. Launch set:
+    ``marin`` (default), ``cedar``, ``gleam``/``meridian`` (US), ``vesper``
+    (UK), ``quartz``/``ripple`` (AU), ``willow``/``stone`` (IE), ``delta``/
+    ``cinder`` (Southern US), ``beacon`` (PH), ``bossa``/``tempo`` (pt-BR);
+    custom voices by name. A voice is a speaking style — the *language* is a
+    prompt rule (``language`` below). Separate from ``voice`` (TTS voice id)."""
+    live_instructions: str | None = None
+    """``session.instructions`` for the *voice* model (≤16k tokens): role,
+    pace, backchannel / interruption policy, when to delegate. None → the
+    recommended skeleton with a delegation policy built from the Agent's
+    tools (:func:`timbal.server.voice.default_live_instructions`). ``language``
+    appends "Speak <Language> unless the user asks to switch" either way. The
+    Agent keeps its own full system prompt — gpt-live-1 has no speed,
+    temperature or language parameter."""
     stt_provider: str = "elevenlabs"
     stt_model: str = "scribe_v2_realtime"
     tts_provider: str = "elevenlabs"
