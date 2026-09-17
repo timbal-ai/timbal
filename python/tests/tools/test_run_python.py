@@ -552,16 +552,27 @@ async def test_upload_failure_terminates_sandbox(modal_mock):
 
 
 @pytest.mark.parametrize("phase", ["upload", "download"])
-async def test_transfer_deadline_terminates_sandbox(modal_mock, phase):
+async def test_transfer_deadline_terminates_sandbox(modal_mock, monkeypatch, phase):
     async def hang(*_args):
         await asyncio.Event().wait()
 
     if phase == "upload":
-        modal_mock.sandbox.filesystem.write_bytes.aio.side_effect = hang
+        # Keep input preparation out of this test: read_file uses a thread pool,
+        # whose scheduling can exhaust a short deadline before upload starts.
+        monkeypatch.setattr("timbal.tools.run_python.read_file", AsyncMock(return_value=b"x"))
+        files = {"data": File(b"x")}
+        transfer = modal_mock.sandbox.filesystem.write_bytes.aio
     else:
-        modal_mock.artifacts.side_effect = hang
-    result = await RunPython(transfer_timeout=0.01).handler("1", files={"data": File(b"x")})
+        files = None
+        transfer = modal_mock.artifacts
+    transfer.side_effect = hang
+    result = await RunPython(transfer_timeout=0.1).handler("1", files=files)
+    transfer.assert_awaited_once()
     assert result["error"]["type"] == ("TimeoutError" if phase == "upload" else "ArtifactError")
+    if phase == "upload":
+        modal_mock.sandbox.exec.aio.assert_not_awaited()
+    else:
+        assert result["return_value"] == 42
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
 
 
