@@ -71,7 +71,7 @@ async def _download_file(source: str, limit: int) -> bytes:
             async with client.stream(
                 "GET",
                 target,
-                headers={"Host": url.netloc.decode("ascii")},
+                headers={"Host": url.netloc.decode("ascii"), "Accept-Encoding": "identity"},
                 extensions={"sni_hostname": url.raw_host.decode("ascii")},
             ) as response:
                 if response.is_redirect and "location" in response.headers:
@@ -82,6 +82,13 @@ async def _download_file(source: str, limit: int) -> bytes:
                     url = url.join(response.headers["location"])
                     continue
                 response.raise_for_status()
+                # HTTPX decodes content before yielding chunks. Reject encodings
+                # before reading, even if the server ignores Accept-Encoding, so
+                # compressed input cannot allocate past the host's byte limit.
+                if response.headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+                    raise ValueError(
+                        "Input file URLs must return uncompressed HTTP bodies (Content-Encoding: identity)."
+                    )
                 data = bytearray()
                 async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
                     if len(data) + len(chunk) > limit:

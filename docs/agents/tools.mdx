@@ -119,6 +119,11 @@ URL credentials, and follow at most five redirects. For private-source files,
 application code can fetch them through its own authorized integration and pass
 the contents as `File` objects.
 
+Downloads request `Accept-Encoding: identity` and reject other HTTP content
+encodings before reading the body, preventing decompression from bypassing the
+host's file-size limit. Compressed files such as `.gz` remain supported when
+served without HTTP content encoding; Python can decompress them in the sandbox.
+
 `artifacts` contains file references and metadata, not base64 blobs in the model's
 context. To reuse an artifact in a later call, pass its URL as another input, or
 wrap its local reference in `File` from application code. Each call still starts

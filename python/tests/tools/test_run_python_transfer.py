@@ -1,6 +1,7 @@
 """File downloads must not bridge the host's private network into a sandbox."""
 
 import asyncio
+import gzip
 import socket
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -121,6 +122,74 @@ async def test_public_ipv6_literal_is_supported(http, dns):
     assert http.requests[0].url.host == "2606:4700:4700::1111"
     assert http.requests[0].headers["host"] == "[2606:4700:4700::1111]"
     dns.assert_not_awaited()
+
+
+class DownloadStream(httpx.AsyncByteStream):
+    def __init__(self, data):
+        self.data = data
+        self.chunks_read = 0
+        self.closed = False
+
+    async def __aiter__(self):
+        for offset in range(0, len(self.data), 16384):
+            self.chunks_read += 1
+            yield self.data[offset : offset + 16384]
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.usefixtures("dns")
+async def test_gzip_bomb_is_rejected_before_body_read(http):
+    stream = DownloadStream(gzip.compress(b"x" * (64 * 1024 * 1024)))
+    http.handler = lambda _request: httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=stream)
+
+    with pytest.raises(ValueError, match="Content-Encoding"):
+        await read_file(File("https://files.example/bomb"), 1024)
+
+    # No compressed bytes reach HTTPX's decoder, so expansion cannot allocate
+    # beyond the limit before our size check gets control.
+    assert stream.chunks_read == 0
+    assert stream.closed
+    assert http.requests[0].headers["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize(
+    "encoding", ["GZip", "deflate", "br", "zstd", "unknown", "identity, gzip", "gzip, identity", ""]
+)
+@pytest.mark.usefixtures("dns")
+async def test_nonidentity_encoding_after_redirect_is_rejected(http, encoding):
+    stream = DownloadStream(b"must not be read")
+
+    def respond(request):
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"location": "/encoded"})
+        return httpx.Response(200, headers={"Content-Encoding": encoding}, stream=stream)
+
+    http.handler = respond
+    with pytest.raises(ValueError, match="Content-Encoding"):
+        await read_file(File("https://files.example/start"), 1024)
+    assert stream.chunks_read == 0
+    assert stream.closed
+    assert len(http.requests) == 2
+    assert all(request.headers["accept-encoding"] == "identity" for request in http.requests)
+
+
+@pytest.mark.parametrize("encoding", [None, "identity", " Identity "])
+@pytest.mark.parametrize("limit", [1, 1024])
+@pytest.mark.usefixtures("dns")
+async def test_identity_download_preserves_file_bytes_and_enforces_limit(http, encoding, limit):
+    # A gzip file is still a valid input when sent without HTTP content encoding.
+    payload = gzip.compress(b"file contents")
+    stream = DownloadStream(payload)
+    headers = {} if encoding is None else {"Content-Encoding": encoding}
+    http.handler = lambda _request: httpx.Response(200, headers=headers, stream=stream)
+    if limit < len(payload):
+        with pytest.raises(ValueError, match="max_file_bytes"):
+            await read_file(File("https://files.example/data.gz"), limit)
+    else:
+        assert await read_file(File("https://files.example/data.gz"), limit) == payload
+    assert stream.closed
 
 
 async def test_http_transport_connects_to_pinned_ip_with_verified_tls(dns, monkeypatch):
