@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from httpx import ReadTimeout
 from pydantic import ValidationError
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
 from timbal.tools import RunPython
@@ -221,7 +222,39 @@ async def test_timeout_cleanup(modal_mock):
     modal_mock.sandbox.exec.aio.side_effect = hang
     result = await RunPython(timeout=0.01).handler("while True: pass")
     assert result["error"]["type"] == "TimeoutError"
+    assert result["error"]["message"] == "Python execution timed out."
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
+
+
+@pytest.mark.parametrize("stage", ["input", "http_input", "app_lookup", "sandbox_creation", "result"])
+async def test_timeout_identifies_phase(modal_mock, monkeypatch, stage):
+    files = None
+    if stage in ("input", "http_input"):
+        exception = ReadTimeout("read timed out") if stage == "http_input" else TimeoutError()
+        monkeypatch.setattr("timbal.tools.run_python.read_file", AsyncMock(side_effect=exception))
+        files = {"data": "https://example.com/data.txt"}
+        expected_message = "Input download timed out."
+    elif stage == "app_lookup":
+        modal_mock.module.App.lookup.aio.side_effect = TimeoutError
+        expected_message = "Modal setup timed out."
+    elif stage == "sandbox_creation":
+        modal_mock.module.Sandbox.create.aio.side_effect = TimeoutError
+        expected_message = "Modal setup timed out."
+    else:
+        modal_mock.sandbox.exec.aio.side_effect = [modal_mock.execution, TimeoutError()]
+        expected_message = "Result retrieval timed out."
+
+    result = await RunPython().handler("42", files=files)
+
+    assert result["status"] == "error"
+    assert result["error"] == {"type": "TimeoutError", "message": expected_message}
+    if stage == "result":
+        assert result["stdout"] == "hello\n"
+        assert result["returncode"] == 0
+        modal_mock.sandbox.terminate.aio.assert_awaited_once()
+    else:
+        modal_mock.sandbox.exec.aio.assert_not_awaited()
+        modal_mock.sandbox.terminate.aio.assert_not_awaited()
 
 
 async def test_host_timeout_preserves_bounded_partial_output(modal_mock):
@@ -259,6 +292,7 @@ async def test_provider_timeout_preserves_logs(modal_mock):
     modal_mock.sandbox.exec.aio.side_effect = [process("before timeout\n", returncode=-1)]
     result = await RunPython().handler("while True: pass")
     assert result["error"]["type"] == "TimeoutError"
+    assert result["error"]["message"] == "Python execution timed out."
     assert result["stdout"] == "before timeout\n"
     modal_mock.sandbox.exec.aio.assert_awaited_once()
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
@@ -316,6 +350,7 @@ async def test_result_read_timeout_is_reported_as_timeout(modal_mock):
     result = await RunPython().handler("42")
     assert result["status"] == "error"
     assert result["error"]["type"] == "TimeoutError"
+    assert result["error"]["message"] == "Result retrieval timed out."
     assert result["stdout"] == "execution complete\n"
     assert result["returncode"] == 0
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
@@ -570,8 +605,10 @@ async def test_transfer_deadline_terminates_sandbox(modal_mock, monkeypatch, pha
     transfer.assert_awaited_once()
     assert result["error"]["type"] == ("TimeoutError" if phase == "upload" else "ArtifactError")
     if phase == "upload":
+        assert result["error"]["message"] == "Input upload timed out."
         modal_mock.sandbox.exec.aio.assert_not_awaited()
     else:
+        assert result["artifact_error"]["message"] == "Artifact retrieval timed out."
         assert result["return_value"] == 42
     modal_mock.sandbox.terminate.aio.assert_awaited_once()
 

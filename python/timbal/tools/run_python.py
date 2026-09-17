@@ -9,6 +9,7 @@ import mimetypes
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
+from httpx import TimeoutException
 from pydantic import BeforeValidator, Field, WithJsonSchema, field_validator, model_validator
 
 from ..core.tool import Tool
@@ -351,6 +352,7 @@ class RunPython(Tool):
             returncode = None
             stdout_buffer = _OutputBuffer(self.max_output_chars)
             stderr_buffer = _OutputBuffer(self.max_output_chars)
+            phase = "Input download"
             try:
                 input_data = {}
                 async with asyncio.timeout(self.transfer_timeout):
@@ -359,6 +361,7 @@ class RunPython(Tool):
                         data = await read_file(file, self.max_file_bytes - total)
                         total += len(data)
                         input_data[name] = data
+                phase = "Modal setup"
                 async with asyncio.timeout(self.setup_timeout):
                     app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
                     sandbox = await modal.Sandbox.create.aio(
@@ -370,11 +373,13 @@ class RunPython(Tool):
                         memory=(self.memory, self.memory),
                         block_network=self.block_network,
                     )
+                phase = "Input upload"
                 async with asyncio.timeout(self.transfer_timeout):
                     await sandbox.filesystem.make_directory.aio("/workspace/inputs")
                     await sandbox.filesystem.make_directory.aio("/workspace/outputs")
                     for name, data in input_data.items():
                         await sandbox.filesystem.write_bytes.aio(data, f"/workspace/inputs/{name}")
+                phase = "Python execution"
                 async with asyncio.timeout(self.timeout):
                     process = await sandbox.exec.aio(
                         "python",
@@ -400,6 +405,7 @@ class RunPython(Tool):
                 if returncode != 0:
                     result = _error_result("ExecutionError", f"Python exited with code {returncode}.")
                 else:
+                    phase = "Result retrieval"
                     result = await _read_result(sandbox, self.max_result_bytes)
                 artifacts = []
                 artifact_error = None
@@ -422,7 +428,7 @@ class RunPython(Tool):
                     "error": error or artifact_error,
                     "status": "error" if error or artifact_error else "success",
                 }
-            except TimeoutError:
+            except (TimeoutError, TimeoutException):
                 return {
                     "stdout": stdout_buffer.value(),
                     "stderr": stderr_buffer.value(),
@@ -433,7 +439,7 @@ class RunPython(Tool):
                     "status": "error",
                     "error": {
                         "type": "TimeoutError",
-                        "message": "Modal setup, execution, input transfer, or result retrieval timed out.",
+                        "message": f"{phase} timed out.",
                     },
                 }
             finally:
