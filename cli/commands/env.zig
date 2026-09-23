@@ -1113,9 +1113,9 @@ pub fn parsePullResponse(allocator: std.mem.Allocator, body: []const u8) !PullRe
             }
         }
         const canon = canonType(typ) orelse "plain";
+        // Preserve absence even before /vars reconciles the type. An explicit empty
+        // string is a value; an omitted value must never become a blank secret on push.
         const missing = value == null;
-        // A plain var can legitimately be empty; only secrets get placeholder treatment.
-        const treat_missing = missing and std.mem.eql(u8, canon, "secret");
         // Forward-compatible: honour an explicit platform flag if the API starts sending one.
         const flagged_managed = (jsonBool(obj, "managed") orelse false) or
             (if (jsonStr(obj, "source")) |s| std.ascii.eqlIgnoreCase(s, "platform") else false);
@@ -1126,7 +1126,7 @@ pub fn parsePullResponse(allocator: std.mem.Allocator, body: []const u8) !PullRe
             .value = undefined,
             .type_explicit = true,
             .managed = flagged_managed,
-            .value_missing = treat_missing,
+            .value_missing = missing,
         };
         errdefer allocator.free(sv.name);
         sv.type = try allocator.dupe(u8, canon);
@@ -1164,6 +1164,10 @@ pub const RemoteVar = struct {
         for (self.env_ids) |e| if (std.mem.eql(u8, e, env_id)) return true;
         return false;
     }
+
+    pub fn appliesToEnv(self: RemoteVar, env_id: ?[]const u8) bool {
+        return self.applies_to_all_envs or (if (env_id) |id| self.hasEnv(id) else false);
+    }
 };
 
 fn freeRemoteVars(allocator: std.mem.Allocator, vars: *std.ArrayList(RemoteVar)) void {
@@ -1171,12 +1175,12 @@ fn freeRemoteVars(allocator: std.mem.Allocator, vars: *std.ArrayList(RemoteVar))
     vars.deinit();
 }
 
-/// Type of a user-defined var by name. Vars can exist once per env; if any copy is a
-/// secret the name is treated as secret (the conservative direction). Null when the
-/// name is not user-defined on the platform.
-pub fn remoteTypeFor(remote: []const RemoteVar, name: []const u8) ?[]const u8 {
+/// Resolve types only in the selected environment (including global vars).
+/// A variable in another branch must not suppress inference for a new secret here.
+pub fn remoteTypeFor(remote: []const RemoteVar, name: []const u8, env_id: ?[]const u8) ?[]const u8 {
     var found: ?[]const u8 = null;
     for (remote) |rv| {
+        if (!rv.appliesToEnv(env_id)) continue;
         if (!std.mem.eql(u8, rv.name, name)) continue;
         if (isSecretType(rv.type)) return "secret";
         found = "plain";
@@ -1328,6 +1332,90 @@ fn fetchEnvIdForBranch(allocator: std.mem.Allocator, remote: TimbalRemote, api_k
     return parseEnvIdForBranch(allocator, res.body, branch) catch null;
 }
 
+/// Only --default needs server-side revision resolution. Normal invocations have
+/// already resolved the current Git branch in run(). Pin the result for the push.
+fn fetchDefaultRev(allocator: std.mem.Allocator, remote: TimbalRemote, api_key: []const u8, verbose: bool) ![]u8 {
+    const url = try projectUrl(allocator, remote, "/vars/pull");
+    defer allocator.free(url);
+    const body = try apiRequest(allocator, .GET, url, api_key, null, verbose, null);
+    defer allocator.free(body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root = jsonObject(parsed.value) orelse return error.UnexpectedResponse;
+    const rev = jsonStr(root, "rev") orelse return error.UnexpectedResponse;
+    if (rev.len == 0) return error.UnexpectedResponse;
+    return allocator.dupe(u8, rev);
+}
+
+const SecretFetcher = struct {
+    remote: TimbalRemote,
+    api_key: []const u8,
+    verbose: bool,
+
+    fn fetch(self: @This(), allocator: std.mem.Allocator, id: []const u8) !?[]u8 {
+        return fetchVarDecrypted(allocator, self.remote, self.api_key, id, self.verbose);
+    }
+};
+
+const SecretRecovery = struct {
+    recovered: usize = 0,
+    other_env: usize = 0,
+};
+
+/// Recover both absent entries and existing placeholders. The fetcher owns the
+/// transport so tests exercise this same merge logic without live credentials.
+fn recoverSecrets(
+    allocator: std.mem.Allocator,
+    vars: *std.ArrayList(SyncVar),
+    remote_vars: []const RemoteVar,
+    env_id: ?[]const u8,
+    fetcher: anytype,
+) !SecretRecovery {
+    var result = SecretRecovery{};
+    for (remote_vars) |rv| {
+        if (!isSecretType(rv.type) or isReservedVarName(rv.name)) continue;
+        const existing = findSyncVar(vars.items, rv.name);
+        if (existing) |i| if (!vars.items[i].value_missing) continue;
+        if (!rv.appliesToEnv(env_id)) {
+            result.other_env += 1;
+            continue;
+        }
+
+        const decrypted = try fetcher.fetch(allocator, rv.id);
+        errdefer if (decrypted) |d| allocator.free(d);
+        if (existing) |i| {
+            const secret_type = try allocator.dupe(u8, "secret");
+            allocator.free(vars.items[i].type);
+            vars.items[i].type = secret_type;
+            if (decrypted) |d| {
+                allocator.free(vars.items[i].value);
+                vars.items[i].value = d;
+                vars.items[i].value_missing = false;
+                result.recovered += 1;
+            }
+            continue;
+        }
+
+        var sv = SyncVar{
+            .name = try allocator.dupe(u8, rv.name),
+            .type = undefined,
+            .value = undefined,
+            .type_explicit = true,
+            .value_missing = decrypted == null,
+        };
+        errdefer allocator.free(sv.name);
+        sv.type = try allocator.dupe(u8, "secret");
+        errdefer allocator.free(sv.type);
+        sv.value = decrypted orelse try allocator.dupe(u8, "");
+        errdefer if (decrypted == null) allocator.free(sv.value);
+        if (rv.description) |d| sv.description = try allocator.dupe(u8, d);
+        errdefer if (sv.description) |d| allocator.free(d);
+        try vars.append(sv);
+        if (decrypted != null) result.recovered += 1;
+    }
+    return result;
+}
+
 // --- workforce components ---------------------------------------------------
 
 pub const RemoteComponent = struct {
@@ -1476,6 +1564,7 @@ pub fn planPush(
     allocator: std.mem.Allocator,
     vars: []const SyncVar,
     remote: []const RemoteVar,
+    env_id: []const u8,
     secret_names: []const []const u8,
     plain_names: []const []const u8,
 ) ![]PlanEntry {
@@ -1483,7 +1572,7 @@ pub fn planPush(
     errdefer allocator.free(plan);
 
     for (vars, 0..) |v, i| {
-        const remote_type = remoteTypeFor(remote, v.name);
+        const remote_type = remoteTypeFor(remote, v.name, env_id);
         const file_type = canonType(v.type) orelse "plain";
 
         if (isReservedVarName(v.name)) {
@@ -2202,12 +2291,24 @@ fn runPull(
         );
     }
 
+    const env_id = if (listing.ok and effective_rev.len > 0)
+        try fetchEnvIdForBranch(allocator, remote, api_key, effective_rev, opts.verbose)
+    else
+        null;
+    defer if (env_id) |id| allocator.free(id);
+    if (listing.ok and env_id == null) {
+        try stderr.print(
+            "{s}Warning:{s} could not resolve the environment for branch '{s}'; using the effective response's types and only recovering global secrets.\n",
+            .{ Color.bold_yellow, Color.reset, effective_rev },
+        );
+    }
+
     // 3. Reconcile: mark managed (anything the platform computes rather than the user defines),
     //    never let a platform secret be written as plain.
     var upgraded: usize = 0;
     for (pulled.vars.items) |*v| {
-        if (listing.ok) {
-            const rt = remoteTypeFor(listing.vars.items, v.name);
+        if (listing.ok and env_id != null) {
+            const rt = remoteTypeFor(listing.vars.items, v.name, env_id);
             if (rt == null) {
                 v.managed = true;
             } else if (isSecretType(rt.?) and !isSecretType(v.type)) {
@@ -2220,53 +2321,20 @@ fn runPull(
         }
     }
 
-    // 4. Secrets the effective env left out: fetch individually (scoped to this rev's env).
-    var recovered: usize = 0;
+    // 4. Recover absent secrets and existing placeholders in this branch's env.
+    const recovery = if (listing.ok)
+        try recoverSecrets(allocator, &pulled.vars, listing.vars.items, env_id, SecretFetcher{
+            .remote = remote,
+            .api_key = api_key,
+            .verbose = opts.verbose,
+        })
+    else
+        SecretRecovery{};
+    const recovered = recovery.recovered;
+    const other_env = recovery.other_env;
     var placeholders: usize = 0;
-    var other_env: usize = 0;
-    if (listing.ok) {
-        var env_id: ?[]u8 = null;
-        defer if (env_id) |e| allocator.free(e);
-        var env_resolved = false;
-        for (listing.vars.items) |rv| {
-            if (!isSecretType(rv.type)) continue;
-            if (isReservedVarName(rv.name)) continue;
-            if (findSyncVar(pulled.vars.items, rv.name) != null) continue;
-
-            if (!rv.applies_to_all_envs) {
-                if (!env_resolved) {
-                    env_resolved = true;
-                    if (effective_rev.len > 0) env_id = try fetchEnvIdForBranch(allocator, remote, api_key, effective_rev, opts.verbose);
-                }
-                const eid = env_id orelse {
-                    other_env += 1;
-                    continue;
-                };
-                if (!rv.hasEnv(eid)) {
-                    other_env += 1;
-                    continue;
-                }
-            }
-
-            const decrypted = try fetchVarDecrypted(allocator, remote, api_key, rv.id, opts.verbose);
-            errdefer if (decrypted) |d| allocator.free(d);
-            var sv = SyncVar{
-                .name = try allocator.dupe(u8, rv.name),
-                .type = undefined,
-                .value = undefined,
-                .type_explicit = true,
-                .value_missing = decrypted == null,
-            };
-            errdefer allocator.free(sv.name);
-            sv.type = try allocator.dupe(u8, "secret");
-            errdefer allocator.free(sv.type);
-            sv.value = decrypted orelse try allocator.dupe(u8, "");
-            errdefer if (decrypted == null) allocator.free(sv.value);
-            if (rv.description) |d| sv.description = try allocator.dupe(u8, d);
-            errdefer if (sv.description) |d| allocator.free(d);
-            try pulled.vars.append(sv);
-            if (sv.value_missing) placeholders += 1 else recovered += 1;
-        }
+    for (pulled.vars.items) |v| {
+        if (v.value_missing and isSecretType(v.type)) placeholders += 1;
     }
 
     // A project-level TIMBAL_APP_ID applies to every workforce member under `timbal start`.
@@ -2369,7 +2437,10 @@ fn ensureParentDir(file_path: []const u8, stderr: anytype) !void {
 /// Exclusive create: a file created concurrently cannot be truncated.
 fn writeFileExclusive(file_path: []const u8, content: []const u8, stderr: anytype) !void {
     try ensureParentDir(file_path, stderr);
-    const file = fs.cwd().createFile(file_path, .{ .exclusive = true }) catch |err| {
+    const file = fs.cwd().createFile(file_path, .{
+        .exclusive = true,
+        .mode = if (is_windows) fs.File.default_mode else 0o600,
+    }) catch |err| {
         if (err == error.PathAlreadyExists) {
             try stderr.print(
                 "Error: {s} already exists. Re-run with --force to overwrite.\n",
@@ -2390,52 +2461,27 @@ fn writeFileExclusive(file_path: []const u8, content: []const u8, stderr: anytyp
     file.setEndPos(content.len) catch {};
 }
 
-/// Temp file + rename: the destination is never deleted until the new contents are on disk.
+/// An exclusively created random temporary file prevents symlink substitution.
+/// Keep it private while writing and preserve the destination's POSIX permissions.
 fn writeFileAtomic(allocator: std.mem.Allocator, file_path: []const u8, content: []const u8, stderr: anytype) !void {
+    _ = allocator;
     try ensureParentDir(file_path, stderr);
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.timbal-pull.tmp", .{file_path});
-    defer allocator.free(tmp_path);
-
-    {
-        const tmp = fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch |err| {
-            try stderr.print("Error: could not write temp file {s}: {}\n", .{ tmp_path, err });
-            std.process.exit(1);
+    const mode: fs.File.Mode = if (is_windows) fs.File.default_mode else blk: {
+        const stat = fs.cwd().statFile(file_path) catch |err| switch (err) {
+            error.FileNotFound => break :blk 0o600,
+            else => return err,
         };
-        var tmp_ok = false;
-        defer {
-            tmp.close();
-            if (!tmp_ok) fs.cwd().deleteFile(tmp_path) catch {};
-        }
-        tmp.writeAll(content) catch |err| {
-            try stderr.print("Error: could not write temp file {s}: {}\n", .{ tmp_path, err });
-            std.process.exit(1);
-        };
-        tmp.setEndPos(content.len) catch {};
-        tmp_ok = true;
-    }
-
-    fs.cwd().rename(tmp_path, file_path) catch |err| {
-        // POSIX rename replaces atomically. Windows often cannot rename onto an existing path —
-        // only then delete the destination after the temp write succeeded.
-        if (err == error.PathAlreadyExists) {
-            fs.cwd().deleteFile(file_path) catch |del_err| {
-                fs.cwd().deleteFile(tmp_path) catch {};
-                try stderr.print("Error: could not replace {s}: {}\n", .{ file_path, del_err });
-                std.process.exit(1);
-            };
-            fs.cwd().rename(tmp_path, file_path) catch |ren_err| {
-                // Destination is gone; leave the temp file so the pulled content is recoverable.
-                try stderr.print(
-                    "Error: failed to move pulled vars into {s}: {}\nPulled content left at {s}\n",
-                    .{ file_path, ren_err, tmp_path },
-                );
-                std.process.exit(1);
-            };
-            return;
-        }
-        fs.cwd().deleteFile(tmp_path) catch {};
+        break :blk stat.mode & 0o777;
+    };
+    var atomic = try fs.cwd().atomicFile(file_path, .{
+        .mode = if (is_windows) fs.File.default_mode else 0o600,
+    });
+    defer atomic.deinit();
+    try atomic.file.writeAll(content);
+    if (!is_windows) try atomic.file.chmod(mode);
+    atomic.finish() catch |err| {
         try stderr.print("Error: could not replace {s}: {}\n", .{ file_path, err });
-        std.process.exit(1);
+        return err;
     };
 }
 
@@ -2513,7 +2559,18 @@ fn runPush(
         std.process.exit(1);
     }
 
-    const plan = try planPush(allocator, sync_vars.items, listing.vars.items, opts.secret_names.items, opts.plain_names.items);
+    // run() supplies the current Git branch automatically; only --default needs
+    // the server to resolve its branch. Use the same revision for planning and POST.
+    const default_rev = if (rev == null) try fetchDefaultRev(allocator, remote, api_key, opts.verbose) else null;
+    defer if (default_rev) |r| allocator.free(r);
+    const effective_rev = rev orelse default_rev.?;
+    const env_id = (try fetchEnvIdForBranch(allocator, remote, api_key, effective_rev, opts.verbose)) orelse {
+        try stderr.print("Error: could not resolve the environment tracking branch '{s}'. Push requires its variable types; no changes made.\n", .{effective_rev});
+        return error.EnvironmentNotFound;
+    };
+    defer allocator.free(env_id);
+
+    const plan = try planPush(allocator, sync_vars.items, listing.vars.items, env_id, opts.secret_names.items, opts.plain_names.items);
     defer allocator.free(plan);
 
     var pushable: usize = 0;
@@ -2534,11 +2591,7 @@ fn runPush(
         if (opts.dry_run) {
             try stdout.print("Dry run — would POST {s}\n", .{url});
         }
-        if (rev) |r| {
-            try stdout.print("rev: {s}\n", .{r});
-        } else {
-            try stdout.writeAll("rev: (project default)\n");
-        }
+        try stdout.print("rev: {s}{s}\n", .{ effective_rev, if (rev == null) " (project default)" else "" });
         try stdout.print("file: {s}\nvars ({d}, values redacted):\n", .{ file_path, sync_vars.items.len });
         for (sync_vars.items, plan) |v, p| {
             try stdout.print("  {s}", .{v.name});
@@ -2602,15 +2655,15 @@ fn runPush(
     if (opts.dry_run) {
         try stdout.writeAll("No changes made.\n");
         if (!opts.no_app_ids) {
-            if (rev) |r| try syncAppIds(allocator, opts, remote, api_key, r, project_root, repo_root, stdout, stderr);
+            try syncAppIds(allocator, opts, remote, api_key, effective_rev, project_root, repo_root, stdout, stderr);
         }
         return;
     }
 
-    const payload = try buildPushPayload(allocator, rev, sync_vars.items, plan);
+    const payload = try buildPushPayload(allocator, effective_rev, sync_vars.items, plan);
     defer allocator.free(payload);
 
-    const body = try apiRequest(allocator, .POST, url, api_key, payload, opts.verbose, rev);
+    const body = try apiRequest(allocator, .POST, url, api_key, payload, opts.verbose, effective_rev);
     defer allocator.free(body);
 
     const parsed = std.json.parseFromSlice(PushResponse, allocator, body, .{
@@ -2634,8 +2687,7 @@ fn runPush(
     }
 
     if (!opts.no_app_ids) {
-        const effective_rev: []const u8 = if (parsed.value.rev.len > 0) parsed.value.rev else (rev orelse "");
-        if (effective_rev.len > 0) try syncAppIds(allocator, opts, remote, api_key, effective_rev, project_root, repo_root, stdout, stderr);
+        try syncAppIds(allocator, opts, remote, api_key, effective_rev, project_root, repo_root, stdout, stderr);
     }
 }
 
@@ -3137,7 +3189,7 @@ test "inferSecret: credentials by name and value, counts and public keys are pla
 }
 
 fn testRemote(name: []const u8, typ: []const u8) RemoteVar {
-    return .{ .id = "1", .name = name, .type = typ };
+    return .{ .id = "1", .name = name, .type = typ, .applies_to_all_envs = true };
 }
 
 test "planPush: flag > file > remote > inferred; downgrades blocked without --plain" {
@@ -3158,11 +3210,11 @@ test "planPush: flag > file > remote > inferred; downgrades blocked without --pl
         testRemote("C", "secret"),
         testRemote("G", "plain"),
         testRemote("H", "plain"),
-        testRemote("H", "secret"), // same name secret in another env → conservative secret
+        testRemote("H", "secret"), // duplicate applicable secret → conservative secret
     };
     const secret_names = [_][]const u8{"F"};
     const plain_names = [_][]const u8{"C"};
-    const plan = try planPush(allocator, &vars, &remote, &secret_names, &plain_names);
+    const plan = try planPush(allocator, &vars, &remote, "7", &secret_names, &plain_names);
     defer allocator.free(plan);
 
     try std.testing.expectEqual(PlanAction.push, plan[0].action);
@@ -3208,7 +3260,7 @@ test "planPush: reserved and TIMBAL_* vars are never pushed, whatever the platfo
     };
     const remote = [_]RemoteVar{testRemote("TIMBAL_KB_ID", "plain")};
     const secret_names = [_][]const u8{"TIMBAL_LOG_EVENTS"};
-    const plan = try planPush(allocator, &vars, &remote, &secret_names, &.{});
+    const plan = try planPush(allocator, &vars, &remote, "7", &secret_names, &.{});
     defer allocator.free(plan);
     try std.testing.expectEqual(PlanAction.skip_reserved, plan[0].action);
     try std.testing.expectEqual(PlanAction.skip_reserved, plan[1].action);
@@ -3234,7 +3286,7 @@ test "buildPushPayload includes rev and only planned vars with resolved types" {
         .{ .name = "TIMBAL_APP_ID", .type = "plain", .value = "77", .description = null },
         .{ .name = "MY_KEY", .type = "plain", .value = "1", .description = "d" },
     };
-    const plan = try planPush(allocator, &vars, &.{}, &.{}, &.{});
+    const plan = try planPush(allocator, &vars, &.{}, "7", &.{}, &.{});
     defer allocator.free(plan);
     const payload = try buildPushPayload(allocator, "main", &vars, plan);
     defer allocator.free(payload);
@@ -3310,7 +3362,7 @@ test "parsePullResponse tolerates string, VarValue object, and missing values" {
     try std.testing.expectEqualStrings("plain", res.vars.items[2].type);
     try std.testing.expectEqualStrings("v", res.vars.items[2].value);
     try std.testing.expect(res.vars.items[3].value_missing);
-    try std.testing.expect(!res.vars.items[4].value_missing); // empty plain var is legitimate
+    try std.testing.expect(res.vars.items[4].value_missing); // absence must survive later type reconciliation
     try std.testing.expectEqualStrings("", res.vars.items[4].value);
 }
 
@@ -3334,9 +3386,9 @@ test "parseRemoteVarList reads types, env scoping, and ids as strings" {
     try std.testing.expectEqualStrings("plain", list.items[1].type);
     try std.testing.expect(list.items[1].applies_to_all_envs);
 
-    try std.testing.expectEqualStrings("secret", remoteTypeFor(list.items, "TIMBAL_PROJECT_SECRET").?);
-    try std.testing.expectEqualStrings("plain", remoteTypeFor(list.items, "FOO").?);
-    try std.testing.expect(remoteTypeFor(list.items, "NOPE") == null);
+    try std.testing.expectEqualStrings("secret", remoteTypeFor(list.items, "TIMBAL_PROJECT_SECRET", "7").?);
+    try std.testing.expectEqualStrings("plain", remoteTypeFor(list.items, "FOO", "7").?);
+    try std.testing.expect(remoteTypeFor(list.items, "NOPE", "7") == null);
 }
 
 test "parseVarDecrypted and parseEnvIdForBranch" {
@@ -3428,4 +3480,172 @@ test "normalizeBaseUrlOverride accepts api hosts" {
 
     try std.testing.expectError(error.InsecureBaseUrl, normalizeBaseUrlOverride(allocator, "http://api.dev.timbal.ai"));
     try std.testing.expectError(error.InvalidBaseUrl, normalizeBaseUrlOverride(allocator, "https://evil.timbal.ai"));
+}
+
+test "push types are scoped to the branch environment before inferring new secrets" {
+    const a = std.testing.allocator;
+    var remote = try parseRemoteVarList(a,
+        \\{"vars":[
+        \\ {"id":1,"name":"OPENAI_API_KEY","value":{"type":"plain","value":"dev-dummy"},"envs":[{"id":10}]},
+        \\ {"id":2,"name":"LOG_LEVEL","value":{"type":"secret"},"envs":[{"id":10}]},
+        \\ {"id":3,"name":"LOG_LEVEL","value":{"type":"plain","value":"info"},"envs":[{"id":20}]},
+        \\ {"id":4,"name":"GLOBAL_TOKEN","value":{"type":"secret"},"envs":[],"applies_to_all_envs":true}
+        \\]}
+    );
+    defer freeRemoteVars(a, &remote);
+    const vars = [_]SyncVar{
+        .{ .name = "OPENAI_API_KEY", .type = "plain", .value = "sk-production" },
+        .{ .name = "LOG_LEVEL", .type = "plain", .value = "debug", .type_explicit = true },
+        .{ .name = "GLOBAL_TOKEN", .type = "plain", .value = "new" },
+    };
+    const envs = "{\"envs\":[{\"id\":10,\"branch\":\"dev\"},{\"id\":20,\"branch\":\"production\"}]}";
+    const id = (try parseEnvIdForBranch(a, envs, "production")).?;
+    defer a.free(id);
+    const plan = try planPush(a, &vars, remote.items, id, &.{}, &.{});
+    defer a.free(plan);
+    try std.testing.expectEqual(TypeSource.inferred, plan[0].source);
+    try std.testing.expectEqualStrings("secret", plan[0].type);
+    try std.testing.expectEqual(PlanAction.push, plan[1].action);
+    try std.testing.expectEqualStrings("plain", plan[1].remote_type.?);
+    try std.testing.expectEqualStrings("secret", plan[2].type);
+    try std.testing.expectEqual(TypeSource.remote, plan[2].source);
+    const payload = try buildPushPayload(a, "production", &vars, plan);
+    defer a.free(payload);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"OPENAI_API_KEY\",\"type\":\"secret\"") != null);
+}
+
+test "secret recovery fills placeholders and absent values only in the selected environment" {
+    const a = std.testing.allocator;
+    var pulled = try parsePullResponse(a,
+        \\{"rev":"production","vars":[
+        \\ {"name":"TOKEN","value":{"type":"secret","preview":"abc"}},
+        \\ {"name":"EMPTY","type":"secret","value":""},
+        \\ {"name":"RETAGGED"},
+        \\ {"name":"UNAVAILABLE","type":"secret"}
+        \\]}
+    );
+    defer pulled.deinit(a);
+    const remote = [_]RemoteVar{
+        .{ .id = "dev", .name = "TOKEN", .type = "secret", .env_ids = &.{"10"} },
+        .{ .id = "prod", .name = "TOKEN", .type = "secret", .env_ids = &.{"20"} },
+        .{ .id = "empty", .name = "EMPTY", .type = "secret", .env_ids = &.{"20"} },
+        .{ .id = "retagged", .name = "RETAGGED", .type = "secret", .env_ids = &.{"20"} },
+        .{ .id = "global", .name = "GLOBAL", .type = "secret", .applies_to_all_envs = true },
+        .{ .id = "unavailable", .name = "UNAVAILABLE", .type = "secret", .env_ids = &.{"20"} },
+        .{ .id = "dev-only", .name = "DEV_ONLY", .type = "secret", .env_ids = &.{"10"} },
+    };
+    const Fixture = struct {
+        calls: usize = 0,
+        fn fetch(self: *@This(), allocator: std.mem.Allocator, id: []const u8) !?[]u8 {
+            self.calls += 1;
+            if (std.mem.eql(u8, id, "unavailable")) return null;
+            if (std.mem.eql(u8, id, "prod") or std.mem.eql(u8, id, "global") or std.mem.eql(u8, id, "retagged")) return try allocator.dupe(u8, "recovered");
+            return error.UnexpectedSecretFetch;
+        }
+    };
+    var fixture = Fixture{};
+    const result = try recoverSecrets(a, &pulled.vars, &remote, "20", &fixture);
+    try std.testing.expectEqual(@as(usize, 4), fixture.calls);
+    try std.testing.expectEqual(@as(usize, 3), result.recovered);
+    try std.testing.expectEqual(@as(usize, 2), result.other_env);
+    try std.testing.expectEqual(@as(usize, 5), pulled.vars.items.len);
+    try std.testing.expectEqualStrings("recovered", pulled.vars.items[0].value);
+    try std.testing.expectEqualStrings("", pulled.vars.items[1].value);
+    try std.testing.expect(!pulled.vars.items[1].value_missing);
+    try std.testing.expectEqualStrings("secret", pulled.vars.items[2].type);
+    try std.testing.expect(pulled.vars.items[3].value_missing);
+    const content = try formatEnvFile(a, "production", pulled.vars.items, .{});
+    defer a.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\nTOKEN=recovered\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\nRETAGGED=recovered\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\n# UNAVAILABLE=\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "DEV_ONLY") == null);
+    var roundtrip = try parseEnvFile(a, content);
+    defer freeSyncVars(a, &roundtrip);
+    try std.testing.expect(findSyncVar(roundtrip.items, "UNAVAILABLE") == null);
+}
+
+test "unknown environment recovers only global secrets and never blanks a missing value" {
+    const a = std.testing.allocator;
+    var pulled = try parsePullResponse(a, "{\"vars\":[{\"name\":\"GLOBAL\"},{\"name\":\"SCOPED\",\"type\":\"secret\"}]}");
+    defer pulled.deinit(a);
+    const remote = [_]RemoteVar{
+        .{ .id = "global", .name = "GLOBAL", .type = "secret", .applies_to_all_envs = true },
+        .{ .id = "scoped", .name = "SCOPED", .type = "secret", .env_ids = &.{"10"} },
+    };
+    const Fixture = struct {
+        fn fetch(_: @This(), _: std.mem.Allocator, id: []const u8) !?[]u8 {
+            try std.testing.expectEqualStrings("global", id);
+            return null;
+        }
+    };
+    const result = try recoverSecrets(a, &pulled.vars, &remote, null, Fixture{});
+    try std.testing.expectEqual(@as(usize, 0), result.recovered);
+    try std.testing.expectEqual(@as(usize, 1), result.other_env);
+    try std.testing.expectEqualStrings("secret", pulled.vars.items[0].type);
+    const content = try formatEnvFile(a, "main", pulled.vars.items, .{});
+    defer a.free(content);
+    var roundtrip = try parseEnvFile(a, content);
+    defer freeSyncVars(a, &roundtrip);
+    try std.testing.expectEqual(@as(usize, 0), roundtrip.items.len);
+}
+
+test "member app id sync preserves file permissions and ignores predictable temp symlinks" {
+    if (is_windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const root = try dir.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+    const path = try fs.path.join(a, &.{ root, ".env" });
+    defer a.free(path);
+    const original = "LOCAL_SECRET=private\nTIMBAL_APP_ID=1\n";
+    try dir.dir.writeFile(.{ .sub_path = ".env", .data = original });
+    {
+        const file = try dir.dir.openFile(".env", .{});
+        defer file.close();
+        try file.chmod(0o600);
+    }
+    try dir.dir.writeFile(.{ .sub_path = "unrelated", .data = "untouched" });
+    try dir.dir.symLink("unrelated", ".env.timbal-pull.tmp", .{});
+    var merged = try upsertEnvLine(a, original, "TIMBAL_APP_ID", "2335", null);
+    defer merged.deinit(a);
+    try writeFileAtomic(a, path, merged.content, std.io.null_writer);
+    try std.testing.expectEqual(@as(fs.File.Mode, 0o600), (try dir.dir.statFile(".env")).mode & 0o777);
+    const content = try dir.dir.readFileAlloc(a, ".env", 1024);
+    defer a.free(content);
+    try std.testing.expectEqualStrings("LOCAL_SECRET=private\nTIMBAL_APP_ID=2335\n", content);
+    const unrelated = try dir.dir.readFileAlloc(a, "unrelated", 1024);
+    defer a.free(unrelated);
+    try std.testing.expectEqualStrings("untouched", unrelated);
+}
+
+test "new env files are private and failed atomic replacements remove temporary files" {
+    if (is_windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{ .iterate = true });
+    defer dir.cleanup();
+    const root = try dir.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+    const path = try fs.path.join(a, &.{ root, ".env" });
+    defer a.free(path);
+    try writeFileExclusive(path, "SECRET=private\n", std.io.null_writer);
+    try std.testing.expectEqual(@as(fs.File.Mode, 0o600), (try dir.dir.statFile(".env")).mode & 0o777);
+    const forced = try fs.path.join(a, &.{ root, ".env.force" });
+    defer a.free(forced);
+    try writeFileAtomic(a, forced, "SECRET=private\n", std.io.null_writer);
+    try std.testing.expectEqual(@as(fs.File.Mode, 0o600), (try dir.dir.statFile(".env.force")).mode & 0o777);
+    try dir.dir.makeDir("blocked");
+    const blocked = try fs.path.join(a, &.{ root, "blocked" });
+    defer a.free(blocked);
+    if (writeFileAtomic(a, blocked, "SECRET=private\n", std.io.null_writer)) |_| {
+        return error.ExpectedRenameFailure;
+    } else |_| {}
+    var entries = dir.dir.iterate();
+    var count: usize = 0;
+    while (try entries.next()) |entry| {
+        try std.testing.expect(std.mem.eql(u8, entry.name, ".env") or std.mem.eql(u8, entry.name, ".env.force") or std.mem.eql(u8, entry.name, "blocked"));
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
 }

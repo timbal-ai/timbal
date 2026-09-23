@@ -78,6 +78,8 @@ Vite and Bun may also read `ui/.env` and `api/.env` from those directories at de
 
 For projects connected to the [Timbal Platform](/deployment/platform), `timbal env` keeps the local files above in sync with the project's variables for one environment (the env tracking your current branch, `--rev <branch>`, or `--default`).
 
+The CLI detects your current Git branch automatically. Variable types and secret recovery use the environment tracking that branch, including variables shared across all environments. Use `--rev` or `--default` only when you want to override the current branch.
+
 ```bash
 timbal env pull                 # platform → <project>/.env (+ TIMBAL_APP_ID per member)
 timbal env push                 # <project>/.env → platform (upsert only)
@@ -98,6 +100,8 @@ Secrets vs plain: a `# type: secret` (or `# secret`) comment directly above a va
 <Warning>
 Pulled files contain secrets in plaintext — keep `.env` files gitignored (`timbal create` does this). `PORT`, `TIMBAL_PROJECT_SECRET`, and `TIMBAL_APP_ID` are never pushed as project vars.
 </Warning>
+
+`TIMBAL_APP_ID` remains active in each member's local `.env`. On POSIX systems, new env files are created with owner-only permissions, and atomic updates preserve existing file permissions. Pull attempts to recover secrets whose values were omitted or returned as placeholders; values that remain unavailable stay commented out so a later push cannot erase them.
 
 ## Production
 
