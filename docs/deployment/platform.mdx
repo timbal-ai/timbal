@@ -3,12 +3,11 @@ title: "Timbal Platform"
 description: "Deploy Timbal projects to managed hosting"
 ---
 
-The [Timbal Platform](https://app.timbal.ai) runs your project's UI, API, and workforce components for you. There is no local `timbal build` or Docker workflow — you push code to a connected git repo and deploy from the platform.
+The [Timbal Platform](https://app.timbal.ai) runs your project's UI, API, and workforce components for you. There is no local `timbal build` or Docker workflow — you push code with `timbal push` and deploy from the platform.
 
 ## Prerequisites
 
 - A project scaffolded with [`timbal create`](/quickstart#create-a-timbal-project)
-- Code pushed to a git remote the platform can access (typically GitHub)
 - [Timbal CLI](/installation) installed (`timbal configure` for local credentials if needed)
 - The project tested locally with [`timbal start`](/quickstart#run-locally)
 
@@ -23,17 +22,21 @@ Each platform **project** maps to a git repository. **Environments** map to git 
 
 <Steps>
   <Step title="Create and push your project">
-    Scaffold locally, develop with `timbal start`, then push to your remote:
+    Scaffold locally, develop with `timbal start`, then commit and push:
 
     ```bash
     timbal create my-project
     cd my-project
-    git remote add origin git@github.com:your-org/my-project.git
-    git push -u origin main
+    timbal configure
+    git add .
+    git commit -m "Initial project"
+    timbal push
     ```
   </Step>
-  <Step title="Connect the repo on the platform">
-    In the [Timbal Platform](https://app.timbal.ai), create a project linked to that repository. Create environments for the branches you want to deploy (production, staging, etc.).
+  <Step title="Open your linked project">
+    On the first push, the CLI creates a project in your configured organization and adds a `timbal` Git remote. The platform default branch remains `main`; the CLI pushes whichever branch you have checked out. Existing Timbal remotes are reused, and GitHub remotes stay intact.
+
+    Open the project in the [Timbal Platform](https://app.timbal.ai). Pushing discovers your components and provisions new branch environments. Pushes to an existing environment follow the platform’s normal deployment behavior.
   </Step>
   <Step title="Configure secrets">
     Add environment variables and secrets in the platform dashboard — model API keys, integration tokens, anything sensitive. These are injected at runtime and are not baked into your repo.
@@ -46,6 +49,31 @@ Each platform **project** maps to a git repository. **Environments** map to git 
     Deployments are idempotent on the same rev. Re-deploy after pushing new commits to pick up changes.
   </Step>
 </Steps>
+
+## Pushing code
+
+`timbal push` uploads the current branch's commits using Git. It leaves uncommitted files alone and preserves your existing upstream. To also set the Timbal remote as the branch's upstream, use `timbal push -u`.
+
+```bash
+# First push: optional project name and organization overrides
+timbal push --name my-project --org 123
+
+# Select credentials and API host from a configured profile
+timbal push --profile dev
+
+# Preview without creating a project or linking a remote
+timbal push --dry-run
+```
+
+The default project name is the repository directory name. `--name` and `--org` apply only to the first push. Profile selection follows `--profile`, then `TIMBAL_PROFILE`, then `default`, for both project creation and Git authentication.
+
+A failed upload keeps the project link, so `timbal push` retries the same project. For a project created by this command, the initial push to `main` replaces the generated scaffold using an exact-SHA `--force-with-lease`. The CLI verifies the scaffold is a single initial commit and saves its SHA before pushing; retries never refresh the lease. A concurrent update causes rejection. Existing linked projects and subsequent pushes use normal Git behavior. Common Git options such as `--force-with-lease`, `--porcelain`, and `--follow-tags` are supported; run `timbal push --help` for the full list. The command always targets the current branch; use Git directly for other refspecs.
+
+Automatic creation uses the existing minimal `Scratch` scaffold without server-generated workforce members. Your committed UI and workforce code are uploaded by Git; the project’s `has_ui` metadata retains the creation default because the existing metadata API does not expose that field.
+
+If several Timbal remotes exist, name the intended one `timbal`. A remote named `timbal` that points elsewhere must be renamed before automatic linking can proceed.
+
+Environment variables are separate from code: use `timbal env push` to upload them and `timbal env pull` to configure your local environment after the first code push.
 
 ## `timbal.yaml` manifest
 
