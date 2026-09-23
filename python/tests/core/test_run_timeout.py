@@ -140,6 +140,71 @@ class TestAgentTimeout:
         leftover = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
         assert leftover == []
 
+    @pytest.mark.parametrize("cancellation", ["caught", "nested_tool"])
+    async def test_parallel_tools_do_not_resume_after_swallowed_cancellation(self, cancellation):
+        """A final delta after cancellation must not resume the handler again."""
+        started: set[str] = set()
+        closed: set[str] = set()
+        side_effects: list[str] = []
+        waiting = asyncio.Event()
+        inner = Tool(name="inner", handler=_slow)
+
+        async def streaming(label: str) -> AsyncGenerator[TextDelta, None]:
+            started.add(label)
+            try:
+                yield TextDelta(id=label, text_delta="ready")
+                if cancellation == "nested_tool":
+                    # Runnable turns CancelledError into an interrupted result.
+                    # The enclosing handler must still stop at its next yield.
+                    await inner(seconds=5.0).collect()
+                else:
+                    try:
+                        await waiting.wait()
+                    except asyncio.CancelledError:
+                        pass
+                yield TextDelta(id=label, text_delta="interrupted")
+                side_effects.append(label)
+            finally:
+                # Cleanup can itself await and must finish before root OUTPUT.
+                await asyncio.sleep(0)
+                closed.add(label)
+
+        agent = Agent(
+            name="fanout",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[
+                            ToolUseContent(id=label, name="streaming", input={"label": label}) for label in ("a", "b")
+                        ],
+                        stop_reason="tool_use",
+                    ),
+                    "Done.",
+                ]
+            ),
+            tools=[streaming],
+            timeout=0.1,
+        )
+
+        async def consume():
+            result = None
+            stream = agent(prompt="go")
+            try:
+                async for event in stream:
+                    if isinstance(event, OutputEvent) and event.path == "fanout":
+                        assert closed == {"a", "b"}, "timeout was reported before child cleanup"
+                        result = event
+            finally:
+                await stream.aclose()
+            return result
+
+        result = await asyncio.wait_for(consume(), timeout=2.0)
+
+        assert result is not None and result.status.code == "timeout"
+        assert started == {"a", "b"}
+        assert side_effects == [], "cancelled handlers resumed after yielding their final delta"
+
     @pytest.mark.parametrize("wrapper", ["direct", "agent", "workflow"])
     async def test_parallel_tools_are_closed_before_timeout_output_after_slow_consumer(self, wrapper):
         """Expiry between events must join child tasks before reporting timeout."""

@@ -1372,14 +1372,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if tool is None:
                     queue.put_nowait((tool_call, self._build_unknown_tool_event(tool_call, tools)))
                     return
-                async for event in tool._stream(**tool_call.input):
-                    event, tool_span_call_id, tool_span_parent_call_id = self._prepare_multiplex_event(
-                        event,
-                        tool_call,
-                        tool_span_call_id,
-                        tool_span_parent_call_id,
-                    )
-                    queue.put_nowait((tool_call, event))
+                current_task = asyncio.current_task()
+                tool_stream = tool._stream(**tool_call.input)
+                try:
+                    async for event in tool_stream:
+                        # A nested runnable can turn cancellation into an event.
+                        # Stop before resuming its enclosing handler again.
+                        if current_task is not None and current_task.cancelling():
+                            raise asyncio.CancelledError
+                        event, tool_span_call_id, tool_span_parent_call_id = self._prepare_multiplex_event(
+                            event,
+                            tool_call,
+                            tool_span_call_id,
+                            tool_span_parent_call_id,
+                        )
+                        queue.put_nowait((tool_call, event))
+                finally:
+                    # Cancellation alone does not close a stream that yielded
+                    # after swallowing it. Join cleanup before the sentinel.
+                    await tool_stream.aclose()
             except (asyncio.CancelledError, GeneratorExit, InterruptError):
                 raise
             except Exception as e:
