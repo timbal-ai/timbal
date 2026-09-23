@@ -9,6 +9,7 @@ from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
 from timbal.errors import RunTimeout
 from timbal.types.content import ToolResultContent, ToolUseContent
+from timbal.types.events import DeltaEvent, OutputEvent
 from timbal.types.events.delta import TextDelta
 from timbal.types.message import Message
 
@@ -138,6 +139,83 @@ class TestAgentTimeout:
         leftover = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
         assert leftover == []
 
+    async def test_parallel_tools_are_closed_before_timeout_output_after_slow_consumer(self):
+        """Expiry between events must join child tasks before reporting timeout."""
+        release = asyncio.Event()
+        both_started = asyncio.Event()
+        started: set[str] = set()
+        closed: set[str] = set()
+        side_effects: list[str] = []
+        tool_tasks: set[asyncio.Task] = set()
+
+        async def streaming(label: str) -> AsyncGenerator[TextDelta, None]:
+            task = asyncio.current_task()
+            assert task is not None
+            tool_tasks.add(task)
+            started.add(label)
+            if len(started) == 2:
+                both_started.set()
+            try:
+                yield TextDelta(id=label, text_delta="ready")
+                await release.wait()
+                side_effects.append(label)
+            finally:
+                closed.add(label)
+
+        agent = Agent(
+            name="fanout",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[
+                            ToolUseContent(id="a", name="streaming", input={"label": "a"}),
+                            ToolUseContent(id="b", name="streaming", input={"label": "b"}),
+                        ],
+                        stop_reason="tool_use",
+                    ),
+                    "Done.",
+                ]
+            ),
+            tools=[streaming],
+            timeout=0.2,
+        )
+        stream = agent(prompt="go")
+        delayed = False
+        closed_at_timeout = None
+        pending_at_timeout = None
+        try:
+            async for event in stream:
+                if not delayed and isinstance(event, DeltaEvent) and event.path == "fanout.streaming":
+                    await asyncio.wait_for(both_started.wait(), timeout=1.0)
+                    delayed = True
+                    # The deadline expires while the consumer holds an event,
+                    # not while the handler is being awaited.
+                    await asyncio.sleep(0.25)
+                if isinstance(event, OutputEvent) and event.path == "fanout":
+                    assert event.status.code == "timeout"
+                    closed_at_timeout = set(closed)
+                    pending_at_timeout = [task for task in tool_tasks if not task.done()]
+
+            assert delayed, "the test must reach the slow-consumer path"
+            # Any work still alive after the terminal event can now run a side
+            # effect. A correct timeout has already cancelled and joined it.
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tool_tasks, return_exceptions=True), timeout=1.0)
+            assert closed_at_timeout == {"a", "b"}, (
+                f"timeout was reported before child cleanup; post-timeout side effects: {side_effects}"
+            )
+            assert pending_at_timeout == []
+            assert side_effects == []
+        finally:
+            # Keep this intentionally failing regression from leaking tasks
+            # into later tests, even if an earlier assertion fails.
+            for task in tool_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tool_tasks, return_exceptions=True)
+            await stream.aclose()
+
 
 class TestSubAgentTimeout:
     async def test_parent_sees_an_error_tool_result_and_continues(self):
@@ -216,6 +294,30 @@ class TestToolTimeout:
         err = RunTimeout("a.b", 1.5)
         assert isinstance(err, TimeoutError)
         assert str(err) == "a.b timed out after 1.5s"
+
+    @pytest.mark.parametrize("hook_name", ["pre_hook", "post_hook"])
+    async def test_foreground_timeout_includes_hooks(self, hook_name):
+        """A slow hook must not outlive the whole-call deadline and succeed."""
+        hook_completed = False
+        handler_calls = 0
+
+        async def slow_hook() -> None:
+            nonlocal hook_completed
+            await asyncio.sleep(0.2)
+            hook_completed = True
+
+        async def handler() -> str:
+            nonlocal handler_calls
+            handler_calls += 1
+            return "Done."
+
+        tool = Tool(name="hooked", handler=handler, timeout=0.05, **{hook_name: slow_hook})
+        result = await tool().collect()
+
+        assert result.status.code == "timeout", f"{hook_name} bypassed the foreground deadline"
+        assert result.error["type"] == "RunTimeout"
+        assert not hook_completed
+        assert handler_calls == (0 if hook_name == "pre_hook" else 1)
 
 
 class TestWorkflowStepTimeout:
