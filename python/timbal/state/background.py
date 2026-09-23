@@ -48,7 +48,6 @@ _RESULT_PREVIEW_CHARS = 500
 _TASK_ID_LEN = 12
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled", "timed_out", "stalled"})
-TERMINAL_STATUSES = _TERMINAL_STATUSES
 
 # Ring-buffer defaults (mirrors JobStore). ``None`` / 0 = unlimited.
 DEFAULT_BG_LOG_MAX_EVENTS = 50_000
@@ -1242,8 +1241,16 @@ def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
 
 
 def store_for_run(run_id: str) -> BackgroundTaskStore | None:
-    """Look up the session bag registered for a run id (tests / JobStore)."""
-    return _STORES_BY_RUN_ID.get(run_id)
+    """Look up the session bag registered for a run id.
+
+    Finished tasks past their retention window are dropped on the way, like
+    ``JobStore.get_job``: a server that only polls a session never spawns
+    into it again, which is otherwise the only thing that reaps.
+    """
+    store = _STORES_BY_RUN_ID.get(run_id)
+    if store is not None:
+        store.reap_finished()
+    return store
 
 
 def current_background_store() -> BackgroundTaskStore | None:

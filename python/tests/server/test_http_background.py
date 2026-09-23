@@ -139,6 +139,36 @@ class TestBackgroundPolling:
             final = (await client.get(f"/runs/stop-me/background/{task_id}", params={"wait_ms": 5000})).json()
             assert final["status"] == "cancelled"
 
+    async def test_events_are_not_done_while_a_cancelled_child_unwinds(self, make_client):
+        """Status says cancelled as soon as the stop is requested; the log is still open."""
+        unwinding = asyncio.Event()
+
+        async def slow_to_stop(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            try:
+                while True:
+                    yield TextDelta(id="s", text_delta=prompt)
+                    await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                unwinding.set()
+                await asyncio.sleep(0.3)
+                raise
+
+        async with make_client(_parent(slow_to_stop)) as client:
+            task_id = await _start(client, "unwind")
+            url = f"/runs/unwind/background/{task_id}"
+            await client.get(url, params={"after": 0, "wait_ms": 5000})
+
+            await client.post(f"{url}/cancel")
+            await asyncio.wait_for(unwinding.wait(), 5.0)
+            cursor = (await client.get(url)).json()["transcript_cursor"]
+
+            mid = (await client.get(f"{url}/events", params={"after": cursor})).json()
+            assert mid["status"] == "cancelled"
+            assert mid["done"] is False
+
+            final = (await client.get(f"{url}/events", params={"after": cursor, "wait_ms": 5000})).json()
+            assert final["done"] is True
+
     async def test_unknown_run_or_task(self, make_client):
         async with make_client(_parent(_builder)) as client:
             listed = await client.get("/runs/never-ran/background")

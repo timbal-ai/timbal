@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
-from ..state.background import TERMINAL_STATUSES, store_for_run
+from ..state.background import store_for_run
 from ..utils import ImportSpec, dump, is_port_in_use
 from .jobs import DEFAULT_READ_LIMIT, MAX_READ_LIMIT, JobStore, RunIdInUse
 from .voice import merge_voice_config
@@ -387,7 +387,7 @@ def create_app() -> FastAPI:
 
         Same paging contract as `/runs/{run_id}/events`: feed ``next_cursor``
         back as ``after``, and ``wait_ms`` long-polls instead of spinning.
-        ``done`` means the child is terminal and this batch reached the end of
+        ``done`` means the child has finished and this batch reached the end of
         its log. ``gapped`` means ``after`` fell behind the ring's floor
         (``forgotten_through``) and the events in between are gone.
         """
@@ -396,17 +396,18 @@ def create_app() -> FastAPI:
             return _task_not_found(run_id, task_id)
         limit = max(1, min(limit, MAX_READ_LIMIT))
         transcript = store.transcript(task_id, after=after, limit=limit)
-        if (
-            wait_ms > 0
-            and not transcript["events"]
-            and not transcript["gapped"]
-            and transcript["status"] not in TERMINAL_STATUSES
-        ):
+        record = store.get(task_id)
+        # Not the status: it reads cancelled/timed_out/stalled as soon as a stop
+        # is requested, while the child is still unwinding and can still log.
+        # Its log only closes once the task has finished.
+        finished = record is None or record.task.done()
+        if wait_ms > 0 and not transcript["events"] and not transcript["gapped"] and not finished:
             await store.wait(task_id, after=after, timeout=min(wait_ms, MAX_WAIT_MS) / 1000)
             transcript = store.transcript(task_id, after=after, limit=limit)
+            record = store.get(task_id)
+            finished = record is None or record.task.done()
         if transcript["status"] == "not_found":
             return _task_not_found(run_id, task_id)
-        record = store.get(task_id)
         log_end = record.log.cursor_end if record is not None else transcript["cursor"]
         return JSONResponse(
             status_code=200,
@@ -416,7 +417,7 @@ def create_app() -> FastAPI:
                 "status": transcript["status"],
                 "events": await dump(transcript["events"]),
                 "next_cursor": transcript["cursor"],
-                "done": transcript["status"] in TERMINAL_STATUSES and transcript["cursor"] >= log_end,
+                "done": finished and transcript["cursor"] >= log_end,
                 "gapped": transcript["gapped"],
                 "forgotten_through": transcript["forgotten_through"],
             },

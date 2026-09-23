@@ -3460,6 +3460,20 @@ class TestPollByRunId:
         assert [notice["task_id"] for notice in pending] == [task_id]
 
     @pytest.mark.asyncio
+    async def test_polling_alone_reaps_past_retention(self):
+        """No new spawn ever lands in a polled-only session, so the lookup must reap."""
+        from timbal.state.background import store_for_run
+
+        run_id, task_id = await self._spawn(_fake_streaming_builder)
+        await wait_for_background(task_id, run_id=run_id, timeout=5.0)
+        store_for_run(run_id).task_retention_secs = 0.05
+
+        assert get_background_task(task_id, run_id=run_id)["status"] == "completed"
+        await asyncio.sleep(0.1)
+        assert get_background_task(task_id, run_id=run_id)["status"] == "not_found"
+        assert list_background_tasks(run_id=run_id) == []
+
+    @pytest.mark.asyncio
     async def test_unknown_run_id_is_not_found(self):
         assert list_background_tasks(run_id="no-such-run") == []
         assert get_background_task("abc", run_id="no-such-run")["status"] == "not_found"
