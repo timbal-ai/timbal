@@ -24,8 +24,9 @@ from dotenv import load_dotenv
 from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
-from ..utils import ImportSpec, is_port_in_use
-from .jobs import DEFAULT_READ_LIMIT, JobStore, RunIdInUse
+from ..state.background import TERMINAL_STATUSES, store_for_run
+from ..utils import ImportSpec, dump, is_port_in_use
+from .jobs import DEFAULT_READ_LIMIT, MAX_READ_LIMIT, JobStore, RunIdInUse
 from .voice import merge_voice_config
 
 logger = structlog.get_logger("timbal.server.http")
@@ -327,6 +328,112 @@ def create_app() -> FastAPI:
                 "expired": False,
             },
         )
+
+    def _task_not_found(run_id: str, task_id: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Background task not found", "run_id": run_id, "task_id": task_id},
+        )
+
+    @app.get("/runs/{run_id}/background")
+    async def list_background(run_id: str) -> Response:
+        """Background children of the session ``run_id`` belongs to.
+
+        ``run_id`` is the one carried on the run's events (``context.id`` when
+        the client supplied it); any turn from the spawning one onward works.
+        A run that never spawned a child is an empty list, not a 404. Like the
+        job store, sessions are process-local.
+        """
+        store = store_for_run(run_id)
+        tasks = store.list() if store is not None else []
+        return JSONResponse(status_code=200, content={"run_id": run_id, "tasks": await dump(tasks)})
+
+    @app.get("/runs/{run_id}/background/{task_id}")
+    async def get_background(
+        run_id: str,
+        task_id: str,
+        after: int | None = None,
+        wait_ms: int = 0,
+    ) -> Response:
+        """Snapshot of one background child — the polling path for detached work.
+
+        ``wait_ms`` long-polls: without ``after`` it holds until the child is
+        terminal, with ``after`` until its log advances past that cursor
+        (``transcript_cursor`` from a previous snapshot). Either way it returns
+        the current snapshot once ``wait_ms`` lapses, so a client just re-polls.
+        Never acks the completion notice: the parent agent still hears about
+        the result on its next turn.
+        """
+        store = store_for_run(run_id)
+        if store is None or store.get(task_id) is None:
+            return _task_not_found(run_id, task_id)
+        if wait_ms > 0:
+            snapshot = await store.wait(task_id, after=after, timeout=min(wait_ms, MAX_WAIT_MS) / 1000)
+        else:
+            snapshot = store.snapshot(task_id)
+        if snapshot.get("status") == "not_found":
+            return _task_not_found(run_id, task_id)
+        return JSONResponse(status_code=200, content=await dump(snapshot))
+
+    @app.get("/runs/{run_id}/background/{task_id}/events")
+    async def background_events(
+        run_id: str,
+        task_id: str,
+        after: int = 0,
+        limit: int = DEFAULT_READ_LIMIT,
+        wait_ms: int = 0,
+    ) -> Response:
+        """A background child's raw events after a logical cursor.
+
+        Same paging contract as `/runs/{run_id}/events`: feed ``next_cursor``
+        back as ``after``, and ``wait_ms`` long-polls instead of spinning.
+        ``done`` means the child is terminal and this batch reached the end of
+        its log. ``gapped`` means ``after`` fell behind the ring's floor
+        (``forgotten_through``) and the events in between are gone.
+        """
+        store = store_for_run(run_id)
+        if store is None or store.get(task_id) is None:
+            return _task_not_found(run_id, task_id)
+        limit = max(1, min(limit, MAX_READ_LIMIT))
+        transcript = store.transcript(task_id, after=after, limit=limit)
+        if (
+            wait_ms > 0
+            and not transcript["events"]
+            and not transcript["gapped"]
+            and transcript["status"] not in TERMINAL_STATUSES
+        ):
+            await store.wait(task_id, after=after, timeout=min(wait_ms, MAX_WAIT_MS) / 1000)
+            transcript = store.transcript(task_id, after=after, limit=limit)
+        if transcript["status"] == "not_found":
+            return _task_not_found(run_id, task_id)
+        record = store.get(task_id)
+        log_end = record.log.cursor_end if record is not None else transcript["cursor"]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "run_id": run_id,
+                "task_id": task_id,
+                "status": transcript["status"],
+                "events": await dump(transcript["events"]),
+                "next_cursor": transcript["cursor"],
+                "done": transcript["status"] in TERMINAL_STATUSES and transcript["cursor"] >= log_end,
+                "gapped": transcript["gapped"],
+                "forgotten_through": transcript["forgotten_through"],
+            },
+        )
+
+    @app.post("/runs/{run_id}/background/{task_id}/cancel")
+    async def cancel_background(run_id: str, task_id: str) -> Response:
+        """Cancel one background child without touching its parent run.
+
+        Returns the post-cancel snapshot; a child that already finished keeps
+        its terminal status.
+        """
+        store = store_for_run(run_id)
+        if store is None or store.get(task_id) is None:
+            return _task_not_found(run_id, task_id)
+        snapshot = store.cancel(task_id)
+        return JSONResponse(status_code=200, content=await dump(snapshot))
 
     @app.post("/cancel/{run_id}")
     async def cancel(run_id: str) -> Response:

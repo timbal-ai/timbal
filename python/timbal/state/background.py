@@ -48,6 +48,7 @@ _RESULT_PREVIEW_CHARS = 500
 _TASK_ID_LEN = 12
 _ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 _TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled", "timed_out", "stalled"})
+TERMINAL_STATUSES = _TERMINAL_STATUSES
 
 # Ring-buffer defaults (mirrors JobStore). ``None`` / 0 = unlimited.
 DEFAULT_BG_LOG_MAX_EVENTS = 50_000
@@ -1020,7 +1021,7 @@ class BackgroundTaskStore:
             self.ack_completion(task_id)
         return snap
 
-    def transcript(self, task_id: str, after: int = 0) -> dict[str, Any]:
+    def transcript(self, task_id: str, after: int = 0, limit: int | None = None) -> dict[str, Any]:
         record = self._tasks.get(task_id)
         if record is None:
             return {
@@ -1031,7 +1032,7 @@ class BackgroundTaskStore:
                 "gapped": False,
                 "forgotten_through": 0,
             }
-        events, cursor, gapped = record.log.read(after)
+        events, cursor, gapped = record.log.read(after, limit)
         return {
             "status": record.status_code(),
             "task_id": task_id,
@@ -1040,6 +1041,51 @@ class BackgroundTaskStore:
             "gapped": gapped,
             "forgotten_through": record.log.forgotten_through,
         }
+
+    async def wait(self, task_id: str, *, timeout: float | None = None, after: int | None = None) -> dict[str, Any]:
+        """Store-level :func:`wait_for_background`, for callers holding a bag."""
+        record = self._tasks.get(task_id)
+        if record is None:
+            return {"status": "not_found", "task_id": task_id}
+
+        def _is_ready(rec: BackgroundTask) -> bool:
+            if after is not None and rec.log.cursor_end > after:
+                return True
+            return rec.task.done() and rec.status_code() in _TERMINAL_STATUSES
+
+        async def _yield_for_callbacks(rec: BackgroundTask) -> None:
+            if rec.task.done():
+                await asyncio.sleep(0)
+
+        if _is_ready(record):
+            await _yield_for_callbacks(record)
+            fresh = self._tasks.get(task_id)
+            return fresh.summarize() if fresh is not None else {"status": "not_found", "task_id": task_id}
+
+        if after is None:
+            wait_set = {record.task}
+            if timeout is None:
+                await asyncio.wait(wait_set)
+            else:
+                await asyncio.wait(wait_set, timeout=timeout)
+            await _yield_for_callbacks(record)
+            fresh = self._tasks.get(task_id)
+            return fresh.summarize() if fresh is not None else {"status": "not_found", "task_id": task_id}
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            rec = self._tasks.get(task_id)
+            if rec is None:
+                return {"status": "not_found", "task_id": task_id}
+            if _is_ready(rec):
+                await _yield_for_callbacks(rec)
+                return rec.summarize()
+
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return rec.summarize()
+
+            await rec.log.wait(after, timeout=remaining)
 
     def cancel(self, task_id: str) -> dict[str, Any]:
         record = self._tasks.get(task_id)
@@ -1209,7 +1255,20 @@ def current_background_store() -> BackgroundTaskStore | None:
     return getattr(run_context, "_bg_store", None)
 
 
-def get_background_task(task_id: str, *, ack_completion: bool = False) -> dict[str, Any]:
+def _resolve_store(run_id: str | None) -> BackgroundTaskStore | None:
+    """The session bag for ``run_id``, or the ambient run's bag when omitted.
+
+    The spawning turn and every later turn chained on it via ``parent_id``
+    resolve to the same bag, so an app can poll with the ``run_id`` of the
+    latest turn it saw (``OutputEvent.run_id``). Turns before the first spawn
+    have no bag.
+    """
+    if run_id is not None:
+        return store_for_run(run_id)
+    return current_background_store()
+
+
+def get_background_task(task_id: str, *, ack_completion: bool = False, run_id: str | None = None) -> dict[str, Any]:
     """Peek a summary of a background task. Does not drain the event log.
 
     Use this to answer questions about an in-flight or finished background
@@ -1221,14 +1280,17 @@ def get_background_task(task_id: str, *, ack_completion: bool = False) -> dict[s
 
     When ``ack_completion`` is true and the child is terminal, any pending
     completion notice for this task is dropped (LLM tool path).
+
+    ``run_id`` polls a session from outside its run (app code after
+    ``collect()`` returns, an HTTP route). Omitted = the ambient run.
     """
-    store = current_background_store()
+    store = _resolve_store(run_id)
     if store is None:
         return {"status": "not_found", "task_id": task_id}
     return store.snapshot(task_id, ack_completion=ack_completion)
 
 
-def list_background_tasks(*, ack_completion: bool = False) -> list[dict[str, Any]]:
+def list_background_tasks(*, ack_completion: bool = False, run_id: str | None = None) -> list[dict[str, Any]]:
     """List background tools for this session (not other concurrent runs).
 
     Returns ``[{task_id, name, status, started_at, title}]``. Use a ``task_id``
@@ -1236,34 +1298,37 @@ def list_background_tasks(*, ack_completion: bool = False) -> list[dict[str, Any
 
     When ``ack_completion`` is true, terminal children are treated as already
     delivered (LLM tool path) so the next turn does not re-inject notices.
+    ``run_id`` selects a session from outside its run (see :func:`get_background_task`).
     """
-    store = current_background_store()
+    store = _resolve_store(run_id)
     if store is None:
         return []
     return store.list(ack_completion=ack_completion)
 
 
-def cancel_background_task(task_id: str) -> dict[str, Any]:
+def cancel_background_task(task_id: str, *, run_id: str | None = None) -> dict[str, Any]:
     """Cancel a running background task and stop its in-flight work.
 
     Cancels the asyncio.Task (the child's handler sees ``CancelledError``).
     If the child registered ``on_background_cancel``, that hook runs too
-    (e.g. to stop an external harness).
+    (e.g. to stop an external harness). ``run_id`` selects a session from
+    outside its run (see :func:`get_background_task`).
     """
-    store = current_background_store()
+    store = _resolve_store(run_id)
     if store is None:
         return {"status": "not_found", "task_id": task_id}
     return store.cancel(task_id)
 
 
-def read_background_transcript(task_id: str, after: int = 0) -> dict[str, Any]:
+def read_background_transcript(task_id: str, after: int = 0, *, run_id: str | None = None) -> dict[str, Any]:
     """Raw events for a background task, from logical cursor ``after``.
 
     Does not drain. Returns ``gapped=True`` when ``after`` is behind
     ``forgotten_through`` (events were dropped from the ring). ``cursor`` is
-    the next logical index to pass.
+    the next logical index to pass. ``run_id`` selects a session from outside
+    its run (see :func:`get_background_task`).
     """
-    store = current_background_store()
+    store = _resolve_store(run_id)
     if store is None:
         return {
             "status": "not_found",
@@ -1281,6 +1346,7 @@ async def wait_for_background(
     *,
     timeout: float | None = None,
     after: int | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Block until a background child is ready to report, then return its snapshot.
 
@@ -1291,55 +1357,13 @@ async def wait_for_background(
 
     Returns the same dict shape as :func:`get_background_task` (does not ack
     completion notices). On timeout while still running, returns the current
-    snapshot so callers can poll again.
+    snapshot so callers can poll again. ``run_id`` selects a session from
+    outside its run (see :func:`get_background_task`).
     """
-    store = current_background_store()
+    store = _resolve_store(run_id)
     if store is None:
         return {"status": "not_found", "task_id": task_id}
-
-    record = store.get(task_id)
-    if record is None:
-        return {"status": "not_found", "task_id": task_id}
-
-    def _is_ready(rec: BackgroundTask) -> bool:
-        if after is not None and rec.log.cursor_end > after:
-            return True
-        return rec.task.done() and rec.status_code() in _TERMINAL_STATUSES
-
-    async def _yield_for_callbacks(rec: BackgroundTask) -> None:
-        if rec.task.done():
-            await asyncio.sleep(0)
-
-    if _is_ready(record):
-        await _yield_for_callbacks(record)
-        fresh = store.get(task_id)
-        return fresh.summarize() if fresh is not None else {"status": "not_found", "task_id": task_id}
-
-    if after is None:
-        wait_set = {record.task}
-        if timeout is None:
-            await asyncio.wait(wait_set)
-        else:
-            await asyncio.wait(wait_set, timeout=timeout)
-        await _yield_for_callbacks(record)
-        fresh = store.get(task_id)
-        return fresh.summarize() if fresh is not None else {"status": "not_found", "task_id": task_id}
-
-    deadline = None if timeout is None else time.monotonic() + timeout
-    while True:
-        rec = store.get(task_id)
-        if rec is None:
-            return {"status": "not_found", "task_id": task_id}
-        if _is_ready(rec):
-            await _yield_for_callbacks(rec)
-            return rec.summarize()
-
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0:
-            return rec.summarize()
-
-        wait_timeout = remaining if remaining is not None else None
-        await rec.log.wait(after, timeout=wait_timeout)
+    return await store.wait(task_id, timeout=timeout, after=after)
 
 
 def register_background_task_on(

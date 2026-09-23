@@ -3376,3 +3376,91 @@ class TestBackgroundEnvDefaults:
         monkeypatch.setenv("TIMBAL_BG_TASK_RETENTION_SECS", "600")
         assert _default_task_retention_secs() == 600.0
         assert BackgroundTaskStore().task_retention_secs == 600.0
+
+
+class TestPollByRunId:
+    """``run_id=`` polls a session's children from outside any RunContext."""
+
+    @staticmethod
+    async def _spawn(handler, *, tool_name: str = "builder") -> tuple[str, str]:
+        """Run a parent that detaches ``handler``; return ``(run_id, task_id)`` with no ambient context."""
+        parent = Agent(
+            name="composer",
+            model=TestModel(
+                responses=[
+                    _tool_call(tool_name, {"prompt": "go"}, run_in_background=True),
+                    "Started.",
+                ]
+            ),
+            tools=[Tool(name=tool_name, handler=handler, background_mode="auto")],
+        )
+        result = await parent(prompt="start").collect()
+        set_run_context(None)
+        set_call_id(None)
+        set_parent_call_id(None)
+        tasks = list_background_tasks(run_id=result.run_id)
+        assert len(tasks) == 1
+        return result.run_id, tasks[0]["task_id"]
+
+    @pytest.mark.asyncio
+    async def test_without_run_id_there_is_nothing_to_poll(self):
+        run_id, task_id = await self._spawn(_fake_streaming_builder)
+
+        assert list_background_tasks() == []
+        assert get_background_task(task_id)["status"] == "not_found"
+        cancel_background_task(task_id, run_id=run_id)
+
+    @pytest.mark.asyncio
+    async def test_get_and_wait_by_run_id(self):
+        run_id, task_id = await self._spawn(_fake_streaming_builder)
+
+        assert get_background_task(task_id, run_id=run_id)["status"] == "running"
+
+        done = await wait_for_background(task_id, run_id=run_id, timeout=5.0)
+        assert done["status"] == "completed"
+        assert "[go] done" in done["summary"]["text"]
+
+    @pytest.mark.asyncio
+    async def test_long_poll_transcript_by_run_id(self):
+        run_id, task_id = await self._spawn(_fake_streaming_builder)
+
+        progressed = await wait_for_background(task_id, run_id=run_id, after=0, timeout=5.0)
+        assert progressed["transcript_cursor"] > 0
+
+        transcript = read_background_transcript(task_id, run_id=run_id)
+        assert transcript["events"]
+        assert transcript["cursor"] == len(transcript["events"])
+        await wait_for_background(task_id, run_id=run_id, timeout=5.0)
+
+    @pytest.mark.asyncio
+    async def test_cancel_by_run_id(self):
+        async def forever(prompt: str) -> AsyncGenerator[TextDelta, None]:
+            while True:
+                yield TextDelta(id="f", text_delta=prompt)
+                await asyncio.sleep(0.05)
+
+        run_id, task_id = await self._spawn(forever)
+
+        cancel_background_task(task_id, run_id=run_id)
+        snap = await wait_for_background(task_id, run_id=run_id, timeout=5.0)
+        assert snap["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_external_poll_does_not_ack_the_completion_notice(self):
+        """The app watching a child must not steal the parent LLM's next-turn notice."""
+        run_id, task_id = await self._spawn(_fake_streaming_builder)
+
+        await wait_for_background(task_id, run_id=run_id, timeout=5.0)
+        get_background_task(task_id, run_id=run_id)
+        list_background_tasks(run_id=run_id)
+
+        from timbal.state.background import store_for_run
+
+        pending = store_for_run(run_id).pending_completions()
+        assert [notice["task_id"] for notice in pending] == [task_id]
+
+    @pytest.mark.asyncio
+    async def test_unknown_run_id_is_not_found(self):
+        assert list_background_tasks(run_id="no-such-run") == []
+        assert get_background_task("abc", run_id="no-such-run")["status"] == "not_found"
+        assert (await wait_for_background("abc", run_id="no-such-run", timeout=0.01))["status"] == "not_found"
