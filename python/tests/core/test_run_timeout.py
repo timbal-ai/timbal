@@ -514,8 +514,20 @@ class TestNestedWorkflowTimeoutRegressions:
     async def test_timeout_prevents_dependent_and_transitive_steps(self, step_kind, execution):
         """Dependents must not produce side effects after their prerequisite fails."""
         effects: list[str] = []
+        unrelated: list[str] = []
 
-        async def dependent() -> str:
+        def should_run() -> bool:
+            effects.append("when")
+            return True
+
+        def resolve_input() -> str:
+            effects.append("input resolver")
+            return "input"
+
+        async def pre_hook() -> None:
+            effects.append("pre_hook")
+
+        async def dependent(value: str) -> str:  # noqa: ARG001
             effects.append("dependent")
             return "should not run"
 
@@ -524,6 +536,7 @@ class TestNestedWorkflowTimeoutRegressions:
             return "should not run either"
 
         async def independent() -> str:
+            unrelated.append("independent")
             return "independent completed"
 
         if step_kind == "tool":
@@ -535,7 +548,12 @@ class TestNestedWorkflowTimeoutRegressions:
         workflow = (
             Workflow(name="pipeline")
             .step(step, **inputs)
-            .step(dependent, depends_on=["slow"])
+            .step(
+                Tool(name="dependent", handler=dependent, pre_hook=pre_hook),
+                depends_on=["slow"],
+                when=should_run,
+                value=resolve_input,
+            )
             .step(transitive, depends_on=["dependent"])
         )
         if execution == "parallel":
@@ -546,6 +564,7 @@ class TestNestedWorkflowTimeoutRegressions:
         assert result.status.code == "error"
         assert result.error["type"] == "RunTimeout"
         assert effects == [], f"steps ran after their prerequisite timed out: {effects}"
+        assert unrelated == (["independent"] if execution == "parallel" else [])
 
     @pytest.mark.parametrize("wrapper", ["direct", "agent", "workflow"])
     @pytest.mark.parametrize("expiry", ["awaiting_handler", "slow_consumer"])

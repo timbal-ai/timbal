@@ -10,7 +10,8 @@ Workflows run steps concurrently but respect dependencies. When something goes w
 | State | Cause | Dependents |
 |---|---|---|
 | **Skipped** | `when` returned `False`, or `step_span()` hit a skipped upstream step (`SpanNotFound`) | Steps that need that step's data are skipped; steps with only `depends_on` wait and may still run |
-| **Failed** | Handler raised, step returned `OutputEvent` with error, or param/`when` evaluation failed | Steps that try to read the failed step's output fail during evaluation; workflow ends with `status.code == "error"` |
+| **Failed** | Handler raised, the step's own call returned an error (including timeout), or param/`when` evaluation failed | All dependent steps are blocked; workflow ends with `status.code == "error"` |
+| **Blocked** | A prerequisite failed or was itself blocked | Transitive dependents are also blocked, before their conditions, input resolvers, hooks, or handlers run |
 
 Skipped is intentional (branch not taken). Failed is an error you should handle or fix.
 
@@ -25,11 +26,13 @@ result = await workflow().collect()
 # result.error == {"type": "ValueError", "message": "...", "traceback": "..."}
 ```
 
-If multiple steps run in parallel and one fails, the workflow still reports error even if other steps succeeded.
+If multiple steps run in parallel and one fails, unrelated branches may finish. The workflow reports the original step failure after those branches finish; it does not cancel all branches on the first error.
+
+An agent step can handle errors from its own tools or sub-agents. Those descendant events remain visible in the stream, but only the enclosing step's own result determines whether that step failed. A tool timeout does not fail the workflow if its agent recovers and completes successfully.
 
 ## Dependent steps
 
-A downstream step that reads a failed step's output via `step_span()` fails during parameter resolution (before its handler runs):
+A downstream step is blocked when any prerequisite fails. This applies to explicit `depends_on` links and dependencies inferred from `step_span()` calls, and propagates through the dependency chain. Conditions and input resolvers are not evaluated for blocked steps:
 
 ```python
 workflow = (
@@ -42,7 +45,13 @@ workflow = (
 )
 ```
 
-Use `step_span("name", default=None)` when a step might have been skipped (see [Control flow](/workflows/control-flow#handling-optional-steps)), not when it failed. A failed upstream step does not produce output to read.
+Use `step_span("name", default=None)` when a step might have been skipped (see [Control flow](/workflows/control-flow#handling-optional-steps)), not to recover from a failed prerequisite. A failed step may retain partial output for inspection, but dependent steps do not run.
+
+## Timeouts
+
+A step's own `timeout` ends that call with `status.code == "timeout"` and a `RunTimeout` error. Its dependents are blocked, and the workflow reports `status.code == "error"` with reason `step_failed` and the original timeout details.
+
+A `timeout` on the workflow instead bounds the entire foreground run. It cancels and joins active step tasks and closes their streams before the workflow reports `status.code == "timeout"`. Nested agents and workflows follow the same cleanup path. Cancellation is cooperative: cleanup may take longer than the deadline, already-completed side effects are not rolled back, and detached children use their separate `background_timeout`.
 
 ## Skipped branches
 
