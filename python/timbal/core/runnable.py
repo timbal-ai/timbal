@@ -9,7 +9,7 @@ import os
 import time
 import traceback
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
 from typing import Any, Literal
 
@@ -154,12 +154,18 @@ async def _relay_until(agen: Any, deadline: float, path: str, timeout: float) ->
             raise RunTimeout(path, timeout)
 
 
-async def _await_until(awaitable: Any, deadline: float, path: str, timeout: float) -> Any:
+async def _await_until(awaitable: Coroutine[Any, Any, Any], deadline: float, path: str, timeout: float) -> Any:
     """Await ``awaitable`` under ``deadline``; ``RunTimeout`` once it has passed.
 
     Checked on exit too: a nested runnable absorbs the cancellation and returns
     its interrupted output normally, which must not read as success.
     """
+    loop = asyncio.get_running_loop()
+    if loop.time() >= deadline:
+        # Do not start the next stage after a previous hook used the budget.
+        # The coroutine was constructed by the caller but has not been awaited.
+        awaitable.close()
+        raise RunTimeout(path, timeout)
     cm = asyncio.timeout_at(deadline)
     try:
         async with cm:
@@ -168,7 +174,7 @@ async def _await_until(awaitable: Any, deadline: float, path: str, timeout: floa
         if cm.expired():
             raise RunTimeout(path, timeout) from exc
         raise
-    if cm.expired():
+    if cm.expired() or loop.time() >= deadline:
         raise RunTimeout(path, timeout)
     return result
 
@@ -375,7 +381,8 @@ class Runnable(ABC, BaseModel):
 
     timeout: float | None = None
     """Optional wall-clock seconds for one foreground call of this runnable (for an
-    Agent, the whole turn: every LLM call and tool). On expiry the handler is
+    Agent, the whole turn: every LLM call and tool). Pre/post hooks share the
+    same deadline with the handler. On expiry the handler is
     cancelled and closed, and the call ends with status ``timeout`` and a
     ``RunTimeout`` error, keeping any partial output. A parent agent sees that
     as an error tool result; a workflow step fails. ``None`` / non-positive = no
@@ -2199,15 +2206,29 @@ class Runnable(ABC, BaseModel):
                     if not proceed:
                         return
 
+            # One foreground budget covers both hooks and the handler. The
+            # approval gate and runs spawned directly in the background are
+            # outside it; a later handoff transfers the raw, unbounded stream.
+            run_timeout = self.timeout if self.timeout is not None and self.timeout > 0 else None
+            if run_in_background:
+                run_timeout = None
+            deadline = None if run_timeout is None else asyncio.get_running_loop().time() + run_timeout
+
             # pre_hook runs only when we're actually going to execute the
             # handler. We deliberately defer it past the approval gate so
             # external side-effects don't fire on gated/denied attempts.
             if self.pre_hook is not None:
-                await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
+                if run_timeout is None:
+                    await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
+                else:
+                    await _await_until(
+                        self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine),
+                        deadline,
+                        self._path,
+                        run_timeout,
+                    )
                 set_parent_call_id(_new_parent_call_id)
                 set_call_id(_new_call_id)
-
-            run_timeout = self.timeout if self.timeout is not None and self.timeout > 0 else None
             # Background task
             if run_in_background:
                 emit_sink = span._emit_sink
@@ -2226,7 +2247,7 @@ class Runnable(ABC, BaseModel):
                     else:
                         output = await _await_until(
                             self._execute_simple(validated_input),
-                            asyncio.get_running_loop().time() + run_timeout,
+                            deadline,
                             self._path,
                             run_timeout,
                         )
@@ -2242,7 +2263,7 @@ class Runnable(ABC, BaseModel):
                     if run_timeout is None
                     else _relay_until(
                         handler_events,
-                        asyncio.get_running_loop().time() + run_timeout,
+                        deadline,
                         self._path,
                         run_timeout,
                     )
@@ -2341,7 +2362,15 @@ class Runnable(ABC, BaseModel):
                 set_parent_call_id(_new_parent_call_id)
                 set_call_id(_new_call_id)
                 if self.post_hook is not None and not run_in_background and not handed_off:
-                    await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+                    if run_timeout is None:
+                        await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+                    else:
+                        await _await_until(
+                            self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine),
+                            deadline,
+                            self._path,
+                            run_timeout,
+                        )
                     # Hooks may mutate message content in place; drop any cached
                     # dumps on the output so the re-dump below sees the changes.
                     invalidate_message_dump_caches(span.output)
@@ -2358,6 +2387,13 @@ class Runnable(ABC, BaseModel):
                 span.status = RunStatus(code="cancelled", reason="interrupted", message="")
                 if collector is not None:
                     span.output = _collector_output_on_interrupt(collector)
+            if collector is not None and not handed_off:
+                # Closing a parent must also close a suspended nested handler;
+                # async-for does not propagate aclose() to its inner iterator.
+                try:
+                    await collector.aclose()
+                except Exception as close_err:
+                    _get_logger().warning("collector_close_failed_on_exit", error=str(close_err))
             raise
 
         except RunCancelled as cancelled:
@@ -2433,7 +2469,11 @@ class Runnable(ABC, BaseModel):
                 except Exception as close_err:
                     _get_logger().warning("collector_close_failed_on_timeout", error=str(close_err))
                 span.output = output
-                span._output_dump = await dump(output)
+            # A post-hook timeout also retains a plain handler's completed output.
+            # Hooks may have mutated a Message before cancellation interrupted
+            # the normal cache invalidation below post_hook.
+            invalidate_message_dump_caches(span.output)
+            span._output_dump = await dump(span.output)
 
         except (asyncio.CancelledError, InterruptError) as e:
             # Set status FIRST before any awaits. A second CancelledError can arrive

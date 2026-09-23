@@ -98,7 +98,7 @@ agent = Agent(
 - `system_prompt` — str, or a callable (sync/async) that returns str at runtime
 - `output_model` — Pydantic model for structured output
 - `max_iter` — max LLM→tool→LLM loops before forced stop
-- `timeout` — wall-clock seconds for one foreground call (any `Runnable`; for an Agent, the whole turn). On expiry the handler is cancelled and closed; the call ends `status.code="timeout"` with a `RunTimeout` error (`timbal.errors.RunTimeout`, a `TimeoutError`) and keeps partial output. A parent agent sees a child's timeout as an error tool result; a workflow step fails. Starts after validation + the approval gate; detached children use `background_timeout`. A handler's own `TimeoutError` stays `error`
+- `timeout` — wall-clock seconds for one foreground call (any `Runnable`; for an Agent, the whole turn). On expiry the handler is cancelled and closed; the call ends `status.code="timeout"` with a `RunTimeout` error (`timbal.errors.RunTimeout`, a `TimeoutError`) and keeps partial output. A parent agent sees a child's timeout as an error tool result; a workflow step fails. Pre-hook, handler, and post-hook share one deadline starting after validation + the approval gate; detached children use `background_timeout`. A handler's own `TimeoutError` stays `error`
 - `max_tokens` — required for Anthropic; sets max completion tokens
 - `memory_compaction` — strategy or list of strategies; triggers at `memory_compaction_ratio` (default 0.75) of context window
 - `tracing_provider` — `TracingProvider` subclass, `None` to disable, or `TRACING_UNSET` (default, auto-detects)

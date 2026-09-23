@@ -192,6 +192,7 @@ When the deadline passes, the in-flight LLM or tool call is cancelled and the tu
 
 - **Sub-agents and tools.** A child's own `timeout` fails only that call. The parent agent receives it as an error tool result and can recover. A `timeout` on the parent bounds the whole turn, children included.
 - **Workflow steps.** A step that times out fails like any other erroring step.
+- **Hooks.** `pre_hook`, the handler, and `post_hook` share one deadline. A slow hook times out the call; the budget is not restarted between stages. If the handler finished before a post-hook timed out, its output is retained.
 - **What doesn't count.** The clock starts after input validation and the approval gate, so time a run spends paused waiting for approval does not use up the budget. Children detached with `background_mode` use `background_timeout` instead (see [Background Tasks](/agents/background-tasks#timeouts)).
 - **Sync handlers.** A sync tool running inline on the event loop can't be interrupted. Make it async, or set `offload_blocking=True`.
 

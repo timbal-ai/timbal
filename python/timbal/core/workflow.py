@@ -339,6 +339,7 @@ class Workflow(Runnable):
 
             status.state = StepState.RUNNING
             iteration = 0
+            handler_events = None
             try:
                 # Do-while: always run once, then decide whether to continue.
                 # Each iteration is a full _stream → its own span. Downstream
@@ -349,7 +350,8 @@ class Workflow(Runnable):
                     # Iterate the raw stream: the TimbalCollector wrapper is only
                     # needed at the public API boundary (.collect(), pending-gate
                     # enrichment); a per-event collector layer here is pure overhead.
-                    async for event in step._stream(**resolved_input):
+                    handler_events = step._stream(**resolved_input)
+                    async for event in handler_events:
                         yield event
                         if (
                             isinstance(event, OutputEvent)
@@ -381,6 +383,7 @@ class Workflow(Runnable):
                             status.done.set()
                             return
 
+                    handler_events = None
                     iteration += 1
 
                     if not step.while_:
@@ -410,7 +413,11 @@ class Workflow(Runnable):
                 status.signal = e
                 return
             finally:
-                status.done.set()
+                try:
+                    if handler_events is not None:
+                        await handler_events.aclose()
+                finally:
+                    status.done.set()
 
         except BaseException as e:
             # Catch BaseException subclasses that bypass the inner `except Exception`
@@ -506,11 +513,13 @@ class Workflow(Runnable):
                 return current_task is not None and current_task.cancelling()
 
             for step in self._steps.values():
+                step_events = self._run_step(step, statuses, **kwargs)
                 try:
-                    async for event in self._run_step(step, statuses, **kwargs):
+                    async for event in step_events:
                         if _cancel_pending():
                             raise asyncio.CancelledError
                         yield event
+                    step_events = None
                 except (asyncio.CancelledError, GeneratorExit, InterruptError):
                     raise
                 except BaseException:  # noqa: BLE001
@@ -520,6 +529,11 @@ class Workflow(Runnable):
                     # surfaces the failure via failed_steps below. _run_step
                     # already marked the step FAILED and logged.
                     pass
+                finally:
+                    # A parent may close this workflow between yielded events.
+                    # Finish the nested step's cleanup in this task, not at GC.
+                    if step_events is not None:
+                        await step_events.aclose()
                 if _cancel_pending():
                     raise asyncio.CancelledError
                 _record_signal(statuses[step.name].signal)

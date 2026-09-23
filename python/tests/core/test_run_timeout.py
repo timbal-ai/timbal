@@ -8,6 +8,7 @@ import pytest
 from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
 from timbal.errors import RunTimeout
+from timbal.state import get_run_context
 from timbal.types.content import ToolResultContent, ToolUseContent
 from timbal.types.events import DeltaEvent, OutputEvent
 from timbal.types.events.delta import TextDelta
@@ -139,7 +140,8 @@ class TestAgentTimeout:
         leftover = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
         assert leftover == []
 
-    async def test_parallel_tools_are_closed_before_timeout_output_after_slow_consumer(self):
+    @pytest.mark.parametrize("wrapper", ["direct", "agent", "workflow"])
+    async def test_parallel_tools_are_closed_before_timeout_output_after_slow_consumer(self, wrapper):
         """Expiry between events must join child tasks before reporting timeout."""
         release = asyncio.Event()
         both_started = asyncio.Event()
@@ -163,7 +165,7 @@ class TestAgentTimeout:
                 closed.add(label)
 
         agent = Agent(
-            name="fanout",
+            name="fanout" if wrapper == "direct" else "worker",
             model=TestModel(
                 responses=[
                     Message(
@@ -178,15 +180,24 @@ class TestAgentTimeout:
                 ]
             ),
             tools=[streaming],
-            timeout=0.2,
+            timeout=0.2 if wrapper == "direct" else None,
         )
+        if wrapper != "direct":
+            child = Workflow(name="worker").step(agent, prompt="go") if wrapper == "workflow" else agent
+            child_input = {} if wrapper == "workflow" else {"prompt": "go"}
+            agent = Agent(
+                name="fanout",
+                model=TestModel(responses=[_tool_call("worker", child_input), "Done."]),
+                tools=[child],
+                timeout=0.2,
+            )
         stream = agent(prompt="go")
         delayed = False
         closed_at_timeout = None
         pending_at_timeout = None
         try:
             async for event in stream:
-                if not delayed and isinstance(event, DeltaEvent) and event.path == "fanout.streaming":
+                if not delayed and isinstance(event, DeltaEvent) and event.path.endswith(".streaming"):
                     await asyncio.wait_for(both_started.wait(), timeout=1.0)
                     delayed = True
                     # The deadline expires while the consumer holds an event,
@@ -208,7 +219,7 @@ class TestAgentTimeout:
             assert pending_at_timeout == []
             assert side_effects == []
         finally:
-            # Keep this intentionally failing regression from leaking tasks
+            # Keep a failed regression from leaking tasks
             # into later tests, even if an earlier assertion fails.
             for task in tool_tasks:
                 if not task.done():
@@ -318,6 +329,46 @@ class TestToolTimeout:
         assert result.error["type"] == "RunTimeout"
         assert not hook_completed
         assert handler_calls == (0 if hook_name == "pre_hook" else 1)
+
+    async def test_hooks_and_handler_share_one_deadline(self):
+        """Each stage fits alone, but their combined work exceeds the budget."""
+        post_started = False
+        post_completed = False
+
+        async def pre_hook() -> None:
+            await asyncio.sleep(0.06)
+
+        async def handler() -> str:
+            await asyncio.sleep(0.06)
+            return "Done."
+
+        async def post_hook() -> None:
+            nonlocal post_started, post_completed
+            post_started = True
+            await asyncio.sleep(0.14)
+            post_completed = True
+
+        tool = Tool(name="hooked", handler=handler, pre_hook=pre_hook, post_hook=post_hook, timeout=0.2)
+        result = await tool().collect()
+
+        assert result.status.code == "timeout"
+        assert post_started
+        assert not post_completed
+        assert result.output == "Done."
+        assert result._output_dump == "Done."
+
+    async def test_post_hook_timeout_keeps_mutated_message_dump_consistent(self):
+        async def post_hook() -> None:
+            output = get_run_context().current_span().output
+            output.content[0].text = "Updated by hook."
+            await asyncio.sleep(0.2)
+
+        agent = Agent(name="hooked", model=TestModel(responses=["Original."]), post_hook=post_hook, timeout=0.05)
+        result = await agent(prompt="go").collect()
+
+        assert result.status.code == "timeout"
+        assert result.output.collect_text() == "Updated by hook."
+        assert result._output_dump["content"][0]["text"] == "Updated by hook."
 
 
 class TestWorkflowStepTimeout:

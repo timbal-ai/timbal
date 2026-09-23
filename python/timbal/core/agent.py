@@ -1337,10 +1337,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_task = asyncio.current_task()
             tool_span_call_id: str | None = None
             tool_span_parent_call_id: str | None = None
+            tool_stream = tool._stream(**tool_call.input)
             try:
                 # Raw stream: the collector wrapper is only needed at the public
                 # API boundary; internal consumers forward events themselves.
-                async for event in tool._stream(**tool_call.input):
+                async for event in tool_stream:
                     if current_task is not None and current_task.cancelling():
                         raise asyncio.CancelledError
                     event, tool_span_call_id, tool_span_parent_call_id = self._prepare_multiplex_event(
@@ -1354,6 +1355,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 raise
             except Exception as e:
                 yield tool_call, self._build_dispatch_failed_event(tool_call, e)
+            finally:
+                await tool_stream.aclose()
             if current_task is not None and current_task.cancelling():
                 raise asyncio.CancelledError
             return
@@ -1684,6 +1687,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Token usage reported by the previous LLM call this turn — the live signal for
         # mid-loop compaction. None until the first LLM call completes.
         last_llm_usage: dict | None = None
+        # Own the active nested iterator explicitly: closing this handler while
+        # it is suspended at a yield must finish child cleanup before returning.
+        active_events: AsyncGenerator | None = None
         try:
             while True:
                 need_retry = False
@@ -1762,7 +1768,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 # Run the tool (raw stream — see _multiplex_tools;
                                 # same pending-cancel detection as the fast path)
                                 _cmd_task = asyncio.current_task()
-                                async for event in tool._stream(**tool_input):
+                                active_events = tool._stream(**tool_input)
+                                async for event in active_events:
                                     if _cmd_task is not None and _cmd_task.cancelling():
                                         raise asyncio.CancelledError
                                     await _process_tool_event(event, tool_use_id, append_to_messages=False)
@@ -1785,6 +1792,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                             )
                                         )
                                     yield event
+                                active_events = None
                                 return
 
                 # Resume path: if the trailing assistant message has tool_uses
@@ -1798,7 +1806,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     _llm_memory_saved = True  # nothing to salvage; we never called the LLM
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
-                    async for tool_call, event in self._multiplex_tools(tools, tool_calls):
+                    active_events = self._multiplex_tools(tools, tool_calls)
+                    async for tool_call, event in active_events:
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
                         for pending_event in pending_guardrail_events:
                             yield pending_event
@@ -1817,6 +1826,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             and first_pending is None
                         ):
                             first_pending = event
+                    active_events = None
                     if first_pending is not None:
                         raise PauseRequired(first_pending)
                     i += 1
@@ -1857,14 +1867,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 buffered_events: list[BaseEvent] = []
                 guardrail_retry = False
 
-                async for event in self._llm._stream(
+                active_events = self._llm._stream(
                     model=model,
                     messages=current_span.memory,
                     system_prompt=system_prompt,
                     tools=tools,
                     output_model=self.output_model,
                     **kwargs,
-                ):
+                )
+                async for event in active_events:
                     if isinstance(event, OutputEvent):
                         # If the LLM call fails, we want to propagate the error upwards
                         if event.error is not None:
@@ -2100,6 +2111,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             setattr(event.item, attr, stable)
                     yield event
 
+                # Output validation/guardrails can break the loop early too.
+                await active_events.aclose()
+                active_events = None
                 if guardrail_retry:
                     continue  # re-generate with the guardrail critique appended
 
@@ -2119,7 +2133,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     break
 
                 first_pending: OutputEvent | None = None
-                async for tool_call, event in self._multiplex_tools(tools, tool_calls):
+                active_events = self._multiplex_tools(tools, tool_calls)
+                async for tool_call, event in active_events:
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     for pending_event in pending_guardrail_events:
                         yield pending_event
@@ -2138,9 +2153,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         and first_pending is None
                     ):
                         first_pending = event
+                active_events = None
                 if first_pending is not None:
                     raise PauseRequired(first_pending)
                 i += 1
         finally:
-            if not _llm_memory_saved:
-                self._salvage_interrupted_llm_output(run_context, current_span)
+            try:
+                if active_events is not None:
+                    await active_events.aclose()
+            finally:
+                if not _llm_memory_saved:
+                    self._salvage_interrupted_llm_output(run_context, current_span)
