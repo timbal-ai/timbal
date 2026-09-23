@@ -32,6 +32,7 @@ from ..errors import (
     InterruptError,
     PauseRequired,
     RunCancelled,
+    RunTimeout,
     Suspend,
     WorkflowStepError,
 )
@@ -118,6 +119,58 @@ def _collector_output_on_interrupt(collector: Any) -> Any:
     if isinstance(raw, OutputEvent):
         return raw.output
     return raw
+
+
+async def _relay_until(agen: Any, deadline: float, path: str, timeout: float) -> AsyncGenerator[Any, None]:
+    """Relay ``agen`` until the loop clock passes ``deadline``, then close it and raise ``RunTimeout``.
+
+    The deadline wraps each ``__anext__`` only, never a ``yield``: a timeout held
+    across a yield would cancel whatever the consumer is awaiting instead.
+    Nested runnables absorb the cancellation and may still hand back their
+    ``interrupted`` events. Those are relayed, but ``agen`` is then closed
+    rather than resumed: leaving the timeout un-cancels the task, so the
+    handler would otherwise carry on as if nothing happened.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        if loop.time() >= deadline:
+            await agen.aclose()
+            raise RunTimeout(path, timeout)
+        cm = asyncio.timeout_at(deadline)
+        try:
+            async with cm:
+                item = await agen.__anext__()
+        except StopAsyncIteration:
+            if cm.expired():
+                raise RunTimeout(path, timeout) from None
+            return
+        except Exception as exc:
+            if cm.expired():
+                raise RunTimeout(path, timeout) from exc
+            raise
+        yield item
+        if cm.expired():
+            await agen.aclose()
+            raise RunTimeout(path, timeout)
+
+
+async def _await_until(awaitable: Any, deadline: float, path: str, timeout: float) -> Any:
+    """Await ``awaitable`` under ``deadline``; ``RunTimeout`` once it has passed.
+
+    Checked on exit too: a nested runnable absorbs the cancellation and returns
+    its interrupted output normally, which must not read as success.
+    """
+    cm = asyncio.timeout_at(deadline)
+    try:
+        async with cm:
+            result = await awaitable
+    except Exception as exc:
+        if cm.expired():
+            raise RunTimeout(path, timeout) from exc
+        raise
+    if cm.expired():
+        raise RunTimeout(path, timeout)
+    return result
 
 
 _Tool = None
@@ -319,6 +372,16 @@ class Runnable(ABC, BaseModel):
     (Guardrail instances, shorthand strings, callables). tool_args checks run after
     Pydantic validation and before the approval gate; an ``escalate`` verdict forces the
     approval gate."""
+
+    timeout: float | None = None
+    """Optional wall-clock seconds for one foreground call of this runnable (for an
+    Agent, the whole turn: every LLM call and tool). On expiry the handler is
+    cancelled and closed, and the call ends with status ``timeout`` and a
+    ``RunTimeout`` error, keeping any partial output. A parent agent sees that
+    as an error tool result; a workflow step fails. ``None`` / non-positive = no
+    deadline. Starts after input resolution and the approval gate, so a paused
+    run does not spend it. Detached children use ``background_timeout`` instead.
+    A sync handler running inline on the event loop cannot be interrupted."""
 
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
@@ -1797,7 +1860,7 @@ class Runnable(ABC, BaseModel):
                         output = final_output
 
                 if isinstance(output, OutputEvent):
-                    if output.status.code in {"cancelled", "error"}:
+                    if output.status.code in {"cancelled", "error", "timeout"}:
                         span.status = output.status
                         span.error = output.error
                     output = output.output
@@ -2144,6 +2207,7 @@ class Runnable(ABC, BaseModel):
                 set_parent_call_id(_new_parent_call_id)
                 set_call_id(_new_call_id)
 
+            run_timeout = self.timeout if self.timeout is not None and self.timeout > 0 else None
             # Background task
             if run_in_background:
                 emit_sink = span._emit_sink
@@ -2157,14 +2221,34 @@ class Runnable(ABC, BaseModel):
                 # do NOT Task-wrap this await: that extra schedule hop shows up
                 # in the framework-overhead benches (trivial `return a + b`).
                 try:
-                    output = await self._execute_simple(validated_input)
+                    if run_timeout is None:
+                        output = await self._execute_simple(validated_input)
+                    else:
+                        output = await _await_until(
+                            self._execute_simple(validated_input),
+                            asyncio.get_running_loop().time() + run_timeout,
+                            self._path,
+                            run_timeout,
+                        )
                 except Suspend as susp:
                     suspend_signal = susp
             else:
                 # Iterate over events from handler and yield them
                 handler_events = self._execute_handler(validated_input, run_context, span)
+                # A handoff below passes the raw generator on, so a detached
+                # continuation is not bound by this call's deadline.
+                handler_iter = (
+                    handler_events
+                    if run_timeout is None
+                    else _relay_until(
+                        handler_events,
+                        asyncio.get_running_loop().time() + run_timeout,
+                        self._path,
+                        run_timeout,
+                    )
+                )
                 try:
-                    async for event, final_output, handler_collector in handler_events:
+                    async for event, final_output, handler_collector in handler_iter:
                         # Update collector immediately so it's available for interruption handling
                         if handler_collector is not None:
                             collector = handler_collector
@@ -2237,7 +2321,7 @@ class Runnable(ABC, BaseModel):
                 # to avoid nesting an output event inside another output event
                 status_already_set = False
                 if isinstance(output, OutputEvent):
-                    if output.status.code in {"cancelled", "error"}:
+                    if output.status.code in {"cancelled", "error", "timeout"}:
                         span.status = output.status
                         if output.error is not None:
                             span.error = output.error
@@ -2327,6 +2411,29 @@ class Runnable(ABC, BaseModel):
                 "traceback": "".join(traceback.format_exception(type(original), original, original.__traceback__)),
                 "runnable_path": policy_err.runnable_path,
             }
+
+        except RunTimeout as timed_out:
+            # Status first, as in the cancellation branch below: a second
+            # cancellation can land at any await that follows.
+            span.status = RunStatus(code="timeout", reason="timeout", message=str(timed_out))
+            span.error = {"type": "RunTimeout", "message": str(timed_out), "timeout": timed_out.timeout}
+            _get_logger().warning(
+                "Timed out",
+                run_id=run_context.id,
+                call_id=span.call_id,
+                runnable_path=self._path,
+                timeout=timed_out.timeout,
+            )
+            if collector is not None:
+                output = _collector_output_on_interrupt(collector)
+                # The handler generator may still be suspended mid-stream; close it
+                # so its own cleanup (tool tasks, memory salvage) runs now.
+                try:
+                    await collector.aclose()
+                except Exception as close_err:
+                    _get_logger().warning("collector_close_failed_on_timeout", error=str(close_err))
+                span.output = output
+                span._output_dump = await dump(output)
 
         except (asyncio.CancelledError, InterruptError) as e:
             # Set status FIRST before any awaits. A second CancelledError can arrive

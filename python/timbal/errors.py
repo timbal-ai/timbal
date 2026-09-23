@@ -49,6 +49,19 @@ class MaxIterExceeded(TimbalError):
         self.max_iter = max_iter
 
 
+class RunTimeout(TimbalError, TimeoutError):
+    """Raised when a runnable exceeds its own ``timeout`` (wall-clock seconds).
+
+    Distinct from a ``TimeoutError`` raised *inside* a handler (an HTTP read,
+    an ``asyncio.wait_for``), which stays an ordinary error.
+    """
+
+    def __init__(self, path: str, timeout: float) -> None:
+        super().__init__(f"{path} timed out after {timeout:g}s")
+        self.path = path
+        self.timeout = timeout
+
+
 class EarlyExit(TimbalError):
     """Error raised when an early exit is requested.
 
