@@ -1116,8 +1116,9 @@ pub fn parsePullResponse(allocator: std.mem.Allocator, body: []const u8) !PullRe
         // Preserve absence even before /vars reconciles the type. An explicit empty
         // string is a value; an omitted value must never become a blank secret on push.
         const missing = value == null;
-        // Forward-compatible: honour an explicit platform flag if the API starts sending one.
-        const flagged_managed = (jsonBool(obj, "managed") orelse false) or
+        // Namespace ownership is independent of /vars membership: older clients
+        // may have stored runtime wiring as project vars. Keep it managed even then.
+        const managed = isPlatformManagedName(name) or (jsonBool(obj, "managed") orelse false) or
             (if (jsonStr(obj, "source")) |s| std.ascii.eqlIgnoreCase(s, "platform") else false);
 
         var sv = SyncVar{
@@ -1125,7 +1126,7 @@ pub fn parsePullResponse(allocator: std.mem.Allocator, body: []const u8) !PullRe
             .type = undefined,
             .value = undefined,
             .type_explicit = true,
-            .managed = flagged_managed,
+            .managed = managed,
             .value_missing = missing,
         };
         errdefer allocator.free(sv.name);
@@ -1401,6 +1402,7 @@ fn recoverSecrets(
             .type = undefined,
             .value = undefined,
             .type_explicit = true,
+            .managed = isPlatformManagedName(rv.name),
             .value_missing = decrypted == null,
         };
         errdefer allocator.free(sv.name);
@@ -3648,4 +3650,74 @@ test "new env files are private and failed atomic replacements remove temporary 
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "legacy runtime vars stay commented in root while member app ids stay active" {
+    const a = std.testing.allocator;
+    var pulled = try parsePullResponse(a,
+        \\{"rev":"main","vars":[
+        \\ {"name":"TIMBAL_PROJECT_ENV_ID","type":"plain","value":"42"},
+        \\ {"name":"TIMBAL_PROJECT_ENV_ORIGIN","type":"plain","value":"https://deployed.example"},
+        \\ {"name":"VITE_TIMBAL_ORG_ID","type":"plain","value":"1"},
+        \\ {"name":"VITE_AUTH_TIMBAL_IAM","type":"plain","value":"true"},
+        \\ {"name":"TIMBAL_APP_ID","type":"plain","value":"999"},
+        \\ {"name":"OPENAI_API_KEY","type":"secret","value":"local-key"}
+        \\]}
+    );
+    defer pulled.deinit(a);
+    for (pulled.vars.items[0..5]) |v| try std.testing.expect(v.managed);
+    try std.testing.expect(!pulled.vars.items[5].managed);
+
+    const content = try formatEnvFile(a, "main", pulled.vars.items, .{});
+    defer a.free(content);
+    var root_vars = try parseEnvFile(a, content);
+    defer freeSyncVars(a, &root_vars);
+    try std.testing.expectEqual(@as(usize, 1), root_vars.items.len);
+    try std.testing.expectEqualStrings("OPENAI_API_KEY", root_vars.items[0].name);
+    for (pulled.vars.items[0..5]) |v| {
+        const comment = try std.fmt.allocPrint(a, "\n# {s}=", .{v.name});
+        defer a.free(comment);
+        try std.testing.expect(std.mem.indexOf(u8, content, comment) != null);
+    }
+
+    // An explicit opt-in still activates runtime vars, but app IDs remain per member.
+    const opted_in = try formatEnvFile(a, "main", pulled.vars.items, .{ .managed_active = true });
+    defer a.free(opted_in);
+    var active_vars = try parseEnvFile(a, opted_in);
+    defer freeSyncVars(a, &active_vars);
+    try std.testing.expect(findSyncVar(active_vars.items, "TIMBAL_PROJECT_ENV_ID") != null);
+    try std.testing.expect(findSyncVar(active_vars.items, "TIMBAL_APP_ID") == null);
+
+    var member = try upsertEnvLine(a, "LOCAL_SECRET=keep\nTIMBAL_APP_ID=1\n", "TIMBAL_APP_ID", "2335", null);
+    defer member.deinit(a);
+    var member_vars = try parseEnvFile(a, member.content);
+    defer freeSyncVars(a, &member_vars);
+    try std.testing.expectEqualStrings("2335", member_vars.items[findSyncVar(member_vars.items, "TIMBAL_APP_ID").?].value);
+    try std.testing.expectEqualStrings("keep", member_vars.items[findSyncVar(member_vars.items, "LOCAL_SECRET").?].value);
+}
+
+test "individually recovered runtime secrets retain platform classification" {
+    const a = std.testing.allocator;
+    var pulled = try parsePullResponse(a, "{\"rev\":\"main\",\"vars\":[]}");
+    defer pulled.deinit(a);
+    const remote = [_]RemoteVar{
+        .{ .id = "legacy", .name = "TIMBAL_PROJECT_ENV_ID", .type = "secret", .env_ids = &.{"7"} },
+        .{ .id = "app", .name = "TIMBAL_APP_ID", .type = "secret", .env_ids = &.{"7"} },
+    };
+    const Fixture = struct {
+        fn fetch(_: @This(), allocator: std.mem.Allocator, id: []const u8) !?[]u8 {
+            try std.testing.expectEqualStrings("legacy", id);
+            return try allocator.dupe(u8, "42");
+        }
+    };
+    const result = try recoverSecrets(a, &pulled.vars, &remote, "7", Fixture{});
+    try std.testing.expectEqual(@as(usize, 1), result.recovered);
+    try std.testing.expectEqual(@as(usize, 1), pulled.vars.items.len);
+    try std.testing.expect(pulled.vars.items[0].managed);
+    const content = try formatEnvFile(a, "main", pulled.vars.items, .{});
+    defer a.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\n# TIMBAL_PROJECT_ENV_ID=42\n") != null);
+    var root_vars = try parseEnvFile(a, content);
+    defer freeSyncVars(a, &root_vars);
+    try std.testing.expectEqual(@as(usize, 0), root_vars.items.len);
 }
