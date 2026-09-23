@@ -444,3 +444,193 @@ class TestWorkflowStepTimeout:
 
         assert result.status.code == "error"
         assert "timed out after 0.1s" in str(result.error)
+
+
+class TestNestedWorkflowTimeoutRegressions:
+    @pytest.mark.parametrize("child_kind", ["tool", "agent"])
+    @pytest.mark.parametrize("execution", ["standalone", "linear", "parallel"])
+    async def test_agent_can_recover_from_child_timeout_inside_workflow(self, child_kind, execution):
+        """A descendant error must not preempt the enclosing agent's recovery."""
+        seen: list[Message] = []
+        if child_kind == "tool":
+            child = Tool(name="helper", handler=_slow, timeout=0.1)
+            child_input = {"seconds": 5.0}
+        else:
+            child = _stuck_agent(name="helper", timeout=0.1)
+            child_input = {"prompt": "go"}
+
+        def model(messages: list[Message]) -> Message | str:
+            seen[:] = messages
+            if len(messages) == 1:
+                return _tool_call("helper", child_input)
+            return "Recovered without the child."
+
+        worker = Agent(name="worker", model=TestModel(handler=model), tools=[child])
+
+        async def independent() -> str:
+            return "independent completed"
+
+        if execution == "standalone":
+            root = worker
+            inputs = {"prompt": "go"}
+            worker_path = "worker"
+        else:
+            root = Workflow(name="pipeline").step(worker, prompt="go")
+            if execution == "parallel":
+                root.step(independent)
+            inputs = {}
+            worker_path = "pipeline.worker"
+
+        outputs: list[OutputEvent] = []
+
+        async def consume():
+            stream = root(**inputs)
+            try:
+                async for event in stream:
+                    if isinstance(event, OutputEvent):
+                        outputs.append(event)
+            finally:
+                await stream.aclose()
+
+        await asyncio.wait_for(consume(), timeout=2.0)
+
+        child_output = next(event for event in outputs if event.path == f"{worker_path}.helper")
+        assert child_output.status.code == "timeout"
+        assert child_output.error["type"] == "RunTimeout"
+        assert outputs[-1].status.code == "success", (
+            "the workflow consumed a descendant error before the agent could recover: "
+            f"{[(event.path, event.status.code) for event in outputs]}"
+        )
+        worker_output = next(event for event in outputs if event.path == worker_path)
+        assert worker_output.output.collect_text() == "Recovered without the child."
+        tool_results = [
+            content for message in seen for content in message.content if isinstance(content, ToolResultContent)
+        ]
+        assert len(tool_results) == 1
+        assert "timed out after 0.1s" in str(tool_results[0].content)
+
+    @pytest.mark.parametrize("step_kind", ["tool", "agent"])
+    @pytest.mark.parametrize("execution", ["linear", "parallel"])
+    async def test_timeout_prevents_dependent_and_transitive_steps(self, step_kind, execution):
+        """Dependents must not produce side effects after their prerequisite fails."""
+        effects: list[str] = []
+
+        async def dependent() -> str:
+            effects.append("dependent")
+            return "should not run"
+
+        async def transitive() -> str:
+            effects.append("transitive")
+            return "should not run either"
+
+        async def independent() -> str:
+            return "independent completed"
+
+        if step_kind == "tool":
+            step = Tool(name="slow", handler=_slow, timeout=0.1)
+            inputs = {"seconds": 5.0}
+        else:
+            step = _stuck_agent(name="slow", timeout=0.1)
+            inputs = {"prompt": "go"}
+        workflow = (
+            Workflow(name="pipeline")
+            .step(step, **inputs)
+            .step(dependent, depends_on=["slow"])
+            .step(transitive, depends_on=["dependent"])
+        )
+        if execution == "parallel":
+            workflow.step(independent)
+
+        result = await asyncio.wait_for(workflow().collect(), timeout=2.0)
+
+        assert result.status.code == "error"
+        assert result.error["type"] == "RunTimeout"
+        assert effects == [], f"steps ran after their prerequisite timed out: {effects}"
+
+    @pytest.mark.parametrize("wrapper", ["direct", "agent", "workflow"])
+    @pytest.mark.parametrize("expiry", ["awaiting_handler", "slow_consumer"])
+    @pytest.mark.parametrize("cancellation", ["caught", "nested_tool"])
+    async def test_parallel_workflow_stops_handlers_after_swallowed_cancellation(self, wrapper, expiry, cancellation):
+        """Closing a timed-out workflow must not resume cancelled step handlers."""
+        started: set[str] = set()
+        cancelled: set[str] = set()
+        closed: set[str] = set()
+        effects: list[str] = []
+        tasks: set[asyncio.Task] = set()
+        both_started = asyncio.Event()
+        never_release = asyncio.Event()
+        inner = Tool(name="inner", handler=_slow)
+
+        async def streaming(label: str) -> AsyncGenerator[TextDelta, None]:
+            task = asyncio.current_task()
+            assert task is not None
+            tasks.add(task)
+            started.add(label)
+            if len(started) == 2:
+                both_started.set()
+            try:
+                yield TextDelta(id=label, text_delta="ready")
+                if cancellation == "nested_tool":
+                    result = await inner(seconds=5.0).collect()
+                    assert result.status.code == "cancelled"
+                else:
+                    try:
+                        await never_release.wait()
+                    except asyncio.CancelledError:
+                        pass
+                cancelled.add(label)
+                yield TextDelta(id=label, text_delta="interrupted")
+                effects.append(label)
+            finally:
+                await asyncio.sleep(0)
+                closed.add(label)
+
+        workflow = (
+            Workflow(name="root" if wrapper == "direct" else "fanout", timeout=0.1 if wrapper == "direct" else None)
+            .step(Tool(name="a", handler=streaming), label="a")
+            .step(Tool(name="b", handler=streaming), label="b")
+        )
+        inputs = {}
+        if wrapper == "agent":
+            root = Agent(
+                name="root",
+                model=TestModel(responses=[_tool_call("fanout", {}), "Done."]),
+                tools=[workflow],
+                timeout=0.1,
+            )
+            inputs = {"prompt": "go"}
+        elif wrapper == "workflow":
+            root = Workflow(name="root", timeout=0.1).step(workflow)
+        else:
+            root = workflow
+        stream = root(**inputs)
+        delayed = False
+        timeout_snapshot = None
+
+        async def consume():
+            nonlocal delayed, timeout_snapshot
+            async for event in stream:
+                if expiry == "slow_consumer" and not delayed and isinstance(event, DeltaEvent):
+                    await asyncio.wait_for(both_started.wait(), timeout=1.0)
+                    delayed = True
+                    await asyncio.sleep(0.15)
+                if isinstance(event, OutputEvent) and event.path == "root":
+                    assert event.status.code == "timeout"
+                    timeout_snapshot = (set(closed), [task for task in tasks if not task.done()], list(effects))
+
+        try:
+            await asyncio.wait_for(consume(), timeout=2.0)
+            assert started == cancelled == {"a", "b"}, "both children must reach the cancellation path"
+            assert delayed == (expiry == "slow_consumer")
+            assert timeout_snapshot is not None
+            closed_at_timeout, pending_at_timeout, effects_at_timeout = timeout_snapshot
+            assert closed_at_timeout == {"a", "b"}, "timeout was reported before asynchronous child cleanup"
+            assert pending_at_timeout == [], "child tasks outlived the root timeout event"
+            assert effects_at_timeout == effects == [], f"cancelled workflow handlers resumed after yielding: {effects}"
+        finally:
+            # Leave no tasks or suspended root generators behind on failure.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await stream.aclose()
