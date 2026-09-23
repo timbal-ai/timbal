@@ -7,6 +7,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from timbal import Agent
@@ -2145,7 +2147,7 @@ class TestHoldExpiryTiming:
         # Must have waited past the bare timeout into the grace window.
         assert elapsed > 0.5, f"hold expired after only {elapsed:.2f}s despite fresh partial"
 
-    async def test_pre_commit_speech_does_not_stretch_via_vad_lookback(self) -> None:
+    async def test_pre_commit_speech_does_not_stretch_via_vad_lookback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Live bug: Silero's 2s lookback still contains the held utterance, so
         ``not vad_contradicts`` was always true after commit — any late STT
         refinement floored a 0.35s text-complete HOLD at the 2s grace window.
@@ -2163,15 +2165,47 @@ class TestHoldExpiryTiming:
             async def close(self) -> None:
                 return None
 
-        elapsed, _ = await self._run_hold_scenario(
-            grace_secs=2.0,
-            timeout_secs=0.2,
-            partial_after_commit_delay=0.05,
-            endpointer=_StaleSpeechEP(),
+        session = VoiceSession(
+            agent=Agent(name="t", model=TestModel(responses=["ok"]), tools=[]),
+            stt=DelayedMockSTT(),
+            tts=MockTTS(),
+            turn_detector=_AlwaysHoldOnceDetector(0.2),
         )
-        assert elapsed < 0.8, (
-            f"hold expiry took {elapsed:.2f}s — pre-commit VAD speech stretched the grace"
+        _arm_vad(session, _StaleSpeechEP())
+        session._hold_partial_grace_secs = 2.0
+        session._commit_event_at = 100.0
+        session._last_partial_at = 100.0
+        now = 100.0
+        sleeps: list[float] = []
+
+        async def advance_clock(delay: float) -> None:
+            nonlocal now
+            sleeps.append(delay)
+            # A late refinement arrives after arming, but the mic is quiet.
+            session._last_partial_at = 100.05
+            now += delay
+            await asyncio.sleep(0)
+
+        # Measure the timer's decisions, not STT delivery, logging, or agent
+        # startup. Patch this module's references without changing the real
+        # event loop's clock/sleep (used by wait_for and task scheduling).
+        monkeypatch.setattr("timbal.voice.session.time", SimpleNamespace(monotonic=lambda: now))
+        monkeypatch.setattr(
+            "timbal.voice.session.asyncio",
+            SimpleNamespace(**(vars(asyncio) | {"sleep": advance_clock})),
         )
+        interrupt = AsyncMock()
+        begin_turn = AsyncMock()
+        monkeypatch.setattr(session, "interrupt", interrupt)
+        monkeypatch.setattr(session, "_begin_user_turn", begin_turn)
+
+        await session._arm_hold("Thank you.", 0.2)
+        await asyncio.wait_for(session._hold_task, timeout=2.0)
+
+        assert sleeps == [0.2], "pre-commit VAD speech stretched the grace"
+        interrupt.assert_awaited_once_with()
+        begin_turn.assert_awaited_once_with("Thank you.", replace_user_entry=False)
+        assert session._hold_task is None
 
     async def test_live_mic_extends_hold_without_any_partial(self) -> None:
         """Measured on ElevenLabs at a 0.3s VAD threshold: an interior pause
