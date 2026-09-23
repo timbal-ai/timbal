@@ -46,8 +46,8 @@ def prepare_messages_request(
 
     # Server-side automatic prompt caching (anthropic SDK >= 0.83): the API
     # places a breakpoint on the last cacheable block and advances it as the
-    # conversation grows. Cache reads cost 0.1x input; prefixes below the
-    # model's minimum (1024-4096 tokens) are simply not cached, so this is
+    # conversation grows. Cache-read rates and minimum cacheable prefix lengths
+    # vary by model; short prefixes are simply not cached, so this is
     # safe to default on. Opt out with model_params={"cache_control": None}.
     anthropic_kwargs["cache_control"] = {"type": "ephemeral"}
 
@@ -68,6 +68,7 @@ def prepare_messages_request(
     async def _create_stream():
         if output_model is not None:
             anthropic_kwargs["output_config"] = {
+                **anthropic_kwargs.get("output_config", {}),
                 "format": {
                     "type": "json_schema",
                     "schema": transform_schema(output_model),

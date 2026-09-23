@@ -959,8 +959,9 @@ class TestLlmRouterAnthropicStructuredOutput:
 
         assert stable_captured, "Expected client.messages.create to be called"
 
+    @pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-5-5"])
     @pytest.mark.asyncio
-    async def test_output_model_sets_output_config(self):
+    async def test_output_model_sets_output_config(self, model):
         from timbal.core.llm import _llm_router
 
         _make_run_context()
@@ -982,14 +983,19 @@ class TestLlmRouterAnthropicStructuredOutput:
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
                 try:
                     async for _ in _llm_router(
-                        model="anthropic/claude-sonnet-4-6",
+                        model=model,
                         max_tokens=100,
                         output_model=MyOutput,
+                        provider_params={"output_config": {"effort": "low"}},
                     ):
                         pass
                 except (RuntimeError, StopAsyncIteration):
                     pass
 
+        assert captured_kwargs["model"] == model.split("/", 1)[1]
+        assert captured_kwargs["output_config"]["effort"] == "low"
+        assert "thinking" not in captured_kwargs
+        assert "tool_choice" not in captured_kwargs
         assert "betas" not in captured_kwargs
         assert captured_kwargs.get("output_config", {}).get("format", {}).get("type") == "json_schema"
 

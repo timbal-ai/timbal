@@ -9,6 +9,8 @@ from timbal.state import set_run_context
 from timbal.state.context import RunContext
 
 NEW_MODEL_IDS = [
+    "anthropic/claude-opus-5-5",
+    "xai/grok-4.7",
     "xai/grok-4.6",
     "xai/grok-4.5",
     "xai/grok-4.3",
@@ -91,6 +93,7 @@ class TestXaiRouterDispatch:
     @pytest.mark.parametrize(
         "model_id,api_name",
         [
+            ("xai/grok-4.7", "grok-4.7"),
             ("xai/grok-4.6", "grok-4.6"),
             ("xai/grok-4.5", "grok-4.5"),
             ("xai/grok-4.3", "grok-4.3"),

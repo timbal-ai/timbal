@@ -137,6 +137,7 @@ def has_cache_write_pricing(model_id: str) -> bool:
 Model = Literal[
     "anthropic/claude-fable-5-1",
     "anthropic/claude-fable-5",
+    "anthropic/claude-opus-5-5",
     "anthropic/claude-opus-5",
     "anthropic/claude-opus-4-8",
     "anthropic/claude-sonnet-5",
@@ -212,6 +213,7 @@ Model = Literal[
     "google/gemini-2.5-flash-lite",
     "google/gemini-2.5-flash-image",
     "google/gemini-2.5-flash-preview-tts",
+    "xai/grok-4.7",
     "xai/grok-4.6",
     "xai/grok-4.5",
     "xai/grok-4.3",

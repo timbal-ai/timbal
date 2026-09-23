@@ -991,4 +991,6 @@ class ResponseCollector(BaseCollector):
                                model=getattr(self, "model", None))
                 get_run_context().update_usage("unrecovered_tool_call_leaks", 1)
 
+        if any(isinstance(c, ThinkingContent) and c.encrypted_content for c in content):
+            metadata = {**(metadata or {}), "reasoning_model": getattr(self, "model", "")}
         return Message(role="assistant", content=content, stop_reason=self._stop_reason, metadata=metadata)
