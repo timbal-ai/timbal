@@ -20,6 +20,12 @@ PROMPT = "Reply with exactly one word: ok"
 
 LIVE_MODELS = [
     pytest.param(
+        "anthropic/claude-opus-5-5", "ANTHROPIC_API_KEY", None, id="anthropic-claude-opus-5-5",
+    ),
+    pytest.param(
+        "xai/grok-4.7", "XAI_API_KEY", None, id="xai-grok-4.7",
+    ),
+    pytest.param(
         "openai/gpt-6-astra",
         "OPENAI_API_KEY",
         None,

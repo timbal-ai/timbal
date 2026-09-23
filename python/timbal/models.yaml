@@ -28,7 +28,7 @@ models:
   display_name: Claude Fable 5.1
   description: Anthropic's most capable generally available model — successor to Fable 5 for long-running agentic coding,
     knowledge work, and research, with fewer false-positive safety refusals in multi-turn agent loops.
-  notes: Adaptive thinking is always on. Cache reads are $0.25 per 1M tokens (0.025x input, vs 0.1x on other models).
+  notes: Adaptive thinking is always on. Cache reads are $0.25 per 1M tokens (0.025x input).
     `tool_choice` any/tool return 400 — use strict tools or structured outputs instead. Requires 30-day data retention;
     not available under ZDR.
   input_price: 10.0
@@ -46,11 +46,27 @@ models:
   output_price: 50.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
+- id: anthropic/claude-opus-5-5
+  provider: anthropic
+  display_name: Claude Opus 5.5
+  description: Anthropic's latest Opus for long-running agentic coding and knowledge work, with lower token and cache-read
+    prices than Opus 5.
+  notes: 'Adaptive thinking is always on; effort defaults to medium. Disabled/budgeted thinking and forced tool_choice
+    any/tool are rejected. 128K max output. Cache writes cost $5/$8 per 1M tokens (5m/1h); cache reads cost $0.20.
+    No long-context surcharge. Fast mode (Claude API research preview) is $8/$40 per 1M input/output tokens;
+    cache rates also double. Batch input/output is $2/$10. Prices are global; US-only inference adds 10%.'
+  input_price: 4.0
+  output_price: 20.0
+  cached_input_price: 0.2
+  cache_write_price: 5.0
+  service_tiers:
+    fast: 2.0
+  context_window: 1000000
+  capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-5
   provider: anthropic
   display_name: Claude Opus 5
-  description: Anthropic's latest Opus — near-frontier intelligence at half the price of Fable 5, with step-change gains in
-    deep reasoning, agentic coding, and long-horizon tasks.
+  description: Previous Opus generation for deep reasoning, agentic coding, and long-horizon tasks. Superseded by Opus 5.5.
   notes: 'Thinking is on by default; effort defaults to high and `thinking.type=disabled` is rejected at xhigh/max effort.
     Fast mode (~2.5x speed, `speed: "fast"` + `fast-mode-2026-02-01` beta) is $10/$50 per 1M tokens on the Claude API only;
     cache multipliers stack on top. Reported as `usage.speed` and metered with `_fast` units.'
@@ -793,6 +809,25 @@ models:
   output_price: 10.0
   context_window: 1000000
   capabilities: [audio]
+- id: xai/grok-4.7
+  provider: xai
+  display_name: Grok 4.7
+  description: xAI's latest flagship for coding, agentic tasks, and knowledge work with configurable reasoning effort.
+  notes: 'Reasoning efforts: low, medium, high (default), xhigh. No separate text output limit. At >=200K prompt tokens,
+    the full request costs $4/$12 per 1M input/output tokens; cached input is $1 (otherwise $0.50).
+    Prices are for the global API; the US regional endpoint adds 10%. Batch API is not supported.
+    Grok 4.7 Fast is not available on the public API.'
+  input_price: 2.0
+  output_price: 6.0
+  cached_input_price: 0.5
+  long_context:
+    threshold: 200000
+    inclusive: true
+    input_price: 4.0
+    output_price: 12.0
+    cached_input_price: 1.0
+  context_window: 500000
+  capabilities: [vision, tools, reasoning]
 - id: xai/grok-4.6
   provider: xai
   display_name: Grok 4.6

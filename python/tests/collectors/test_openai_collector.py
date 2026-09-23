@@ -977,6 +977,15 @@ class TestChatCompletionCollectorPricingTiers:
         assert usage["openai/gpt-6-astra:input_cache_write_tokens"] == 20
         assert usage["openai/gpt-6-astra:input_text_tokens"] == 0
 
+    @pytest.mark.parametrize("prompt_tokens,suffix", [(199_999, ""), (200_000, "_long_context"), (200_001, "_long_context")])
+    def test_grok_47_cache_hits_count_toward_long_context(self, prompt_tokens, suffix):
+        usage = self._run("xai/grok-4.7", prompt_tokens=prompt_tokens, completion_tokens=10, cached=50_000)
+        assert usage == {
+            f"xai/grok-4.7:input_text_tokens{suffix}": prompt_tokens - 50_000,
+            f"xai/grok-4.7:input_cached_tokens{suffix}": 50_000,
+            f"xai/grok-4.7:output_text_tokens{suffix}": 10,
+        }
+
     def test_short_context_uses_base_units(self):
         usage = self._run("openai/gpt-6-astra", prompt_tokens=200_000, completion_tokens=10)
         assert usage["openai/gpt-6-astra:input_text_tokens"] == 200_000
@@ -1610,6 +1619,15 @@ class TestResponseCollectorHandleCompleted:
 
 class TestResponseCollectorPricingTiers:
     """Cache-write accounting and long-context repricing on the Responses path."""
+
+    @pytest.mark.parametrize("prompt_tokens,suffix", [(199_999, ""), (200_000, "_long_context"), (200_001, "_long_context")])
+    def test_grok_47_cache_hits_count_toward_long_context(self, prompt_tokens, suffix):
+        usage = self._run("xai/grok-4.7", input_tokens=prompt_tokens, output_tokens=10, cached=50_000)
+        assert usage == {
+            f"xai/grok-4.7:input_text_tokens{suffix}": prompt_tokens - 50_000,
+            f"xai/grok-4.7:input_cached_tokens{suffix}": 50_000,
+            f"xai/grok-4.7:output_text_tokens{suffix}": 10,
+        }
 
     def _run(
         self,

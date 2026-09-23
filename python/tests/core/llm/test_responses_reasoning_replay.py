@@ -76,7 +76,7 @@ class TestSupportsEncryptedReasoning:
         assert supports_encrypted_reasoning(model)
 
     @pytest.mark.parametrize(
-        "model", ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-nano", "grok-4.6", "grok-3", "", "   "]
+        "model", ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-nano", "grok-4.7", "grok-4.6", "grok-3", "", "   "]
     )
     def test_non_reasoning_models_and_xai(self, model):
         assert not supports_encrypted_reasoning(model)
@@ -357,7 +357,7 @@ class _ScriptedResponses:
         return gen()
 
 
-async def _run_agent(scripted: _ScriptedResponses, *, prompt: str = "look it up"):
+async def _run_agent(scripted: _ScriptedResponses, *, prompt: str = "look it up", model="openai/gpt-5.6-luna"):
     """Run a one-tool Agent against the scripted client; return (OutputEvent, tool calls made).
 
     Everything — including `collect()` — runs inside the patches: the collector is lazy,
@@ -372,7 +372,7 @@ async def _run_agent(scripted: _ScriptedResponses, *, prompt: str = "look it up"
         calls.append({"q": q})
         return f"result for {q}"
 
-    agent = Agent(name="agent", model="openai/gpt-5.6-luna", tools=[search])
+    agent = Agent(name="agent", model=model, tools=[search])
     client = MagicMock()
     client.responses.create = scripted.create
     with patch("timbal.core.llm.router._resolve_client", return_value=(client, None)):
@@ -600,7 +600,7 @@ class TestCrossProviderReplayScrub:
         assert kw["input"][-1]["phase"] == "final_answer"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model", ["gpt-4.1", "grok-4"])
+    @pytest.mark.parametrize("model", ["gpt-4.1", "grok-4", "grok-4.7"])
     async def test_other_target_gets_neither(self, model):
         """FallbackModel to xAI, or a gpt-4.1 follow-up on a gpt-5 history: the function_call
         stays, the encrypted reasoning item and the phase do not."""
@@ -609,3 +609,43 @@ class TestCrossProviderReplayScrub:
         assert kinds == ["user", "function_call", "assistant"], (model, kinds)
         assert "phase" not in kw["input"][-1]
         assert kw["input"][-1]["content"] == [{"type": "output_text", "text": "Done."}]
+
+
+class TestGrok47ReasoningReplay:
+    @pytest.mark.asyncio
+    async def test_tool_loop_preserves_grok_reasoning_without_include(self):
+        turns = [
+            _tool_call_turn("rs_1", "grok-enc", "call_1", "fc_1", "search", '{"q": "x"}'),
+            _text_turn("rs_2", "grok-enc-2", "Done: x"),
+        ]
+        for events in turns:
+            for index, event in enumerate(events):
+                if isinstance(event, (ResponseCreatedEvent, ResponseCompletedEvent)):
+                    events[index] = event.model_copy(update={
+                        "response": event.response.model_copy(update={"model": "grok-4.7"}),
+                    })
+        scripted = _ScriptedResponses(turns)
+        result, calls = await _run_agent(scripted, model="xai/grok-4.7")
+        assert calls == [{"q": "x"}]
+        assert result.output.metadata["reasoning_model"] == "grok-4.7"
+        second = scripted.requests[1]
+        assert REASONING_ENCRYPTED_CONTENT_INCLUDE not in second["include"]
+        assert [i.get("type") or i.get("role") for i in second["input"]] == [
+            "user", "reasoning", "function_call", "function_call_output",
+        ]
+        assert second["input"][1]["encrypted_content"] == "grok-enc"
+        assert "reasoning_model" not in second["input"][1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("target", ["gpt-5.6-luna", "grok-4.6"])
+    async def test_grok_ciphertext_is_dropped_on_fallback(self, target):
+        history = [Message(
+            role="assistant",
+            content=[
+                ThinkingContent(thinking="", id="rs_grok", encrypted_content="grok-enc"),
+                ToolUseContent(id="call_1", name="search", input={"q": "x"}),
+            ],
+            metadata={"reasoning_model": "grok-4.7"},
+        )]
+        kwargs = await _kwargs_sent(target, messages=history)
+        assert [item["type"] for item in kwargs["input"]] == ["function_call"]

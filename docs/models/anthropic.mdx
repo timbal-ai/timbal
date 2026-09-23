@@ -1,6 +1,6 @@
 ---
 title: "Anthropic"
-description: "Claude Fable 5.1, Opus 5, Sonnet 5, and Haiku models with specs, pricing, and capabilities"
+description: "Claude Fable 5.1, Opus 5.5, Sonnet 5, and Haiku models with specs, pricing, and capabilities"
 ---
 
 <Note>Source: [Anthropic model docs](https://platform.claude.com/docs/en/about-claude/models/overview) · [Release notes](https://platform.claude.com/docs/en/release-notes/overview) · [Pricing](https://platform.claude.com/docs/en/about-claude/pricing)</Note>
@@ -12,14 +12,14 @@ Every 1M-context Claude model bills the full window at standard rates — there 
 | Anthropic `usage` field | Usage key on `OutputEvent.usage` | Rate |
 | --- | --- | --- |
 | `input_tokens` | `input_tokens` | 1x |
-| `cache_read_input_tokens` | `cache_read_input_tokens` | 0.1x (0.025x on Fable 5.1) |
+| `cache_read_input_tokens` | `cache_read_input_tokens` | 0.1x (0.05x on Opus 5.5; 0.025x on Fable 5.1) |
 | `cache_creation.ephemeral_5m_input_tokens` | `ephemeral_5m_input_tokens` | 1.25x |
 | `cache_creation.ephemeral_1h_input_tokens` | `ephemeral_1h_input_tokens` | 2x |
 | `cache_creation_input_tokens` (only when no per-TTL breakdown is reported) | `cache_creation_input_tokens` | 1.25x |
 | `output_tokens` | `output_tokens` | output rate |
 | `server_tool_use.*_requests` | e.g. `web_search_requests` | per call |
 
-`output_tokens_details.thinking_tokens` is a subset of `output_tokens` and is **not** emitted as a separate unit (it would be billed twice). On Opus 5 / Opus 4.8, `usage.speed == "fast"` ([fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), 2x) suffixes every token unit with `_fast`, e.g. `anthropic/claude-opus-5:output_tokens_fast`; pass `model_params={"extra_body": {"speed": "fast"}, "extra_headers": {"anthropic-beta": "fast-mode-2026-02-01"}}` to opt in. If a stream is interrupted before the final `message_delta`, the prompt-side units are still recorded from `message_start` (Anthropic charges them regardless); output is left unbilled.
+`output_tokens_details.thinking_tokens` is a subset of `output_tokens` and is **not** emitted as a separate unit (it would be billed twice). On Opus 5.5 / Opus 5 / Opus 4.8, `usage.speed == "fast"` ([fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), 2x) suffixes every token unit with `_fast`, e.g. `anthropic/claude-opus-5-5:output_tokens_fast`; pass `model_params={"extra_body": {"speed": "fast"}, "extra_headers": {"anthropic-beta": "fast-mode-2026-02-01"}}` to opt in. If a stream is interrupted before the final `message_delta`, the prompt-side units are still recorded from `message_start` (Anthropic charges them regardless); output is left unbilled.
 
 ## Latest
 
@@ -41,12 +41,30 @@ Every 1M-context Claude model bills the full window at standard rates — there 
   - <Icon icon="triangle-exclamation" size={14} /> `tool_choice` `any` / `tool` not supported (400); requires 30-day data retention (no ZDR)
   </Card>
 
+  <Card title="claude-opus-5-5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-opus-5-5`
+
+  Latest Opus for long-running agentic coding and knowledge work. Lower input, output, and cache-read prices than Opus 5.
+
+  - &#36;4 / &#36;20 per 1M tokens (input / output); cache reads &#36;0.20; 5m / 1h cache writes &#36;5 / &#36;8
+  - Fast mode &#36;8 / &#36;40; cache reads &#36;0.40; 5m / 1h writes &#36;10 / &#36;16 (Claude API research preview, requires access)
+  - Provider Batch API input / output &#36;2 / &#36;10; global prices, US-only inference adds 10%
+  - <Icon icon="window-maximize" size={14} /> 1M context at standard rates
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output (300K with the provider's Batch API beta)
+  - <Icon icon="keyboard" size={14} /> Text, Image input; Text output
+  - <Icon icon="brain" size={14} /> Adaptive thinking always on; default effort `medium`
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2026
+  - <Icon icon="triangle-exclamation" size={14} /> Disabled/budgeted thinking and forced `tool_choice` (`any` / `tool`) return 400
+  </Card>
+
   <Card title="claude-opus-5">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
   `anthropic/claude-opus-5`
 
-  Latest Opus and the recommended default for complex agentic coding and enterprise work — near-Fable-5 intelligence at half the price, with large gains in deep reasoning, long-horizon tool loops, and test-time compute scaling.
+  Previous Opus generation for complex agentic coding and enterprise work. Superseded by Opus 5.5, which has lower token and cache-read prices.
 
   - &#36;5 / &#36;25 per 1M tokens (input / output; Fast mode &#36;10 / &#36;50 at ~2.5x speed)
   - <Icon icon="window-maximize" size={14} /> 1M context (default and maximum)
@@ -220,3 +238,22 @@ Every 1M-context Claude model bills the full window at standard rates — there 
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
   </Card>
 </CardGroup>
+
+## Using Opus 5.5
+
+Set `ANTHROPIC_API_KEY` and select the full model ID:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="coder",
+    model="anthropic/claude-opus-5-5",
+    max_tokens=16000,
+    model_params={"output_config": {"effort": "medium"}},
+)
+```
+
+Use effort to control thinking depth; omit `thinking` or use adaptive thinking. For tool use, choose `auto` with strict tools or structured output instead of forcing a tool. Progress text between tool calls now arrives in thinking blocks and is empty by default; `thinking.display="summarized"` returns text, while `"updates"` requires the `thinking-display-updates-2026-08-18` beta header. Preserve thinking blocks unchanged within the conversation. The older `computer_20251124` tool is no longer accepted on the Claude API; use `computer_toolset_20260801` if supplying native computer tools.
+
+See the [Opus 5.5 specifications](https://platform.claude.com/docs/en/models/opus-5-5/overview) and [migration guide](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide) for model-bound thinking, refusal handling, and provider-specific differences. Pricing verified September 23, 2026 against [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing).

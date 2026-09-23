@@ -55,17 +55,24 @@ def prepare_responses_request(
     if system_prompt:
         responses_kwargs["instructions"] = system_prompt
 
-    input_items = sum([message.to_openai_responses_input() for message in messages], [])
-    if not supports_encrypted_reasoning(model_name):
-        # History written by an OpenAI reasoning model, replayed to something else
-        # (FallbackModel to xAI, a gpt-4.1 follow-up): `reasoning` items with another
-        # model's encrypted payload and the assistant `phase` field are not accepted
-        # there. The function_call each reasoning item preceded stays.
-        input_items = [
-            {k: v for k, v in item.items() if k != "phase"}
-            for item in input_items
-            if not (item.get("type") == "reasoning" and item.get("encrypted_content"))
-        ]
+    input_items = []
+    openai_reasoning = supports_encrypted_reasoning(model_name)
+    for message in messages:
+        # Grok 4.7 always returns encrypted reasoning without an include flag.
+        # Replay it only to the originating Grok model; provider ciphertext is
+        # not portable. Unannotated history retains the legacy OpenAI behavior.
+        source_model = message.metadata.get("reasoning_model", "")
+        keep_reasoning = (
+            source_model == model_name
+            if model_name == "grok-4.7"
+            else openai_reasoning and (not source_model or supports_encrypted_reasoning(source_model))
+        )
+        for item in message.to_openai_responses_input():
+            if item.get("type") == "reasoning" and item.get("encrypted_content") and not keep_reasoning:
+                continue
+            if not openai_reasoning:
+                item = {k: v for k, v in item.items() if k != "phase"}
+            input_items.append(item)
     responses_kwargs["input"] = input_items
 
     if tools:

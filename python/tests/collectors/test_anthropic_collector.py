@@ -599,22 +599,23 @@ class TestAnthropicCollectorUsageAccounting:
         assert usage["anthropic/claude-sonnet-5:web_search_requests"] == 2
         assert "anthropic/claude-sonnet-5:web_fetch_requests" not in usage
 
-    def test_fast_mode_suffixes_token_units_when_catalog_prices_it(self):
-        """Opus 5 fast mode (2x): ``usage.speed == "fast"`` ships on message_start only."""
+    @pytest.mark.parametrize("billing_id", ["anthropic/claude-opus-5", "anthropic/claude-opus-5-5"])
+    def test_fast_mode_suffixes_token_units_when_catalog_prices_it(self, billing_id):
+        """Opus fast mode (2x): ``usage.speed == "fast"`` ships on message_start only."""
         usage = self._run(
             {"input_tokens": 11, "output_tokens": 1, "cache_creation_input_tokens": 200, "cache_read_input_tokens": 50,
              "cache_creation": {"ephemeral_5m_input_tokens": 200, "ephemeral_1h_input_tokens": 0},
              "service_tier": "standard", "inference_geo": "global", "speed": "fast"},
             {"input_tokens": 11, "output_tokens": 5, "cache_creation_input_tokens": 200, "cache_read_input_tokens": 50,
              "server_tool_use": {"web_search_requests": 1, "web_fetch_requests": 0}},
-            billing_id="anthropic/claude-opus-5",
+            billing_id=billing_id,
         )
         assert usage == {
-            "anthropic/claude-opus-5:input_tokens_fast": 11,
-            "anthropic/claude-opus-5:cache_read_input_tokens_fast": 50,
-            "anthropic/claude-opus-5:ephemeral_5m_input_tokens_fast": 200,
-            "anthropic/claude-opus-5:output_tokens_fast": 5,
-            "anthropic/claude-opus-5:web_search_requests": 1,
+            f"{billing_id}:input_tokens_fast": 11,
+            f"{billing_id}:cache_read_input_tokens_fast": 50,
+            f"{billing_id}:ephemeral_5m_input_tokens_fast": 200,
+            f"{billing_id}:output_tokens_fast": 5,
+            f"{billing_id}:web_search_requests": 1,
         }
 
     def test_fast_mode_is_ignored_for_models_without_a_fast_tier(self):

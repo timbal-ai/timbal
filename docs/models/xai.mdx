@@ -1,9 +1,51 @@
 ---
 title: "xAI"
-description: "Grok 4.6, Grok 4.5, and Grok 4.3 models with specs, pricing, and capabilities"
+description: "Grok 4.7, Grok 4.6, Grok 4.5, and Grok 4.3 models with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [xAI pricing](https://docs.x.ai/developers/pricing). Web Search and X Search are &#36;5/1K calls. Cached input varies by model.</Note>
+<Note>Source: [xAI pricing](https://docs.x.ai/developers/pricing). Web Search is &#36;5/1K calls; X Search is &#36;5/1K posts and &#36;10/1K profiles fetched. Cached input varies by model.</Note>
+
+## Grok 4.7
+
+<CardGroup cols={2}>
+  <Card title="grok-4.7">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `xai/grok-4.7`
+
+  xAI's latest flagship for coding, agentic tasks, and knowledge work.
+
+  - &#36;2 / &#36;6 per 1M tokens (input / output); cached input &#36;0.50
+  - At **≥200K prompt tokens**: &#36;4 / &#36;12; cached input &#36;1 per 1M tokens, applied to the full request
+  - <Icon icon="window-maximize" size={14} /> 500K context; no separate text output limit
+  - <Icon icon="keyboard" size={14} /> Text, Image input; Text output
+  - <Icon icon="brain" size={14} /> Reasoning effort `low`, `medium`, `high` (default), `xhigh`
+  - Function calling and structured outputs; Responses and Chat Completions APIs
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2026
+  - Batch API not supported; Grok 4.7 Fast is available only in Cursor and Grok Build, not on the public API
+  </Card>
+</CardGroup>
+
+Set `XAI_API_KEY` and select the full model ID:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="coder",
+    model="xai/grok-4.7",
+    max_tokens=16000,
+    model_params={"reasoning": {"effort": "high"}},  # Default Responses API path
+)
+```
+
+When using `TIMBAL_OPENAI_API=chat_completions`, pass `model_params={"reasoning_effort": "high"}` instead. The Responses API always returns encrypted reasoning for Grok 4.7. Timbal preserves it automatically within Grok 4.7 tool loops and removes incompatible encrypted payloads when switching providers. A stable `prompt_cache_key` improves cache routing on Responses (`x-grok-conv-id` header on Chat Completions).
+
+Prices above are for the global API. The US regional endpoint adds 10% to input, output, and cached input at both context tiers. Timbal's catalog records global rates. Both collectors count cache hits toward the 200K threshold and emit `input_text_tokens_long_context`, `input_cached_tokens_long_context`, and `output_text_tokens_long_context` at or above it.
+
+Verified September 23, 2026: [model specifications](https://docs.x.ai/developers/models/grok-4.7), [usage guide](https://docs.x.ai/developers/grok-4-7), and [pricing](https://docs.x.ai/developers/pricing).
+
+---
 
 ## Grok 4.6
 
@@ -15,7 +57,7 @@ description: "Grok 4.6, Grok 4.5, and Grok 4.3 models with specs, pricing, and c
 
   xAI's August 2026 flagship for coding, long-running agents, and ambitious interactive work.
 
-  - &#36;2 / &#36;6 (&#36;4 / &#36;12 above 200K prompt tokens); cached input &#36;0.50 / 1M
+  - &#36;2 / &#36;6 (&#36;4 / &#36;12 at ≥200K prompt tokens); cached input &#36;0.50 / 1M
   - <Icon icon="window-maximize" size={14} /> 500K context
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Configurable reasoning
@@ -35,7 +77,7 @@ description: "Grok 4.6, Grok 4.5, and Grok 4.3 models with specs, pricing, and c
 
   xAI's July 2026 flagship for coding, agentic tool use, and knowledge work. Configurable reasoning effort (low / medium / high).
 
-  - &#36;2 / &#36;6 (&#36;4 / &#36;12 above 200K prompt tokens); cached input &#36;0.30 / 1M
+  - &#36;2 / &#36;6 (&#36;4 / &#36;12 at ≥200K prompt tokens); cached input &#36;0.30 / 1M
   - <Icon icon="window-maximize" size={14} /> 500K context
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Configurable reasoning
@@ -55,7 +97,7 @@ description: "Grok 4.6, Grok 4.5, and Grok 4.3 models with specs, pricing, and c
 
   Production mid-tier for coding, agents, and general workloads. Replacement for the retired Grok 4 Fast / 4.1 Fast slugs (removed May 15, 2026).
 
-  - &#36;1.25 / &#36;2.50 (&#36;2.50 / &#36;5.00 above 200K prompt tokens); cached input &#36;0.20 / 1M
+  - &#36;1.25 / &#36;2.50 (&#36;2.50 / &#36;5.00 at ≥200K prompt tokens); cached input &#36;0.20 / 1M
   - <Icon icon="window-maximize" size={14} /> 1M context
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Reasoning
