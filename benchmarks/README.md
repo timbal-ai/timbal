@@ -173,6 +173,7 @@ zero provider-specific code in user land.
 
 | Directory | What it compares | Status |
 |-----------|-----------------|--------|
+| `timeout/` | Foreground timeout disabled vs enabled — token-like streaming overhead | stable |
 | `langchain/` | Timbal vs LangGraph + LangSmith — agents and DAG workflows | stable |
 | `crewai/` | Timbal vs CrewAI + AgentOps — multi-agent pipelines | stable |
 | `agno/` | Timbal vs Agno — agents, workflows, fan-out | WIP |

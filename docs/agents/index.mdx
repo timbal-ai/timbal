@@ -197,6 +197,8 @@ When the deadline passes, the in-flight LLM or tool call is cancelled and the tu
 
 A `TimeoutError` raised inside a handler, such as a slow HTTP call, is still reported as a regular `error`. Only the runnable's own deadline produces `timeout`.
 
+**Performance.** An unset timeout has negligible overhead: the per-call check remains, but the stream relay and timers are bypassed. Enabling a timeout adds timer and relay work per streamed event. The `benchmarks/timeout/bench_streaming.py` benchmark measures this cost separately from network and LLM latency.
+
 ### Approval-Required Tools
 
 Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `resume`:
