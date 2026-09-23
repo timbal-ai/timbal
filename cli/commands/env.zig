@@ -103,7 +103,7 @@ fn isAnySectionHeader(line: []const u8) bool {
     return trimmed.len >= 2 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']';
 }
 
-fn readValue(content: []const u8, profile: []const u8, key: []const u8) ?[]const u8 {
+pub fn readValue(content: []const u8, profile: []const u8, key: []const u8) ?[]const u8 {
     var in_target = false;
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
@@ -214,8 +214,10 @@ pub fn parseTimbalRemoteUrl(allocator: std.mem.Allocator, url: []const u8, remot
 }
 
 /// Extract remotes from a .git/config file and pick the Timbal one.
-/// Prefers `origin` when it is a Timbal remote; otherwise the first match.
+/// Prefers `timbal` (the push link), then `origin`, then the first match.
 pub fn resolveTimbalRemoteFromConfig(allocator: std.mem.Allocator, config: []const u8) !?TimbalRemote {
+    var timbal_match: ?TimbalRemote = null;
+    errdefer if (timbal_match) |*r| r.deinit(allocator);
     var origin_match: ?TimbalRemote = null;
     errdefer if (origin_match) |*r| r.deinit(allocator);
     var first_match: ?TimbalRemote = null;
@@ -245,7 +247,10 @@ pub fn resolveTimbalRemoteFromConfig(allocator: std.mem.Allocator, config: []con
         const url = std.mem.trim(u8, after[1..], " \t");
 
         const parsed = try parseTimbalRemoteUrl(allocator, url, remote_name) orelse continue;
-        if (std.mem.eql(u8, remote_name, "origin")) {
+        if (std.mem.eql(u8, remote_name, "timbal")) {
+            if (timbal_match) |*old| old.deinit(allocator);
+            timbal_match = parsed;
+        } else if (std.mem.eql(u8, remote_name, "origin")) {
             if (origin_match) |*old| old.deinit(allocator);
             origin_match = parsed;
         } else if (first_match == null) {
@@ -256,6 +261,12 @@ pub fn resolveTimbalRemoteFromConfig(allocator: std.mem.Allocator, config: []con
         }
     }
 
+    if (timbal_match) |r| {
+        if (origin_match) |*other| other.deinit(allocator);
+        if (first_match) |*other| other.deinit(allocator);
+        timbal_match = null;
+        return r;
+    }
     if (origin_match) |r| {
         if (first_match) |*other| other.deinit(allocator);
         origin_match = null;
@@ -1697,7 +1708,7 @@ const Options = struct {
 };
 
 /// Normalize/validate `--base-url` (https + Timbal API host). Caller owns returned slice.
-fn normalizeBaseUrlOverride(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+pub fn normalizeBaseUrlOverride(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     var url = std.mem.trim(u8, raw, " \t\r\n/");
     if (std.mem.startsWith(u8, url, "https://")) {
         url = url["https://".len..];
@@ -3720,4 +3731,18 @@ test "individually recovered runtime secrets retain platform classification" {
     var root_vars = try parseEnvFile(a, content);
     defer freeSyncVars(a, &root_vars);
     try std.testing.expectEqual(@as(usize, 0), root_vars.items.len);
+}
+
+test "env commands prefer the timbal push link over another platform origin" {
+    const a = std.testing.allocator;
+    const config =
+        \\[remote "origin"]
+        \\url = https://api.timbal.ai/orgs/1/projects/2/git
+        \\[remote "timbal"]
+        \\url = https://api.timbal.ai/orgs/1/projects/3/git
+    ;
+    var remote = (try resolveTimbalRemoteFromConfig(a, config)).?;
+    defer remote.deinit(a);
+    try std.testing.expectEqualStrings("3", remote.project_id);
+    try std.testing.expectEqualStrings("timbal", remote.remote_name);
 }

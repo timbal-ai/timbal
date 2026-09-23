@@ -14,6 +14,7 @@ comptime {
     _ = @import("commands/create.zig");
     _ = @import("commands/credential_helper.zig");
     _ = @import("commands/env.zig");
+    _ = @import("commands/push.zig");
     _ = @import("commands/start.zig");
     _ = @import("commands/upgrade.zig");
 }
