@@ -889,15 +889,16 @@ def _cc_usage_chunk(
         prompt_tokens_details=PromptTokensDetails(cached_tokens=cached, audio_tokens=None, cache_write_tokens=cache_write),
         completion_tokens_details=CompletionTokensDetails(audio_tokens=None, reasoning_tokens=0),
     )
+    # Match SDK response parsing, which accepts new provider values such as "fast"
+    # before they appear in the SDK's service_tier Literal.
     return ChatCompletionChunk(
         id="chatcmpl_usage_tier",
         choices=[],
         created=int(time.time()),
         model=model,
         object="chat.completion.chunk",
-        service_tier=service_tier,
         usage=usage,
-    )
+    ).model_copy(update={"service_tier": service_tier})
 
 
 class TestChatCompletionCollectorPricingTiers:
@@ -984,6 +985,23 @@ class TestChatCompletionCollectorPricingTiers:
             f"xai/grok-4.7:input_text_tokens{suffix}": prompt_tokens - 50_000,
             f"xai/grok-4.7:input_cached_tokens{suffix}": 50_000,
             f"xai/grok-4.7:output_text_tokens{suffix}": 10,
+        }
+
+    @pytest.mark.parametrize("model", ["openai/gpt-6-sol", "openai/gpt-6-luna"])
+    @pytest.mark.parametrize("tokens,context_suffix", [(272_000, ""), (272_001, "_long_context")])
+    @pytest.mark.parametrize(
+        "tier,tier_suffix", [("default", ""), ("flex", "_flex"), ("fast", "_fast"), ("priority", "_fast")],
+    )
+    def test_gpt6_sol_luna_pricing_buckets(self, model, tokens, context_suffix, tier, tier_suffix):
+        usage = self._run(
+            model, prompt_tokens=tokens, completion_tokens=10, cached=1_000, cache_write=2_000, service_tier=tier,
+        )
+        suffix = context_suffix + tier_suffix
+        assert usage == {
+            f"{model}:input_text_tokens{suffix}": tokens - 3_000,
+            f"{model}:input_cached_tokens{suffix}": 1_000,
+            f"{model}:input_cache_write_tokens{suffix}": 2_000,
+            f"{model}:output_text_tokens{suffix}": 10,
         }
 
     def test_short_context_uses_base_units(self):
@@ -1627,6 +1645,23 @@ class TestResponseCollectorPricingTiers:
             f"xai/grok-4.7:input_text_tokens{suffix}": prompt_tokens - 50_000,
             f"xai/grok-4.7:input_cached_tokens{suffix}": 50_000,
             f"xai/grok-4.7:output_text_tokens{suffix}": 10,
+        }
+
+    @pytest.mark.parametrize("model", ["openai/gpt-6-sol", "openai/gpt-6-luna"])
+    @pytest.mark.parametrize("tokens,context_suffix", [(272_000, ""), (272_001, "_long_context")])
+    @pytest.mark.parametrize(
+        "tier,tier_suffix", [("default", ""), ("flex", "_flex"), ("fast", "_fast"), ("priority", "_fast")],
+    )
+    def test_gpt6_sol_luna_pricing_buckets(self, model, tokens, context_suffix, tier, tier_suffix):
+        usage = self._run(
+            model, input_tokens=tokens, output_tokens=10, cached=1_000, cache_write=2_000, service_tier=tier,
+        )
+        suffix = context_suffix + tier_suffix
+        assert usage == {
+            f"{model}:input_text_tokens{suffix}": tokens - 3_000,
+            f"{model}:input_cached_tokens{suffix}": 1_000,
+            f"{model}:input_cache_write_tokens{suffix}": 2_000,
+            f"{model}:output_text_tokens{suffix}": 10,
         }
 
     def _run(

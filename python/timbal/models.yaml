@@ -184,6 +184,54 @@ models:
     fast: 2.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
+- id: openai/gpt-6-sol
+  provider: openai
+  display_name: GPT-6 Sol
+  description: OpenAI GPT-6 model for complex coding and agentic workflows.
+  notes: 'Prompts over 272K input tokens bill the full request at long-context rates ($4/$15 per 1M input/output;
+    cached input $0.4, cache writes $5). Batch/Flex are 50% of applicable Standard rates; Fast is 2x.
+    Reasoning efforts: none, low, medium (default), high, xhigh, max. 128K max output.
+    Use Responses for tools; Chat Completions function calling requires reasoning_effort none.
+    Regional processing adds 10% where eligible; EU data residency requires Standard processing.'
+  input_price: 2.0
+  output_price: 10.0
+  cached_input_price: 0.2
+  cache_write_price: 2.5
+  long_context:
+    threshold: 272000
+    input_price: 4.0
+    output_price: 15.0
+    cached_input_price: 0.4
+    cache_write_price: 5.0
+  service_tiers:
+    flex: 0.5
+    fast: 2.0
+  context_window: 1050000
+  capabilities: [vision, tools, reasoning]
+- id: openai/gpt-6-luna
+  provider: openai
+  display_name: GPT-6 Luna
+  description: OpenAI GPT-6 model for focused, high-volume tasks at low cost.
+  notes: 'Prompts over 272K input tokens bill the full request at long-context rates ($0.2/$0.75 per 1M input/output;
+    cached input $0.02, cache writes $0.25). Batch/Flex are 50% of applicable Standard rates; Fast is 2x.
+    Reasoning efforts: none, low, medium (default), high, xhigh, max. 128K max output.
+    Use Responses for tools; Chat Completions function calling requires reasoning_effort none.
+    Regional processing adds 10% where eligible; EU data residency requires Standard processing.'
+  input_price: 0.1
+  output_price: 0.5
+  cached_input_price: 0.01
+  cache_write_price: 0.125
+  long_context:
+    threshold: 272000
+    input_price: 0.2
+    output_price: 0.75
+    cached_input_price: 0.02
+    cache_write_price: 0.25
+  service_tiers:
+    flex: 0.5
+    fast: 2.0
+  context_window: 1050000
+  capabilities: [vision, tools, reasoning]
 - id: openai/gpt-5.5
   provider: openai
   display_name: GPT-5.5

@@ -65,6 +65,8 @@ class TestSupportsEncryptedReasoning:
             "gpt-5.1-codex",
             "GPT-5.6-luna",
             "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "o3",
             "o3-mini",
             "o4-mini",
@@ -385,14 +387,15 @@ async def _run_agent(scripted: _ScriptedResponses, *, prompt: str = "look it up"
 
 class TestAgentToolLoopReplaysReasoning:
     @pytest.mark.asyncio
-    async def test_second_request_carries_first_steps_reasoning_item(self):
+    @pytest.mark.parametrize("model", ["openai/gpt-5.6-luna", "openai/gpt-6-sol", "openai/gpt-6-luna"])
+    async def test_second_request_carries_first_steps_reasoning_item(self, model):
         scripted = _ScriptedResponses(
             [
                 _tool_call_turn("rs_1", "enc-1", "call_1", "fc_1", "search", '{"q": "x"}'),
                 _text_turn("rs_2", "enc-2", "Done: x"),
             ]
         )
-        result, calls = await _run_agent(scripted)
+        result, calls = await _run_agent(scripted, model=model)
 
         assert calls == [{"q": "x"}]
         assert isinstance(result.output, Message)
