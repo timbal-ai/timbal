@@ -43,6 +43,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+modal = [
+  "modal>=1.5.5,<2",
+  "packaging>=24.2",
+]
 codegen = [
   "libcst>=1.8.6",
   "ruff>=0.9.3",
@@ -71,6 +75,7 @@ voice = [
   "livekit>=1.1.14",
 ]
 all = [
+  "timbal[modal]",
   "timbal[codegen]",
   "timbal[documents]",
   "timbal[evals]",
