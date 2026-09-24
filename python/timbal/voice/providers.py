@@ -145,13 +145,17 @@ def resolve_tts(
     ``provider`` is case-insensitive: ``"elevenlabs"`` (default when empty;
     aliases ``"el"``, ``"11labs"``), ``"munsit"`` (alias ``"faseeh"``), or
     ``"fishaudio"`` (aliases ``"fish"``, ``"fish-audio"``), or ``"deepgram"``
-    (alias ``"deepgram-aura"``). Unknown ids raise
+    (alias ``"deepgram-aura"``), or ``"openai"``. Unknown ids raise
     ``ValueError`` so the caller can log and fall back explicitly.
 
     Provider modules import lazily — selecting Munsit never imports the
     ElevenLabs/Fish WebSocket stacks.
     """
     p = (provider or "").strip().lower() or "elevenlabs"
+    if p == "openai":
+        from .openai import OpenAIStreamTTS
+
+        return OpenAIStreamTTS(api_key=api_key)
     if p in ("elevenlabs", "el", "11labs"):
         from . import elevenlabs
 

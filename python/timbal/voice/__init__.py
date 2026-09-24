@@ -77,6 +77,10 @@ def __getattr__(name: str):
     # Lazy: importing smart_turn / namo / vad pulls numpy/onnxruntime /
     # transformers (timbal[voice] extra), which must not be required just to
     # import timbal.voice.
+    if name in ("OpenAIRealtimeSTT", "OpenAIStreamTTS"):
+        from . import openai
+
+        return getattr(openai, name)
     if name in ("DeepgramFluxSTT", "DeepgramNovaSTT", "resolve_stt", "stt_provider_id"):
         from . import deepgram
 
@@ -113,6 +117,8 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "OpenAIRealtimeSTT",
+    "OpenAIStreamTTS",
     "AgentApproval",
     "AgentInteraction",
     "AgentStatus",

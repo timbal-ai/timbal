@@ -1,7 +1,103 @@
 ---
 title: "Text-to-Speech"
-description: "Generate audio with text-to-speech tools or use Deepgram Aura in live voice sessions"
+description: "Generate audio with text-to-speech tools or use OpenAI and Deepgram in live voice sessions"
 ---
+
+## OpenAI speech providers
+
+Set `OPENAI_API_KEY` on the server and install `timbal[server,voice]`:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="VoiceAgent",
+    model="openai/gpt-4.1-mini",
+    voice_config={
+        "stt_provider": "openai",
+        "stt_model": "gpt-transcribe",
+        "tts_provider": "openai",
+        "tts_model": "gpt-4o-mini-tts",
+        "voice": "coral",
+        "language": "en",
+    },
+)
+```
+
+These are independent STT/TTS providers in the regular Timbal voice pipeline:
+the agent still chooses its own LLM and tools. You can mix OpenAI transcription
+with ElevenLabs or Deepgram speech output, or select OpenAI only for TTS.
+WebSocket, WebRTC, LiveKit and telephony sessions use the same provider wiring.
+Both selectors are available in the voice playground; the advanced STT model
+field accepts an explicit transcription model.
+
+`OpenAIRealtimeSTT` uses a transcription-only Realtime WebSocket session.
+The default is `gpt-transcribe`. Legacy `gpt-4o-transcribe`,
+`gpt-4o-mini-transcribe` (including its 2025-03-20 and 2025-12-15 snapshots),
+and `whisper-1` are also accepted. This adapter uses **server VAD**, keeping
+Timbal's turn detector active. It supports local force-commit, accumulates
+partial transcripts, and delivers completed transcripts in audio-turn order.
+`gpt-live-transcribe` and `gpt-realtime-whisper` need client-side VAD and are
+explicitly rejected, as are diarization models. Legacy transcription models
+are [deprecated](https://developers.openai.com/api/docs/deprecations); new
+integrations should use the default.
+
+STT tuning lives in `stt_extra`: `prompt`, `threshold` (default `0.5`),
+`prefix_padding_ms` (`300`), `silence_duration_ms` (`500`), and
+`noise_reduction` (`"near_field"`, `"far_field"`, or `None`). The session's
+`language` is an optional ISO-639-1 transcription hint.
+
+`OpenAIStreamTTS` uses the Speech API with streaming PCM audio. It defaults to
+`gpt-4o-mini-tts` and `coral`; `tts-1` and `tts-1-hd` are also supported. Set
+`voice` to a built-in voice such as `alloy`, `coral`, `marin`, or `cedar`
+(`tts-1` / `tts-1-hd` support only `alloy`, `ash`, `coral`, `echo`,
+`fable`, `onyx`, `nova`, `sage`, and `shimmer`). Invalid OpenAI model ids and
+unsupported model/voice combinations fail before opening a request. `OPENAI_TTS_VOICE` sets the fallback
+voice when a foreign provider's voice id is inherited. Foreign model ids
+are replaced with the OpenAI defaults.
+
+Use `tts_extra={"speed": 1.1, "instructions": "Speak warmly and clearly."}`
+for speech style; `instructions` applies only to `gpt-4o-mini-tts`. The speech
+endpoint accepts complete text segments, so Timbal synthesizes each segment
+as it becomes ready rather than opening an incremental text context.
+Interrupting a segment closes its response; subsequent segments have fresh
+audio/resampling state. Each segment makes a separate HTTP request; this
+can introduce pauses and has different latency from ElevenLabs incremental
+text streaming. Benchmark with your own call audio before choosing a model.
+
+OpenAI's wire audio is 24 kHz PCM16. The providers resample in both directions
+to the configured session sample rate, including the default 16 kHz. Rates
+other than 24 kHz require the `timbal[voice]` extra. PCM framing and resampler
+tails are preserved so playback and recordings use the advertised rate.
+Server-only `stt_host` / `tts_host` extras can select an API-compatible endpoint;
+clients cannot override the host. Credentials stay on the server.
+
+For file transcription or standalone audio generation, use the built-in tools:
+
+```python
+from timbal.tools import OpenAISpeechToText, OpenAITextToSpeech
+
+transcript = await OpenAISpeechToText()(
+    audio_file_path="recording.wav",
+    language="en",
+).collect()
+audio = await OpenAITextToSpeech()(
+    text="Hello from Timbal!",
+    voice="coral",
+    response_format="mp3",
+).collect()
+```
+
+Both tools also work in `Agent(tools=[...])` and accept explicit `api_key`,
+platform `integration`, or `OPENAI_API_KEY`. `OpenAISpeechToText` accepts exactly
+one local path or base64 source (with `filename` for base64), returning JSON
+with `text`. `OpenAITextToSpeech` returns `audio_base64`, `content_type`, `model`,
+`voice`, and `response_format`. Formats: MP3, Opus, AAC, FLAC, WAV or raw PCM.
+Callers should identify generated speech as AI-generated in their user experience.
+
+Protocol references: [Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription),
+[Realtime session events](https://developers.openai.com/api/reference/resources/realtime/client-events),
+and [text to speech](https://developers.openai.com/api/docs/guides/text-to-speech).
 
 ## Deepgram Aura
 

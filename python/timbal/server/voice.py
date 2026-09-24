@@ -360,7 +360,9 @@ def client_call_direction(config: dict[str, Any]) -> str | None:
 # pin like ``dialect: emirati``). Server-side config (``runnable.voice_config``,
 # env, org overrides) is unaffected and can still point at a self-hosted
 # Munsit, on-prem Deepgram or a residency endpoint.
-CLIENT_TUNING_STT_EXTRA = frozenset({
+_OPENAI_STT_EXTRA = frozenset({"prompt", "threshold", "prefix_padding_ms", "silence_duration_ms", "noise_reduction"})
+_OPENAI_TTS_EXTRA = frozenset({"instructions"})
+CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset({
     # Deepgram Flux / Nova
     "eot_timeout_ms",
     "eot_threshold",
@@ -382,7 +384,7 @@ CLIENT_TUNING_STT_EXTRA = frozenset({
     "hotwords",
     "channels",
 })
-CLIENT_TUNING_TTS_EXTRA = frozenset({
+CLIENT_TUNING_TTS_EXTRA = _OPENAI_TTS_EXTRA | frozenset({
     # ElevenLabs
     "output_format",
     "audio_format",
@@ -991,6 +993,18 @@ def build_voice_session(
     # than 500-ing the socket.
     stt_extra = dict(merged.stt_extra) if isinstance(merged.stt_extra, dict) else {}
     tts_extra = dict(merged.tts_extra) if isinstance(merged.tts_extra, dict) else {}
+    # Switching providers must not forward new OpenAI client options to the
+    # older adapters. Preserve their existing server-side passthrough config.
+    if stt_provider != "openai":
+        for key in _OPENAI_STT_EXTRA:
+            stt_extra.pop(key, None)
+            if defaults.stt_provider != "openai" and isinstance(defaults.stt_extra, dict) and key in defaults.stt_extra:
+                stt_extra[key] = defaults.stt_extra[key]
+    if tts_provider != "openai":
+        for key in _OPENAI_TTS_EXTRA:
+            tts_extra.pop(key, None)
+            if defaults.tts_provider != "openai" and isinstance(defaults.tts_extra, dict) and key in defaults.tts_extra:
+                tts_extra[key] = defaults.tts_extra[key]
     if stt_native_eou:
         # Scribe-tuned VAD knobs don't apply to a provider-side turn machine
         # (Flux, Munsit).
