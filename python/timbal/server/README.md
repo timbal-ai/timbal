@@ -89,7 +89,7 @@ Connect to the same host as the HTTP server:
 - **URL:** `ws://<host>/voice/ws` or `wss://<host>/voice/ws`
 - **Runnable:** The same object as `/run` (`TIMBAL_RUNNABLE`). **Voice requires that runnable to be a Timbal `Agent`.** If it is not, the server closes the WebSocket with code **1008** and reason `Voice requires an Agent runnable` (no JSON messages are sent). There is no separate voice-agent id in the protocol.
 
-Server-side env and keys (e.g. ElevenLabs, model provider for the agent) are an operations concern; the client only speaks this socket. The server needs `timbal[server]` (includes `websockets`) and an ElevenLabs API key for STT/TTS.
+Server-side env and keys (e.g. speech providers, model provider for the agent) are an operations concern; the client only speaks this socket. The server needs `timbal[server]` (includes `websockets`) and API keys for the selected STT/TTS providers.
 
 ### Connection order
 
@@ -138,11 +138,11 @@ Two hello keys are read by the transport rather than merged into `VoiceConfig`: 
 
 | Key           | Description |
 |---------------|-------------|
-| `stt_provider` | `"elevenlabs"` (default), `"deepgram-flux"`, or `"deepgram-nova"` (bare `"deepgram"` routes by `stt_model`, defaulting to Flux). Deepgram needs `DEEPGRAM_API_KEY` on the server. Flux (`/v2/listen`) does model-native end-of-turn detection: the session auto-selects the `provider` turn detector (explicit `turn_detector` still wins) and disables local VAD endpointing. Nova-3 (`/v1/listen`) is plain ASR — Timbal turn detection and VAD endpointing work exactly as with ElevenLabs. Env default: `TIMBAL_STT_PROVIDER`. |
-| `stt_model`   | Speech-to-text model id (ElevenLabs realtime `scribe_*`, Deepgram `flux-general-en`/`flux-general-multi`/`nova-3*`). Model ids that don't belong to the selected provider are ignored (provider default used). |
-| `tts_provider` | `"elevenlabs"` (default), `"deepgram"` (Aura/Aura-2), `"fishaudio"`, or `"munsit"`. Deepgram uses `DEEPGRAM_API_KEY`, independently of the STT provider. Env default: `TIMBAL_TTS_PROVIDER`. |
-| `tts_model` | Provider TTS model. For Deepgram, use a full voice model id such as `aura-2-thalia-en`; foreign defaults are ignored. Env default: `TIMBAL_TTS_MODEL`. |
-| `voice`       | Provider voice id. Deepgram also accepts a full Aura model id here when `tts_model` is not an Aura id. |
+| `stt_provider` | `"elevenlabs"` (default), `"deepgram-flux"`, or `"deepgram-nova"` (bare `"deepgram"` routes by `stt_model`, defaulting to Flux). Deepgram needs `DEEPGRAM_API_KEY` on the server. Flux (`/v2/listen`) does model-native end-of-turn detection: the session auto-selects the `provider` turn detector (explicit `turn_detector` still wins) and disables local VAD endpointing. Nova-3 (`/v1/listen`) is plain ASR — Timbal turn detection and VAD endpointing work exactly as with ElevenLabs. Also accepts `"openai"` (requires `OPENAI_API_KEY`): transcription-only Realtime STT with server VAD; Timbal turn detection remains active. Env default: `TIMBAL_STT_PROVIDER`. |
+| `stt_model`   | Speech-to-text model id (ElevenLabs realtime `scribe_*`, Deepgram `flux-general-en`/`flux-general-multi`/`nova-3*`, OpenAI `gpt-transcribe` (default), legacy `gpt-4o-mini-transcribe`/`gpt-4o-transcribe`/`whisper-1`). Model ids that don't belong to the selected provider are ignored (provider default used). |
+| `tts_provider` | `"elevenlabs"` (default), `"deepgram"` (Aura/Aura-2), `"fishaudio"`, `"munsit"`, or `"openai"`. OpenAI uses `OPENAI_API_KEY` and streams audio per text segment. Deepgram uses `DEEPGRAM_API_KEY`, independently of the STT provider. Env default: `TIMBAL_TTS_PROVIDER`. |
+| `tts_model` | Provider TTS model. For Deepgram, use a full voice model id such as `aura-2-thalia-en`; foreign defaults are ignored. OpenAI defaults to `gpt-4o-mini-tts` (also supports `tts-1`/`tts-1-hd`). Env default: `TIMBAL_TTS_MODEL`. |
+| `voice`       | Provider voice id. OpenAI uses built-in names such as `coral` (default), `alloy`, `marin`, or `cedar`; supported names depend on the model. Deepgram also accepts a full Aura model id here when `tts_model` is not an Aura id. |
 | `language`    | e.g. `"es"`. Unset → provider auto-detect. |
 | `sample_rate` | Hz; STT/TTS audio use this unless extended later. |
 | `encoding`    | Default `"pcm_s16le"`. |
@@ -157,7 +157,7 @@ Example — align server with the browser capture rate (only if that rate is sup
 { "sample_rate": 48000 }
 ```
 
-Default pipeline is tuned for **16 kHz** unless capture, resampling, and this field are aligned.
+Default pipeline is tuned for **16 kHz** unless capture, resampling, and this field are aligned. OpenAI adapters convert between the session rate and their 24 kHz PCM wire format; install `timbal[voice]` for resampling. For examples and tuning options, see [OpenAI speech providers](../../../docs/examples/agents/tts.mdx).
 
 ### Server messages (server → client)
 

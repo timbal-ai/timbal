@@ -31,6 +31,7 @@ from pydantic import SecretStr
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from .._openai_audio import is_openai_stt_model
 from .providers import (
     AudioInputConfig,
     SpeechToText,
@@ -441,11 +442,16 @@ def effective_stt_model(provider_instance: SpeechToText, requested: str | None) 
     from .munsit import MunsitStreamSTT
     from .munsit import effective_stt_model as munsit_effective_stt_model
 
+    if getattr(provider_instance, "provider_id", None) == "openai":
+        from .openai import effective_stt_model as openai_effective_stt_model
+
+        return openai_effective_stt_model(requested)
+
     if isinstance(provider_instance, DeepgramFluxSTT):
         return requested if is_flux_model(requested) else DEFAULT_FLUX_MODEL
     if isinstance(provider_instance, DeepgramNovaSTT):
         m = requested or ""
-        if not m or is_flux_model(m) or m.startswith(("scribe", "eleven", "munsit")):
+        if not m or is_flux_model(m) or is_openai_stt_model(m) or m.startswith(("scribe", "eleven", "munsit")):
             return DEFAULT_NOVA_MODEL
         return requested
     if isinstance(provider_instance, MunsitStreamSTT):
@@ -454,7 +460,7 @@ def effective_stt_model(provider_instance: SpeechToText, requested: str | None) 
     # through — e.g. unknown-provider fallback keeps the merged model string
     # otherwise.
     m = (requested or "").strip().lower()
-    if not m or is_flux_model(m) or m.startswith(("nova", "munsit")):
+    if not m or is_flux_model(m) or is_openai_stt_model(m) or m.startswith(("nova", "munsit")):
         return None
     return requested
 
@@ -467,6 +473,9 @@ def stt_provider_id(provider_instance: SpeechToText) -> str:
     name.
     """
     from .munsit import MunsitStreamSTT
+
+    if getattr(provider_instance, "provider_id", None) == "openai":
+        return "openai"
 
     if isinstance(provider_instance, DeepgramFluxSTT):
         return "deepgram-flux"
@@ -485,10 +494,11 @@ def resolve_stt(
 ) -> SpeechToText:
     """STT factory for the voice server.
 
-    ``provider`` is ``"elevenlabs"`` / ``"deepgram"`` / ``"munsit"`` (alias
+    ``provider`` is ``"openai"`` / ``"elevenlabs"`` / ``"deepgram"`` / ``"munsit"`` (alias
     ``"faseeh"``; case-insensitive; also accepts UI labels like
     ``"deepgram-flux"`` / ``"deepgram-nova"``). When ``None``, inferred from
-    the model id: ``flux-*`` / ``nova-*`` → Deepgram, ``munsit*`` → Munsit,
+    the model id: OpenAI transcription ids → OpenAI,
+    ``flux-*`` / ``nova-*`` → Deepgram, ``munsit*`` → Munsit,
     anything else (including ``scribe_*``) → ElevenLabs.
 
     Bare ``"deepgram"`` defaults to Flux (voice-agent native EOU). Only an
@@ -497,13 +507,20 @@ def resolve_stt(
     """
     p = (provider or "").strip().lower()
     m = (model or "").strip().lower()
+
     if not p:
         if m.startswith(("flux", "nova")):
             p = "deepgram"
         elif m.startswith("munsit"):
             p = "munsit"
+        elif is_openai_stt_model(m):
+            p = "openai"
         else:
             p = "elevenlabs"
+    if p == "openai":
+        from .openai import OpenAIRealtimeSTT
+
+        return OpenAIRealtimeSTT(api_key=api_key)
     if p in ("elevenlabs", "el", "11labs"):
         from .elevenlabs import ElevenLabsRealtimeSTT
 

@@ -1627,3 +1627,11 @@ Real-time pacing is mandatory, so a run takes as long as the conversation.
 `acks True` confirms the harness is exercising the client-truth playback path
 rather than the wall-clock estimate fallback — production behavior, not a
 degraded fallback.
+
+## OpenAI provider audit
+
+`openai_speech.py` measures local PCM-processing CPU cost. With `--live`, it
+also checks the supported OpenAI STT models and all TTS model/voice combinations
+using synthetic speech and billable API requests. It is deliberately outside
+the default test path. See [the verification record](OPENAI_SPEECH_AUDIT.md)
+for commands, measured results, and limitations.

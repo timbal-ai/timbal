@@ -106,7 +106,7 @@ class PcmResampler:
             from av import AudioFrame, AudioResampler
         except ImportError as e:  # pragma: no cover — exercised only without the extra
             raise ImportError(
-                "Telephony audio bridging requires the timbal[voice] extra: "
+                "PCM audio resampling requires the timbal[voice] extra: "
                 "uv pip install 'timbal[voice]'"
             ) from e
         if src_rate <= 0 or dst_rate <= 0:
@@ -140,6 +140,12 @@ class PcmResampler:
         self._pts += samples
         # Plane buffers are alignment-padded; only samples*2 bytes are audio.
         return b"".join(bytes(out.planes[0])[: out.samples * 2] for out in self._resampler.resample(frame))
+
+    def flush(self) -> bytes:
+        """Drain the filter tail at the end of an utterance and reset for reuse."""
+        out = b"".join(bytes(frame.planes[0])[: frame.samples * 2] for frame in self._resampler.resample(None))
+        self.reset()
+        return out
 
 
 class TelephonyPlaybackTracker(BufferedPlaybackTracker):

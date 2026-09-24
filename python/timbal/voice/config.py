@@ -280,12 +280,15 @@ class VoiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     stt_provider: str = "elevenlabs"
+    """Also supports Deepgram, Munsit, and OpenAI (``OPENAI_API_KEY``)."""
     stt_model: str = "scribe_v2_realtime"
     tts_provider: str = "elevenlabs"
     """``"elevenlabs"``, ``"munsit"`` (Arabic; requires ``MUNSIT_API_KEY``), or
     ``"fishaudio"`` (requires ``FISH_API_KEY``), or ``"deepgram"``
     (Aura/Aura-2; requires ``DEEPGRAM_API_KEY``). For Deepgram, set
-    ``tts_model`` to a full voice model id, e.g. ``aura-2-thalia-en``."""
+    ``tts_model`` to a full voice model id, e.g. ``aura-2-thalia-en``.
+    ``"openai"`` uses ``OPENAI_API_KEY`` and defaults to ``gpt-4o-mini-tts``.
+    OpenAI STT/TTS require ``timbal[voice]`` for rates other than 24 kHz."""
     tts_model: str = "eleven_flash_v2_5"
     voice: str = DEFAULT_VOICE_ID
     language: str | None = None

@@ -632,6 +632,7 @@ if TYPE_CHECKING:
         OneDriveSearchFiles,
         OneDriveUploadFile,
     )
+    from .openai_audio import OpenAISpeechToText, OpenAITextToSpeech
     from .outlook import (
         OutlookArchive,
         OutlookCreateDraft,
@@ -1616,6 +1617,8 @@ __all__ = [
     "HubSpotGetAssociationTypes",
     "HubSpotGetUsers",
     "DeepgramListVoices",
+    "OpenAISpeechToText",
+    "OpenAITextToSpeech",
     "DeepgramTextToSpeech",
     "ElevenLabsTextToSpeech",
     "ElevenLabsSpeechToText",
@@ -2832,6 +2835,8 @@ _LAZY_IMPORTS = {
     "HubSpotGetAssociationTypes": ".hubspot",
     "HubSpotGetUsers": ".hubspot",
     "DeepgramListVoices": ".deepgram",
+    "OpenAISpeechToText": ".openai_audio",
+    "OpenAITextToSpeech": ".openai_audio",
     "DeepgramTextToSpeech": ".deepgram",
     "ElevenLabsTextToSpeech": ".elevenlabs",
     "ElevenLabsSpeechToText": ".elevenlabs",
