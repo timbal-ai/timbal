@@ -173,6 +173,33 @@ agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_repor
 
 Every mode records `metadata["max_iter_reached"] = {"max_iter", "behavior"}` on the agent span. Injected messages are persisted in memory tagged `metadata={"source": "runtime", "kind": "max_iter_notice" | "max_iter_stop"}`, so `Message.is_runtime()` lets you hide them when rendering a human transcript.
 
+### Timeout
+
+`max_iter` bounds steps; `timeout` bounds time. It is the wall-clock budget, in seconds, for one turn — every LLM call and tool call included. Default `None` (no limit).
+
+```python
+agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], timeout=120)
+
+result = await agent(prompt="Research and write the report").collect()
+if result.status.code == "timeout":
+    print(result.error["message"])  # "assistant timed out after 120s"
+    partial = result.output         # whatever the turn produced before the deadline
+```
+
+When the deadline passes, the in-flight LLM or tool call is cancelled and the turn ends with `status.code == "timeout"` and an `error` of type `RunTimeout`. Memory stays consistent: an interrupted tool call gets a synthetic result, so the next turn runs normally.
+
+`timeout` is available on every runnable, not just agents:
+
+- **Sub-agents and tools.** A child's own `timeout` fails only that call. The parent agent receives it as an error tool result and can recover. A `timeout` on the parent bounds the whole turn, children included.
+- **Workflow steps.** A step that times out blocks its dependents, including transitive dependents. Unrelated branches may finish before the workflow reports the step failure. An agent inside a workflow can still recover from its own tools' timeouts; the workflow uses that agent's final result. See [Errors & failure](/workflows/errors-and-failure#timeouts).
+- **Hooks.** `pre_hook`, the handler, and `post_hook` share one deadline. A slow hook times out the call; the budget is not restarted between stages. If the handler finished before a post-hook timed out, its output is retained.
+- **What doesn't count.** The clock starts after input validation and the approval gate, so time a run spends paused waiting for approval does not use up the budget. Children detached with `background_mode` use `background_timeout` instead (see [Background Tasks](/agents/background-tasks#timeouts)).
+- **Sync handlers.** A sync tool running inline on the event loop can't be interrupted. Make it async, or set `offload_blocking=True`.
+
+A `TimeoutError` raised inside a handler, such as a slow HTTP call, is still reported as a regular `error`. Only the runnable's own deadline produces `timeout`.
+
+**Performance.** An unset timeout has negligible overhead: the per-call check remains, but the stream relay and timers are bypassed. Enabling a timeout adds timer and relay work per streamed event. The `benchmarks/timeout/bench_streaming.py` benchmark measures this cost separately from network and LLM latency.
+
 ### Approval-Required Tools
 
 Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `resume`:

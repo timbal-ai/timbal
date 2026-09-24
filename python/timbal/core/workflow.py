@@ -26,6 +26,7 @@ class StepState(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     SKIPPED = "skipped"
+    BLOCKED = "blocked"
     FAILED = "failed"
 
 
@@ -256,8 +257,7 @@ class Workflow(Runnable):
         # task/queue fan-in machinery entirely.
         steps = list(self._steps.values())
         self._is_linear = all(
-            (not s.previous_steps) if i == 0 else s.previous_steps == {steps[i - 1].name}
-            for i, s in enumerate(steps)
+            (not s.previous_steps) if i == 0 else s.previous_steps == {steps[i - 1].name} for i, s in enumerate(steps)
         )
 
         return self
@@ -286,9 +286,16 @@ class Workflow(Runnable):
             # equivalent to gather() for waiting on ALL events, without a task
             # per dependency; the is_set() guard skips already-completed ones.
             for step_name in step.previous_steps:
-                dep_done = statuses[step_name].done
-                if not dep_done.is_set():
-                    await dep_done.wait()
+                dependency = statuses[step_name]
+                if not dependency.done.is_set():
+                    await dependency.done.wait()
+                if dependency.state in (StepState.FAILED, StepState.BLOCKED):
+                    # Distinguish failed prerequisites from conditional skips:
+                    # joins may run after a when=False branch, but failures
+                    # must block every transitive dependent before any hooks
+                    # or input resolvers can produce side effects.
+                    status.state = StepState.BLOCKED
+                    return
             # This serves multiple purposes.
             # - It ensures that the step is not executed multiple times.
             # - It allows the step to be skipped from other steps, e.g. if a previous step failed.
@@ -305,9 +312,7 @@ class Workflow(Runnable):
 
             try:
                 if step.when:
-                    should_run = await step._execute_runtime_callable(
-                        step.when["callable"], step.when["is_coroutine"]
-                    )
+                    should_run = await step._execute_runtime_callable(step.when["callable"], step.when["is_coroutine"])
                     if not should_run:
                         logger.info(f"Skipping {step.name} because `when` condition returned False.")
                         status.state = StepState.SKIPPED
@@ -339,6 +344,7 @@ class Workflow(Runnable):
 
             status.state = StepState.RUNNING
             iteration = 0
+            handler_events = None
             try:
                 # Do-while: always run once, then decide whether to continue.
                 # Each iteration is a full _stream → its own span. Downstream
@@ -349,38 +355,38 @@ class Workflow(Runnable):
                     # Iterate the raw stream: the TimbalCollector wrapper is only
                     # needed at the public API boundary (.collect(), pending-gate
                     # enrichment); a per-event collector layer here is pure overhead.
-                    async for event in step._stream(**resolved_input):
+                    handler_events = step._stream(**resolved_input)
+                    async for event in handler_events:
                         yield event
-                        if (
-                            isinstance(event, OutputEvent)
-                            and event.status.code == "cancelled"
-                            and event.status.reason
-                            in {"approval_required", "approval_denied", "input_required"}
-                        ):
+                        # Descendant events are forwarded for tracing, but an
+                        # agent owns recovery from its children's errors. Only
+                        # this step's own terminal event determines its outcome.
+                        if not isinstance(event, OutputEvent) or event.path != step._path:
+                            continue
+                        if event.status.code == "cancelled" and event.status.reason in {
+                            "approval_required",
+                            "approval_denied",
+                            "input_required",
+                        }:
                             logger.info(f"Step {step.name} paused ({event.status.reason}).")
                             status.state = StepState.FAILED
                             status.signal = PauseRequired(event)
                             return
-                        if (
-                            isinstance(event, OutputEvent)
-                            and event.status.code == "cancelled"
-                            and event.status.reason == "cancelled"
-                        ):
+                        if event.status.code == "cancelled" and event.status.reason == "cancelled":
                             # A human cancelled this step via Cancel(); terminate the
                             # whole workflow run rather than continuing other steps.
                             logger.info(f"Step {step.name} cancelled by user.")
                             status.state = StepState.FAILED
-                            status.signal = RunCancelled(
-                                event.status.message or "Run cancelled by user."
-                            )
+                            status.signal = RunCancelled(event.status.message or "Run cancelled by user.")
                             return
-                        if isinstance(event, OutputEvent) and event.error is not None:
+                        if event.error is not None:
                             logger.info(f"Step {step.name} completed with error.")
                             status.state = StepState.FAILED
                             status.error = event.error
                             status.done.set()
                             return
 
+                    handler_events = None
                     iteration += 1
 
                     if not step.while_:
@@ -410,7 +416,11 @@ class Workflow(Runnable):
                 status.signal = e
                 return
             finally:
-                status.done.set()
+                try:
+                    if handler_events is not None:
+                        await handler_events.aclose()
+                finally:
+                    status.done.set()
 
         except BaseException as e:
             # Catch BaseException subclasses that bypass the inner `except Exception`
@@ -448,16 +458,29 @@ class Workflow(Runnable):
         so the finally guarantees it even for BaseException exits.
         """
         status = statuses[step.name]
+        current_task = asyncio.current_task()
+        step_events = self._run_step(step, statuses, **kwargs)
         try:
-            async for event in self._run_step(step, statuses, **kwargs):
+            async for event in step_events:
+                # A nested runnable may absorb cancellation and yield another
+                # event. Do not resume its enclosing handler after that yield.
+                if current_task is not None and current_task.cancelling():
+                    raise asyncio.CancelledError
                 # put_nowait: the queue is unbounded, so put() never suspends —
                 # awaiting it is pure coroutine overhead per event.
                 queue.put_nowait(event)
+            step_events = None
         finally:
             try:
-                queue.put_nowait(status)
-            except Exception:
-                logger.exception("Failed to enqueue sentinel for step %s", step.name)
+                if step_events is not None:
+                    await step_events.aclose()
+            finally:
+                # Cleanup must finish before completion is visible to the
+                # workflow. Even a failing aclose must not lose the sentinel.
+                try:
+                    queue.put_nowait(status)
+                except Exception:
+                    logger.exception("Failed to enqueue sentinel for step %s", step.name)
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute all steps, respecting dependencies.
@@ -506,11 +529,13 @@ class Workflow(Runnable):
                 return current_task is not None and current_task.cancelling()
 
             for step in self._steps.values():
+                step_events = self._run_step(step, statuses, **kwargs)
                 try:
-                    async for event in self._run_step(step, statuses, **kwargs):
+                    async for event in step_events:
                         if _cancel_pending():
                             raise asyncio.CancelledError
                         yield event
+                    step_events = None
                 except (asyncio.CancelledError, GeneratorExit, InterruptError):
                     raise
                 except BaseException:  # noqa: BLE001
@@ -520,6 +545,11 @@ class Workflow(Runnable):
                     # surfaces the failure via failed_steps below. _run_step
                     # already marked the step FAILED and logged.
                     pass
+                finally:
+                    # A parent may close this workflow between yielded events.
+                    # Finish the nested step's cleanup in this task, not at GC.
+                    if step_events is not None:
+                        await step_events.aclose()
                 if _cancel_pending():
                     raise asyncio.CancelledError
                 _record_signal(statuses[step.name].signal)
@@ -554,9 +584,7 @@ class Workflow(Runnable):
         if first_pending_exception is not None:
             raise first_pending_exception
         failed_steps = sorted(
-            (name, step_status)
-            for name, step_status in statuses.items()
-            if step_status.state == StepState.FAILED
+            (name, step_status) for name, step_status in statuses.items() if step_status.state == StepState.FAILED
         )
         if failed_steps:
             step_name, step_status = failed_steps[0]
