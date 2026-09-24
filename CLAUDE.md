@@ -442,6 +442,7 @@ task = await handoff  # {"task_id": "...", "status": "running"}
 - `background_timeout` → store enforces wall-clock deadline; status `timed_out`. `background_stall_timeout` → no log events within window; status `stalled` (timer resets on every event).
 - Cancel stops in-flight work: the Task is cancelled *and* the handler generator is closed (an async gen suspended at a yield would otherwise never run its `finally`), then `on_background_cancel` fires for work the loop can't reach.
 - `wait_for_background(task_id, timeout=..., after=...)` blocks until terminal (no `after`) or until the log advances past `after` — app/frontends; does not ack completion notices.
+- **Polling from outside the run**: the module functions take `run_id=` (any turn from the spawning one onward, e.g. `OutputEvent.run_id`) and resolve that session's store without an ambient `RunContext` — `get_background_task(task_id, run_id=result.run_id)`, `await wait_for_background(task_id, run_id=..., timeout=...)`. The `Runnable` methods (the LLM tool path) stay ambient-only. Over HTTP: `GET /runs/{run_id}/background`, `GET /runs/{run_id}/background/{task_id}?wait_ms=&after=`, `GET .../{task_id}/events?after=&limit=&wait_ms=`, `POST .../{task_id}/cancel` (see `python/timbal/server/README.md`).
 
 ---
 
