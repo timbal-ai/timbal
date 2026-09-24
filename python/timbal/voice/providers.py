@@ -144,7 +144,8 @@ def resolve_tts(
 
     ``provider`` is case-insensitive: ``"elevenlabs"`` (default when empty;
     aliases ``"el"``, ``"11labs"``), ``"munsit"`` (alias ``"faseeh"``), or
-    ``"fishaudio"`` (aliases ``"fish"``, ``"fish-audio"``). Unknown ids raise
+    ``"fishaudio"`` (aliases ``"fish"``, ``"fish-audio"``), or ``"deepgram"``
+    (alias ``"deepgram-aura"``). Unknown ids raise
     ``ValueError`` so the caller can log and fall back explicitly.
 
     Provider modules import lazily — selecting Munsit never imports the
@@ -163,4 +164,8 @@ def resolve_tts(
         from . import fish_audio
 
         return fish_audio.FishAudioStreamTTS(api_key=api_key)
+    if p in ("deepgram", "deepgram-aura"):
+        from .deepgram_tts import DeepgramStreamTTS
+
+        return DeepgramStreamTTS(api_key=api_key)
     raise ValueError(f"Unknown TTS provider: {provider!r}")

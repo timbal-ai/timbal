@@ -283,7 +283,9 @@ class VoiceConfig(BaseModel):
     stt_model: str = "scribe_v2_realtime"
     tts_provider: str = "elevenlabs"
     """``"elevenlabs"``, ``"munsit"`` (Arabic; requires ``MUNSIT_API_KEY``), or
-    ``"fishaudio"`` (requires ``FISH_API_KEY``)."""
+    ``"fishaudio"`` (requires ``FISH_API_KEY``), or ``"deepgram"``
+    (Aura/Aura-2; requires ``DEEPGRAM_API_KEY``). For Deepgram, set
+    ``tts_model`` to a full voice model id, e.g. ``aura-2-thalia-en``."""
     tts_model: str = "eleven_flash_v2_5"
     voice: str = DEFAULT_VOICE_ID
     language: str | None = None

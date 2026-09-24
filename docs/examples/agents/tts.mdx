@@ -1,9 +1,86 @@
 ---
 title: "Text-to-Speech"
-description: "AI agents can convert text to speech using OpenAI's TTS capabilities"
+description: "Generate audio with text-to-speech tools or use Deepgram Aura in live voice sessions"
 ---
 
-Agents can generate audio from text using text-to-speech tools. Add the TTS tool to your agent's tools list:
+## Deepgram Aura
+
+Set `DEEPGRAM_API_KEY` on the server. For live conversations, install
+`timbal[server,voice]` and select Deepgram in your agent's voice configuration:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="VoiceAgent",
+    model="openai/gpt-4.1-mini",
+    voice_config={
+        "stt_provider": "deepgram-flux",
+        "tts_provider": "deepgram",
+        "tts_model": "aura-2-thalia-en",
+    },
+)
+```
+
+The same configuration works through the voice server's WebSocket, WebRTC,
+LiveKit, and telephony transports. STT and TTS are independent: you can keep
+ElevenLabs transcription and use Deepgram for speech output. The voice
+playground also includes a **Deepgram Aura** provider option.
+
+Aura combines the voice and language into its model id. `tts_model` takes
+precedence; a full Aura id in `voice` is also accepted when `tts_model` contains
+another provider's default. Otherwise, `DEEPGRAM_TTS_MODEL` is used, falling
+back to `aura-2-thalia-en`. Select the appropriate language's voice explicitly;
+the `language` setting controls transcription and does not change an Aura voice.
+See the [voice catalog](https://developers.deepgram.com/docs/tts-models).
+
+Live output is raw PCM16 at the session's sample rate (8000, 16000, 24000,
+32000, or 48000 Hz). Each reply streams text over its own connection and
+flushes once at the end. Interrupting a reply closes its socket and drops its
+queued audio. Greeting, filler, and reply streams are isolated. Each new reply
+pays a WebSocket handshake; no Deepgram SDK is required. This adapter uses
+Aura's `/v1/speak` protocol, not the separate Flux TTS `/v2/speak` API.
+
+Optional server configuration: `tts_extra={"speed": 1.1}` adjusts speaking
+rate where supported. `tts_extra` also accepts `mip_opt_out` and a server-only
+`tts_host` for regional/self-hosted endpoints (for example,
+`api.eu.deepgram.com`). Client overrides cannot change the host or opt-out policy.
+
+For standalone audio generation and voice discovery, add the built-in tools:
+
+```python
+from timbal import Agent
+from timbal.tools import DeepgramListVoices, DeepgramTextToSpeech
+
+agent = Agent(
+    name="Narrator",
+    model="openai/gpt-4.1-mini",
+    tools=[DeepgramListVoices(), DeepgramTextToSpeech()],
+)
+
+# Tools also work directly, without an agent:
+voices = await DeepgramListVoices()(language="es").collect()
+audio = await DeepgramTextToSpeech()(
+    text="Hello from Timbal!",
+    model="aura-2-thalia-en",
+    encoding="mp3",
+).collect()
+```
+
+`DeepgramListVoices` returns Aura model ids, languages and provider metadata
+(including voice sample URLs). `DeepgramTextToSpeech` returns `audio_base64`,
+`content_type`, `model`, and `encoding`. REST generation supports MP3, linear16,
+mu-law, A-law, Opus, FLAC and AAC; only pass sample rate, bitrate and container
+options supported by the selected format. Both tools support explicit
+`api_key`, platform `integration`, or `DEEPGRAM_API_KEY` credential resolution,
+following the same precedence as the ElevenLabs tools.
+
+For a custom voice pipeline, import `DeepgramStreamTTS` from `timbal.voice`
+and pass it as the `tts` provider to `VoiceSession`.
+
+## Custom OpenAI tool
+
+Agents can also generate audio using a custom text-to-speech tool:
 
 ```python
 import os

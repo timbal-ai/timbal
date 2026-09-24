@@ -93,6 +93,10 @@ def __getattr__(name: str):
         from .fish_audio import FishAudioStreamTTS
 
         return FishAudioStreamTTS
+    if name == "DeepgramStreamTTS":
+        from .deepgram_tts import DeepgramStreamTTS
+
+        return DeepgramStreamTTS
     if name == "SmartTurnEouModel":
         from .smart_turn import SmartTurnEouModel
 
@@ -124,6 +128,7 @@ __all__ = [
     "CommitDecision",
     "DeepgramFluxSTT",
     "DeepgramNovaSTT",
+    "DeepgramStreamTTS",
     "ElevenLabsRealtimeSTT",
     "EouPredictor",
     "FillerConfig",
