@@ -864,9 +864,10 @@
             </label>
             <label class="field">
               <span class="field-label">TTS provider</span>
-              <select id="tts-select" aria-label="TTS provider" title="Text-to-speech provider — applied on the next Start. Munsit (Arabic) needs MUNSIT_API_KEY, Fish Audio needs FISH_API_KEY on the server.">
+              <select id="tts-select" aria-label="TTS provider" title="Text-to-speech provider — applied on the next Start. Deepgram needs DEEPGRAM_API_KEY, Munsit needs MUNSIT_API_KEY, Fish Audio needs FISH_API_KEY on the server.">
                 <option value="">Server default</option>
                 <option value="elevenlabs">ElevenLabs</option>
+                <option value="deepgram">Deepgram Aura</option>
                 <option value="fishaudio">Fish Audio</option>
                 <option value="munsit">Munsit (Arabic)</option>
               </select>
@@ -885,7 +886,7 @@
             <label class="field">
               <span class="field-label">Voice ID</span>
               <input type="text" id="voice-input" aria-label="TTS voice id" placeholder="Server default" data-vc="voice"
-                     title="Provider voice id for TTS (ElevenLabs voice id, Fish reference id…). Applied on the next Start.">
+                     title="Provider voice id for TTS (ElevenLabs voice id, Fish reference id…). For Deepgram, enter a full Aura voice model id and leave TTS model at Server default. Applied on the next Start.">
             </label>
           </div>
         </section>
@@ -1568,6 +1569,7 @@ const TTS_MODEL_STORAGE_KEY = 'timbal-voice-tts-model';
 const TTS_MODELS = {
   elevenlabs: ['eleven_flash_v2_5', 'eleven_turbo_v2_5', 'eleven_multilingual_v2'],
   fishaudio: ['s2.1-pro', 's2.1-pro-free', 's2-pro', 's1'],
+  deepgram: ['aura-2-thalia-en', 'aura-2-andromeda-en', 'aura-2-helena-en', 'aura-2-apollo-en', 'aura-2-asteria-en'],
   munsit: ['faseeh-v1-preview'],
 };
 function syncTtsModels() {

@@ -178,6 +178,7 @@ if TYPE_CHECKING:
         CoverManagerUpdateReserv,
         CoverManagerWaitingList,
     )
+    from .deepgram import DeepgramListVoices, DeepgramTextToSpeech
     from .dynamics_business_central import (
         DynamicsBCCreateCustomer,
         DynamicsBCGetItemPrices,
@@ -1614,6 +1615,8 @@ __all__ = [
     "HubSpotDeleteAssociation",
     "HubSpotGetAssociationTypes",
     "HubSpotGetUsers",
+    "DeepgramListVoices",
+    "DeepgramTextToSpeech",
     "ElevenLabsTextToSpeech",
     "ElevenLabsSpeechToText",
     "ElevenLabsSpeechToSpeech",
@@ -2828,6 +2831,8 @@ _LAZY_IMPORTS = {
     "HubSpotDeleteAssociation": ".hubspot",
     "HubSpotGetAssociationTypes": ".hubspot",
     "HubSpotGetUsers": ".hubspot",
+    "DeepgramListVoices": ".deepgram",
+    "DeepgramTextToSpeech": ".deepgram",
     "ElevenLabsTextToSpeech": ".elevenlabs",
     "ElevenLabsSpeechToText": ".elevenlabs",
     "ElevenLabsSpeechToSpeech": ".elevenlabs",

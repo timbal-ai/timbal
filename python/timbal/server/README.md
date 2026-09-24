@@ -140,8 +140,9 @@ Two hello keys are read by the transport rather than merged into `VoiceConfig`: 
 |---------------|-------------|
 | `stt_provider` | `"elevenlabs"` (default), `"deepgram-flux"`, or `"deepgram-nova"` (bare `"deepgram"` routes by `stt_model`, defaulting to Flux). Deepgram needs `DEEPGRAM_API_KEY` on the server. Flux (`/v2/listen`) does model-native end-of-turn detection: the session auto-selects the `provider` turn detector (explicit `turn_detector` still wins) and disables local VAD endpointing. Nova-3 (`/v1/listen`) is plain ASR — Timbal turn detection and VAD endpointing work exactly as with ElevenLabs. Env default: `TIMBAL_STT_PROVIDER`. |
 | `stt_model`   | Speech-to-text model id (ElevenLabs realtime `scribe_*`, Deepgram `flux-general-en`/`flux-general-multi`/`nova-3*`). Model ids that don't belong to the selected provider are ignored (provider default used). |
-| `tts_model`   | Text-to-speech model id. |
-| `voice`       | ElevenLabs voice id string. |
+| `tts_provider` | `"elevenlabs"` (default), `"deepgram"` (Aura/Aura-2), `"fishaudio"`, or `"munsit"`. Deepgram uses `DEEPGRAM_API_KEY`, independently of the STT provider. Env default: `TIMBAL_TTS_PROVIDER`. |
+| `tts_model` | Provider TTS model. For Deepgram, use a full voice model id such as `aura-2-thalia-en`; foreign defaults are ignored. Env default: `TIMBAL_TTS_MODEL`. |
+| `voice`       | Provider voice id. Deepgram also accepts a full Aura model id here when `tts_model` is not an Aura id. |
 | `language`    | e.g. `"es"`. Unset → provider auto-detect. |
 | `sample_rate` | Hz; STT/TTS audio use this unless extended later. |
 | `encoding`    | Default `"pcm_s16le"`. |
