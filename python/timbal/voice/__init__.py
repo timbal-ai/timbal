@@ -34,6 +34,7 @@ from .events import (
     TranscriptEntry,
     TranscriptPartial,
     VoiceSessionEvent,
+    VoiceUsageEvent,
 )
 from .metrics import (
     TurnMetrics,
@@ -180,6 +181,7 @@ __all__ = [
     "VoiceConfig",
     "VoiceSession",
     "VoiceSessionEvent",
+    "VoiceUsageEvent",
     "endpointing_delay",
     "resolve_stt",
     "resolve_turn_detector",

@@ -1198,6 +1198,7 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         TranscriptCommitted,
         TranscriptPartial,
         TurnMetricsEvent,
+        VoiceUsageEvent,
     )
 
     if isinstance(event, SessionStarted):
@@ -1238,6 +1239,8 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         return [{"type": "agent_text_done", "text": event.text, "run_id": event.run_id}]
     if isinstance(event, AudioOutput):
         return [{"type": "audio", "data": base64.b64encode(event.data).decode("ascii")}]
+    if isinstance(event, VoiceUsageEvent):
+        return [event.model_dump(mode="json")]
     if isinstance(event, TurnMetricsEvent):
         return [{"type": "metrics", "metrics": event.metrics.model_dump()}]
     if isinstance(event, SessionInterrupted):

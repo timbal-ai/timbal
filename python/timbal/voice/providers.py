@@ -7,10 +7,43 @@ Implement these to plug a new speech provider into
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from .events import VoiceUsageEvent
+
+logger = structlog.get_logger(__name__)
+
+
+class VoiceUsageEmitter:
+    """Optional usage capability, without changing audio/transcript iterators.
+
+    Listeners are synchronous, non-blocking callbacks (e.g. ``queue.put_nowait``).
+    Persist/price events outside the callback. Listener failures are logged and
+    isolated from speech; consumers are responsible for durable delivery.
+    Other providers remain compatible and emit nothing until implemented.
+    """
+
+    def add_usage_listener(self, listener: Callable[[VoiceUsageEvent], None]) -> None:
+        if not hasattr(self, "_usage_listeners"):
+            self._usage_listeners: list[Callable[[VoiceUsageEvent], None]] = []
+        if listener not in self._usage_listeners:
+            self._usage_listeners.append(listener)
+
+    def remove_usage_listener(self, listener: Callable[[VoiceUsageEvent], None]) -> None:
+        listeners = getattr(self, "_usage_listeners", [])
+        if listener in listeners:
+            listeners.remove(listener)
+
+    def _emit_usage(self, event: VoiceUsageEvent) -> None:
+        for listener in tuple(getattr(self, "_usage_listeners", ())):
+            try:
+                listener(event.model_copy(deep=True))
+            except Exception:
+                logger.exception("voice_usage_listener_failed", usage_id=event.usage_id)
 
 
 class AudioInputConfig(BaseModel):
@@ -44,7 +77,7 @@ class TranscriptEvent(BaseModel):
     text: str
 
 
-class SpeechToText(ABC):
+class SpeechToText(VoiceUsageEmitter, ABC):
     """Abstract STT provider.
 
     Lifecycle: ``connect`` → push audio / consume ``events`` → ``close``.
@@ -104,7 +137,7 @@ class TTSStream(ABC):
     def audio(self) -> AsyncIterator[bytes]: ...
 
 
-class TextToSpeech(ABC):
+class TextToSpeech(VoiceUsageEmitter, ABC):
     """Abstract TTS provider.
 
     Lifecycle: ``connect`` → ``synthesize`` (repeatable) → ``close``.
