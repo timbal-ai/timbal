@@ -380,6 +380,13 @@ class TestGuardLifetimeAroundSessionBuild:
         session is built — a build failure must finish(), not release(),
         or the box is unclaimed, idle-disarmed and immortal."""
         room, guard, _log, app = driver_env
+        published = []
+
+        async def capture(payload, **kwargs):
+            import json
+            published.append(json.loads(payload))
+
+        room.local_participant.publish_data = capture
 
         def _boom(*args: object, **kwargs: object) -> None:
             raise RuntimeError("recorder misconfigured")
@@ -397,6 +404,8 @@ class TestGuardLifetimeAroundSessionBuild:
         assert guard.finished
         assert not guard.released
         assert room.disconnected
+        assert "voice_livekit_startup_failed" in _log.events
+        assert published == [{"type": "error", "message": "Voice session could not start. Please try again."}]
 
     async def test_failure_before_media_releases_the_claim(
         self, driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]

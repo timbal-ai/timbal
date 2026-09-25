@@ -135,10 +135,11 @@ class TestFluxEventMapping:
         await stt._handle_message(_flux_turn_info("EndOfTurn", "  "))
         assert _drain(stt) == []
 
-    async def test_connected_ignored_fatal_error_surfaces(self) -> None:
+    @pytest.mark.parametrize("message_type", ["Error", "FatalError"])
+    async def test_connected_ignored_fatal_error_surfaces(self, message_type) -> None:
         stt = DeepgramFluxSTT()
         await stt._handle_message({"type": "Connected", "request_id": "r1", "sequence_id": 0})
-        await stt._handle_message({"type": "FatalError", "description": "bad auth", "code": "AUTH"})
+        await stt._handle_message({"type": message_type, "description": "bad auth", "code": "AUTH"})
         events = _drain(stt)
         assert len(events) == 1
         assert events[0].type == "error"
@@ -149,6 +150,28 @@ class TestFluxEventMapping:
         stt._ws = _FakeWs()
         await stt.commit()
         assert stt._ws.sent == []
+
+
+class TestProviderDisconnect:
+    @pytest.mark.parametrize("requested", [False, True])
+    async def test_normal_websocket_exhaustion_only_reports_unrequested_close(self, requested):
+        class ClosedSocket:
+            close_code = 1000
+
+            async def __aiter__(self):
+                return
+                yield  # pragma: no cover
+
+        stt = DeepgramFluxSTT()
+        stt._ws = ClosedSocket()
+        if requested:
+            stt._stop.set()
+        await stt._receive_loop()
+        if requested:
+            assert [event async for event in stt.events()] == []
+        else:
+            with pytest.raises(RuntimeError, match="STT connection closed unexpectedly"):
+                await anext(stt.events())
 
 
 class TestFluxUri:

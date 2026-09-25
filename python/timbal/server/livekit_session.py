@@ -984,15 +984,15 @@ async def _run_livekit_session(
         except Exception as e:
             logger.error("voice_livekit_session_error", error=str(e), exc_info=True)
     except BaseException as e:
-        # A failure before `join.ok()` is the request's answer; after it, the
-        # request is long gone and this is just teardown (`fail` is a no-op
-        # once the handshake completed). The reason the caller sees is
-        # deliberately fixed — `e` carries internal hostnames and stack detail
-        # and this route is reachable by whoever can reach the process — so the
-        # detail goes to the log, once, and only for a real join failure
-        # (a cancel here is a shutdown or the 504 path, not news).
-        if join is not None and not join.done.is_set() and not isinstance(e, asyncio.CancelledError):
-            logger.error("voice_livekit_join_failed", room=room_name, error=str(e), exc_info=True)
+        # Joining the room is not the end of startup: provider preparation
+        # and track publication can still fail before session.run can report
+        # an error. Keep internal details in logs and notify connected clients.
+        if not isinstance(e, asyncio.CancelledError):
+            if join is not None and not join.done.is_set():
+                logger.error("voice_livekit_join_failed", room=room_name, error=str(e), exc_info=True)
+            else:
+                logger.error("voice_livekit_startup_failed", room=room_name, error=str(e), exc_info=True)
+                send_q.put_nowait({"type": "error", "message": "Voice session could not start. Please try again."})
         _reject("the agent could not join the room")
         # Before the caller's mic subscribed, the idle timer is still armed —
         # release the claim and let it own the exit. After subscribe,
