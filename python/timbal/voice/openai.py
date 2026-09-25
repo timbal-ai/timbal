@@ -12,8 +12,9 @@ import contextlib
 import json
 import os
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from pydantic import SecretStr
@@ -21,6 +22,7 @@ from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from .._openai_audio import STT_MODELS, TTS_MODELS, VOICES, is_openai_stt_model, validate_speech
+from .events import VoiceUsageEvent
 from .providers import AudioInputConfig, AudioOutputConfig, SpeechToText, TextToSpeech, TranscriptEvent
 from .telephony import PcmResampler
 
@@ -128,11 +130,16 @@ class OpenAIRealtimeSTT(SpeechToText):
         self._order: deque[str] = deque()
         self._partials: dict[str, str] = {}
         self._completed: dict[str, str] = {}
+        self._usage_scope = uuid4().hex
+        self._model = DEFAULT_STT_MODEL
+        self._pending_usage: set[str] = set()
 
     async def connect(self, config: AudioInputConfig) -> None:
         await self.close()
         _validate_pcm(config)
         update = build_transcription_session(config)
+        self._model = effective_stt_model(config.model)
+        self._usage_scope = uuid4().hex
         key = _resolve_api_key(self._api_key_explicit)
         self._resampler = PcmResampler(config.sample_rate, WIRE_RATE) if config.sample_rate != WIRE_RATE else None
         self._queue = asyncio.Queue()
@@ -215,12 +222,15 @@ class OpenAIRealtimeSTT(SpeechToText):
             # Only the local commit resets our byte estimate; server-VAD
             # races can safely return the owned commit_empty error below.
             self._order.append(item)
+            self._pending_usage.add(item)
         elif kind == "conversation.item.input_audio_transcription.delta":
             self._partials[item] = self._partials.get(item, "") + event.get("delta", "")
             if self._order and item == self._order[0]:
                 self._queue.put_nowait(TranscriptEvent(type="partial", text=self._partials[item]))
         elif kind == "conversation.item.input_audio_transcription.completed":
             self._completed[item] = event.get("transcript", "")
+            self._pending_usage.discard(item)
+            self._report_usage(item, event.get("usage"), event.get("content_index", 0))
         elif kind == "error":
             error = event.get("error", {})
             # A server VAD commit may win the race against local force-commit.
@@ -241,6 +251,24 @@ class OpenAIRealtimeSTT(SpeechToText):
             if text:
                 self._queue.put_nowait(TranscriptEvent(type="partial", text=text))
 
+    def _report_usage(self, item: str, usage: Any = None, content_index: int = 0) -> None:
+        self._emit_usage(
+            VoiceUsageEvent(
+                usage_id=f"{self._usage_scope}:{item}:{content_index}",
+                provider=self.provider_id,
+                operation="stt",
+                model=self._model,
+                item_id=item,
+                status="complete" if _valid_usage(usage) else "incomplete",
+                usage=usage if isinstance(usage, dict) else None,
+            )
+        )
+
+    def _report_pending_usage(self) -> None:
+        for item in self._pending_usage:
+            self._report_usage(item)
+        self._pending_usage.clear()
+
     async def _receive_loop(self) -> None:
         try:
             async for raw in self._ws:
@@ -253,6 +281,7 @@ class OpenAIRealtimeSTT(SpeechToText):
             if not self._closed:
                 self._queue.put_nowait(TranscriptEvent(type="error", text=f"OpenAI STT connection closed: {exc}"))
         finally:
+            self._report_pending_usage()
             self._queue.put_nowait(None)
 
     async def events(self) -> AsyncIterator[TranscriptEvent]:
@@ -276,7 +305,34 @@ class OpenAIRealtimeSTT(SpeechToText):
             with contextlib.suppress(Exception):
                 await self._ws.close()
             self._ws = None
+        self._report_pending_usage()
         self._queue.put_nowait(None)
+
+
+def _valid_usage(usage: Any) -> bool:
+    """Accept reported counters, including legitimate zeros; never invent them."""
+    if not isinstance(usage, dict):
+        return False
+    if usage.get("type") == "duration":
+        seconds = usage.get("seconds")
+        return type(seconds) in (int, float) and 0 <= seconds < float("inf")
+    if usage.get("type", "tokens") != "tokens":
+        return False
+    return all(type(usage.get(k)) is int and usage[k] >= 0 for k in ("input_tokens", "output_tokens", "total_tokens"))
+
+
+async def _speech_events(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:
+    """Parse SSE framing across arbitrary HTTP chunks, comments and CRLF."""
+    data: list[str] = []
+    async for line in response.aiter_lines():
+        if not line:
+            if data:
+                yield json.loads("\n".join(data))
+                data.clear()
+        elif line.startswith("data:"):
+            data.append(line[5:].removeprefix(" "))
+    if data:
+        yield json.loads("\n".join(data))
 
 
 class OpenAIStreamTTS(TextToSpeech):
@@ -294,6 +350,7 @@ class OpenAIStreamTTS(TextToSpeech):
         self._client: httpx.AsyncClient | None = None
         self._config: AudioOutputConfig | None = None
         self._responses: set[httpx.Response] = set()
+        self._pending_usage: dict[str, Callable[[], None]] = {}
 
     async def connect(self, config: AudioOutputConfig) -> None:
         await self.close()
@@ -324,36 +381,89 @@ class OpenAIStreamTTS(TextToSpeech):
             "input": text,
             "response_format": "pcm",
         }
+        structured = model.startswith("gpt-4o-mini-tts")
+        if structured:
+            payload["stream_format"] = "sse"
         if "speed" in config.extra:
             payload["speed"] = config.extra["speed"]
         if config.extra.get("instructions") and model.startswith("gpt-4o-mini-tts"):
             payload["instructions"] = config.extra["instructions"]
         resampler = PcmResampler(WIRE_RATE, config.sample_rate) if config.sample_rate != WIRE_RATE else None
         remainder = b""
-        async with client.stream("POST", "audio/speech", json=payload) as response:
-            response.raise_for_status()
-            self._responses.add(response)
-            try:
+        usage_id = uuid4().hex
+        reported = False
+        request_id = None
+
+        def report(usage: Any = None) -> None:
+            nonlocal reported
+            if reported:
+                return
+            reported = True
+            self._pending_usage.pop(usage_id, None)
+            self._emit_usage(
+                VoiceUsageEvent(
+                    usage_id=usage_id,
+                    provider=self.provider_id,
+                    operation="tts",
+                    model=model,
+                    request_id=request_id,
+                    status="complete" if _valid_usage(usage) else "incomplete",
+                    usage=usage if isinstance(usage, dict) else None,
+                )
+            )
+
+        async def chunks(response: httpx.Response) -> AsyncIterator[bytes]:
+            if not structured:
                 async for chunk in response.aiter_bytes():
+                    yield chunk
+                return
+            async for event in _speech_events(response):
+                kind = event.get("type")
+                if kind == "speech.audio.delta":
+                    yield base64.b64decode(event["audio"], validate=True)
+                elif kind == "speech.audio.done":
+                    report(event.get("usage"))
+                    return
+                elif kind in ("error", "speech.audio.error"):
+                    raise RuntimeError(f"OpenAI TTS error: {event.get('error')}")
+            raise RuntimeError("OpenAI TTS stream ended before speech.audio.done")
+
+        if structured:
+            self._pending_usage[usage_id] = report
+        try:
+            async with client.stream("POST", "audio/speech", json=payload) as response:
+                request_id = response.headers.get("x-request-id")
+                response.raise_for_status()
+                self._responses.add(response)
+                try:
+                    async with contextlib.aclosing(chunks(response)) as stream:
+                        async for chunk in stream:
+                            if self._client is not client:
+                                return
+                            raw = remainder + chunk
+                            end = len(raw) // 2 * 2
+                            pcm, remainder = raw[:end], raw[end:]
+                            if resampler is not None:
+                                pcm = resampler.process(pcm)
+                            if pcm:
+                                yield pcm
+                            if self._client is not client:
+                                return
                     if self._client is not client:
                         return
-                    raw = remainder + chunk
-                    end = len(raw) // 2 * 2
-                    pcm, remainder = raw[:end], raw[end:]
+                    if remainder:
+                        raise RuntimeError("OpenAI TTS returned an incomplete PCM16 sample")
                     if resampler is not None:
-                        pcm = resampler.process(pcm)
-                    if pcm:
-                        yield pcm
-                if self._client is not client:
-                    return
-                if remainder:
-                    raise RuntimeError("OpenAI TTS returned an incomplete PCM16 sample")
-                if resampler is not None:
-                    tail = resampler.flush()
-                    if tail:
-                        yield tail
-            finally:
-                self._responses.discard(response)
+                        tail = resampler.flush()
+                        if tail:
+                            yield tail
+                finally:
+                    self._responses.discard(response)
+        finally:
+            # Includes cancellation, generator.aclose(), HTTP errors and EOF.
+            # Legacy character-priced models keep their existing metering path.
+            if structured and not reported:
+                report()
 
     async def close(self) -> None:
         client, self._client = self._client, None
@@ -361,5 +471,7 @@ class OpenAIStreamTTS(TextToSpeech):
         for response in list(self._responses):
             await response.aclose()
         self._responses.clear()
+        for report in list(self._pending_usage.values()):
+            report()
         if client is not None:
             await client.aclose()

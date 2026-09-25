@@ -31,6 +31,26 @@ class VoiceSessionEvent(BaseModel):
     type: str
 
 
+class VoiceUsageEvent(VoiceSessionEvent):
+    """One provider operation's usage, independent of playback or turn timing.
+
+    ``usage`` preserves the provider's counters (including token breakdowns),
+    never a dollar estimate. ``status=incomplete`` means no authoritative
+    counters arrived; it must not be interpreted as zero cost. Consumers must
+    deduplicate by ``usage_id``. Request/item ids support provider reconciliation.
+    """
+
+    type: Literal["voice_usage"] = "voice_usage"
+    usage_id: str
+    provider: str
+    operation: Literal["stt", "tts"]
+    model: str
+    status: Literal["complete", "incomplete"]
+    usage: dict[str, Any] | None = None
+    request_id: str | None = None
+    item_id: str | None = None
+
+
 class SessionStarted(VoiceSessionEvent):
     type: Literal["session_started"] = "session_started"
 

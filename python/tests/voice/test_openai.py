@@ -206,7 +206,7 @@ async def test_stt_resampling_preserves_duration(ws, rate):
         await stt.close()
 
 
-class AudioStream(httpx.AsyncByteStream):
+class RawAudioStream(httpx.AsyncByteStream):
     def __init__(self, chunks):
         self.chunks = chunks
         self.closed = False
@@ -219,6 +219,28 @@ class AudioStream(httpx.AsyncByteStream):
 
     async def aclose(self):
         self.closed = True
+
+
+def sse(event):
+    return ("data: " + json.dumps(event) + "\r\n\r\n").encode()
+
+
+class AudioStream(RawAudioStream):
+    """PCM chunks carried in the mini-TTS SSE protocol."""
+
+    async def __aiter__(self):
+        async for chunk in super().__aiter__():
+            yield sse({"type": "speech.audio.delta", "audio": base64.b64encode(chunk).decode()})
+        yield sse(
+            {
+                "type": "speech.audio.done",
+                "usage": {
+                    "input_tokens": 14,
+                    "output_tokens": 101,
+                    "total_tokens": 115,
+                },
+            }
+        )
 
 
 @pytest.fixture
@@ -258,6 +280,7 @@ async def test_tts_streaming_pcm_resampling_and_wire_format(http, rate):
             "model": "gpt-4o-mini-tts",
             "voice": "coral",
             "response_format": "pcm",
+            "stream_format": "sse",
             "instructions": "Speak calmly",
             "speed": 1.1,
         }
@@ -540,3 +563,172 @@ def test_existing_server_extra_passthrough_is_preserved():
         {"stt_extra": {"prompt": "New client setting"}},
     )
     assert session.audio_input.extra["prompt"] == "Server setting"
+
+
+@pytest.mark.parametrize(
+    "model,usage",
+    [
+        (
+            "gpt-4o-transcribe",
+            {
+                "type": "tokens",
+                "input_tokens": 17,
+                "output_tokens": 9,
+                "total_tokens": 26,
+                "input_token_details": {"text_tokens": 2, "audio_tokens": 15},
+            },
+        ),
+        ("whisper-1", {"type": "duration", "seconds": 1.25}),
+    ],
+)
+@pytest.mark.usefixtures("ws")
+async def test_stt_reports_usage_independently_of_transcript_order(model, usage):
+    stt = OpenAIRealtimeSTT(api_key="key")
+    events = []
+    stt.add_usage_listener(events.append)
+    await stt.connect(AudioInputConfig(model=model, sample_rate=24000))
+    for item in ("a", "b"):
+        stt._handle_message({"type": "input_audio_buffer.committed", "item_id": item})
+    completion = {
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "b",
+        "content_index": 0,
+        "transcript": "",
+        "usage": usage,
+    }
+    stt._handle_message(completion)
+    stt._handle_message(completion)
+    assert stt._queue.empty()  # Blank transcript / blocked ordering must not hide spend.
+    assert events[0].usage == usage and events[0].model == model
+    assert events[0].status == "complete"
+    assert events[0].usage_id == events[1].usage_id  # Durable consumers can deduplicate.
+    await stt.close()
+    assert events[-1].item_id == "a" and events[-1].status == "incomplete"
+    assert events[-1].usage is None
+    count = len(events)
+    await stt.close()
+    assert len(events) == count
+
+
+async def test_stt_usage_scope_changes_on_reconnect(ws):
+    socket, _ = ws
+    stt = OpenAIRealtimeSTT(api_key="key")
+    events = []
+    stt.add_usage_listener(events.append)
+    for _ in range(2):
+        await stt.connect(AudioInputConfig(sample_rate=24000))
+        stt._handle_message(
+            {"type": "conversation.item.input_audio_transcription.completed", "item_id": "same", "transcript": ""}
+        )
+        await stt.close()
+        socket.receive({"type": "session.updated"})
+    assert events[0].usage_id != events[1].usage_id
+    assert all(e.status == "incomplete" for e in events)
+
+
+async def test_sse_usage_and_audio_survive_arbitrary_http_boundaries(http):
+    _, responses = http
+    usage = {"input_tokens": 14, "output_tokens": 101, "total_tokens": 115}
+    wire = (
+        b": keepalive\r\nevent: speech.audio.delta\r\n"
+        + sse({"type": "speech.audio.delta", "audio": "AAE="})
+        + b'data: {"type": "speech.audio.done",\r\ndata: "usage": '
+        + json.dumps(usage).encode()
+        + b"}\r\n\r\n"
+    )
+    responses.append(
+        httpx.Response(
+            200, headers={"x-request-id": "req_123"}, stream=RawAudioStream([wire[i : i + 1] for i in range(len(wire))])
+        )
+    )
+    tts = OpenAIStreamTTS(api_key="key")
+    events = []
+    tts.add_usage_listener(events.append)
+    await tts.connect(AudioOutputConfig(model="eleven_flash_v2_5", sample_rate=24000))
+    try:
+        assert b"".join([c async for c in tts.synthesize("Hello")]) == b"\x00\x01"
+        assert len(events) == 1
+        assert events[0].usage == usage and events[0].status == "complete"
+        assert events[0].request_id == "req_123" and events[0].model == "gpt-4o-mini-tts"
+    finally:
+        await tts.close()
+    assert len(events) == 1
+
+
+@pytest.mark.parametrize(
+    "ending",
+    [
+        b"",
+        b"data: invalid json\n\n",
+        sse({"type": "speech.audio.error", "error": {"message": "failed"}}),
+        sse({"type": "speech.audio.delta", "audio": "not-base64!"}),
+    ],
+)
+async def test_failed_sse_does_not_manufacture_zero_usage(http, ending):
+    _, responses = http
+    stream = RawAudioStream([sse({"type": "speech.audio.delta", "audio": "AAE="}), ending])
+    responses.append(httpx.Response(200, stream=stream))
+    tts = OpenAIStreamTTS(api_key="key")
+    events = []
+    tts.add_usage_listener(events.append)
+    await tts.connect(AudioOutputConfig(sample_rate=24000))
+    try:
+        with pytest.raises((ValueError, RuntimeError)):
+            async for _ in tts.synthesize("Hello"):
+                pass
+        assert stream.closed
+        assert len(events) == 1 and events[0].status == "incomplete" and events[0].usage is None
+    finally:
+        await tts.close()
+
+
+@pytest.mark.parametrize("usage", [None, {}, {"input_tokens": -1, "output_tokens": 1, "total_tokens": 0}])
+async def test_missing_or_invalid_terminal_usage_is_incomplete(http, usage):
+    _, responses = http
+    responses.append(httpx.Response(200, stream=RawAudioStream([sse({"type": "speech.audio.done", "usage": usage})])))
+    tts = OpenAIStreamTTS(api_key="key")
+    events = []
+    tts.add_usage_listener(events.append)
+    await tts.connect(AudioOutputConfig(sample_rate=24000))
+    try:
+        assert [c async for c in tts.synthesize("Hello")] == []
+        assert len(events) == 1 and events[0].status == "incomplete"
+    finally:
+        await tts.close()
+
+
+async def test_concurrent_synthesis_close_reports_each_request_once(http):
+    _, responses = http
+    responses.extend(
+        httpx.Response(200, headers={"x-request-id": f"req_{i}"}, stream=AudioStream([b"\0\0"] * 2)) for i in range(2)
+    )
+    tts = OpenAIStreamTTS(api_key="key")
+    events = []
+    tts.add_usage_listener(events.append)
+    await tts.connect(AudioOutputConfig(sample_rate=24000))
+    first, second = tts.synthesize("First"), tts.synthesize("Second")
+    await anext(first)
+    await anext(second)
+    await first.aclose()
+    assert len(events) == 1 and events[0].request_id == "req_0"
+    await tts.close()
+    assert len(events) == 2 and events[1].request_id == "req_1"
+    await second.aclose()
+    assert len(events) == 2 and len({e.usage_id for e in events}) == 2
+    assert all(e.status == "incomplete" for e in events)
+
+
+@pytest.mark.parametrize("model", ["tts-1", "tts-1-hd"])
+async def test_legacy_tts_keeps_raw_pcm_and_character_metering(http, model):
+    requests, responses = http
+    responses.append(httpx.Response(200, stream=RawAudioStream([b"\0", b"\1"])))
+    tts = OpenAIStreamTTS(api_key="key")
+    events = []
+    tts.add_usage_listener(events.append)
+    await tts.connect(AudioOutputConfig(model=model, voice="alloy", sample_rate=24000))
+    try:
+        assert b"".join([c async for c in tts.synthesize("Hello")]) == b"\0\1"
+        assert "stream_format" not in json.loads(requests[0].content)
+        assert events == []
+    finally:
+        await tts.close()

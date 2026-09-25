@@ -60,6 +60,7 @@ from .events import (
     TranscriptEntry,
     TranscriptPartial,
     VoiceSessionEvent,
+    VoiceUsageEvent,
 )
 from .metrics import TurnMetrics, TurnMetricsEvent
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
@@ -597,6 +598,9 @@ class VoiceSession:
         """
         if self._prepared:
             return
+        for provider in (self.stt, self.tts):
+            if add_listener := getattr(provider, "add_usage_listener", None):
+                add_listener(self._event_queue.put_nowait)
         try:
             await self.stt.connect(self.audio_input)
             await self.tts.connect(self.audio_output)
@@ -621,6 +625,12 @@ class VoiceSession:
                 await closer()
             except Exception as e:  # noqa: BLE001 - teardown must finish
                 logger.debug("voice_prepared_adapter_close_failed", error=str(e))
+        self._remove_usage_listeners()
+
+    def _remove_usage_listeners(self) -> None:
+        for provider in (self.stt, self.tts):
+            if remove_listener := getattr(provider, "remove_usage_listener", None):
+                remove_listener(self._event_queue.put_nowait)
 
     async def run(self, audio_in: AsyncIterable[bytes]) -> AsyncIterator[VoiceSessionEvent]:
         """Main loop.  Yields events until the session is closed or errors out."""
@@ -665,7 +675,16 @@ class VoiceSession:
             logger.error("voice_session_error", error=str(e), exc_info=True)
             yield SessionError(message=str(e))
         finally:
-            await self._cleanup()
+            try:
+                await self._cleanup()
+            finally:
+                self._remove_usage_listeners()
+            # Closing adapters can report incomplete operations after the stop
+            # sentinel. Deliver their accounting before the terminal event.
+            while not self._event_queue.empty():
+                event = self._event_queue.get_nowait()
+                if isinstance(event, VoiceUsageEvent):
+                    yield event
             yield SessionEnded()
 
     async def interrupt(self, *, truncate_completed: bool = True) -> None:
