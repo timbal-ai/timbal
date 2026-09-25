@@ -263,6 +263,10 @@ def merge_voice_config(runnable: Any) -> VoiceConfig:
         **base.model_dump(exclude={"outbound_greeting"}),
         **{k: v for k, v in vc.items() if v is not None and k not in skip},
     }
+    # An empty selector means inherit, not "disable speech". Keep the
+    # operator's configured voice before falling back to a provider default.
+    if isinstance(data.get("voice"), str) and not data["voice"].strip():
+        data["voice"] = base.voice
     if "outbound_greeting" in vc:
         data["outbound_greeting"] = vc["outbound_greeting"]
     if isinstance(vc.get("stt_extra"), dict):
@@ -436,6 +440,14 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     :data:`CLIENT_TUNING_TTS_EXTRA` — a caller never picks the provider host.
     """
     updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
+    if "voice" in updates:
+        voice = updates["voice"]
+        if isinstance(voice, str) and voice.strip():
+            updates["voice"] = voice.strip()
+        else:
+            # Studio's unselected picker may send "". A blank/malformed
+            # override must not erase a working Agent/operator voice.
+            updates.pop("voice")
     # ``turn_detector``, ``call_context``, ``parent_id`` and ``direction`` are
     # read straight off the hello by the transport, not through VoiceConfig —
     # reporting them as ignored would be a lie in both directions.
@@ -987,6 +999,16 @@ def build_voice_session(
         tts_voice_requested = DEFAULT_VOICE_ID
     # Config id for clients/logs (``fishaudio``), not the class name.
     tts_provider = tts.provider_id
+    if tts_provider == "elevenlabs":
+        voice = tts_voice_requested.strip() if isinstance(tts_voice_requested, str) else ""
+        if not voice:
+            # model_copy / platform session knobs bypass VoiceConfig validation.
+            # Keep this final guard provider-specific: other TTS adapters own
+            # their defaults and must not receive an ElevenLabs voice id here.
+            configured = defaults.voice.strip() if isinstance(defaults.voice, str) else ""
+            voice = configured or DEFAULT_VOICE_ID
+            logger.info("voice_tts_default_selected", provider=tts_provider, reason="missing_voice")
+        tts_voice_requested = voice
 
     # The merge allow-lists client extras over the server's (never the host);
     # ``model_copy`` ran no validators, so still tolerate a non-dict rather

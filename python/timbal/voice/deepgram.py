@@ -183,6 +183,12 @@ class _DeepgramSTTBase(SpeechToText):
                 except ValueError:
                     continue
                 await self._handle_message(msg)
+            # websockets ends iteration normally for 1000/1001 (and no status),
+            # so provider-initiated closes do not always raise ConnectionClosed.
+            if not self._stop.is_set():
+                code = getattr(self._ws, "close_code", None)
+                logger.warning("dg_stt_ws_closed_unrequested", code=code)
+                await self._queue.put(TranscriptEvent(type="error", text="STT connection closed unexpectedly"))
         except ConnectionClosed as e:
             if self._stop.is_set():
                 # Requested teardown (close() sent CloseStream); silence is correct.
@@ -323,7 +329,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                     text_preview=text[:80],
                 )
             return
-        if mt == "FatalError":
+        if mt in ("Error", "FatalError"):
             err = msg.get("description") or msg.get("message") or "Unknown Flux error"
             logger.error("dg_flux_fatal", error=err, code=msg.get("code"))
             await self._queue.put(TranscriptEvent(type="error", text=f"STT fatal: {err}"))
