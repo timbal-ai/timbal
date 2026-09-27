@@ -23,6 +23,33 @@ _ENCRYPTED_REASONING_MODEL_RE = re.compile(r"^(?:o\d|gpt-5|gpt-6|codex)", re.IGN
 REASONING_ENCRYPTED_CONTENT_INCLUDE = "reasoning.encrypted_content"
 
 
+def normalize_responses_params(provider_params: dict[str, Any]) -> dict[str, Any]:
+    """Translate the Chat Completions effort alias without losing user intent.
+
+    Agent model switches can retain this spelling. Responses uses a nested
+    object; sending the alias directly fails in the SDK before an HTTP request.
+    Conflicting spellings are a configuration error, never a silent override.
+    Effort values remain provider/model-owned, including future additions.
+    """
+    params = dict(provider_params)
+    if "reasoning_effort" not in params:
+        return params
+    effort = params.pop("reasoning_effort")
+    if effort is None:
+        return params
+    if not isinstance(effort, str) or not effort.strip():
+        raise ValueError("model_params.reasoning_effort must be a nonempty string")
+    reasoning = params.get("reasoning")
+    if reasoning is not None and not isinstance(reasoning, dict):
+        raise ValueError("model_params.reasoning must be an object when reasoning_effort is supplied")
+    reasoning = dict(reasoning or {})
+    if reasoning.get("effort") is not None and reasoning["effort"] != effort:
+        raise ValueError("Conflicting model_params.reasoning.effort and model_params.reasoning_effort")
+    reasoning["effort"] = effort
+    params["reasoning"] = reasoning
+    return params
+
+
 def supports_encrypted_reasoning(model_name: str) -> bool:
     """Whether `include: ["reasoning.encrypted_content"]` should be requested for this model."""
     return bool(_ENCRYPTED_REASONING_MODEL_RE.match((model_name or "").strip()))
@@ -100,7 +127,7 @@ def prepare_responses_request(
     # provider_params may carry provider-native (server-side) tool defs, e.g.
     # {"type": "web_search"}. Merge them with the client tools instead of
     # letting dict.update clobber the generated list.
-    provider_params = dict(provider_params)
+    provider_params = normalize_responses_params(provider_params)
     extra_tools = provider_params.pop("tools", None)
     # A caller-supplied `include` extends ours rather than replacing it: dropping
     # `reasoning.encrypted_content` silently would reintroduce the lost-chain-of-thought bug.
