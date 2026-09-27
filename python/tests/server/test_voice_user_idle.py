@@ -33,6 +33,16 @@ def _session(stt: _OpenSTT, **user_idle: object) -> VoiceSession:
 
 
 class TestUserIdleConfig:
+    async def test_direct_session_ignores_empty_behavior_blocks(self) -> None:
+        agent = Agent(name="empty_behaviors", model=TestModel(responses=[REPLY]), tools=[])
+        session = VoiceSession(
+            agent, _OpenSTT(), _make_tts_class()(), turn_detector="heuristic",
+            user_idle={}, greeting={}, filler={},
+        )
+        assert session.user_idle is None
+        assert session.greeting is None
+        assert session.filler is None
+
     def test_defaults_and_rotation(self) -> None:
         cfg = UserIdleConfig(text=["Still there?", "Hello?"])
         assert cfg.timeout_secs == 8.0 and cfg.max_count == 2 and cfg.hangup_after_secs is None

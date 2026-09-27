@@ -84,14 +84,26 @@ class TestFillerConfig:
     def test_voice_config_default_is_off(self) -> None:
         assert VoiceConfig().filler is None
 
-    def test_empty_dict_enables_defaults(self) -> None:
+    def test_empty_dict_is_unset(self) -> None:
         cfg = VoiceConfig(filler={})
+        assert cfg.filler is None
+
+    def test_explicit_enable_uses_defaults(self) -> None:
+        cfg = VoiceConfig(filler={"enabled": True})
         assert cfg.filler is not None
         assert cfg.filler.delay_secs == 1.0
 
 
 class TestFillerTurnFlow:
     """Full turns through ``VoiceSession._run_turn`` — no transports."""
+
+    @pytest.mark.parametrize("filler", [{}, FillerConfig()])
+    async def test_empty_filler_does_not_generate_spoken_fillers(self, filler) -> None:
+        session = _make_session(filler=filler)
+        await session._run_turn("what is the answer?")
+        assert session.filler is None
+        assert session._filler_agent is None
+        assert not any(e.filler for e in session.transcript)
 
     async def test_filler_spoken_during_slow_tool(self) -> None:
         session = _make_session(filler=_default_filler())

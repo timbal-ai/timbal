@@ -347,7 +347,7 @@ Tools mean dead air: the caller asks something, the agent goes quiet for seconds
 
 ```python
 agent.voice_config = {
-    "filler": {},  # enable with defaults
+    "filler": {"enabled": True},  # explicitly enable with defaults
 }
 # or tuned:
 agent.voice_config = {
@@ -362,6 +362,15 @@ agent.voice_config = {
 ```
 
 Or via env: `TIMBAL_VOICE_FILLER=1` (defaults), `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, `TIMBAL_VOICE_FILLER_REPEAT_SECS`. Default is off.
+
+Empty optional behavior objects (`filler`, `greeting`, `outbound_greeting`,
+`user_idle`, `ambient`, `recording`) mean **no override**, just like omitting
+the key. They preserve inherited settings; with no inherited behavior, it stays
+off. This also applies to typed blocks with no explicitly set fields, such as
+`FillerConfig()`. To enable default fillers, use `{"enabled": True}` or
+`FillerConfig(enabled=True)`; use `{"enabled": False}` to disable them.
+Nonempty settings remain validated. This changes the former `filler: {}` opt-in
+shorthand; replace that shorthand with an explicit enabled flag when upgrading.
 
 `filler` is also client-settable (session config frame): the client's dict is deep-merged over the server's, so `{"filler": {"delay_secs": 0.3}}` keeps a server-set custom prompt, and `{"filler": {"enabled": false}}` switches a server-default filler off for that session. The playground exposes this — a Filler speech on/off/server-default picker plus prompt and delay fields, applied on the next Start.
 

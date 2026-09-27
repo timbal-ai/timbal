@@ -7,9 +7,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from timbal.server import voice as routes
 from timbal.server.http import create_app
-from timbal.voice.config import VoiceConfig, coerce_greeting, greeting_for_direction
+from timbal.voice.config import FillerConfig, RecordingConfig, VoiceConfig, coerce_greeting, greeting_for_direction
 
-FIELDS = ("greeting", "outbound_greeting", "user_idle", "ambient")
+FIELDS = ("greeting", "outbound_greeting", "user_idle", "ambient", "filler", "recording")
 
 
 @pytest.mark.parametrize("field", FIELDS)
@@ -44,6 +44,8 @@ def test_empty_client_blocks_preserve_defaults_and_outbound_inheritance(with_def
     base = VoiceConfig(
         greeting="Hello" if with_defaults else None,
         user_idle={"text": "Still there?"} if with_defaults else None,
+        filler={"enabled": True, "delay_secs": 0.4} if with_defaults else None,
+        recording={"dir": "/tmp/recordings"} if with_defaults else None,
     )
     result = routes.merge_client_voice_overrides(base, {field: {} for field in FIELDS})
     assert result == base
@@ -58,20 +60,26 @@ def test_empty_agent_blocks_preserve_all_inherited_behaviors(monkeypatch):
         outbound_greeting="Calling about your appointment",
         user_idle={"text": "Still there?"},
         ambient={"source": "office"},
+        filler={"enabled": True, "delay_secs": 0.4},
+        recording={"dir": "/tmp/recordings"},
     )
     monkeypatch.setattr(routes, "default_voice_config_from_env", lambda: base)
     merged = routes.merge_voice_config(SimpleNamespace(voice_config={field: {} for field in FIELDS}))
     assert merged.greeting == base.greeting
     assert merged.user_idle == base.user_idle
     assert merged.ambient == base.ambient
+    assert merged.filler == base.filler
+    assert merged.recording == base.recording
     # The env loader does not supply outbound_greeting. Its existing merge policy
     # excludes that field, so verify outbound inheritance through the client path.
     client_merged = routes.merge_client_voice_overrides(base, {field: {} for field in FIELDS})
     assert greeting_for_direction(client_merged, outbound=True) == base.outbound_greeting
 
 
-def test_explicit_disable_and_documented_empty_defaults_still_work():
-    config = VoiceConfig(greeting="Hello", outbound_greeting="", filler={}, recording={})
+def test_explicit_enable_and_disable_still_work():
+    config = VoiceConfig(
+        greeting="Hello", outbound_greeting="", filler={"enabled": True}, recording={"layout": "mixed"}
+    )
     assert greeting_for_direction(config, outbound=True) is None
     assert "outbound_greeting" in config.model_fields_set
     assert config.filler.enabled is True
@@ -80,6 +88,40 @@ def test_explicit_disable_and_documented_empty_defaults_still_work():
     assert coerce_greeting({"text": ""}) is None
     base = VoiceConfig(user_idle={"text": "Still there?"})
     assert routes.merge_client_voice_overrides(base, {"user_idle": ""}).user_idle is None
+
+
+@pytest.mark.parametrize("field,block", [("filler", FillerConfig()), ("recording", RecordingConfig())])
+def test_empty_typed_blocks_match_sparse_json(field, block):
+    typed = VoiceConfig(**{field: block})
+    raw = VoiceConfig(**{field: {}})
+    assert typed == raw
+    assert typed.model_fields_set == raw.model_fields_set == set()
+    assert routes.declared_voice_config(SimpleNamespace(voice_config={field: block})) == {}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("patch", [{}, FillerConfig()])
+def test_empty_filler_patch_preserves_explicit_server_choice(enabled, patch):
+    base = VoiceConfig(filler={"enabled": enabled, "delay_secs": 0.2})
+    result = routes.merge_client_voice_overrides(base, {"filler": patch})
+    assert result.filler == base.filler
+
+
+@pytest.mark.parametrize("patch", [False, True, "on", [], 1])
+@pytest.mark.parametrize("enabled", [None, False, True])
+def test_invalid_client_filler_does_not_enable_or_reset_defaults(patch, enabled):
+    base = VoiceConfig(filler={"enabled": enabled, "delay_secs": 0.2} if enabled is not None else None)
+    result = routes.merge_client_voice_overrides(base, {"filler": patch})
+    assert result.filler == base.filler
+
+
+def test_explicit_typed_filler_enable_survives_export_and_client_merge():
+    block = FillerConfig(enabled=True)
+    config = VoiceConfig(filler=block)
+    assert config.filler.enabled
+    assert routes.declared_voice_config(SimpleNamespace(voice_config=config)) == {"filler": {"enabled": True}}
+    result = routes.merge_client_voice_overrides(VoiceConfig(), {"filler": block})
+    assert result.filler.enabled
 
 
 @pytest.mark.parametrize(

@@ -43,6 +43,7 @@ from .config import (
     GreetingConfig,
     UserIdleConfig,
     coerce_greeting,
+    omit_empty_voice_blocks,
 )
 from .events import (
     AgentApproval,
@@ -300,6 +301,10 @@ class VoiceSession:
         self._llm_warmup_task: asyncio.Task[None] | None = None
         # Tool-call filler: an LLM-generated phrase masks tool dead air (see
         # FillerConfig). The generator Agent is built lazily on first use.
+        behaviors = omit_empty_voice_blocks({"filler": filler, "greeting": greeting, "user_idle": user_idle})
+        filler = behaviors.get("filler")
+        greeting = behaviors.get("greeting")
+        user_idle = behaviors.get("user_idle")
         self.filler = FillerConfig.model_validate(filler) if isinstance(filler, dict) else filler
         self._filler_agent: Agent | None = None
         self._turn_filler_task: asyncio.Task[None] | None = None

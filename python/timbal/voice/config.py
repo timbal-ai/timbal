@@ -274,18 +274,36 @@ class RecordingConfig(BaseModel):
     """Async callable invoked with the ``RecordingResult``. Python-only."""
 
 
+_OPTIONAL_VOICE_BLOCKS = {
+    "greeting": GreetingConfig,
+    "outbound_greeting": GreetingConfig,
+    "user_idle": UserIdleConfig,
+    "ambient": AmbientAudioConfig,
+    "filler": FillerConfig,
+    "recording": RecordingConfig,
+}
+
+
 def omit_empty_voice_blocks(config: dict[str, Any]) -> dict[str, Any]:
     """Treat empty optional behavior objects as absent, without mutating input.
 
     Forms and generated configs may include these objects before a behavior is
     configured. Omission preserves inherited settings, including the outbound
     opener's fallback to the inbound greeting. Nonempty blocks still validate.
-    Filler/recording and provider extras already have meaningful empty defaults.
+    A typed block with no explicitly set fields is empty too, so Python objects
+    and their sparse JSON representation behave alike. Provider extras are not
+    behavior switches and retain their own merge semantics.
     """
-    optional = {"greeting", "outbound_greeting", "user_idle", "ambient"}
     return {
-        key: value for key, value in config.items()
-        if not (key in optional and isinstance(value, dict) and not value)
+        key: value
+        for key, value in config.items()
+        if not (
+            key in _OPTIONAL_VOICE_BLOCKS
+            and (
+                (isinstance(value, dict) and not value)
+                or (isinstance(value, _OPTIONAL_VOICE_BLOCKS[key]) and not value.model_fields_set)
+            )
+        )
     }
 
 
@@ -345,10 +363,12 @@ class VoiceConfig(BaseModel):
     turn_timeout_fallback: str | None = None
     """None → ``VoiceSession`` default; "" → no spoken apology on timeout."""
     recording: RecordingConfig | None = None
+    """Empty/unset → inherit recording policy; an empty object does not enable it."""
     ambient: AmbientAudioConfig | None = None
     """None → no background audio. An empty object is treated as unset."""
     filler: FillerConfig | None = None
-    """None → no spoken tool-call fillers. ``{}`` enables with defaults."""
+    """Empty/unset → no override. Use ``{"enabled": true}`` to enable default fillers,
+    or ``{"enabled": false}`` to explicitly disable inherited fillers."""
     user_idle: UserIdleConfig | None = None
     """None → wait for the user forever. ``{}`` is unset. See :class:`UserIdleConfig`."""
     greeting: GreetingConfig | None = None
