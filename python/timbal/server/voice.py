@@ -38,6 +38,7 @@ from ..voice.config import (
     UserIdleConfig,
     VoiceConfig,
     greeting_for_direction,
+    omit_empty_voice_blocks,
 )
 from .capacity import acquire_session_slot, release_session_slot
 
@@ -142,7 +143,7 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
         vc = dumped
     if not isinstance(vc, dict):
         return None
-    out = dict(vc)
+    out = omit_empty_voice_blocks(vc)
     for key, model_type in _SPARSE_NESTED:
         nested = out.get(key)
         if isinstance(nested, model_type):
@@ -439,7 +440,9 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     deep-merged, through :data:`CLIENT_TUNING_STT_EXTRA` /
     :data:`CLIENT_TUNING_TTS_EXTRA` — a caller never picks the provider host.
     """
-    updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
+    updates = omit_empty_voice_blocks(
+        {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
+    )
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
