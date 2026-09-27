@@ -215,7 +215,7 @@ def coerce_greeting(value: Any) -> GreetingConfig | None:
     ``<Parameter name="greeting">`` is a string, as is an env var. ``""`` means
     "no greeting", so a per-call override can also switch a server default off.
     """
-    if value is None:
+    if value is None or (isinstance(value, dict) and not value):
         return None
     if isinstance(value, GreetingConfig):
         return value
@@ -274,10 +274,50 @@ class RecordingConfig(BaseModel):
     """Async callable invoked with the ``RecordingResult``. Python-only."""
 
 
+_OPTIONAL_VOICE_BLOCKS = {
+    "greeting": GreetingConfig,
+    "outbound_greeting": GreetingConfig,
+    "user_idle": UserIdleConfig,
+    "ambient": AmbientAudioConfig,
+    "filler": FillerConfig,
+    "recording": RecordingConfig,
+}
+
+
+def omit_empty_voice_blocks(config: dict[str, Any]) -> dict[str, Any]:
+    """Treat empty optional behavior objects as absent, without mutating input.
+
+    Forms and generated configs may include these objects before a behavior is
+    configured. Omission preserves inherited settings, including the outbound
+    opener's fallback to the inbound greeting. Nonempty blocks still validate.
+    A typed block with no explicitly set fields is empty too, so Python objects
+    and their sparse JSON representation behave alike. Provider extras are not
+    behavior switches and retain their own merge semantics.
+    """
+    return {
+        key: value
+        for key, value in config.items()
+        if not (
+            key in _OPTIONAL_VOICE_BLOCKS
+            and (
+                (isinstance(value, dict) and not value)
+                or (isinstance(value, _OPTIONAL_VOICE_BLOCKS[key]) and not value.model_fields_set)
+            )
+        )
+    }
+
+
 class VoiceConfig(BaseModel):
     """Cross-transport voice session configuration (WS and WebRTC)."""
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _omit_empty_blocks(cls, value: Any) -> Any:
+        # Remove keys before validation so {} does not become an explicit None
+        # in model_fields_set (which would disable the outbound fallback).
+        return omit_empty_voice_blocks(value) if isinstance(value, dict) else value
 
     stt_provider: str = "elevenlabs"
     """Also supports Deepgram, Munsit, and OpenAI (``OPENAI_API_KEY``)."""
@@ -323,12 +363,14 @@ class VoiceConfig(BaseModel):
     turn_timeout_fallback: str | None = None
     """None → ``VoiceSession`` default; "" → no spoken apology on timeout."""
     recording: RecordingConfig | None = None
+    """Empty/unset → inherit recording policy; an empty object does not enable it."""
     ambient: AmbientAudioConfig | None = None
-    """None → no background audio."""
+    """None → no background audio. An empty object is treated as unset."""
     filler: FillerConfig | None = None
-    """None → no spoken tool-call fillers. ``{}`` enables with defaults."""
+    """Empty/unset → no override. Use ``{"enabled": true}`` to enable default fillers,
+    or ``{"enabled": false}`` to explicitly disable inherited fillers."""
     user_idle: UserIdleConfig | None = None
-    """None → wait for the user forever (status quo). See :class:`UserIdleConfig`."""
+    """None → wait for the user forever. ``{}`` is unset. See :class:`UserIdleConfig`."""
     greeting: GreetingConfig | None = None
     """None → the session stays reactive (waits for the user to speak first).
     A bare string is shorthand for ``{"text": ...}``; ``""`` means no greeting.
@@ -337,7 +379,7 @@ class VoiceConfig(BaseModel):
     outbound_greeting: GreetingConfig | None = None
     """Opener for calls *we* placed (outbound PSTN), where "thanks for calling"
     is the wrong sentence. Unset → ``greeting`` applies to both directions;
-    ``""`` → speak nothing on outbound and wait for the callee's "hello"; a
+    ``{}`` → inherit, just like unset; ``""`` → speak nothing on outbound; a
     string / block → that opener on outbound only. Only a host that knows the
     call direction can apply it (:func:`greeting_for_direction`); the session
     itself never sees a direction."""

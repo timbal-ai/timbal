@@ -38,6 +38,7 @@ from ..voice.config import (
     UserIdleConfig,
     VoiceConfig,
     greeting_for_direction,
+    omit_empty_voice_blocks,
 )
 from .capacity import acquire_session_slot, release_session_slot
 
@@ -82,7 +83,7 @@ def default_voice_config_from_env() -> VoiceConfig:
     # TIMBAL_VOICE_FILLER=1 enables with defaults; any detail var implies it.
     enabled = os.environ.get("TIMBAL_VOICE_FILLER", "").strip().lower()
     if enabled in ("1", "true", "yes", "on") or (filler and enabled not in ("0", "false", "no", "off")):
-        kwargs["filler"] = filler
+        kwargs["filler"] = {"enabled": True, **filler}
     return VoiceConfig(**kwargs)
 
 
@@ -142,7 +143,7 @@ def _normalize_declared_voice_config(runnable: Any) -> dict[str, Any] | None:
         vc = dumped
     if not isinstance(vc, dict):
         return None
-    out = dict(vc)
+    out = omit_empty_voice_blocks(vc)
     for key, model_type in _SPARSE_NESTED:
         nested = out.get(key)
         if isinstance(nested, model_type):
@@ -439,7 +440,9 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     deep-merged, through :data:`CLIENT_TUNING_STT_EXTRA` /
     :data:`CLIENT_TUNING_TTS_EXTRA` — a caller never picks the provider host.
     """
-    updates = {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
+    updates = omit_empty_voice_blocks(
+        {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
+    )
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
@@ -462,15 +465,22 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
             updates[field] = _merge_client_extra(field, getattr(server_defaults, field), updates[field])
     if "filler" in updates:
         base = server_defaults.filler
-        merged_filler = {
-            **(base.model_dump(include=base.model_fields_set) if base is not None else {}),
-            **(updates["filler"] if isinstance(updates["filler"], dict) else {}),
-        }
-        try:
-            updates["filler"] = FillerConfig.model_validate(merged_filler)
-        except ValidationError:
-            logger.info("voice_client_filler_invalid", value=repr(updates["filler"]))
+        patch = updates["filler"]
+        if isinstance(patch, FillerConfig):
+            patch = patch.model_dump(include=patch.model_fields_set)
+        if not isinstance(patch, dict):
+            logger.info("voice_client_filler_invalid")
             del updates["filler"]
+        else:
+            merged_filler = {
+                **(base.model_dump(include=base.model_fields_set) if base is not None else {}),
+                **patch,
+            }
+            try:
+                updates["filler"] = FillerConfig.model_validate(merged_filler)
+            except ValidationError:
+                logger.info("voice_client_filler_invalid")
+                del updates["filler"]
     if "greeting" in updates:
         _merge_client_greeting(server_defaults, updates, "greeting")
     if "outbound_greeting" in updates:
