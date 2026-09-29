@@ -46,6 +46,25 @@ That's it — before each LLM call, the agent lists the server's tools and offer
 
 With `name=` set, a tool declared as `list_files` on the `filesystem` server appears to the LLM as `filesystem__list_files`. The bare name is still used on the wire.
 
+## The project API
+
+For routes exposed by the TypeScript SDK's `timbalMcp()` plugin, use:
+
+```python
+project_tools = MCPServer(name="app", transport="http", service="api")
+```
+
+The endpoint and authorization resolve at execution time from the current run.
+Local development uses the API port's `/mcp`; deployed projects use the project
+origin's `/api/mcp`. Do not point MCP at the UI origin's `/mcp`, capture a caller
+bearer during module import, or put a project service secret in source.
+
+Service mode cannot be combined with a manual URL or headers. Discovery and each
+tool call open and close their own connection, so concurrent users never share a
+connection authenticated as someone else. This adds a handshake per operation;
+explicit-URL MCP servers retain their existing persistent connection behavior.
+Discovery does not invoke application tools, and tool approvals still apply.
+
 ## Configuration
 
 | Field | Transport | Description |
@@ -55,7 +74,8 @@ With `name=` set, a tool declared as `list_files` on the `filesystem` server app
 | `command` | stdio | Executable to spawn (e.g. `"npx"`, `"uvx"`, `"python"`) |
 | `args` | stdio | Command arguments |
 | `env` | stdio | Environment variables for the spawned process |
-| `url` | http | Server URL |
+| `service` | http | `"api"` resolves the project API MCP endpoint and current caller authorization at runtime. Mutually exclusive with `url` and `headers`. |
+| `url` | http | Explicit external server URL |
 | `headers` | http | HTTP headers sent with every request |
 | `timeout` | both | Seconds to wait for a request on an established session (`tools/list`, `tools/call`). Default **600** (10 minutes) — past any tool that legitimately runs long, but a server that accepted a request and will never answer becomes an error instead of a run that sits open forever. `None` = wait forever. A dead transport fails the call immediately regardless. |
 | `tool_timeouts` | both | Per-tool override of `timeout` for `tools/call`, keyed by the server's bare tool name: `{"codegen": 900, "whoami": 10}`. `None` waits forever for that tool. |
