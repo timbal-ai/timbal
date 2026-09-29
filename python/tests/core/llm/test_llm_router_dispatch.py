@@ -959,7 +959,9 @@ class TestLlmRouterAnthropicStructuredOutput:
 
         assert stable_captured, "Expected client.messages.create to be called"
 
-    @pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-5-5"])
+    @pytest.mark.parametrize(
+        "model", ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5"],
+    )
     @pytest.mark.asyncio
     async def test_output_model_sets_output_config(self, model):
         from timbal.core.llm import _llm_router

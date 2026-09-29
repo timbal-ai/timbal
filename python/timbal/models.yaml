@@ -1,7 +1,7 @@
 # Source of truth for all supported LLM models.
 # Pricing is in USD per 1M tokens (input / output). null = unknown or not publicly listed.
 # context_window is in tokens. null = unknown.
-# Run scripts/generate_models.py to regenerate the Model Literal in core/llm/router.py.
+# Run scripts/generate_models.py to regenerate the Model Literal in core/models.py.
 #
 # Availability flags (optional; set one at most):
 #   requires_activation: true  — model exists but must be enabled in the provider console first
@@ -33,6 +33,8 @@ models:
     not available under ZDR.
   input_price: 10.0
   output_price: 50.0
+  cached_input_price: 0.25
+  cache_write_price: 12.5
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-fable-5
@@ -44,6 +46,8 @@ models:
     workloads.
   input_price: 10.0
   output_price: 50.0
+  cached_input_price: 1.0
+  cache_write_price: 12.5
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-5-5
@@ -72,6 +76,8 @@ models:
     cache multipliers stack on top. Reported as `usage.speed` and metered with `_fast` units.'
   input_price: 5.0
   output_price: 25.0
+  cached_input_price: 0.5
+  cache_write_price: 6.25
   service_tiers:
     fast: 2.0
   context_window: 1000000
@@ -84,19 +90,39 @@ models:
     multipliers stack on top. Reported as `usage.speed` and metered with `_fast` units.'
   input_price: 5.0
   output_price: 25.0
+  cached_input_price: 0.5
+  cache_write_price: 6.25
   service_tiers:
     fast: 2.0
+  context_window: 1000000
+  capabilities: [vision, tools, reasoning]
+- id: anthropic/claude-sonnet-5-5
+  provider: anthropic
+  display_name: Claude Sonnet 5.5
+  description: Anthropic's latest Sonnet, balancing speed and intelligence for coding, agents, and professional work.
+    Supersedes Sonnet 5 at the same token prices.
+  notes: 'Adaptive thinking is on by default; effort defaults to high. Use thinking.type=between_tools at high effort
+    or below to turn off up-front thinking. Disabled/budgeted thinking, forced tool_choice any/tool, and non-default
+    sampling parameters are rejected. 128K max output. Cache writes cost $2.50/$4 per 1M tokens (5m/1h); cache reads
+    cost $0.20. No long-context surcharge or fast mode. Batch input/output is $1/$5; cache rates are also halved.
+    Prices are global; US-only inference adds 10% to all token rates.'
+  input_price: 2.0
+  output_price: 10.0
+  cached_input_price: 0.2
+  cache_write_price: 2.5
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-sonnet-5
   provider: anthropic
   display_name: Claude Sonnet 5
-  description: Best combination of speed and intelligence. Drop-in upgrade from Sonnet 4.6 for coding, agents, and professional
-    work.
+  description: Previous Sonnet generation for coding, agents, and professional work. Superseded by Sonnet 5.5 at the same
+    token prices.
   notes: Standard API pricing is $2/$10 per 1M tokens. The previously announced increase to $3/$15 on September 1, 2026 did
     not occur.
   input_price: 2.0
   output_price: 10.0
+  cached_input_price: 0.2
+  cache_write_price: 2.5
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-7
@@ -106,6 +132,8 @@ models:
     vision.
   input_price: 5.0
   output_price: 25.0
+  cached_input_price: 0.5
+  cache_write_price: 6.25
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-6
@@ -114,6 +142,8 @@ models:
   description: Anthropic's most capable model, excelling at planning and debugging within large codebases.
   input_price: 5.0
   output_price: 25.0
+  cached_input_price: 0.5
+  cache_write_price: 6.25
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-5
@@ -122,6 +152,8 @@ models:
   description: Previous-generation Opus model with high intelligence for complex reasoning tasks.
   input_price: 5.0
   output_price: 25.0
+  cached_input_price: 0.5
+  cache_write_price: 6.25
   context_window: 200000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-1
@@ -131,6 +163,8 @@ models:
   notes: Deprecated; retires August 5, 2026. Prefer claude-opus-5 or claude-fable-5-1.
   input_price: 15.0
   output_price: 75.0
+  cached_input_price: 1.5
+  cache_write_price: 18.75
   context_window: 200000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-sonnet-4-6
@@ -140,6 +174,8 @@ models:
     tasks.
   input_price: 3.0
   output_price: 15.0
+  cached_input_price: 0.3
+  cache_write_price: 3.75
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-sonnet-4-5
@@ -148,6 +184,8 @@ models:
   description: Balanced speed and intelligence for a wide range of tasks.
   input_price: 3.0
   output_price: 15.0
+  cached_input_price: 0.3
+  cache_write_price: 3.75
   context_window: 200000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-haiku-4-5
@@ -156,6 +194,8 @@ models:
   description: Fastest Claude model, designed for office document processing and high-volume business analysis.
   input_price: 1.0
   output_price: 5.0
+  cached_input_price: 0.1
+  cache_write_price: 1.25
   context_window: 200000
   capabilities: [vision, tools]
 - id: openai/gpt-6-astra

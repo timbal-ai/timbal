@@ -527,6 +527,41 @@ class TestAnthropicCollectorUsageAccounting:
             "anthropic/claude-sonnet-5:output_tokens": 4,
         }
 
+    def test_sonnet_55_mixed_cache_and_thinking_costs_are_disjoint(self):
+        usage = self._run(
+            {
+                "input_tokens": 100, "output_tokens": 1,
+                "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 700,
+                "cache_creation": {"ephemeral_5m_input_tokens": 200, "ephemeral_1h_input_tokens": 500},
+            },
+            {
+                "output_tokens": 50, "output_tokens_details": {"thinking_tokens": 30},
+                "server_tool_use": {"web_search_requests": 2, "web_fetch_requests": 1},
+            },
+            billing_id="anthropic/claude-sonnet-5-5",
+        )
+        assert usage == {
+            "anthropic/claude-sonnet-5-5:input_tokens": 100,
+            "anthropic/claude-sonnet-5-5:cache_read_input_tokens": 1000,
+            "anthropic/claude-sonnet-5-5:ephemeral_5m_input_tokens": 200,
+            "anthropic/claude-sonnet-5-5:ephemeral_1h_input_tokens": 500,
+            "anthropic/claude-sonnet-5-5:output_tokens": 50,
+            "anthropic/claude-sonnet-5-5:web_search_requests": 2,
+            "anthropic/claude-sonnet-5-5:web_fetch_requests": 1,
+        }
+
+        # Official global standard rates, USD per token/request. Thinking is already
+        # in output_tokens; aggregate cache writes must not be billed a second time.
+        from decimal import Decimal
+
+        rates = {
+            "input_tokens": "0.000002", "output_tokens": "0.000010",
+            "cache_read_input_tokens": "0.0000002", "ephemeral_5m_input_tokens": "0.0000025",
+            "ephemeral_1h_input_tokens": "0.000004", "web_search_requests": "0.01", "web_fetch_requests": "0",
+        }
+        cost = sum(count * Decimal(rates[key.split(":", 1)[1]]) for key, count in usage.items())
+        assert cost == Decimal("0.0234")
+
     def test_one_hour_cache_write_bills_at_its_own_unit(self):
         """1h writes are 2x input (vs 1.25x for 5m); the aggregate unit would under-bill them."""
         usage = self._run(

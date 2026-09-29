@@ -9,6 +9,7 @@ from timbal.state import set_run_context
 from timbal.state.context import RunContext
 
 NEW_MODEL_IDS = [
+    "anthropic/claude-sonnet-5-5",
     "anthropic/claude-opus-5-5",
     "xai/grok-4.7",
     "xai/grok-4.6",
