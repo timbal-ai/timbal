@@ -350,6 +350,16 @@ class MCPServer(ToolSet):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
 
+    service: Literal["api"] | None = None
+    """Resolve the project's API MCP endpoint with the current run's identity.
+
+    ``MCPServer(transport="http", service="api")`` uses the same service routing
+    as platform requests: local API port or deployed origin + /api/mcp. Each
+    discovery/call owns a short-lived connection; credentials and tool lists
+    are never cached across callers. ``url`` and custom headers are not used
+    in this mode. External MCP servers continue to use an explicit ``url``.
+    """
+
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
@@ -428,13 +438,39 @@ class MCPServer(ToolSet):
 
     @model_validator(mode="after")
     def _validate_transport_fields(self) -> "MCPServer":
+        if self.service is not None:
+            if self.transport != "http" or self.url is not None or self.headers:
+                raise ValueError("service='api' requires HTTP transport without url or headers")
         if self.transport == "stdio":
             if not self.command:
                 raise ValueError("'command' is required for stdio transport")
         elif self.transport == "http":
-            if not self.url:
-                raise ValueError("'url' is required for http transport")
+            if not self.url and self.service is None:
+                raise ValueError("'url' is required for http transport unless service='api'")
         return self
+
+    @asynccontextmanager
+    async def _project_connection(self):
+        # Resolve BEFORE opening the transport's fresh-context owner task. It
+        # must inherit the caller's identity, never a process service secret.
+        from ..platform.utils import _resolve_url_and_headers
+
+        url, headers = _resolve_url_and_headers("api", "mcp", {})
+        server = MCPServer(
+            name=self.name,
+            transport="http",
+            url=url,
+            headers=headers,
+            timeout=self.timeout,
+            tool_timeouts=self.tool_timeouts,
+            connect_timeout=self.connect_timeout,
+            elicitation=self.elicitation,
+            sampling_model=self.sampling_model,
+        )
+        try:
+            yield server
+        finally:
+            await server.close()
 
     # ------------------------------------------------------------------ session
 
@@ -984,6 +1020,11 @@ class MCPServer(ToolSet):
         title = mcp_tool.title or (annotations or {}).get("title")
 
         async def _handler(**kwargs: Any) -> Any:
+            if self.service is not None:
+                async with self._project_connection() as server:
+                    # Approval lives on this public tool; invoke the bound
+                    # handler directly so it is not requested a second time.
+                    return await server._make_tool(mcp_tool).handler(**kwargs)
             call = self._begin_call(bare_name)
             try:
                 result = await self._request(
@@ -1076,6 +1117,11 @@ class MCPServer(ToolSet):
         sorted by name so a server that lists in nondeterministic order does not
         churn the LLM's tools prefix.
         """
+        if self.service is not None:
+            async with self._project_connection() as server:
+                result = await server._request(lambda session: session.list_tools(), what="tools/list", idempotent=True)
+            return [self._make_tool(tool) for tool in sorted(result.tools, key=lambda tool: tool.name)]
+
         run_context = get_run_context()
         run_id = run_context.id if run_context is not None else None
         if not self._tools_refresh_due(run_id):
