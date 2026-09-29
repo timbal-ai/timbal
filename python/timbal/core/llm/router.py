@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, SecretStr
 
-from ...state import get_call_id, get_or_create_run_context, set_billing_id
+from ...state import get_call_id, get_or_create_run_context, get_run_context, set_billing_id
 from ...types.message import Message
 from ..runnable import Runnable
 from .chat_completions import prepare_chat_completions_request
@@ -15,6 +15,16 @@ from .messages import prepare_messages_request
 from .registry import _PROVIDERS, TIMBAL_OPENAI_API
 from .responses import prepare_responses_request
 from .retry import _retry_on_error
+
+
+def _set_model_metadata(provider: str, model_name: str) -> None:
+    """Label only the active call; direct router calls may have no span."""
+    run_context = get_run_context()
+    if run_context is None:
+        return
+    span = run_context._trace.get(get_call_id())
+    if span is not None:
+        span.metadata.update(model_provider=provider, model_name=model_name)
 
 
 async def _llm_router(
@@ -67,6 +77,7 @@ async def _llm_router(
 
     # TestModel short-circuit — delegates to model.stream() with no network call.
     if hasattr(model, "stream"):
+        _set_model_metadata(getattr(model, "provider", "test"), getattr(model, "model_name", "model"))
         async for chunk in model.stream(messages=messages):
             yield chunk  # type: ignore[return-type]
         return
@@ -76,6 +87,10 @@ async def _llm_router(
 
     set_billing_id(model)
     provider, model_name = model.split("/", 1)
+    # FallbackModel re-enters this router for each concrete entry. Updating the
+    # span here records the serving model (or the last attempted model on error)
+    # without mutating the shared Tool metadata or another concurrent run.
+    _set_model_metadata(provider, model_name)
 
     config = _PROVIDERS.get(provider)
     if config is None:
