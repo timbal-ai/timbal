@@ -140,6 +140,7 @@ Model = Literal[
     "anthropic/claude-opus-5-5",
     "anthropic/claude-opus-5",
     "anthropic/claude-opus-4-8",
+    "anthropic/claude-sonnet-5-5",
     "anthropic/claude-sonnet-5",
     "anthropic/claude-opus-4-7",
     "anthropic/claude-opus-4-6",
