@@ -308,6 +308,8 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._keepalive_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._audio_queues: dict[str, asyncio.Queue[dict | None]] = {}
+        # Contexts still accepting input; closed contexts may continue to
+        # receive their final audio through _audio_queues.
         self._active_contexts: set[str] = set()
         self._ctx_counter: int = 0
         self._last_ws_error: str | None = None
@@ -426,12 +428,20 @@ class ElevenLabsStreamTTS(TextToSpeech):
 
     async def _send_text(self, context_id: str, text: str, *, flush: bool = False) -> None:
         async with self._context_send_lock:
+            # An in-flight feed/end may acquire this lock after abort/close.
+            # Absence from the registered set must not reopen a closed context.
+            if context_id not in self._active_contexts:
+                return
             assert self._ws is not None and self._out is not None
             msg: dict[str, Any] = {"context_id": context_id}
             if self._dialogue:
                 if context_id not in self._dialogue_contexts:
                     await self._ws.send(json.dumps({"context_id": context_id, "voices": [self._out.voice]}))
                     self._dialogue_contexts.add(context_id)
+                    # abort() can invalidate input while registration awaits
+                    # the socket; it will close the registration under this lock.
+                    if context_id not in self._active_contexts:
+                        return
                 if text.strip():
                     msg["inputs"] = [{"text": text, "voice_id": self._out.voice}]
             else:
@@ -442,6 +452,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
 
     async def _close_context(self, context_id: str) -> None:
         async with self._context_send_lock:
+            self._active_contexts.discard(context_id)
             if self._dialogue:
                 if context_id not in self._dialogue_contexts:
                     return
@@ -553,8 +564,6 @@ class ElevenLabsStreamTTS(TextToSpeech):
                     yield base64.b64decode(msg["audio"])
                 if msg.get("is_final") or msg.get("isFinal"):
                     break
-            if self._last_ws_error:
-                raise RuntimeError(f"ElevenLabs TTS closed: {self._last_ws_error}")
         finally:
             self._audio_queues.pop(ctx_id, None)
             self._active_contexts.discard(ctx_id)
@@ -601,6 +610,9 @@ class _ElevenLabsTTSStream(TTSStream):
         if not tts._api_key or not tts._out:
             raise RuntimeError("Call connect() before open_stream().")
         await tts._ensure_ws()
+        # The first feed can be interrupted or ended during the handshake.
+        if self._ended or self._aborted:
+            return
         tts._ctx_counter += 1
         self._ctx_id = f"ctx_{tts._ctx_counter}"
         tts._audio_queues[self._ctx_id] = self._queue
@@ -612,6 +624,8 @@ class _ElevenLabsTTSStream(TTSStream):
             return
         if self._ctx_id is None:
             await self._open_context()
+        if self._ctx_id is None:
+            return
         assert self._tts._ws is not None
         logger.debug(
             "el_tts_stream_feed",

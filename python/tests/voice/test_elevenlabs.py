@@ -279,3 +279,136 @@ async def test_unscoped_server_error_fails_all_streams_even_after_audio(tts_fact
     for stream in streams:
         with pytest.raises(RuntimeError, match="context_limit_exceeded"):
             await _collect(stream)
+
+
+@pytest.mark.parametrize("operation", ["feed", "end"])
+async def test_abort_prevents_pending_text_from_reopening_context(tts_factory, monkeypatch, operation):
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    await stream.feed("First sentence.")
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original_send = p._send_text
+
+    async def delayed_send(*args, **kwargs):
+        entered.set()
+        await resume.wait()
+        await original_send(*args, **kwargs)
+
+    monkeypatch.setattr(p, "_send_text", delayed_send)
+    pending = asyncio.create_task(stream.feed("Too late.") if operation == "feed" else stream.end())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    await stream.abort()
+    sent_at_abort = list(ws.sent)
+    resume.set()
+    await asyncio.wait_for(pending, timeout=2)
+    await p._send_keepalive()
+    assert ws.sent == sent_at_abort
+    assert not p._dialogue_contexts
+    assert not p._active_contexts
+    assert await _collect(stream) == b""
+
+
+@pytest.mark.parametrize("operation", ["abort", "end"])
+async def test_stream_closed_during_connect_cannot_allocate_context(tts_factory, monkeypatch, operation):
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original_ensure = p._ensure_ws
+
+    async def delayed_ensure():
+        entered.set()
+        await resume.wait()
+        await original_ensure()
+
+    monkeypatch.setattr(p, "_ensure_ws", delayed_ensure)
+    pending = asyncio.create_task(stream.feed("Too late."))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    await getattr(stream, operation)()
+    resume.set()
+    await asyncio.wait_for(pending, timeout=2)
+    await p._send_keepalive()
+    assert ws.sent == []
+    assert not p._audio_queues
+    assert not p._active_contexts
+    assert not p._dialogue_contexts
+    assert await _collect(stream) == b""
+
+
+@pytest.mark.parametrize("model,final_key", [("eleven_v4_turbo", "is_final"), ("eleven_flash_v2_5", "isFinal")])
+@pytest.mark.parametrize("completed", [True, False])
+async def test_synthesis_error_depends_on_its_final_frame(tts_factory, model, final_key, completed):
+    p, ws, _ = await tts_factory(model)
+    speech = p.synthesize("Welcome.")
+    first = asyncio.create_task(anext(speech))
+    await asyncio.wait_for(ws.close_started.wait(), timeout=2)
+    context_key = "context_id" if model == "eleven_v4_turbo" else "contextId"
+    ws.incoming.put_nowait({context_key: "ctx_1", "audio": base64.b64encode(b"\x01\x02").decode()})
+    if completed:
+        ws.incoming.put_nowait({context_key: "ctx_1", final_key: True})
+    # Reader observes a connection error before the consumer drains its queue.
+    ws.incoming.put_nowait({"error": "connection_failed"})
+    await asyncio.wait_for(p._reader_task, timeout=2)
+    assert await asyncio.wait_for(first, timeout=2) == b"\x01\x02"
+    if completed:
+        assert [chunk async for chunk in speech] == []
+    else:
+        with pytest.raises(RuntimeError, match="connection_failed"):
+            await anext(speech)
+
+
+async def test_abort_during_registration_closes_without_sending_text(tts_factory, monkeypatch):
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    registering, aborting, resume = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_send, original_close = ws.send, p._close_context
+
+    async def delayed_registration(raw):
+        if "voices" in json.loads(raw):
+            registering.set()
+            await resume.wait()
+        await original_send(raw)
+
+    async def close_context(ctx):
+        aborting.set()
+        await original_close(ctx)
+
+    monkeypatch.setattr(ws, "send", delayed_registration)
+    monkeypatch.setattr(p, "_close_context", close_context)
+    feeding = asyncio.create_task(stream.feed("Too late."))
+    await asyncio.wait_for(registering.wait(), timeout=2)
+    aborted = asyncio.create_task(stream.abort())
+    await asyncio.wait_for(aborting.wait(), timeout=2)
+    resume.set()
+    await asyncio.wait_for(asyncio.gather(feeding, aborted), timeout=2)
+    await p._send_keepalive()
+    assert ws.sent == [
+        {"context_id": "ctx_1", "voices": ["test-voice"]},
+        {"context_id": "ctx_1", "close_context": True},
+    ]
+    assert not p._dialogue_contexts
+    assert await _collect(stream) == b""
+
+
+async def test_end_prevents_pending_feed_from_reopening_context(tts_factory, monkeypatch):
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    await stream.feed("First sentence.")
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original_send = p._send_text
+
+    async def delayed_send(ctx, text, **kwargs):
+        if text == "Too late.":
+            entered.set()
+            await resume.wait()
+        await original_send(ctx, text, **kwargs)
+
+    monkeypatch.setattr(p, "_send_text", delayed_send)
+    pending = asyncio.create_task(stream.feed("Too late."))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    await stream.end()
+    sent_at_end = list(ws.sent)
+    resume.set()
+    await asyncio.wait_for(pending, timeout=2)
+    await p._send_keepalive()
+    assert ws.sent == sent_at_end
+    assert not p._dialogue_contexts
