@@ -1866,7 +1866,7 @@ class TestContextWindowTriggering:
         result1 = await agent(prompt="Turn 1").collect()
         assert result1.status.code == "error"
         llm_spans = ctx1._trace.get_path(agent._llm._path)
-        assert [bool(s.usage) for s in sorted(llm_spans, key=lambda s: s.t0)] == [True, False]
+        assert [bool(s.usage) for s in llm_spans] == [True, False]
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1888,7 +1888,8 @@ class TestContextWindowTriggering:
         from timbal.state.tracing.providers import InMemoryTracingProvider
 
         windows = {"openai/gpt-4o-mini": 1_000_000, "test/model": 100_000}
-        monkeypatch.setattr("timbal.core.agent.get_context_window", windows.get)
+        # __getitem__, not get: an unknown model must fail the test, not compact as a fallback.
+        monkeypatch.setattr("timbal.core.agent.get_context_window", windows.__getitem__)
 
         compaction_called = False
 
@@ -1915,8 +1916,8 @@ class TestContextWindowTriggering:
 
         # 90% of the run model's 100k window; only 9% of the constructor model's 1M.
         llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
-        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
-        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        llm1.usage["test/model:input_text_tokens"] = 80_000
+        llm1.usage["test/model:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)

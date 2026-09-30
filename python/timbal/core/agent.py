@@ -894,15 +894,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if self.memory_compaction is not None:
             # The agent span's usage sums every LLM call of the run, so a run with N iterations
             # reads as ~N times its real context. Use the last call that reported usage (the same
-            # signal the mid-loop check uses). A failed call reports none and is skipped; what it
-            # tried to send is counted by _maybe_compact_memory's estimate of the messages after
-            # the last assistant message. Without any, utilization is estimated from content.
-            llm_spans = [
-                s
-                for s in parent_trace.get_path(self._llm._path)
-                if s.parent_call_id == previous_span.call_id and s.usage
-            ]
-            prev_usage = max(llm_spans, key=lambda s: s.t0).usage if llm_spans else None
+            # signal the mid-loop check uses); a failed call reports none, and what it tried to
+            # send is still counted as messages after the last assistant message.
+            llm_spans = [s for s in parent_trace.get_path(self._llm._path) if s.usage]
+            prev_usage = llm_spans[-1].usage if llm_spans else None
             if not is_resume:
                 await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
             else:
