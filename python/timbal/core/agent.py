@@ -893,9 +893,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
             # The agent span's usage sums every LLM call of the run, so a run with N iterations
-            # reads as ~N times its real context. The last call's usage is the context size (the
-            # same signal the mid-loop check uses); without one, utilization is estimated from
-            # message content.
+            # reads as ~N times its real context. Use the last call that reported usage (the same
+            # signal the mid-loop check uses). A failed call reports none and is skipped; what it
+            # tried to send is counted by _maybe_compact_memory's estimate of the messages after
+            # the last assistant message. Without any, utilization is estimated from content.
             llm_spans = [
                 s
                 for s in parent_trace.get_path(self._llm._path)
@@ -980,7 +981,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         head_slice = memory[:split]
         current_span.memory = head_slice
-        await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
+        await self._maybe_compact_memory(current_span, prev_usage=prev_usage, tail=tail)
         if current_span.memory is head_slice:
             # Below the ratio — nothing compacted. Restore the original memory object so the
             # caller's identity check sees no change (no needless dump rebuild).
@@ -1014,7 +1015,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
         await self._compact_preserving_last_assistant(current_span, prev_usage=prev_usage)
 
-    async def _maybe_compact_memory(self, current_span: Any, *, prev_usage: dict | None) -> None:
+    async def _maybe_compact_memory(
+        self, current_span: Any, *, prev_usage: dict | None, tail: list[Message] | None = None
+    ) -> None:
         """Run the configured compaction strategies on ``current_span.memory`` if the
         context-window utilization warrants it.
 
@@ -1025,6 +1028,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         ``prev_usage`` is the usage of the last LLM call (previous run or previous iteration)
         used as a token proxy; when it is empty/None the estimate falls back to message content.
+        ``tail`` is the protected tail _compact_preserving_last_assistant detached from memory:
+        not compacted, but part of the context the next call sends.
         """
         if self.memory_compaction is None:
             return
@@ -1055,7 +1060,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
                 prev_input_tokens = sum(v for k, v in prev_usage.items() if _is_context_input_unit(k))
                 prev_output_tokens = sum(v for k, v in prev_usage.items() if _is_context_output_unit(k))
-                utilization = (prev_input_tokens + prev_output_tokens) / context_window
+                # prev_usage covers the context up to its call's output, the last assistant
+                # message. What came after it (tool results, a new prompt) has not been sent
+                # yet, so estimate it: after one large tool batch, or a call that overflowed
+                # and reported no usage, it is most of the context.
+                messages = [*current_span.memory, *(tail or [])]
+                last_assistant = next(
+                    (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "assistant"), -1
+                )
+                unsent_tokens = _estimate_tokens_from_memory(messages[last_assistant + 1 :])
+                utilization = (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
                 should_compact = utilization >= self.memory_compaction_ratio
             else:
                 # Known model but no usage data from previous run.

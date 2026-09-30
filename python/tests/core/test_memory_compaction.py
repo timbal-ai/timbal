@@ -1440,6 +1440,54 @@ class TestMidLoopCompaction:
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
+    async def test_one_large_tool_batch_after_a_small_call_compacts_mid_turn(self, monkeypatch) -> None:
+        """The previous call's usage predates the tool results it asked for. One batch that fills
+        the window must count before the next call, or that call overflows."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        def fetch() -> str:
+            return "x" * 320_000  # ~80k tokens, after a call of a few tokens
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="midloop_agent_batch",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        result = await agent(prompt="fetch one big thing").collect()
+
+        assert result.status.code == "success", result.error
+        agent_span = ctx._trace.get_path(agent._path)[0]
+        meta = agent_span.metadata.get("compaction")
+        assert meta is not None and meta["triggered"] is True, "the unsent tool batch must trigger mid-loop compaction"
+        assert meta["utilization"] >= 0.75
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
     async def test_no_midloop_compaction_below_ratio(self, monkeypatch) -> None:
         """Mid-loop compaction must not fire when utilization stays under the ratio."""
         from timbal.core.agent import Agent
@@ -1759,6 +1807,73 @@ class TestContextWindowTriggering:
         await agent(prompt="Turn 2").collect()
 
         assert not compaction_called, "The run's summed usage must not stand in for its context size"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_turn_after_overflowed_call_counts_the_unsent_tool_results(self, monkeypatch) -> None:
+        """A run whose last LLM call overflowed reports no usage for it, and its memory ends in
+        the tool results that call tried to send. The last call with usage is small, so only
+        the estimate of what came after its output brings utilization over the ratio."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        def fetch() -> str:
+            return "x" * 320_000  # ~80k tokens
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            if plan["n"] == 2:
+                raise RuntimeError("input_too_large")
+            return "done"
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        result1 = await agent(prompt="Turn 1").collect()
+        assert result1.status.code == "error"
+        llm_spans = ctx1._trace.get_path(agent._llm._path)
+        assert [bool(s.usage) for s in sorted(llm_spans, key=lambda s: s.t0)] == [True, False]
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "Tool results sent after the last reported usage must count toward utilization"
 
         InMemoryTracingProvider._storage.clear()
 
