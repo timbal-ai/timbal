@@ -1447,10 +1447,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """
         llm_path = f"{self._path}.llm"
         for span in reversed(run_context._trace.as_records()):
-            if span.path == llm_path and isinstance(span.output, Message):
-                cleaned = span.output.without_empty_text_blocks()
-                if cleaned is not None:
-                    current_span.memory.append(cleaned)
+            if span.path == llm_path:
+                if isinstance(span.output, Message):
+                    cleaned = span.output.without_empty_text_blocks()
+                    if cleaned is not None:
+                        current_span.memory.append(cleaned)
                 break
 
     def _trailing_user_messages(self, memory: list[Message]) -> list[Message]:

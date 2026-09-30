@@ -1897,7 +1897,10 @@ class TestContextWindowTriggering:
         assert result1.status.code == "error"
         llm_spans = ctx1._trace.get_path(agent._llm._path)
         assert [bool(s.usage) for s in llm_spans] == [True, False]
+        # Salvage must not re-append the previous call's output for a call that produced none.
+        assert [m.role for m in ctx1._trace.get_path(agent._path)[0].memory] == ["user", "assistant", "tool"]
         await ctx1._save_trace()
+        compaction_called = False  # turn 1 compacts mid-loop; only turn start is under test
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx2)
