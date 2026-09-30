@@ -4,6 +4,7 @@ Uses the official WebSocket APIs:
 
 * ``wss://api.elevenlabs.io/v1/speech-to-text/realtime`` — Scribe realtime
 * ``wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input`` — TTS stream
+* ``wss://api.elevenlabs.io/v1/text-to-dialogue/multi-stream-input`` — v4 TTS
 
 Requires ``websockets`` (``pip install timbal[server]``) and ``ELEVENLABS_API_KEY``.
 """
@@ -42,6 +43,8 @@ STT_FLUSH_INTERVAL = 0.1
 _DEFAULT_TTS_INACTIVITY_TIMEOUT = 180
 # Space pings reset stream-input inactivity; too frequent can inject extra “text” mid-receive.
 _TTS_KEEPALIVE_INTERVAL_SEC = 55.0
+# Dialogue contexts expire after 20 seconds without a client message.
+_DIALOGUE_KEEPALIVE_INTERVAL_SEC = 10.0
 
 STT_FATAL_MESSAGE_TYPES = frozenset(
     {
@@ -287,10 +290,9 @@ class ElevenLabsStreamTTS(TextToSpeech):
     ``is_final`` markers, which eliminates the "second segment silence" bug that
     occurred with one-connection-per-segment.
 
-    Endpoint: ``/v1/text-to-speech/{voice_id}/multi-stream-input``
-
-    Multi-context WS is **not** available for the ``eleven_v3`` model but works
-    fine with ``eleven_flash_v2_5`` (the default for real-time voice).
+    Flash/Turbo/v2 use ``/v1/text-to-speech/{voice_id}/multi-stream-input``.
+    Eleven v4 models use ``/v1/text-to-dialogue/multi-stream-input`` with
+    voice registration and dialogue inputs for each context.
     """
 
     provider_id = "elevenlabs"
@@ -311,12 +313,18 @@ class ElevenLabsStreamTTS(TextToSpeech):
         self._last_ws_error: str | None = None
         self._ws_lock = asyncio.Lock()
         self._preconnect_task: asyncio.Task[None] | None = None
+        self._dialogue = False
+        self._dialogue_contexts: set[str] = set()
+        # Registration, keep-alive, and close must be ordered: messaging a
+        # closing dialogue context can make the server close the whole socket.
+        self._context_send_lock = asyncio.Lock()
 
     async def connect(self, config: AudioOutputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         if not config.voice:
             raise ValueError("AudioOutputConfig.voice (ElevenLabs voice_id) is required.")
         self._out = config
+        self._dialogue = effective_tts_model(config).startswith("eleven_v4")
         # Pre-open the multi-context WS in the background so the first
         # synthesize of the session doesn't pay the TCP+TLS+WS handshake
         # (~0.5-1s of the first reply's audio latency). Failures are logged
@@ -364,13 +372,18 @@ class ElevenLabsStreamTTS(TextToSpeech):
             "inactivity_timeout": inactivity_timeout,
             "apply_text_normalization": apply_text_normalization,
         }
-        if auto_mode:
+        if self._dialogue:
+            params.pop("inactivity_timeout")
+            keepalive_interval = min(keepalive_interval, _DIALOGUE_KEEPALIVE_INTERVAL_SEC)
+        elif auto_mode:
             params["auto_mode"] = "true"
         for k, v in extra.items():
             if v is not None and not str(k).startswith("_"):
                 params[k] = v
 
         path = f"/v1/text-to-speech/{quote(cfg.voice, safe='')}/multi-stream-input"
+        if self._dialogue:
+            path = "/v1/text-to-dialogue/multi-stream-input"
         uri = f"wss://{host}{path}?{urlencode(params)}"
 
         logger.debug("el_tts_ws_connecting", uri=uri[:160])
@@ -409,6 +422,42 @@ class ElevenLabsStreamTTS(TextToSpeech):
                 q.put_nowait(None)
         self._audio_queues.clear()
         self._active_contexts.clear()
+        self._dialogue_contexts.clear()
+
+    async def _send_text(self, context_id: str, text: str, *, flush: bool = False) -> None:
+        async with self._context_send_lock:
+            assert self._ws is not None and self._out is not None
+            msg: dict[str, Any] = {"context_id": context_id}
+            if self._dialogue:
+                if context_id not in self._dialogue_contexts:
+                    await self._ws.send(json.dumps({"context_id": context_id, "voices": [self._out.voice]}))
+                    self._dialogue_contexts.add(context_id)
+                if text.strip():
+                    msg["inputs"] = [{"text": text, "voice_id": self._out.voice}]
+            else:
+                msg["text"] = text
+            if flush:
+                msg["flush"] = True
+            await self._ws.send(json.dumps(msg))
+
+    async def _close_context(self, context_id: str) -> None:
+        async with self._context_send_lock:
+            if self._dialogue:
+                if context_id not in self._dialogue_contexts:
+                    return
+                self._dialogue_contexts.discard(context_id)
+            if self._ws is not None and self._ws_open:
+                await self._ws.send(json.dumps({"context_id": context_id, "close_context": True}))
+
+    async def _send_keepalive(self) -> None:
+        async with self._context_send_lock:
+            if self._ws is None or not self._ws_open:
+                return
+            if self._dialogue:
+                for context_id in self._dialogue_contexts:
+                    await self._ws.send(json.dumps({"context_id": context_id, "keep_alive": True}))
+            else:
+                await self._ws.send(json.dumps({"context_id": "_ka", "text": ""}))
 
     # -- background tasks ---------------------------------------------------
 
@@ -418,7 +467,11 @@ class ElevenLabsStreamTTS(TextToSpeech):
         try:
             async for raw in self._ws:
                 msg = json.loads(raw)
-                ctx = msg.get("contextId")
+                if msg.get("error"):
+                    # Dialogue protocol errors close the whole connection and
+                    # may carry no context id. Wake every waiting consumer.
+                    raise RuntimeError(f"ElevenLabs TTS error: {msg['error']}")
+                ctx = msg.get("contextId") or msg.get("context_id")
                 if ctx and ctx in self._audio_queues:
                     await self._audio_queues[ctx].put(msg)
         except ConnectionClosed as e:
@@ -443,8 +496,7 @@ class ElevenLabsStreamTTS(TextToSpeech):
             except TimeoutError:
                 pass
             try:
-                if self._ws is not None and self._ws_open:
-                    await self._ws.send(json.dumps({"context_id": "_ka", "text": ""}))
+                await self._send_keepalive()
             except Exception:
                 return
 
@@ -482,31 +534,16 @@ class ElevenLabsStreamTTS(TextToSpeech):
                 text_chars=len(stripped),
                 text_preview=stripped[:120],
             )
-            await self._ws.send(
-                json.dumps(
-                    {
-                        "text": stripped + " ",
-                        "context_id": ctx_id,
-                        "flush": True,
-                    }
-                )
-            )
+            await self._send_text(ctx_id, stripped + " ", flush=True)
             # Close the context right after flush so ElevenLabs finishes
             # generating audio for the buffered text and then sends is_final.
             # Without this, is_final never arrives and synthesize deadlocks.
-            await self._ws.send(
-                json.dumps(
-                    {
-                        "context_id": ctx_id,
-                        "close_context": True,
-                    }
-                )
-            )
+            await self._close_context(ctx_id)
 
             while True:
                 msg = await queue.get()
                 if msg is None:
-                    if chunk_count == 0 and self._last_ws_error:
+                    if self._last_ws_error:
                         raise RuntimeError(f"ElevenLabs TTS closed: {self._last_ws_error}")
                     break
                 if msg.get("error"):
@@ -516,11 +553,14 @@ class ElevenLabsStreamTTS(TextToSpeech):
                     yield base64.b64decode(msg["audio"])
                 if msg.get("is_final") or msg.get("isFinal"):
                     break
-            if chunk_count == 0 and self._last_ws_error:
+            if self._last_ws_error:
                 raise RuntimeError(f"ElevenLabs TTS closed: {self._last_ws_error}")
         finally:
             self._audio_queues.pop(ctx_id, None)
             self._active_contexts.discard(ctx_id)
+            if self._dialogue:
+                with contextlib.suppress(Exception):
+                    await self._close_context(ctx_id)
             logger.debug(
                 "el_tts_context_done",
                 context_id=ctx_id,
@@ -579,7 +619,7 @@ class _ElevenLabsTTSStream(TTSStream):
             text_chars=len(text),
             text_preview=text[:120],
         )
-        await self._tts._ws.send(json.dumps({"text": text, "context_id": self._ctx_id}))
+        await self._tts._send_text(self._ctx_id, text)
 
     async def end(self) -> None:
         if self._ended or self._aborted:
@@ -595,8 +635,8 @@ class _ElevenLabsTTSStream(TTSStream):
             # close_context finishes generating audio for buffered text and
             # then emits is_final, which terminates audio(). Flush first for
             # parity with synthesize (harmless if auto_mode already flushed).
-            await tts._ws.send(json.dumps({"text": " ", "context_id": self._ctx_id, "flush": True}))
-            await tts._ws.send(json.dumps({"context_id": self._ctx_id, "close_context": True}))
+            await tts._send_text(self._ctx_id, " ", flush=True)
+            await tts._close_context(self._ctx_id)
         except Exception as e:
             logger.warning("el_tts_stream_end_failed", context_id=self._ctx_id, error=str(e))
             self._queue.put_nowait(None)
@@ -612,15 +652,17 @@ class _ElevenLabsTTSStream(TTSStream):
             tts._active_contexts.discard(self._ctx_id)
             if tts._ws is not None and tts._ws_open:
                 with contextlib.suppress(Exception):
-                    await tts._ws.send(json.dumps({"context_id": self._ctx_id, "close_context": True}))
+                    await tts._close_context(self._ctx_id)
         self._queue.put_nowait(None)
 
     async def audio(self) -> AsyncIterator[bytes]:
         try:
             while True:
                 msg = await self._queue.get()
+                if self._aborted:
+                    return
                 if msg is None:
-                    if self._chunks == 0 and not self._aborted and self._tts._last_ws_error:
+                    if self._tts._last_ws_error:
                         raise RuntimeError(f"ElevenLabs TTS closed: {self._tts._last_ws_error}")
                     return
                 if msg.get("error"):
