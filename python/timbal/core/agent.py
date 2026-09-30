@@ -321,10 +321,11 @@ class Agent(Runnable):
     summarize uses the agent's model by default; override with a cheaper model if needed.
     Compaction is triggered automatically when context window utilization exceeds memory_compaction_ratio."""
     memory_compaction_ratio: float = 0.75
-    """Context window utilization ratio that triggers compaction. Uses the last LLM call's token
-    usage plus an estimate of the messages added after it, against the context window (from
-    models.yaml) of the model the run calls. Set to 0.0 to always compact, or 1.0 to effectively
-    disable auto-triggering. Default: 0.75 (75%)."""
+    """Context window utilization ratio that triggers compaction. Uses the token usage of the last
+    LLM call that reported context tokens, plus an estimate of the messages added after its
+    request and output, against the context window (from models.yaml) of the model the run
+    calls. Set to 0.0 to always compact, or 1.0 to effectively disable auto-triggering.
+    Default: 0.75 (75%)."""
     tool_result_limit: SkipValidation[ToolResultLimit | int | None] = None
     """Size limit applied to every tool result when it is produced (before it enters memory).
     An int is shorthand for ToolResultLimit(threshold=int). The default action (Spill) persists
@@ -893,12 +894,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
-            llm_spans = [s for s in parent_trace.get_path(self._llm._path) if s.usage]
-            prev_usage = llm_spans[-1].usage if llm_spans else None
+            measurement = (previous_span.metadata or {}).get("context_measurement")
+            if measurement is not None:
+                # Sanitizing above may drop a message the measurement covered.
+                covered = memory[: measurement["messages"]]
+                kept = sum(1 for m in covered if m.without_empty_text_blocks() is not None)
+                measurement = {**measurement, "messages": kept}
+            memory_before = current_span.memory
             if not is_resume:
-                await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
+                await self._maybe_compact_memory(current_span, measurement=measurement)
             else:
-                await self._compact_on_resume(current_span, prev_usage=prev_usage)
+                await self._compact_on_resume(current_span, measurement=measurement)
+            if measurement is not None:
+                # Compaction keeps the usage as an upper bound and shifts the boundary by what it removed.
+                removed = len(memory_before) - len(current_span.memory)
+                current_span.metadata["context_measurement"] = {
+                    **measurement,
+                    "messages": max(0, measurement["messages"] - removed),
+                }
 
     def _inject_background_completions(self, current_span: Any) -> None:
         """Drain session completion inbox into memory at turn start (Claude-style).
@@ -940,7 +953,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             task_retention_secs=self.background_task_retention_secs,
         )
 
-    async def _compact_preserving_last_assistant(self, current_span: Any, *, prev_usage: dict | None) -> None:
+    async def _compact_preserving_last_assistant(self, current_span: Any, *, measurement: dict | None) -> None:
         """Compact memory while protecting the trailing assistant message (and anything after
         it) from the compactor.
 
@@ -964,7 +977,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         split = next((i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant"), None)
         if split is None:
             # No assistant message yet (e.g. memory is just the prompt) — nothing to protect.
-            await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
+            await self._maybe_compact_memory(current_span, measurement=measurement)
             return
 
         head, tail = memory[:split], memory[split:]
@@ -973,7 +986,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         head_slice = memory[:split]
         current_span.memory = head_slice
-        await self._maybe_compact_memory(current_span, prev_usage=prev_usage, tail=tail)
+        await self._maybe_compact_memory(current_span, measurement=measurement, tail=tail)
         if current_span.memory is head_slice:
             # Below the ratio — nothing compacted. Restore the original memory object so the
             # caller's identity check sees no change (no needless dump rebuild).
@@ -997,7 +1010,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         else:
             current_span.memory = [*head, *tail]
 
-    async def _compact_on_resume(self, current_span: Any, *, prev_usage: dict | None) -> None:
+    @staticmethod
+    def _record_context_measurement(current_span: Any, usage: dict | None, messages: int) -> None:
+        """Keep the usage of an LLM call that measured context tokens with the messages it covered."""
+        if any(v and (_is_context_input_unit(k) or _is_context_output_unit(k)) for k, v in (usage or {}).items()):
+            current_span.metadata["context_measurement"] = {"usage": dict(usage), "messages": messages}
+
+    async def _compact_on_resume(self, current_span: Any, *, measurement: dict | None) -> None:
         """Resume-turn compaction. Only acts when there's a genuine trailing unresolved
         tool_use to protect; delegates the detach/compact/reattach to
         _compact_preserving_last_assistant."""
@@ -1005,10 +1024,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # No trailing unresolved tool_use (degenerate resume); leave memory as-is rather
             # than risk stripping structure we rely on.
             return
-        await self._compact_preserving_last_assistant(current_span, prev_usage=prev_usage)
+        await self._compact_preserving_last_assistant(current_span, measurement=measurement)
 
     async def _maybe_compact_memory(
-        self, current_span: Any, *, prev_usage: dict | None, tail: list[Message] | None = None
+        self, current_span: Any, *, measurement: dict | None, tail: list[Message] | None = None
     ) -> None:
         """Run the configured compaction strategies on ``current_span.memory`` if the
         context-window utilization warrants it.
@@ -1018,8 +1037,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tool_results appended — at which point the previously-unresolved tool_use is a
         complete pair again and safe to compact).
 
-        ``prev_usage`` is the usage of the last LLM call (previous run or previous iteration)
-        used as a token proxy; when it is empty/None the estimate falls back to message content.
+        ``measurement`` is the last LLM call that reported context tokens: its ``usage`` and the
+        number of memory ``messages`` its request and output covered. Messages after those are
+        estimated from content; without a measurement, all of them are.
         ``tail`` is the protected tail _compact_preserving_last_assistant detached from memory:
         not compacted, but part of the context the next call sends.
         """
@@ -1042,20 +1062,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     estimated_tokens=estimated_tokens,
                 )
                 should_compact = True
-            elif prev_usage:
+            elif measurement:
                 # Anthropic's input_tokens excludes cached tokens: full context =
                 # input_tokens + cache reads + cache writes (disjoint buckets). The
                 # collector emits cache writes either as the aggregate
                 # `cache_creation_input_tokens` or as the per-TTL `ephemeral_*` units —
                 # never both — so every cache unit is counted exactly once. Pricing-tier
                 # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
-                prev_input_tokens = sum(v for k, v in prev_usage.items() if _is_context_input_unit(k))
-                prev_output_tokens = sum(v for k, v in prev_usage.items() if _is_context_output_unit(k))
-                assistants = [i for i, m in enumerate(messages) if m.role == "assistant"]
-                # Runtime replies (on_max_iter) and partial or blocked outputs are not what prev_usage measured.
-                outputs = [i for i in assistants if messages[i].stop_reason and not messages[i].is_runtime()]
-                last_output = (outputs or assistants or [-1])[-1]
-                unsent_tokens = _estimate_tokens_from_memory(messages[last_output + 1 :])
+                usage = measurement["usage"]
+                prev_input_tokens = sum(v for k, v in usage.items() if _is_context_input_unit(k))
+                prev_output_tokens = sum(v for k, v in usage.items() if _is_context_output_unit(k))
+                unsent_tokens = _estimate_tokens_from_memory(messages[measurement["messages"] :])
                 utilization = (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
                 should_compact = utilization >= self.memory_compaction_ratio
             else:
@@ -1710,8 +1727,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         guardrail_retry_count = 0
         # Re-requests after a leaked, unrecoverable tool call (max_leaked_tool_call_retries).
         leaked_call_retry_count = 0
-        # Token usage reported by the previous LLM call this turn — the live signal for
-        # mid-loop compaction. None until the first LLM call completes.
+        # Token usage reported by the previous LLM call this turn. None until the first LLM
+        # call completes; mid-loop compaction waits for one.
         last_llm_usage: dict | None = None
         # Own the active nested iterator explicitly: closing this handler while
         # it is suspended at a yield must finish child cleanup before returning.
@@ -1865,14 +1882,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # assistant batch + its tool_results are *unconsumed* — the next LLM call must
                 # read them — so we protect that tail and compact only the history before it
                 # (dropping the unconsumed batch would loop the model back to re-plan the same
-                # step). The previous LLM call's reported usage is the live context-size signal
-                # (its input tokens ≈ the size of the memory we're about to send again).
+                # step). The context measurement is the size signal: the last call that reported
+                # context tokens, plus an estimate of the messages appended after it.
                 if self.memory_compaction is not None and last_llm_usage is not None:
                     mem_before = current_span.memory
-                    await self._compact_preserving_last_assistant(current_span, prev_usage=last_llm_usage)
+                    await self._compact_preserving_last_assistant(
+                        current_span, measurement=current_span.metadata.get("context_measurement")
+                    )
                     if current_span.memory is not mem_before:
                         # Compaction rewrote memory out of lockstep with the dump; rebuild it.
                         current_span._memory_dump = await dump(current_span.memory)
+                        measured = current_span.metadata.get("context_measurement")
+                        if measured is not None:
+                            removed = len(mem_before) - len(current_span.memory)
+                            measured["messages"] = max(0, measured["messages"] - removed)
 
                 # Output-side guardrails: model_output rails run on the final assistant
                 # message; model_step rails run on EVERY assistant message (including
@@ -1893,6 +1916,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 buffered_events: list[BaseEvent] = []
                 guardrail_retry = False
 
+                sent = len(current_span.memory)
                 active_events = self._llm._stream(
                     model=model,
                     messages=current_span.memory,
@@ -1965,6 +1989,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             )
                             _llm_memory_saved = True
                             last_llm_usage = event.usage
+                            self._record_context_measurement(current_span, event.usage, sent)
                             buffered_events.clear()
                             i += 1
                             need_retry = True
@@ -2014,6 +2039,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     await _append_memory(event.output)
                                     _llm_memory_saved = True
                                     last_llm_usage = event.usage
+                                    self._record_context_measurement(current_span, event.usage, sent + 1)
                                     feedback = g_verdict.feedback or (
                                         f"Your response was rejected by guardrail '{g_rail.name}'. "
                                         "Rewrite it to comply."
@@ -2062,9 +2088,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Add LLM response to conversation for next iteration
                         await _append_memory(event.output)
                         _llm_memory_saved = True
-                        # Record this call's token usage as the live signal for mid-loop
-                        # compaction before the next iteration's LLM call.
                         last_llm_usage = event.usage
+                        self._record_context_measurement(current_span, event.usage, sent + 1)
 
                         if self.output_model is not None:
                             validation_error_msg = None
