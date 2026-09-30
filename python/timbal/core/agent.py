@@ -893,10 +893,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
-            # The agent span's usage sums every LLM call of the run, so a run with N iterations
-            # reads as ~N times its real context. Use the last call that reported usage (the same
-            # signal the mid-loop check uses); a failed call reports none, and what it tried to
-            # send is still counted as messages after the last assistant message.
             llm_spans = [s for s in parent_trace.get_path(self._llm._path) if s.usage]
             prev_usage = llm_spans[-1].usage if llm_spans else None
             if not is_resume:
@@ -1030,8 +1026,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if self.memory_compaction is None:
             return
 
-        # The model this run calls: a per-run `model` input overrides the constructor's
-        # (handler pops it the same way), and its window is the one that overflows.
         model = str(current_span.input.get("model") or self.model)
         should_compact = self.memory_compaction_ratio <= 0.0
         utilization = None
@@ -1056,11 +1050,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
                 prev_input_tokens = sum(v for k, v in prev_usage.items() if _is_context_input_unit(k))
                 prev_output_tokens = sum(v for k, v in prev_usage.items() if _is_context_output_unit(k))
-                # prev_usage covers the context up to its call's output, the last assistant
-                # message. What came after it (tool results, a new prompt) has not been sent
-                # yet, so estimate it: after one large tool batch, or a call that overflowed
-                # and reported no usage, it is most of the context.
-                messages = [*current_span.memory, *(tail or [])]
+                messages =[*current_span.memory, *(tail or [])]
                 last_assistant = next(
                     (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "assistant"), -1
                 )

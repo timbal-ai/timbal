@@ -1441,8 +1441,7 @@ class TestMidLoopCompaction:
 
     @pytest.mark.asyncio
     async def test_one_large_tool_batch_after_a_small_call_compacts_mid_turn(self, monkeypatch) -> None:
-        """The previous call's usage predates the tool results it asked for. One batch that fills
-        the window must count before the next call, or that call overflows."""
+        """A tool batch that fills the window after a small call must compact before the next call."""
         from timbal.core.agent import Agent
         from timbal.core.memory_compaction import compact_tool_results
         from timbal.core.tool import Tool
@@ -1453,7 +1452,7 @@ class TestMidLoopCompaction:
         monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
 
         def fetch() -> str:
-            return "x" * 320_000  # ~80k tokens, after a call of a few tokens
+            return "x" * 320_000  # ~80k tokens
 
         plan = {"n": 0}
 
@@ -1761,8 +1760,7 @@ class TestContextWindowTriggering:
 
     @pytest.mark.asyncio
     async def test_utilization_uses_last_llm_call_not_run_total(self, monkeypatch) -> None:
-        """The agent span's usage sums every LLM call of the run: three calls re-sending a 30k
-        context total 90k. The next turn sends ~30k, so utilization is 30%, not 90%."""
+        """Three calls re-sending a 30k context sum to 90k on the agent span; utilization is 30%."""
         from timbal.core.agent import Agent
         from timbal.core.memory_compaction import keep_last_n_turns
         from timbal.state import set_run_context
@@ -1812,9 +1810,7 @@ class TestContextWindowTriggering:
 
     @pytest.mark.asyncio
     async def test_turn_after_overflowed_call_counts_the_unsent_tool_results(self, monkeypatch) -> None:
-        """A run whose last LLM call overflowed reports no usage for it, and its memory ends in
-        the tool results that call tried to send. The last call with usage is small, so only
-        the estimate of what came after its output brings utilization over the ratio."""
+        """After a call that overflowed without usage, the tool results it tried to send still count."""
         from timbal.core.agent import Agent
         from timbal.core.memory_compaction import keep_last_n_turns
         from timbal.core.tool import Tool
@@ -1879,8 +1875,7 @@ class TestContextWindowTriggering:
 
     @pytest.mark.asyncio
     async def test_context_window_comes_from_the_run_model(self, monkeypatch) -> None:
-        """A per-run `model` replaces the constructor's for the LLM call, so its context window
-        is the one compaction must measure against."""
+        """Utilization is measured against the per-run model's context window, not the constructor's."""
         from timbal.core.agent import Agent
         from timbal.core.memory_compaction import keep_last_n_turns
         from timbal.state import set_run_context
@@ -1888,7 +1883,6 @@ class TestContextWindowTriggering:
         from timbal.state.tracing.providers import InMemoryTracingProvider
 
         windows = {"openai/gpt-4o-mini": 1_000_000, "test/model": 100_000}
-        # __getitem__, not get: an unknown model must fail the test, not compact as a fallback.
         monkeypatch.setattr("timbal.core.agent.get_context_window", windows.__getitem__)
 
         compaction_called = False
