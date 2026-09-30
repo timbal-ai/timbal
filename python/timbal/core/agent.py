@@ -321,9 +321,10 @@ class Agent(Runnable):
     summarize uses the agent's model by default; override with a cheaper model if needed.
     Compaction is triggered automatically when context window utilization exceeds memory_compaction_ratio."""
     memory_compaction_ratio: float = 0.75
-    """Context window utilization ratio that triggers compaction. Uses previous run's token
-    usage from span data and the model's context window from models.yaml. Set to 0.0 to
-    always compact, or 1.0 to effectively disable auto-triggering. Default: 0.75 (75%)."""
+    """Context window utilization ratio that triggers compaction. Uses the last LLM call's token
+    usage plus an estimate of the messages added after it, against the context window (from
+    models.yaml) of the model the run calls. Set to 0.0 to always compact, or 1.0 to effectively
+    disable auto-triggering. Default: 0.75 (75%)."""
     tool_result_limit: SkipValidation[ToolResultLimit | int | None] = None
     """Size limit applied to every tool result when it is produced (before it enters memory).
     An int is shorthand for ToolResultLimit(threshold=int). The default action (Spill) persists
