@@ -1027,6 +1027,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
 
         model = str(current_span.input.get("model") or self.model)
+        messages = [*current_span.memory, *(tail or [])]
         should_compact = self.memory_compaction_ratio <= 0.0
         utilization = None
         if not should_compact:
@@ -1034,7 +1035,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if context_window is None:
                 # Unknown model — context window not in models.yaml.
                 # Estimate token count from message content as a best effort.
-                estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                estimated_tokens = _estimate_tokens_from_memory(messages)
                 logger.warning(
                     "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
                     model=model,
@@ -1050,17 +1051,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
                 prev_input_tokens = sum(v for k, v in prev_usage.items() if _is_context_input_unit(k))
                 prev_output_tokens = sum(v for k, v in prev_usage.items() if _is_context_output_unit(k))
-                messages =[*current_span.memory, *(tail or [])]
-                last_assistant = next(
-                    (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "assistant"), -1
-                )
-                unsent_tokens = _estimate_tokens_from_memory(messages[last_assistant + 1 :])
+                assistants = [i for i, m in enumerate(messages) if m.role == "assistant"]
+                # Runtime replies (on_max_iter) and partial or blocked outputs are not what prev_usage measured.
+                outputs = [i for i in assistants if messages[i].stop_reason and not messages[i].is_runtime()]
+                last_output = (outputs or assistants or [-1])[-1]
+                unsent_tokens = _estimate_tokens_from_memory(messages[last_output + 1 :])
                 utilization = (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
                 should_compact = utilization >= self.memory_compaction_ratio
             else:
                 # Known model but no usage data from previous run.
                 # Estimate utilization from message content.
-                estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                estimated_tokens = _estimate_tokens_from_memory(messages)
                 utilization = estimated_tokens / context_window
                 logger.warning(
                     "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",

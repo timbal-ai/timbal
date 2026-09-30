@@ -1595,6 +1595,40 @@ class TestMidLoopCompaction:
 
         InMemoryTracingProvider._storage.clear()
 
+    @pytest.mark.asyncio
+    async def test_content_estimate_counts_the_protected_tail(self, monkeypatch) -> None:
+        """Without usage, the content estimate covers the detached tail as well as the head."""
+        from timbal.core.agent import Agent
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def compactor(memory):
+            nonlocal compaction_called
+            compaction_called = True
+            return memory
+
+        agent = Agent(name="test_agent", model=TestModel(), memory_compaction=compactor, memory_compaction_ratio=0.75)
+
+        class _FakeSpan:
+            def __init__(self) -> None:
+                self.input = {}
+                self.memory = [Message(role="user", content=[TextContent(text="hi")])]
+                self.metadata = {}
+
+        tail = [
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="f1", name="fetch", input={})],
+                stop_reason="tool_use",
+            ),
+            Message(role="tool", content=[ToolResultContent(id="f1", content=[TextContent(text="x" * 320_000)])]),
+        ]
+        await agent._maybe_compact_memory(_FakeSpan(), prev_usage=None, tail=tail)
+
+        assert compaction_called, "The detached tail must count toward the content estimate"
+
 
 # ---------------------------------------------------------------------------
 # Context-window-aware triggering (unit test with mocked usage)
@@ -1870,6 +1904,67 @@ class TestContextWindowTriggering:
         await agent(prompt="Turn 2").collect()
 
         assert compaction_called, "Tool results sent after the last reported usage must count toward utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_turn_after_max_iter_stop_counts_the_tool_results_before_the_stop_reply(self, monkeypatch) -> None:
+        """A synthetic stop reply after the tool results does not hide them from the next turn."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        def fetch() -> str:
+            return "x" * 320_000  # ~80k tokens
+
+        def model_handler(_messages):
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id="f1", name="fetch", input={})],
+                stop_reason="tool_use",
+            )
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            max_iter=1,
+            on_max_iter="stop",
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+        memory1 = ctx1._trace.get_path(agent._path)[0].memory
+        assert [m.role for m in memory1[-3:]] == ["assistant", "tool", "assistant"]
+        assert memory1[-1].is_runtime()
+        await ctx1._save_trace()
+        compaction_called = False  # turn 1 compacts mid-loop; only turn start is under test
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "Tool results before a synthetic reply must count toward utilization"
 
         InMemoryTracingProvider._storage.clear()
 
