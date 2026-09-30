@@ -892,10 +892,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
+            # The agent span's usage sums every LLM call of the run, so a run with N iterations
+            # reads as ~N times its real context. The last call's usage is the context size (the
+            # same signal the mid-loop check uses); without one, utilization is estimated from
+            # message content.
+            llm_spans = [
+                s
+                for s in parent_trace.get_path(self._llm._path)
+                if s.parent_call_id == previous_span.call_id and s.usage
+            ]
+            prev_usage = max(llm_spans, key=lambda s: s.t0).usage if llm_spans else None
             if not is_resume:
-                await self._maybe_compact_memory(current_span, prev_usage=previous_span.usage)
+                await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
             else:
-                await self._compact_on_resume(current_span, prev_usage=previous_span.usage)
+                await self._compact_on_resume(current_span, prev_usage=prev_usage)
 
     def _inject_background_completions(self, current_span: Any) -> None:
         """Drain session completion inbox into memory at turn start (Claude-style).
@@ -1013,23 +1023,26 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tool_results appended — at which point the previously-unresolved tool_use is a
         complete pair again and safe to compact).
 
-        ``prev_usage`` is the prior run's usage dict used as a token proxy; when it is
-        empty/None the estimate falls back to message content.
+        ``prev_usage`` is the usage of the last LLM call (previous run or previous iteration)
+        used as a token proxy; when it is empty/None the estimate falls back to message content.
         """
         if self.memory_compaction is None:
             return
 
+        # The model this run calls: a per-run `model` input overrides the constructor's
+        # (handler pops it the same way), and its window is the one that overflows.
+        model = str(current_span.input.get("model") or self.model)
         should_compact = self.memory_compaction_ratio <= 0.0
         utilization = None
         if not should_compact:
-            context_window = get_context_window(str(self.model))
+            context_window = get_context_window(model)
             if context_window is None:
                 # Unknown model — context window not in models.yaml.
                 # Estimate token count from message content as a best effort.
                 estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
                 logger.warning(
                     "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
-                    model=str(self.model),
+                    model=model,
                     estimated_tokens=estimated_tokens,
                 )
                 should_compact = True
@@ -1051,7 +1064,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 utilization = estimated_tokens / context_window
                 logger.warning(
                     "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
-                    model=str(self.model),
+                    model=model,
                     estimated_tokens=estimated_tokens,
                     estimated_utilization=round(utilization, 4),
                 )
@@ -1069,7 +1082,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # the offload store so summarize can write its canonical record of compacted
             # messages (readable back via read_tool_result).
             if hasattr(compactor, "_state"):
-                compactor._state["agent_model"] = str(self.model)
+                compactor._state["agent_model"] = model
                 if "store" in compactor._state and compactor._state["store"] is None:
                     compactor._state["store"] = getattr(self, "_offload_store", None)
             before = len(current_span.memory)

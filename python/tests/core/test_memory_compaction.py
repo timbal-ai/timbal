@@ -1031,9 +1031,9 @@ class TestCompactionMetadata:
         ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1071,9 +1071,9 @@ class TestCompactionMetadata:
         ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
+        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1109,9 +1109,9 @@ class TestCompactionMetadata:
         ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1583,10 +1583,10 @@ class TestContextWindowTriggering:
         output1 = await result1.collect()
         assert output1.output is not None
 
-        # Manually inflate the span's usage to simulate 90% utilization
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        # Manually inflate the last LLM call's usage to simulate 90% utilization
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         # --- Run 2: should trigger compaction ---
@@ -1645,11 +1645,11 @@ class TestContextWindowTriggering:
 
         # 90% utilization, but almost all of it sits in cache keys — the
         # pre-fix predicate saw only 1k input + 4k output = 5% utilization.
-        root1 = ctx1.root_span()
-        root1.usage["anthropic/claude-haiku-4-5:input_tokens"] = 1_000
-        root1.usage["anthropic/claude-haiku-4-5:cache_read_input_tokens"] = 80_000
-        root1.usage["anthropic/claude-haiku-4-5:cache_creation_input_tokens"] = 5_000
-        root1.usage["anthropic/claude-haiku-4-5:output_tokens"] = 4_000
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["anthropic/claude-haiku-4-5:input_tokens"] = 1_000
+        llm1.usage["anthropic/claude-haiku-4-5:cache_read_input_tokens"] = 80_000
+        llm1.usage["anthropic/claude-haiku-4-5:cache_creation_input_tokens"] = 5_000
+        llm1.usage["anthropic/claude-haiku-4-5:output_tokens"] = 4_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1696,11 +1696,11 @@ class TestContextWindowTriggering:
         await agent(prompt="Turn 1").collect()
 
         # 90% utilization: 1k input + 40k 5m-write + 45k 1h-write + 4k output.
-        root1 = ctx1.root_span()
-        root1.usage["anthropic/claude-opus-5:input_tokens_fast"] = 1_000
-        root1.usage["anthropic/claude-opus-5:ephemeral_5m_input_tokens_fast"] = 40_000
-        root1.usage["anthropic/claude-opus-5:ephemeral_1h_input_tokens_fast"] = 45_000
-        root1.usage["anthropic/claude-opus-5:output_tokens_fast"] = 4_000
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["anthropic/claude-opus-5:input_tokens_fast"] = 1_000
+        llm1.usage["anthropic/claude-opus-5:ephemeral_5m_input_tokens_fast"] = 40_000
+        llm1.usage["anthropic/claude-opus-5:ephemeral_1h_input_tokens_fast"] = 45_000
+        llm1.usage["anthropic/claude-opus-5:output_tokens_fast"] = 4_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1708,6 +1708,107 @@ class TestContextWindowTriggering:
         await agent(prompt="Turn 2").collect()
 
         assert compaction_called, "Per-TTL cache write units must count toward context utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_utilization_uses_last_llm_call_not_run_total(self, monkeypatch) -> None:
+        """The agent span's usage sums every LLM call of the run: three calls re-sending a 30k
+        context total 90k. The next turn sends ~30k, so utilization is 30%, not 90%."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(),
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 29_000
+        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 1_000
+        root1 = ctx1.root_span()
+        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 87_000
+        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 3_000
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert not compaction_called, "The run's summed usage must not stand in for its context size"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_context_window_comes_from_the_run_model(self, monkeypatch) -> None:
+        """A per-run `model` replaces the constructor's for the LLM call, so its context window
+        is the one compaction must measure against."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        windows = {"openai/gpt-4o-mini": 1_000_000, "test/model": 100_000}
+        monkeypatch.setattr("timbal.core.agent.get_context_window", windows.get)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        agent = Agent(
+            name="test_agent",
+            model="openai/gpt-4o-mini",
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1", model=TestModel()).collect()
+
+        # 90% of the run model's 100k window; only 9% of the constructor model's 1M.
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2", model=TestModel()).collect()
+
+        assert compaction_called, "Utilization must be measured against the run model's context window"
 
         InMemoryTracingProvider._storage.clear()
 
@@ -1746,9 +1847,9 @@ class TestContextWindowTriggering:
         set_run_context(ctx1)
         await agent(prompt="Hello").collect()
 
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
+        llm1 = ctx1._trace.get_path(agent._llm._path)[-1]
+        llm1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
+        llm1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
         await ctx1._save_trace()
 
         # --- Run 2: should skip compaction (10% utilization < 75% threshold) ---
@@ -2516,6 +2617,7 @@ class TestSummarizeV2:
 
         class _FakeSpan:
             def __init__(self) -> None:
+                self.input = {}
                 self.memory = memory
                 self.metadata = {}
 
