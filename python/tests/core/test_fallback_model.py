@@ -1,7 +1,11 @@
+import json
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from openai import APIStatusError as OpenAIAPIStatusError
+from openai import AsyncOpenAI
 from timbal import Agent
 from timbal.core.fallback_model import FallbackModel, ModelEntry
 from timbal.core.llm import _llm_router
@@ -157,6 +161,36 @@ class TestFallbackModel:
         assert not is_retryable_provider_error(_status_error(401))
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "primary,other",
+        [("openai", "anthropic"), ("anthropic", "openai"), ("openai", "xai"), ("xai", "openai")],
+    )
+    async def test_provider_params_inheritance_and_replacement(self, primary, other):
+        shared = {"shared": {"value": 1}}
+        override = {"override": {"value": 2}}
+        model = FallbackModel(
+            ModelEntry(f"{primary}/primary", provider_params=override),
+            f"{primary}/inherited",
+            ModelEntry(f"{primary}/cleared", provider_params={}),
+            f"{other}/default",
+            ModelEntry(f"{other}/custom", provider_params=override),
+            f"{other}/next",
+            f"{primary}/last",
+        )
+        calls = []
+
+        async def router(**kwargs):
+            calls.append(kwargs.get("provider_params"))
+            if kwargs["model"] != f"{primary}/last":
+                raise _status_error(503)
+            yield "ok"
+
+        assert [chunk async for chunk in model.route(router, provider_params=shared)] == ["ok"]
+        assert calls == [override, shared, {}, None, override, None, shared]
+        assert shared == {"shared": {"value": 1}}
+        assert override == {"override": {"value": 2}}
+
+    @pytest.mark.asyncio
     async def test_conservative_predicate_skips_non_provider_errors(self):
         """Opt-in conservative mode: only transient provider errors trigger fallback."""
         from timbal.core.fallback_model import is_retryable_provider_error
@@ -246,6 +280,85 @@ class TestFallbackModel:
 
 
 class TestFallbackRouterIntegration:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "primary,backup,shared,native",
+        [
+            ("openai", "anthropic", {"reasoning": {"effort": "low"}}, {"thinking": {"type": "adaptive"}}),
+            ("xai", "anthropic", {"reasoning": {"effort": "low"}}, {"thinking": {"type": "adaptive"}}),
+            ("anthropic", "openai", {"thinking": {"type": "adaptive"}}, {"reasoning": {"effort": "low"}}),
+            ("anthropic", "xai", {"thinking": {"type": "adaptive"}}, {"reasoning": {"effort": "low"}}),
+            ("openai", "google", {"reasoning": {"effort": "low"}}, {"top_p": 0.8}),
+            ("anthropic", "google", {"thinking": {"type": "adaptive"}}, {"top_p": 0.8}),
+        ],
+    )
+    @pytest.mark.parametrize("override", ["inherit", "native", "empty"])
+    async def test_cross_provider_params_with_real_sdks(self, primary, backup, shared, native, override, monkeypatch):
+        """Keep real SDK argument validation and serialization, mocking only HTTP."""
+        from timbal.core.llm import router as router_module
+        from timbal.state import _call_id, _run_context_var
+        from timbal.state.context import RunContext
+
+        monkeypatch.setattr(router_module, "TIMBAL_OPENAI_API", "responses")
+        requests = []
+
+        def respond(request):
+            body = json.loads(request.content)
+            requests.append(body)
+            if body["model"] == "primary":
+                return httpx.Response(
+                    404, json={"error": {"type": "not_found_error", "message": "Model does not exist"}},
+                )
+            if backup == "anthropic":
+                data = 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+            elif backup in ("openai", "xai"):
+                data = (
+                    'event: response.output_text.delta\n'
+                    'data: {"type":"response.output_text.delta","delta":"OK"}\n\n'
+                )
+            else:
+                data = (
+                    'data: {"id":"test","object":"chat.completion.chunk","created":0,"model":"backup",'
+                    '"choices":[{"index":0,"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n'
+                )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=data)
+
+        async with (
+            AsyncAnthropic(
+                api_key="test-key", max_retries=0,
+                http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+            ) as anthropic,
+            AsyncOpenAI(
+                api_key="test-key", max_retries=0,
+                http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+            ) as openai,
+        ):
+            def resolve_client(provider, *_args):
+                return (anthropic if provider == "anthropic" else openai), None
+
+            monkeypatch.setattr(router_module, "_resolve_client", resolve_client)
+            entry_params = {"inherit": None, "native": native, "empty": {}}[override]
+            model = FallbackModel(
+                ModelEntry(f"{primary}/primary", max_retries=0),
+                ModelEntry(f"{backup}/backup", max_retries=0, provider_params=entry_params),
+            )
+            token_ctx = _run_context_var.set(RunContext(tracing_provider=None))
+            token_cid = _call_id.set(None)
+            try:
+                chunks = [chunk async for chunk in _llm_router(model=model, max_tokens=1024, provider_params=shared)]
+            finally:
+                _run_context_var.reset(token_ctx)
+                _call_id.reset(token_cid)
+
+        assert len(chunks) == 1
+        assert [request["model"] for request in requests] == ["primary", "backup"]
+        assert all(requests[0][key] == value for key, value in shared.items())
+        assert not shared.keys() & requests[1].keys()
+        if override == "native":
+            assert all(requests[1][key] == value for key, value in native.items())
+        else:
+            assert not native.keys() & requests[1].keys()
+
     @pytest.mark.asyncio
     async def test_llm_router_delegates_to_fallback_model(self):
         model = FallbackModel("openai/primary")

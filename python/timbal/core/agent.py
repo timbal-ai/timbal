@@ -30,6 +30,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
+from ..collectors.harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED
 from ..errors import GuardrailBlocked, InterruptError, MaxIterExceeded, PauseRequired, RunCancelled, bail
 from ..guardrails.apply import (
     build_guardrail_events,
@@ -53,7 +54,6 @@ from ..state.background import (
     current_background_store,
     format_background_completion_notice,
 )
-from ..collectors.harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED
 from ..types.content import (
     CustomContent,
     FileContent,
@@ -182,7 +182,7 @@ def _coerce_model_to_str(model: Any) -> str:
         return f"<{type(model).__name__}>"
 
 
-_FALLBACK_ITEM_KEYS = ("model", "max_retries", "retry_delay", "api_key", "base_url")
+_FALLBACK_ITEM_KEYS = ("model", "max_retries", "retry_delay", "api_key", "base_url", "provider_params")
 
 
 def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
@@ -633,6 +633,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     "retry_delay": {"type": "number", "default": 1.0},
                     "api_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
                     "base_url": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                    "provider_params": {"anyOf": [{"type": "object"}, {"type": "null"}], "default": None},
                 },
                 "required": ["model"],
             },

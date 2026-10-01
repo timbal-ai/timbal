@@ -16,13 +16,18 @@ _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 @dataclass(frozen=True, slots=True)
 class ModelEntry:
-    """One model in a fallback chain."""
+    """One model in a fallback chain.
+
+    ``provider_params`` replaces shared provider parameters for this entry.
+    ``None`` inherits them only for the primary provider; ``{}`` clears them.
+    """
 
     model: str
     max_retries: int = 2
     retry_delay: float = 1.0
     api_key: str | None = None
     base_url: str | None = None
+    provider_params: dict[str, Any] | None = None
 
 
 class FallbackModel:
@@ -46,6 +51,10 @@ class FallbackModel:
     Shared ``api_key`` and ``base_url`` apply only to the primary provider.
     Other providers resolve their own credentials and endpoint unless their
     ``ModelEntry`` supplies an explicit override.
+
+    Shared ``provider_params`` also apply only to the primary provider.
+    An entry's explicit ``provider_params`` replaces the shared dict, including
+    when it is empty. Provider-specific parameters are never translated.
     """
 
     __timbal_fallback_model__ = True
@@ -97,10 +106,13 @@ class FallbackModel:
                 # to a different provider. Let the router resolve its defaults.
                 kwargs.pop("api_key", None)
                 kwargs.pop("base_url", None)
+                kwargs.pop("provider_params", None)
             if entry.api_key is not None:
                 kwargs["api_key"] = entry.api_key
             if entry.base_url is not None:
                 kwargs["base_url"] = entry.base_url
+            if entry.provider_params is not None:
+                kwargs["provider_params"] = entry.provider_params
 
             try:
                 async for chunk in router(**kwargs):
