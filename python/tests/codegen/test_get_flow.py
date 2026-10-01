@@ -575,6 +575,7 @@ class TestConfigSchema:
             "retry_delay",
             "api_key",
             "base_url",
+            "provider_params",
         }
         assert fb["items"]["required"] == ["model"]
         assert fb["value"] == [
@@ -584,6 +585,7 @@ class TestConfigSchema:
                 "retry_delay": 1.0,
                 "api_key": None,
                 "base_url": None,
+                "provider_params": None,
             },
             {
                 "model": "google/gemini-2.5-flash",
@@ -591,6 +593,7 @@ class TestConfigSchema:
                 "retry_delay": 1.0,
                 "api_key": None,
                 "base_url": None,
+                "provider_params": None,
             },
         ]
 
@@ -612,6 +615,7 @@ class TestConfigSchema:
                     retry_delay=2.5,
                     api_key="hunter2",
                     base_url="https://example.com",
+                    provider_params={"thinking": {"type": "adaptive"}},
                 ),
             ),
             max_tokens=128,
@@ -627,6 +631,7 @@ class TestConfigSchema:
                 "retry_delay": 2.5,
                 "api_key": "**********",
                 "base_url": "https://example.com",
+                "provider_params": {"thinking": {"type": "adaptive"}},
             },
         ]
 

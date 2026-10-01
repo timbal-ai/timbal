@@ -90,10 +90,12 @@ agent = Agent(
             "anthropic/claude-sonnet-4-6",
             max_retries=3,
             retry_delay=0.5,
+            provider_params={"thinking": {"type": "adaptive"}},
         ),
         ModelEntry(
             "openai/gpt-5.5",
             max_retries=1,
+            provider_params={"reasoning": {"effort": "low"}},
         ),
     ),
     max_tokens=1024,
@@ -103,6 +105,8 @@ agent = Agent(
 Fallback only switches models before the first streamed chunk is emitted. If a stream fails after output has started, Timbal raises the error instead of silently switching models and risking duplicated or inconsistent output.
 
 The agent's `api_key` and `base_url` apply only to models from the primary provider. When the chain switches providers, Timbal resolves that provider's own credentials and endpoint from its environment variables or the platform proxy. Use `ModelEntry(api_key=..., base_url=...)` to override these for an individual model, including when multiple providers share a gateway.
+
+The agent's `model_params` (or per-request `provider_params`) also apply only to models from the primary provider. Other providers use their defaults unless their `ModelEntry` sets `provider_params`. An entry's dict **replaces**, rather than merges with, the shared params; use `{}` to clear them explicitly. An omitted value or `None` inherits shared params only for the primary provider. Timbal does not translate provider-specific options such as OpenAI's `reasoning` into Anthropic's `thinking`. This scoping also applies to providers that share an API format, such as OpenAI and xAI; set entry-level params explicitly to reuse compatible options. Shared `max_tokens`, `temperature`, tools, and structured output configuration still apply across the chain.
 
 ### Thinking and reasoning
 
