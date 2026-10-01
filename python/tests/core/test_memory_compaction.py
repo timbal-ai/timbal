@@ -1031,9 +1031,9 @@ class TestCompactionMetadata:
         ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        measured["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1071,9 +1071,9 @@ class TestCompactionMetadata:
         ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["openai/gpt-4o-mini:input_text_tokens"] = 5_000
+        measured["openai/gpt-4o-mini:output_text_tokens"] = 5_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1109,9 +1109,9 @@ class TestCompactionMetadata:
         ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        measured["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1440,6 +1440,56 @@ class TestMidLoopCompaction:
         InMemoryTracingProvider._storage.clear()
 
     @pytest.mark.asyncio
+    async def test_one_large_tool_batch_after_a_small_call_compacts_mid_turn(self, monkeypatch) -> None:
+        """A tool batch that fills the window after a small call must compact before the next call."""
+        from timbal.core.agent import Agent, _estimate_tokens_from_memory
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        def fetch() -> str:
+            return "x" * 320_000  # ~80k tokens
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="midloop_agent_batch",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        result = await agent(prompt="fetch one big thing").collect()
+
+        assert result.status.code == "success", result.error
+        agent_span = ctx._trace.get_path(agent._path)[0]
+        meta = agent_span.metadata.get("compaction")
+        assert meta is not None and meta["triggered"] is True, "the unsent tool batch must trigger mid-loop compaction"
+        assert meta["utilization"] >= 0.75
+        # The batch itself is protected from compaction, so the next request has to fit with it.
+        next_request = ctx._trace.get_path(agent._llm._path)[1]._input_dump["messages"]
+        assert _estimate_tokens_from_memory([Message.validate(m) for m in next_request]) < 100_000
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
     async def test_no_midloop_compaction_below_ratio(self, monkeypatch) -> None:
         """Mid-loop compaction must not fire when utilization stays under the ratio."""
         from timbal.core.agent import Agent
@@ -1548,6 +1598,40 @@ class TestMidLoopCompaction:
 
         InMemoryTracingProvider._storage.clear()
 
+    @pytest.mark.asyncio
+    async def test_content_estimate_counts_the_protected_tail(self, monkeypatch) -> None:
+        """Without usage, the content estimate covers the detached tail as well as the head."""
+        from timbal.core.agent import Agent
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def compactor(memory):
+            nonlocal compaction_called
+            compaction_called = True
+            return memory
+
+        agent = Agent(name="test_agent", model=TestModel(), memory_compaction=compactor, memory_compaction_ratio=0.75)
+
+        class _FakeSpan:
+            def __init__(self) -> None:
+                self.input = {}
+                self.memory = [Message(role="user", content=[TextContent(text="hi")])]
+                self.metadata = {}
+
+        tail = [
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="f1", name="fetch", input={})],
+                stop_reason="tool_use",
+            ),
+            Message(role="tool", content=[ToolResultContent(id="f1", content=[TextContent(text="x" * 320_000)])]),
+        ]
+        await agent._maybe_compact_memory(_FakeSpan(), measurement=None, tail=tail)
+
+        assert compaction_called, "The detached tail must count toward the content estimate"
+
 
 # ---------------------------------------------------------------------------
 # Context-window-aware triggering (unit test with mocked usage)
@@ -1583,10 +1667,10 @@ class TestContextWindowTriggering:
         output1 = await result1.collect()
         assert output1.output is not None
 
-        # Manually inflate the span's usage to simulate 90% utilization
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
+        # Manually inflate the last context measurement's usage to simulate 90% utilization
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        measured["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         # --- Run 2: should trigger compaction ---
@@ -1645,11 +1729,11 @@ class TestContextWindowTriggering:
 
         # 90% utilization, but almost all of it sits in cache keys — the
         # pre-fix predicate saw only 1k input + 4k output = 5% utilization.
-        root1 = ctx1.root_span()
-        root1.usage["anthropic/claude-haiku-4-5:input_tokens"] = 1_000
-        root1.usage["anthropic/claude-haiku-4-5:cache_read_input_tokens"] = 80_000
-        root1.usage["anthropic/claude-haiku-4-5:cache_creation_input_tokens"] = 5_000
-        root1.usage["anthropic/claude-haiku-4-5:output_tokens"] = 4_000
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["anthropic/claude-haiku-4-5:input_tokens"] = 1_000
+        measured["anthropic/claude-haiku-4-5:cache_read_input_tokens"] = 80_000
+        measured["anthropic/claude-haiku-4-5:cache_creation_input_tokens"] = 5_000
+        measured["anthropic/claude-haiku-4-5:output_tokens"] = 4_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1696,11 +1780,11 @@ class TestContextWindowTriggering:
         await agent(prompt="Turn 1").collect()
 
         # 90% utilization: 1k input + 40k 5m-write + 45k 1h-write + 4k output.
-        root1 = ctx1.root_span()
-        root1.usage["anthropic/claude-opus-5:input_tokens_fast"] = 1_000
-        root1.usage["anthropic/claude-opus-5:ephemeral_5m_input_tokens_fast"] = 40_000
-        root1.usage["anthropic/claude-opus-5:ephemeral_1h_input_tokens_fast"] = 45_000
-        root1.usage["anthropic/claude-opus-5:output_tokens_fast"] = 4_000
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["anthropic/claude-opus-5:input_tokens_fast"] = 1_000
+        measured["anthropic/claude-opus-5:ephemeral_5m_input_tokens_fast"] = 40_000
+        measured["anthropic/claude-opus-5:ephemeral_1h_input_tokens_fast"] = 45_000
+        measured["anthropic/claude-opus-5:output_tokens_fast"] = 4_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1708,6 +1792,424 @@ class TestContextWindowTriggering:
         await agent(prompt="Turn 2").collect()
 
         assert compaction_called, "Per-TTL cache write units must count toward context utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_utilization_uses_last_llm_call_not_run_total(self, monkeypatch) -> None:
+        """Three calls re-sending a 30k context sum to 90k on the agent span; utilization is 30%."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(),
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["openai/gpt-4o-mini:input_text_tokens"] = 29_000
+        measured["openai/gpt-4o-mini:output_text_tokens"] = 1_000
+        root1 = ctx1.root_span()
+        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 87_000
+        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 3_000
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert not compaction_called, "The run's summed usage must not stand in for its context size"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_turn_after_overflowed_call_counts_the_unsent_tool_results(self, monkeypatch) -> None:
+        """After a call that overflowed without usage, the tool results it tried to send still count."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        def fetch() -> str:
+            return "x" * 320_000  # ~80k tokens
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            if plan["n"] == 2:
+                raise RuntimeError("input_too_large")
+            return "done"
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        result1 = await agent(prompt="Turn 1").collect()
+        assert result1.status.code == "error"
+        llm_spans = ctx1._trace.get_path(agent._llm._path)
+        assert [bool(s.usage) for s in llm_spans] == [True, False]
+        # Salvage must not re-append the previous call's output for a call that produced none.
+        assert [m.role for m in ctx1._trace.get_path(agent._path)[0].memory] == ["user", "assistant", "tool"]
+        assert "context_measurement" in ctx1._trace.get_path(agent._path)[0].metadata
+        await ctx1._save_trace()
+        compaction_called = False  # turn 1 compacts mid-loop; only turn start is under test
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "Tool results sent after the last reported usage must count toward utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_turn_after_max_iter_stop_counts_the_tool_results_before_the_stop_reply(self, monkeypatch) -> None:
+        """A synthetic stop reply after the tool results does not hide them from the next turn."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        def fetch() -> str:
+            return "x" * 320_000  # ~80k tokens
+
+        def model_handler(_messages):
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id="f1", name="fetch", input={})],
+                stop_reason="tool_use",
+            )
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            max_iter=1,
+            on_max_iter="stop",
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+        memory1 = ctx1._trace.get_path(agent._path)[0].memory
+        assert [m.role for m in memory1[-3:]] == ["assistant", "tool", "assistant"]
+        assert memory1[-1].is_runtime()
+        await ctx1._save_trace()
+        compaction_called = False  # turn 1 compacts mid-loop; only turn start is under test
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "Tool results before a synthetic reply must count toward utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_request_only_usage_leaves_the_earlier_measurement(self, monkeypatch) -> None:
+        """A failed call that reported only server-tool requests does not replace the 80k measured before it."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.core.tool import Tool
+        from timbal.state import get_run_context, set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="s1", name="search", input={})],
+                    stop_reason="tool_use",
+                )
+            if plan["n"] == 2:
+                get_run_context().update_usage("test/model:web_search_requests", 1)
+                raise RuntimeError("stream disconnected")
+            return "done"
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="search", handler=lambda: "found")],
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="x" * 320_000).collect()  # ~80k tokens
+        assert set(ctx1._trace.get_path(agent._llm._path)[1].usage) == {"test/model:web_search_requests"}
+        await ctx1._save_trace()
+        compaction_called = False  # turn 1 compacts mid-loop; only turn start is under test
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "A usage without context tokens must not stand in for the context size"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_input_measured_by_a_failed_request_is_not_counted_twice(self, monkeypatch) -> None:
+        """Tool results a failed request already measured as input are not added again at the next turn."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.core.tool import Tool
+        from timbal.state import get_run_context, set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            if plan["n"] == 2:
+                get_run_context().update_usage("test/model:input_text_tokens", 40_100)
+                raise RuntimeError("stream interrupted")
+            return "done"
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=lambda: "x" * 160_000)],  # ~40k tokens
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert not compaction_called, "A ~40k context must not read as ~80k"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_call_without_usage_keeps_the_boundary_of_the_last_measurement(self, monkeypatch) -> None:
+        """After a completed call that reports no usage, what came after the last measured call still counts."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 100_000)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] == 1:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="f1", name="fetch", input={})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        real_update_usage = RunContext.update_usage
+
+        def update_usage(self, key, value):
+            if plan["n"] != 2:
+                real_update_usage(self, key, value)
+
+        monkeypatch.setattr(RunContext, "update_usage", update_usage)
+
+        agent = Agent(
+            name="test_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=lambda: "x" * 320_000)],  # ~80k tokens
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1").collect()
+        assert [bool(s.usage) for s in ctx1._trace.get_path(agent._llm._path)] == [True, False]
+        await ctx1._save_trace()
+        compaction_called = False  # turn 1 compacts mid-loop; only turn start is under test
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2").collect()
+
+        assert compaction_called, "The tool result after the last measured call must count toward utilization"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_context_window_comes_from_the_run_model(self, monkeypatch) -> None:
+        """Utilization is measured against the per-run model's context window, not the constructor's."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import keep_last_n_turns
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        windows = {"openai/gpt-4o-mini": 1_000_000, "test/model": 100_000}
+        monkeypatch.setattr("timbal.core.agent.get_context_window", windows.__getitem__)
+
+        compaction_called = False
+
+        def tracking_compactor(n):
+            inner = keep_last_n_turns(n)
+
+            def wrapper(memory):
+                nonlocal compaction_called
+                compaction_called = True
+                return inner(memory)
+
+            return wrapper
+
+        agent = Agent(
+            name="test_agent",
+            model="openai/gpt-4o-mini",
+            memory_compaction=tracking_compactor(1),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx1)
+        await agent(prompt="Turn 1", model=TestModel()).collect()
+
+        # 90% of the run model's 100k window; only 9% of the constructor model's 1M.
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["test/model:input_text_tokens"] = 80_000
+        measured["test/model:output_text_tokens"] = 10_000
+        await ctx1._save_trace()
+
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx2)
+        await agent(prompt="Turn 2", model=TestModel()).collect()
+
+        assert compaction_called, "Utilization must be measured against the run model's context window"
 
         InMemoryTracingProvider._storage.clear()
 
@@ -1746,9 +2248,9 @@ class TestContextWindowTriggering:
         set_run_context(ctx1)
         await agent(prompt="Hello").collect()
 
-        root1 = ctx1.root_span()
-        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
-        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
+        measured = ctx1._trace.get_path(agent._path)[0].metadata["context_measurement"]["usage"]
+        measured["openai/gpt-4o-mini:input_text_tokens"] = 5_000
+        measured["openai/gpt-4o-mini:output_text_tokens"] = 5_000
         await ctx1._save_trace()
 
         # --- Run 2: should skip compaction (10% utilization < 75% threshold) ---
@@ -2516,11 +3018,12 @@ class TestSummarizeV2:
 
         class _FakeSpan:
             def __init__(self) -> None:
+                self.input = {}
                 self.memory = memory
                 self.metadata = {}
 
         span = _FakeSpan()
-        await agent._maybe_compact_memory(span, prev_usage=None)
+        await agent._maybe_compact_memory(span, measurement=None)
 
         text = span.memory[0].collect_text()
         assert text.startswith(_SUMMARY_MARKER)

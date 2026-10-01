@@ -143,10 +143,12 @@ Pruning runs off the hot path and never fails a run.
 
 Compaction is triggered automatically when context-window utilization exceeds `memory_compaction_ratio` (default `0.75`, i.e. 75%), at two points:
 
-- **Turn start** — before the first LLM call of a turn, utilization is estimated from the **previous run's** token usage. The configured compactors are applied to the resolved memory before it reaches the LLM.
-- **Mid-loop** — between iterations *within* a turn (after each tool round), utilization is read from the **previous LLM call's** reported usage. This bounds a single turn that makes many or large tool calls instead of letting it grow until it overflows. Mid-loop compaction always protects the most recent, still-unconsumed assistant tool batch (the results the next model call must read), so it never sends the agent back to re-plan the same step.
+- **Turn start** — before the first LLM call of a turn, utilization is read from the previous run's **context measurement** — the usage of its last LLM call that reported context tokens — plus an estimate of the messages added after that call's request and output (the new prompt, and any tool results a failed call never sent). The configured compactors are applied to the resolved memory before it reaches the LLM.
+- **Mid-loop** — between iterations *within* a turn (after each tool round), utilization is read from the same **context measurement**, plus an estimate of the tool results appended since. This bounds a single turn that makes many or large tool calls instead of letting it grow until it overflows. Mid-loop compaction always protects the most recent, still-unconsumed assistant tool batch (the results the next model call must read), so it never sends the agent back to re-plan the same step.
 
-Both use the same strategies and the same ratio; you don't configure them separately.
+Both use the same strategies and the same ratio; you don't configure them separately. Utilization is measured against the context window of the model the run calls: a per-run `model` input when given, otherwise the agent's `model`.
+
+For traces saved before context measurements were recorded, the first continuation uses the previous run's recorded token usage plus a content estimate of the full memory. This conservative fallback may compact early, but preserves file-token usage and counts content that was never measured. The next LLM call that reports context tokens replaces it with a measurement and its request boundary. Traces without any usable token usage use the content estimate alone.
 
 ```python
 from timbal import Agent
@@ -156,7 +158,7 @@ agent = Agent(
     name="my_agent",
     model="openai/gpt-4o-mini",
     memory_compaction=keep_last_n_turns(10),
-    memory_compaction_ratio=0.75,  # trigger when previous run used >75% of context
+    memory_compaction_ratio=0.75,  # trigger when the context passes 75% of the window
 )
 ```
 
