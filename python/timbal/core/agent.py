@@ -159,6 +159,10 @@ def _is_context_output_unit(key: str) -> bool:
     return unit.startswith("output") and "token" in unit
 
 
+def _has_context_token_usage(usage: dict | None) -> bool:
+    return any(v and (_is_context_input_unit(k) or _is_context_output_unit(k)) for k, v in (usage or {}).items())
+
+
 def _coerce_model_to_str(model: Any) -> str:
     """Reduce an agent ``model`` (str, FallbackModel, TestModel, …) to a JSON-
     safe string for serialisation by ``get_config``.
@@ -805,6 +809,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         assert run_context is not None, "Run context not found"
 
         current_span = run_context.current_span()
+        # Distinguish new runs with no measurement (e.g. a failed first call)
+        # from legacy traces that predate this metadata entirely.
+        current_span.metadata.setdefault("context_measurement", None)
         if current_span.memory:
             return
         prompt = Message.validate(current_span.input.get("prompt", ""))
@@ -894,7 +901,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
-            measurement = (previous_span.metadata or {}).get("context_measurement")
+            previous_metadata = previous_span.metadata or {}
+            measurement = previous_metadata.get("context_measurement")
+            if "context_measurement" not in previous_metadata and _has_context_token_usage(previous_span.usage):
+                # Legacy traces have recorded usage but no reliable request boundary.
+                # Keep the run total as a conservative baseline and estimate all memory:
+                # file tokens must not disappear, nor may unmeasured tool results be skipped.
+                # The next measured LLM call replaces this deliberately high estimate.
+                measurement = {"usage": dict(previous_span.usage), "messages": 0}
             if measurement is not None:
                 # Sanitizing above may drop a message the measurement covered.
                 covered = memory[: measurement["messages"]]
@@ -1013,7 +1027,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     @staticmethod
     def _record_context_measurement(current_span: Any, usage: dict | None, messages: int) -> None:
         """Keep the usage of an LLM call that measured context tokens with the messages it covered."""
-        if any(v and (_is_context_input_unit(k) or _is_context_output_unit(k)) for k, v in (usage or {}).items()):
+        if _has_context_token_usage(usage):
             current_span.metadata["context_measurement"] = {"usage": dict(usage), "messages": messages}
 
     async def _compact_on_resume(self, current_span: Any, *, measurement: dict | None) -> None:

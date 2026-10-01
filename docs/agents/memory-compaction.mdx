@@ -148,6 +148,8 @@ Compaction is triggered automatically when context-window utilization exceeds `m
 
 Both use the same strategies and the same ratio; you don't configure them separately. Utilization is measured against the context window of the model the run calls: a per-run `model` input when given, otherwise the agent's `model`.
 
+For traces saved before context measurements were recorded, the first continuation uses the previous run's recorded token usage plus a content estimate of the full memory. This conservative fallback may compact early, but preserves file-token usage and counts content that was never measured. The next LLM call that reports context tokens replaces it with a measurement and its request boundary. Traces without any usable token usage use the content estimate alone.
+
 ```python
 from timbal import Agent
 from timbal.core.memory_compaction import keep_last_n_turns
