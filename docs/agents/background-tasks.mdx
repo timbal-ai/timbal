@@ -206,6 +206,26 @@ snap = await wait_for_background("k4d9x2mq7c1a", after=cursor, timeout=5.0)
 
 Without `after`, the wait is tied to the child's asyncio task finishing. With `after`, it wakes when the append-only log advances, the log closes on completion, or the timeout hits — useful for streaming UIs that already have a `transcript_cursor`.
 
+## Polling from outside the run
+
+The calls above resolve the store from the ambient `RunContext`, which is only set inside the run (or in the same task right after it). To poll from anywhere else — a request handler, a worker, a separate task — pass the parent's `run_id`. It is on every event the run emits, including the `OutputEvent`:
+
+```python
+result = await agent(prompt="build the site").collect()
+
+tasks = list_background_tasks(run_id=result.run_id)
+task_id = tasks[0]["task_id"]
+
+snap = get_background_task(task_id, run_id=result.run_id)
+snap = await wait_for_background(task_id, run_id=result.run_id, timeout=30.0)
+transcript = read_background_transcript(task_id, after=0, run_id=result.run_id)
+cancel_background_task(task_id, run_id=result.run_id)
+```
+
+The spawning turn and every later turn chained on it via `parent_id` resolve to the same store, so use whichever `run_id` you last saw. Like the ambient calls, these never ack completion notices.
+
+Over HTTP the server exposes the same polling under `/runs/{run_id}/background` — list, snapshot with `wait_ms` long-poll, paged events, and cancel. See the [server README](https://github.com/timbal-ai/timbal/blob/main/python/timbal/server/README.md#polling-background-children).
+
 ## Log retention
 
 Each child's event log is a **ring buffer** (defaults: 50k events / 32 MiB — same idea as HTTP `JobStore`). Oldest events drop when over cap; `forgotten_through` is the logical floor. Finished **task records** are removed from the session bag after **300 seconds** by default so long-lived workers do not leak metadata.
