@@ -3,7 +3,7 @@ title: "Fireworks"
 description: "Open-source models via Fireworks serverless inference with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [Fireworks model docs](https://fireworks.ai/models). All model IDs use the prefix `fireworks/accounts/fireworks/models/`. Only serverless models are listed here — other Fireworks models require a dedicated deployment.</Note>
+<Note>Verified 2026-10-03 against [pricing](https://docs.fireworks.ai/serverless/pricing), individual [model pages](https://fireworks.ai/models), and [dated deprecations](https://docs.fireworks.ai/updates/changelog). Prices are USD per 1M tokens at standard online rates. Model IDs use the `fireworks/` prefix. Dedicated endpoints require provisioning and use deployment-specific billing.</Note>
 
 ## All Models
 
@@ -13,11 +13,14 @@ description: "Open-source models via Fireworks serverless inference with specs, 
 
   `fireworks/accounts/fireworks/models/deepseek-v4-flash-0731`
 
-  Official DeepSeek V4 Flash on Fireworks serverless (supersedes the April preview). Fast, cost-efficient MoE with near-Pro reasoning at 1M context.
+  Official DeepSeek V4 Flash on Fireworks dedicated deployments (supersedes the April preview). Fast, cost-efficient MoE with near-Pro reasoning at 1M context.
 
-  - &#36;0.22 / &#36;0.66
-  - <Icon icon="window-maximize" size={14} /> 1M context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 1,048,576 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Serverless retired 2026-09-25. Dedicated deployment remains available and is billed by GPU time, not these historical token rates. See https://docs.fireworks.ai/updates/changelog</Note>
   </Card>
 
   <Card title="qwen3p8-max">
@@ -27,9 +30,13 @@ description: "Open-source models via Fireworks serverless inference with specs, 
 
   Alibaba Qwen 3.8 Max on Fireworks serverless: flagship MoE for long-horizon coding and agentic work. Replacement for retired qwen3p7-plus.
 
-  - &#36;2.00 / &#36;6.00
-  - <Icon icon="window-maximize" size={14} /> 262K context
-  - <Icon icon="keyboard" size={14} /> Text input
+  - &#36;2 / &#36;6 per 1M input / output tokens
+  - Cached input: &#36;0.25 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> Context not published
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Fireworks model page reports context N/A; no limit is inferred from the upstream model. Standard prices; Priority is 1.5x. https://app.fireworks.ai/models/fireworks/qwen3p8-max</Note>
   </Card>
 
   <Card title="kimi-k2p6">
@@ -39,9 +46,12 @@ description: "Open-source models via Fireworks serverless inference with specs, 
 
   Moonshot Kimi K2.6 on Fireworks: multimodal MoE for high-quality tool use and long-context workloads.
 
-  - &#36;0.95 / &#36;4.00
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,144 tokens context
   - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Serverless retired 2026-09-25. Dedicated deployment remains available and is billed by GPU time, not these historical token rates. See https://docs.fireworks.ai/updates/changelog</Note>
   </Card>
 
   <Card title="kimi-k2p7-code">
@@ -49,12 +59,14 @@ description: "Open-source models via Fireworks serverless inference with specs, 
 
   `fireworks/accounts/fireworks/models/kimi-k2p7-code`
 
-  Moonshot Kimi K2.7 Code on Fireworks serverless for long-context coding agents with thinking mode.
+  Moonshot Kimi K2.7 Code on Fireworks dedicated deployments for long-context coding agents with thinking mode.
 
-  - &#36;0.95 / &#36;4.00
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,144 tokens context
   - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Serverless retired 2026-09-25. Dedicated deployment remains available and is billed by GPU time, not these historical token rates. See https://docs.fireworks.ai/updates/changelog</Note>
   </Card>
 
   <Card title="glm-5p2">
@@ -62,11 +74,14 @@ description: "Open-source models via Fireworks serverless inference with specs, 
 
   `fireworks/accounts/fireworks/models/glm-5p2`
 
-  Z.ai GLM-5.2 on Fireworks serverless: 1M-token context, strongest open coding model with prompt caching (cached input &#36;0.14 / 1M).
+  Z.ai GLM-5.2 on Fireworks dedicated deployments: long-context text model for coding and tool use. Serverless access was retired September 25, 2026.
 
-  - &#36;1.40 / &#36;4.40
-  - <Icon icon="window-maximize" size={14} /> 1M context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 1,048,576 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Serverless retired 2026-09-25. Dedicated deployment remains available and is billed by GPU time, not these historical token rates. See https://docs.fireworks.ai/updates/changelog</Note>
   </Card>
 
   <Card title="minimax-m3">
@@ -74,11 +89,15 @@ description: "Open-source models via Fireworks serverless inference with specs, 
 
   `fireworks/accounts/fireworks/models/minimax-m3`
 
-  MiniMax M3 multimodal MoE on Fireworks serverless for chat, agents, and long-context workloads.
+  MiniMax M3 text deployment on Fireworks serverless for chat, agents, and long-context workloads.
 
-  - &#36;0.30 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 512K context
-  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - &#36;0.3 / &#36;1.2 per 1M input / output tokens
+  - Cached input: &#36;0.06 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 512,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Fireworks deployment does not support image input despite the multimodal upstream model. Context advertised as 512k. Standard prices; Priority is 1.5x.</Note>
   </Card>
 
   <Card title="gpt-oss-120b">
@@ -88,8 +107,126 @@ description: "Open-source models via Fireworks serverless inference with specs, 
 
   OpenAI's open-weight 120B MoE achieving near-parity with o4-mini on reasoning benchmarks. Apache 2.0.
 
-  - &#36;0.15 / &#36;0.60
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.15 / &#36;0.6 per 1M input / output tokens
+  - Cached input: &#36;0.015 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Standard prices. Priority is 1.2x input, cached input, and output.</Note>
   </Card>
 </CardGroup>
+
+## Newly verified models
+
+<CardGroup cols={2}>
+  <Card title="DeepSeek V4.1 Flash (Fireworks)">
+
+  `fireworks/accounts/fireworks/models/deepseek-v4p1-flash`
+
+  Multimodal DeepSeek model on Fireworks serverless.
+
+  - &#36;0.3 / &#36;1.2 per 1M input / output tokens
+  - Cached input: &#36;0.006 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Standard rates effective 2026-10-01; Priority is 1.25x. Replaces retired V4 Flash 0731. https://app.fireworks.ai/models/fireworks/deepseek-v4p1-flash</Note>
+  </Card>
+
+  <Card title="Kimi K3 (Fireworks)">
+
+  `fireworks/accounts/fireworks/models/kimi-k3`
+
+  Moonshot Kimi K3 on Fireworks serverless.
+
+  - &#36;3 / &#36;15 per 1M input / output tokens
+  - Cached input: &#36;0.3 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Standard rates; Priority is 1.25x and Fast is 1.5x. US-only routing adds a separate premium. https://app.fireworks.ai/models/fireworks/kimi-k3</Note>
+  </Card>
+
+  <Card title="GLM-5.3 (Fireworks)">
+
+  `fireworks/accounts/fireworks/models/glm-5p3`
+
+  GLM-5.3 for text, coding, and tool use on Fireworks.
+
+  - &#36;1.4 / &#36;4.4 per 1M input / output tokens
+  - Cached input: &#36;0.26 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Standard rates; Priority is 1.25x and Fast is 1.5x. Replaces retired serverless GLM-5.2. https://app.fireworks.ai/models/fireworks/glm-5p3</Note>
+  </Card>
+
+  <Card title="GLM-5.3 Flash (Fireworks)">
+
+  `fireworks/accounts/fireworks/models/glm-5p3-flash`
+
+  GLM-5.3 Flash with text and image input on Fireworks.
+
+  - &#36;0.15 / &#36;0.5 per 1M input / output tokens
+  - Cached input: &#36;0.03 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Standard rates; Priority is 1.25x. https://app.fireworks.ai/models/fireworks/glm-5p3-flash</Note>
+  </Card>
+
+  <Card title="Nemotron Lightning 3.5 30B A3B (Fireworks)">
+
+  `fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b`
+
+  NVIDIA reasoning model for efficient text and tool workloads on Fireworks.
+
+  - &#36;0.05 / &#36;0.2 per 1M input / output tokens
+  - Cached input: &#36;0.01 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 262,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Context advertised as 262k; Standard rates, Priority is 1.25x. https://app.fireworks.ai/models/fireworks/nemotron-lightning-3p5-30b-a3b</Note>
+  </Card>
+
+  <Card title="Nemotron 3 Ultra NVFP4 (Fireworks)">
+
+  `fireworks/accounts/fireworks/models/nemotron-3-ultra-nvfp4`
+
+  NVIDIA Nemotron 3 Ultra preview on Fireworks serverless.
+
+  - &#36;0.6 / &#36;2.4 per 1M input / output tokens
+  - Cached input: &#36;0.12 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 262,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Preview; context advertised as 262k. Standard rates. Pricing docs list Priority at 1.25x despite the model page only listing Standard. https://app.fireworks.ai/models/fireworks/nemotron-3-ultra-nvfp4</Note>
+  </Card>
+
+  <Card title="Ember-1 (Fireworks)">
+
+  `fireworks/accounts/fireworks/models/ember-1`
+
+  Fireworks research preview based on Kimi K3.
+
+  - &#36;3 / &#36;15 per 1M input / output tokens
+  - Cached input: &#36;0.3 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Time-limited research preview; confirm ongoing availability before production use. Standard rates; pricing docs list Priority at 1.25x. https://app.fireworks.ai/models/fireworks/ember-1</Note>
+  </Card>
+
+</CardGroup>
+
+## Serving modes and retirement
+
+All token prices above are Standard mode. Priority, Fast, US-only routing, batch, reserved throughput, and dedicated deployments have different rates. See the [current mode rate card](https://docs.fireworks.ai/serverless/pricing); this catalog does not automatically price nonstandard modes. The September 25 retirement applies to serverless DeepSeek V4 Flash 0731, Kimi K2.6, Kimi K2.7 Code, and GLM-5.2. Their dedicated deployments remain available.

@@ -3,7 +3,7 @@ title: "OpenAI"
 description: "GPT-6, GPT-5, GPT-4, and o-series models with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [OpenAI model docs](https://platform.openai.com/docs/models) · [API pricing](https://developers.openai.com/api/docs/pricing) (GPT-5.6 Sol promo at least through Nov 21, 2026). Prices are Standard tier; Batch/Flex are 50%, Fast mode (`service_tier: "fast"`) is 2x.</Note>
+<Note>Source: [OpenAI model docs](https://platform.openai.com/docs/models) · [API pricing](https://developers.openai.com/api/docs/pricing). Prices are USD per million tokens at Standard tier, checked October 3, 2026. Published post-promotion rates take precedence; promotional rates are retained when no post-promotion rates are published. Processing discounts and premiums are model-specific; see the GPT-6 notes below.</Note>
 
 ## GPT-6 Series
 
@@ -24,6 +24,19 @@ description: "GPT-6, GPT-5, GPT-4, and o-series models with specs, pricing, and 
   - <Icon icon="brain" size={14} /> Extended thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Apr 30, 2026
+  </Card>
+
+  <Card title="gpt-6.1-sol">
+  `openai/gpt-6.1-sol`
+
+  Complex coding, computer use, and professional work. Released September 29, 2026.
+
+  - &#36;2 input / &#36;10 output per 1M tokens; cached input &#36;0.10; cache writes &#36;2.50
+  - Above 272K input tokens, the full request costs &#36;4 / &#36;15; cached input &#36;0.20; cache writes &#36;5
+  - 1.05M context; 128K max output; text and image input, text output
+  - Reasoning: `low`, `medium` (default), `high`, `xhigh`, `max`; `none` and `minimal` are unsupported
+  - Function tools require Responses. Chat Completions supports requests without tools
+  - [Model reference](https://developers.openai.com/api/docs/models/gpt-6.1-sol), crosschecked against [API pricing](https://developers.openai.com/api/docs/pricing) and [release notes](https://developers.openai.com/api/docs/changelog)
   </Card>
 
   <Card title="gpt-6-sol">
@@ -57,30 +70,32 @@ description: "GPT-6, GPT-5, GPT-4, and o-series models with specs, pricing, and 
   </Card>
 </CardGroup>
 
-### Using GPT-6 Sol and Luna
+### Using GPT-6.1 Sol and GPT-6
 
-Set `OPENAI_API_KEY` and choose `openai/gpt-6-sol` or `openai/gpt-6-luna`:
+Set `OPENAI_API_KEY` and choose `openai/gpt-6.1-sol`:
 
 ```python
 from timbal import Agent
 
 agent = Agent(
     name="assistant",
-    model="openai/gpt-6-sol",  # Or openai/gpt-6-luna
+    model="openai/gpt-6.1-sol",
     max_tokens=4096,
     model_params={"reasoning": {"effort": "medium"}},
 )
 ```
 
-Use the Responses API (Timbal's default) for reasoning with tools. With `TIMBAL_OPENAI_API=chat_completions`, function calling on Sol and Luna requires `model_params={"reasoning_effort": "none"}`. Astra still requires Responses for tool calling.
+Use the Responses API (Timbal's default) for reasoning with tools. With `TIMBAL_OPENAI_API=chat_completions`, function calling on the older GPT-6 Sol and GPT-6 Luna requires `model_params={"reasoning_effort": "none"}`. GPT-6.1 Sol and Astra require Responses for tool calling.
 
-All GPT-6 prices shown are Standard rates. Batch and Flex cost half the applicable rates; Fast mode costs twice as much, including cache and long-context rates. Opt into Flex or Fast with `model_params={"service_tier": "flex"}` or `{"service_tier": "fast"}`; metering follows the tier reported by the provider. Regional processing adds 10% where eligible. Sol and Luna support EU data residency only with Standard processing.
+Astra also offers [Ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode) at **6x** Standard, including cache and long-context rates, using `model_params={"service_tier": "ultrafast"}`. Usage uses `_ultrafast` units.
+
+All GPT-6 prices shown are Standard rates. Batch and Flex cost half the applicable rates; Fast mode costs twice as much, including cache and long-context rates. Opt into Flex or Fast with `model_params={"service_tier": "flex"}` or `{"service_tier": "fast"}`; metering follows the tier reported by the provider. Regional processing adds 10% where eligible. GPT-6 Sol and Luna support EU data residency with Standard, Flex, and Batch; Fast is unavailable there. GPT-6.1 Sol also supports EU residency without Fast. Regional premiums are not included in the catalog token rates.
 
 Sol and Luna launched September 22, 2026. Specs and prices verified September 23, 2026 against [Sol's model reference](https://developers.openai.com/api/docs/models/gpt-6-sol), [Luna's model reference](https://developers.openai.com/api/docs/models/gpt-6-luna), and [OpenAI pricing](https://developers.openai.com/api/docs/pricing).
 
 ### How long-context and cache pricing is tracked
 
-GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro bill the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. (GPT-5.5 Pro's model card publishes no long-context tier and no cached-input discount, so it is billed flat.) Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
+GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5/Pro, GPT-5.4 and GPT-5.4 Pro bill the **entire request** at long-context rates once the prompt exceeds **272K input tokens** — including cache reads, cache writes, and output. (GPT-5.5 Pro also has a long-context tier in the pricing table, although its model card omits it; no cache discount is published.) Timbal's collectors decide the tier from the raw prompt size reported by OpenAI (cache hits included; exactly 272K is still short context) and emit distinct usage units so each tier can be priced separately:
 
 | Request | Usage keys on `OutputEvent.usage` |
 | --- | --- |
@@ -120,6 +135,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="window-maximize" size={14} /> 1.05M context
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Extended thinking
+  - Above 272K input: &#36;60 / &#36;270 per 1M tokens for the full request, per the [pricing table](https://developers.openai.com/api/docs/pricing)
   </Card>
 
   <Card title="gpt-5.5-2026-04-23">
@@ -143,7 +159,9 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
 
   GPT-5.6 flagship tier for the hardest coding, agentic, and long-horizon tasks. Supports programmatic tool calling and multi-agent flows in the Responses API.
 
-  - &#36;4 / &#36;20 per 1M tokens (input / output; promo at least through Nov 21, 2026); cached input &#36;0.40 / 1M
+  - &#36;4 input / &#36;20 output per 1M tokens; cached input &#36;0.40; cache writes &#36;5
+  - Above 272K input: &#36;8 / &#36;30; cached input &#36;0.80; cache writes &#36;10 for the full request
+  - Promotional rates, available at least through November 21, 2026, retained because post-promotion rates are not published. Sources: [model card](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [pricing table](https://developers.openai.com/api/docs/pricing).
   - <Icon icon="window-maximize" size={14} /> 1.05M context
   - <Icon icon="right-from-bracket" size={14} /> 128K max output
   - <Icon icon="keyboard" size={14} /> Text, Image input
@@ -195,6 +213,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="brain" size={14} /> Extended thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
+  - Cached input: &#36;0.25 per 1M tokens
   </Card>
 
   <Card title="gpt-5.4-pro">
@@ -224,12 +243,15 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
+  - Cached input: &#36;0.075 per 1M tokens
   </Card>
 
   <Card title="gpt-5.4-nano">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
   `openai/gpt-5.4-nano`
+
+  Deprecated October 1, 2026; scheduled retirement April 1, 2027. Migrate before that date.
 
   The smallest, cheapest version of GPT-5.4 for tasks where speed and cost matter most. Ideal for classification, data extraction, ranking, and coding subagents.
 
@@ -238,6 +260,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="right-from-bracket" size={14} /> 128K max output
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
+  - Cached input: &#36;0.02 per 1M tokens
   </Card>
 
   <Card title="gpt-5.2">
@@ -254,6 +277,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
+  - Cached input: &#36;0.175 per 1M tokens
   </Card>
 
   <Card title="gpt-5.2-pro">
@@ -277,6 +301,8 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
 
   `openai/gpt-5.1`
 
+  Deprecated October 1, 2026; scheduled retirement April 1, 2027. Migrate before that date.
+
   Improves meaningfully on both intelligence and communication style; the first model to use adaptive reasoning to decide when to think before responding.
 
   - &#36;1.25 / &#36;10
@@ -286,22 +312,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Sep 2024
-  </Card>
-
-  <Card title="gpt-5.1-codex">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `openai/gpt-5.1-codex`
-
-  A faster, more intelligent agentic coding model designed for long-running, project-scale work with enhanced reasoning and token efficiency.
-
-  - &#36;1.25 / &#36;10
-  - <Icon icon="window-maximize" size={14} /> 400K context
-  - <Icon icon="right-from-bracket" size={14} /> 128K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Sep 2024
+  - Cached input: &#36;0.125 per 1M tokens
   </Card>
 
   <Card title="gpt-5">
@@ -318,6 +329,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Sep 2024
+  - Cached input: &#36;0.125 per 1M tokens
   </Card>
 
   <Card title="gpt-5-mini">
@@ -333,6 +345,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2024
+  - Cached input: &#36;0.025 per 1M tokens
   </Card>
 
   <Card title="gpt-5-nano">
@@ -347,6 +360,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="right-from-bracket" size={14} /> 128K max output
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2024
+  - Cached input: &#36;0.005 per 1M tokens
   </Card>
 </CardGroup>
 
@@ -368,6 +382,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - Cached input: &#36;0.5 per 1M tokens
   </Card>
 
   <Card title="gpt-4.1-mini">
@@ -383,6 +398,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - Cached input: &#36;0.1 per 1M tokens
   </Card>
 
   <Card title="gpt-4.1-nano">
@@ -398,6 +414,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - Cached input: &#36;0.025 per 1M tokens
   </Card>
 
   <Card title="gpt-4o">
@@ -412,6 +429,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="right-from-bracket" size={14} /> 16K max output
   - <Icon icon="keyboard" size={14} /> Text, Image, Audio input
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - Cached input: &#36;1.25 per 1M tokens
   </Card>
 
   <Card title="gpt-4o-mini">
@@ -426,6 +444,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="right-from-bracket" size={14} /> 16K max output
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Oct 2023
+  - Cached input: &#36;0.075 per 1M tokens
   </Card>
 </CardGroup>
 
@@ -448,22 +467,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
-  </Card>
-
-  <Card title="o4-mini-deep-research">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `openai/o4-mini-deep-research`
-
-  Deep research variant of o4-mini designed for extended multi-step research tasks with mandatory search.
-
-  - &#36;2 / &#36;8
-  - <Icon icon="window-maximize" size={14} /> 200K context
-  - <Icon icon="right-from-bracket" size={14} /> 100K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search (required)
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - Cached input: &#36;0.275 per 1M tokens
   </Card>
 
   <Card title="o3">
@@ -480,6 +484,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - Cached input: &#36;0.5 per 1M tokens
   </Card>
 
   <Card title="o3-mini">
@@ -495,6 +500,7 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="keyboard" size={14} /> Text input
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Oct 2023
+  - Cached input: &#36;0.55 per 1M tokens
   </Card>
 
   <Card title="o3-pro">
@@ -513,22 +519,6 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
   </Card>
 
-  <Card title="o3-deep-research">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
-
-  `openai/o3-deep-research`
-
-  Deep research variant of o3 for extended multi-step research tasks with mandatory search and maximum reasoning depth.
-
-  - &#36;10 / &#36;40
-  - <Icon icon="window-maximize" size={14} /> 200K context
-  - <Icon icon="right-from-bracket" size={14} /> 100K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search (required)
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
-  </Card>
-
   <Card title="o1">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
@@ -542,7 +532,14 @@ GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4 and GPT-5.4 Pro b
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Thinking
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Oct 2023
+  - Cached input: &#36;7.5 per 1M tokens
   </Card>
 </CardGroup>
 
 <Note>Reasoning tokens are billed as output tokens on all o-series models.</Note>
+
+## Retirement review — October 3, 2026
+
+The active catalog no longer includes `gpt-5.1-codex`, `o3-deep-research`, or `o4-mini-deep-research`: their aliases and snapshots shut down July 23, 2026. OpenAI recommends GPT-5.6 Sol as the replacement. GPT-4.1 Nano, o1, o3 Mini, and o4 Mini remain listed until their October 23, 2026 shutdown. GPT-5.1 and GPT-5.4 Nano remain available until April 1, 2027. A newer generation alone is not a retirement notice. See [OpenAI deprecations](https://developers.openai.com/api/docs/deprecations).
+
+Specialized audio, image, Live, and restricted-access research models need their own endpoints and billing units; they are not general `Agent` text-model additions. Availability here reflects public documentation, not an authenticated access check for your account.

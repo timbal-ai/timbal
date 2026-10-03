@@ -215,22 +215,6 @@ The catalog stores global standard input, output, cache-read, and 5m cache-write
   - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2025
   </Card>
 
-  <Card title="claude-opus-4-1">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `anthropic/claude-opus-4-1`
-
-  Earlier Opus variant with strong reasoning, higher pricing tier.
-
-  - &#36;15 / &#36;75
-  - <Icon icon="window-maximize" size={14} /> 200K context
-  - <Icon icon="right-from-bracket" size={14} /> 32K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Extended thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
-  - <Icon icon="triangle-exclamation" size={14} /> Deprecated — retires August 5, 2026
-  </Card>
-
   <Card title="claude-sonnet-4-6">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
@@ -251,7 +235,7 @@ The catalog stores global standard input, output, cache-read, and 5m cache-write
 
   `anthropic/claude-sonnet-4-5`
 
-  Previous Sonnet generation with strong all-around performance and 1M beta context support.
+  Previous Sonnet generation with strong all-around performance and 1M beta context support. Deprecated September 30, 2026; retires November 30, 2026. Migrate to `anthropic/claude-sonnet-5-5`.
 
   - &#36;3 / &#36;15
   - <Icon icon="window-maximize" size={14} /> 200K context (1M beta)
@@ -283,7 +267,7 @@ With adaptive thinking, progress text between tool calls arrives in thinking blo
 
 Automatic prompt caching is enabled by Timbal; Sonnet 5.5 requires at least 512 cacheable tokens. All prices above are USD per 1M tokens except per-call/time-based tool fees. The 50% Batch API discount and 10% US-only inference premium stack across token categories. Partner cloud pricing and negotiated discounts may differ.
 
-See the [Sonnet 5.5 specifications](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) and [migration notes](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5). Anthropic catalog token and cache prices verified September 29, 2026 against [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing).
+See the [Sonnet 5.5 specifications](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) and [migration notes](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5). Anthropic catalog token and cache prices verified October 3, 2026 against [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing).
 
 ## Using Opus 5.5
 
@@ -303,3 +287,7 @@ agent = Agent(
 Use effort to control thinking depth; omit `thinking` or use adaptive thinking. For tool use, choose `auto` with strict tools or structured output instead of forcing a tool. Progress text between tool calls now arrives in thinking blocks and is empty by default; `thinking.display="summarized"` returns text, while `"updates"` requires the `thinking-display-updates-2026-08-18` beta header. Preserve thinking blocks unchanged within the conversation. The older `computer_20251124` tool is no longer accepted on the Claude API; use `computer_toolset_20260801` if supplying native computer tools.
 
 See the [Opus 5.5 specifications](https://platform.claude.com/docs/en/models/opus-5-5/overview) and [migration guide](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide) for model-bound thinking, refusal handling, and provider-specific differences. Pricing verified September 23, 2026 against [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing).
+
+## Lifecycle audit
+
+Checked October 3, 2026 against the [model lifecycle](https://platform.claude.com/docs/en/about-claude/model-deprecations) and [model overview](https://platform.claude.com/docs/en/about-claude/models/overview). Opus 4.1 was removed from the catalog after its August 5 retirement. Sonnet 4.5 remains available until November 30. Haiku 4.5 remains active; its earliest-retirement commitment is not a shutdown announcement. Restricted Mythos models are not generally available catalog entries.

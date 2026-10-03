@@ -13,7 +13,7 @@ description: "Kimi K3 and K2.x models via Moonshot's OpenAI-compatible API"
 
   `moonshot/kimi-k3`
 
-  Moonshot's 2.8T-parameter flagship MoE with a 1M-token context window, native vision/video, and always-on reasoning for long-horizon coding and knowledge work. Pass `reasoning_effort` via `model_params` (currently `"max"` only). Do not set `temperature` — the API fixes it at `1.0`.
+  Moonshot's 2.8T-parameter flagship MoE with a 1M-token context window, native vision/video, and always-on reasoning for long-horizon coding and knowledge work. Pass `reasoning_effort` via `model_params` (`"low"`, `"high"`, or `"max"`; default `"max"`). Do not set `temperature` — the API fixes it at `1.0`.
 
   - &#36;3 / &#36;15 (cache-hit input &#36;0.30)
   - <Icon icon="window-maximize" size={14} /> 1M context
@@ -30,7 +30,7 @@ description: "Kimi K3 and K2.x models via Moonshot's OpenAI-compatible API"
 
   `moonshot/kimi-k2.7-code`
 
-  Coding-focused multimodal model with thinking mode for long-context programming agents.
+  Coding-focused multimodal model with always-on thinking for long-context programming agents. Leave sampling parameters at their fixed defaults and use `tool_choice="auto"` or `"none"`.
 
   - &#36;0.95 / &#36;4 (cache-hit input &#36;0.19)
   - <Icon icon="window-maximize" size={14} /> 256K context
@@ -84,3 +84,11 @@ agent = Agent(
 result = await agent.collect(prompt="Explain Kimi K3 in one sentence.")
 print(result.output.collect_text())
 ```
+
+## Cache billing and lifecycle
+
+K3 cache reads cost &#36;0.30 per million tokens. Cache writes cost &#36;3 for the default 5-minute TTL or &#36;6 for 1 hour. Reads, writes, and uncached input are disjoint; do not add a write charge on top of ordinary input for the same tokens. The catalog stores the 5-minute write rate. The current Chat Completions collector does not distinguish write TTLs, so 1-hour writes require separate reconciliation against provider billing. See [cache pricing and usage fields](https://platform.kimi.ai/docs/guide/context-caching).
+
+K3 requires a successful account top-up of at least &#36;1. [K3 specifications](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart) and the [model list](https://platform.kimi.ai/docs/models) were checked October 3, 2026. K2.5 and Moonshot V1 were discontinued August 31; the K2 series was discontinued May 25. These are already absent from this provider's catalog.
+
+All listed token and cache prices were verified October 3, 2026 from the [pricing page's embedded model tables](https://platform.kimi.ai/docs/pricing/chat), crosschecked against the [platform model cards](https://platform.kimi.ai/) and [cache guide](https://platform.kimi.ai/docs/guide/context-caching). HighSpeed pricing is published in the detailed table only. Prices exclude applicable taxes.

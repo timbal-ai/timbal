@@ -189,7 +189,7 @@ def _check_pricing_fields(m: dict) -> list[str]:
         if not isinstance(service_tiers, dict):
             errors.append(f"service_tiers must be a mapping on {mid}")
         else:
-            unknown_tiers = set(service_tiers) - {"fast", "flex"}
+            unknown_tiers = set(service_tiers) - {"fast", "flex", "ultrafast"}
             if unknown_tiers:
                 errors.append(f"unknown service_tiers on {mid}: {sorted(unknown_tiers)}")
             for tier, multiplier in service_tiers.items():

@@ -1,9 +1,24 @@
 ---
 title: "xAI"
-description: "Grok 4.7, Grok 4.6, Grok 4.5, and Grok 4.3 models with specs, pricing, and capabilities"
+description: "Grok Build 0.1, Grok 4.7, Grok 4.6, Grok 4.5, and Grok 4.3 models with specs, pricing, and capabilities"
 ---
 
 <Note>Source: [xAI pricing](https://docs.x.ai/developers/pricing). Web Search is &#36;5/1K calls; X Search is &#36;5/1K posts and &#36;10/1K profiles fetched. Cached input varies by model.</Note>
+
+## Grok Build 0.1
+
+<Card title="grok-build-0.1">
+  `xai/grok-build-0.1`
+
+  Coding and agent model with text/image input, reasoning, function calling, and structured outputs.
+
+  - Standard input / output / cached input: &#36;1 / &#36;2 / &#36;0.20 per 1M tokens
+  - At ≥200K prompt tokens: &#36;2 / &#36;4 / &#36;0.40, applied to the full request
+  - 256,000-token context; Batch API unsupported
+  - Canonical ID for the `grok-code-fast-1` aliases
+</Card>
+
+Verified October 3, 2026 against [model specifications](https://docs.x.ai/developers/models/grok-build-0.1) and [pricing](https://docs.x.ai/developers/pricing). Use `model="xai/grok-build-0.1"` with the existing xAI configuration.
 
 ## Grok 4.7
 
@@ -43,7 +58,7 @@ When using `TIMBAL_OPENAI_API=chat_completions`, pass `model_params={"reasoning_
 
 Prices above are for the global API. The US regional endpoint adds 10% to input, output, and cached input at both context tiers. Timbal's catalog records global rates. Both collectors count cache hits toward the 200K threshold and emit `input_text_tokens_long_context`, `input_cached_tokens_long_context`, and `output_text_tokens_long_context` at or above it.
 
-Verified September 23, 2026: [model specifications](https://docs.x.ai/developers/models/grok-4.7), [usage guide](https://docs.x.ai/developers/grok-4-7), and [pricing](https://docs.x.ai/developers/pricing).
+Verified October 3, 2026: [model specifications](https://docs.x.ai/developers/models/grok-4.7), [usage guide](https://docs.x.ai/developers/grok-4-7), and [pricing](https://docs.x.ai/developers/pricing).
 
 ---
 
@@ -104,3 +119,5 @@ Verified September 23, 2026: [model specifications](https://docs.x.ai/developers
   - <Icon icon="globe" size={14} /> Web search
   </Card>
 </CardGroup>
+
+Priority processing, when confirmed by the response as `service_tier="priority"`, doubles all token rates. Regional, priority, Batch, and storage charges are separate from the catalog’s global standard rates. Grok 4.3 has a 20% Batch discount. Reconcile those modifiers separately; the catalog does not imply they apply to ordinary requests.

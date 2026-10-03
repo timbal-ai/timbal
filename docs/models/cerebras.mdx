@@ -3,7 +3,7 @@ title: "Cerebras"
 description: "Wafer-scale inference at world-record token speeds with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [Cerebras model docs](https://inference-docs.cerebras.ai/introduction). All model IDs use the prefix `cerebras/`. Powered by Cerebras wafer-scale chips — the world's largest AI accelerator — delivering up to 3000+ tokens/second.</Note>
+<Note>Verified 2026-10-03 against [model catalog](https://inference-docs.cerebras.ai/models/overview), [pricing](https://www.cerebras.ai/pricing), and [Qwen specs](https://inference-docs.cerebras.ai/models/qwen-3.8-27b). Prices are USD per 1M tokens at standard online rates. Model IDs use the `cerebras/` prefix. Dedicated endpoints require provisioning and use deployment-specific billing.</Note>
 
 ## All Models
 
@@ -15,10 +15,30 @@ description: "Wafer-scale inference at world-record token speeds with specs, pri
 
   OpenAI's open-weight MoE model with 120B total parameters (5.1B active per token), running at up to 3000 tokens/s on Cerebras wafer-scale hardware. Near-parity with o4-mini on reasoning benchmarks. Supports extended thinking. Apache 2.0.
 
-  - &#36;0.35 / &#36;0.75
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.35 / &#36;0.75 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Paid context is 131k; free trial is 65k. Pricing: https://www.cerebras.ai/pricing</Note>
   </Card>
+</CardGroup>
+
+## Newly verified models
+
+<CardGroup cols={2}>
+  <Card title="Qwen 3.8 27B (Cerebras)">
+
+  `cerebras/qwen-3.8-27b`
+
+  Qwen 3.8 27B with image input and configurable reasoning on Cerebras.
+
+  - &#36;0.99 / &#36;1.49 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 128,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Paid context is advertised as 128k; free trial is 64k. Prices verified against https://www.cerebras.ai/pricing and https://inference-docs.cerebras.ai/models/qwen-3.8-27b on 2026-10-03.</Note>
+  </Card>
+
 </CardGroup>
