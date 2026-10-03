@@ -121,6 +121,25 @@ cd timbal
 pip install -e .
 ```
 
+### Optional dependencies
+
+Install the extras used by your application:
+
+- `timbal[server]`: HTTP server and WebSocket endpoints.
+- `timbal[voice]`: WebRTC, audio resampling, and local voice turn detection. Combine with `server` for the [voice playground](/voice/quickstart).
+- `timbal[voice-livekit]`: LiveKit media transport; combine with `server,voice` for live calls with local detection.
+- `timbal[documents]`: PDF, Word, and Excel parsing.
+- `timbal[evals]`: Rich CLI output for evaluations.
+- `timbal[codegen]`: Code generation and formatting tools.
+- `timbal[all]`: All of the above.
+
+```bash
+pip install "timbal[server,voice]"
+uv add "timbal[documents,evals]"
+```
+
+CSV and plain text do not require document parser extras. External integration examples may need their own SDKs in addition to Timbal.
+
 <Tip>
 **Next Steps:** You're ready to create your first Timbal project! Continue to the [quickstart guide](./quickstart) to build your first AI agent.
 </Tip>

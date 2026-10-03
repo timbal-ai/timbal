@@ -35,6 +35,8 @@ The sidebar follows a **basics → platform → production** path. You can jump 
 
 After **[Workflows](/workflows)**, see **[Human in the loop](/human-in-the-loop)** for approvals, `suspend()`, and durable resume (agents, workflow steps, and tools).
 
+For live spoken conversations, continue to **[Voice agents](/voice)** for speech providers, browser and phone transports, interruptions, and usage tracking.
+
 This page covers running agents, models, and I/O. The sections below are the reference for that; the linked pages go deeper on each topic.
 
 ## Model Providers
@@ -265,6 +267,7 @@ response = await agent(
 response = await agent(
     prompt=["Describe this image", File.validate("image.png")]
 ).collect()
+```
 
 ### Passing Input Parameters
 
@@ -371,11 +374,7 @@ print(result.output.collect_text())
 ```
 
 <Warning>
-**Important:** When using models with thinking enabled, the content array structure changes:
-- `content[0]` will contain the thinking/reasoning content
-- `content[1]` will contain the actual text response
-
-Directly accessing `result.output.content[0].text` may return thinking content instead of the response text. Always use `collect_text()` to reliably extract the text response, regardless of whether thinking is enabled.
+Response content can contain thinking, text, tool, and other blocks in a provider-dependent order. `content[0]` is not guaranteed to be text, and reasoning need not occupy a fixed position. Use `collect_text()` to extract the text response.
 </Warning>
 
 ## Messages

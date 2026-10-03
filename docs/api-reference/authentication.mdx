@@ -15,10 +15,10 @@ When using the Timbal framework, you can set these environment variables for aut
 
 ```bash
 export TIMBAL_API_KEY="your_api_key_here"
-export TIMBAL_API_HOST="https://api.timbal.ai"
+export TIMBAL_API_HOST="api.timbal.ai"
 ```
 
-The framework will automatically use these values, eliminating the need to pass credentials in your code.
+The framework uses these values for platform requests. `TIMBAL_API_HOST` is a hostname, without `https://` or a path; the request helper adds HTTPS. Set both values before creating the run context. Some operations also need `TIMBAL_ORG_ID`, `TIMBAL_KB_ID`, or explicit resource IDs.
 
 <Warning>
 All API requests must be made over HTTPS. Calls made over plain HTTP will fail. API requests without authentication will also fail.

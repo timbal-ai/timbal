@@ -1,0 +1,71 @@
+---
+title: "Your First Voice Agent"
+description: "Run a live voice agent locally and talk to it in the browser"
+---
+
+## Install
+
+Use Python 3.11 or newer and install the server and voice extras:
+
+```bash
+pip install "timbal[server,voice]"
+```
+
+Or add them to a uv project:
+
+```bash
+uv add "timbal[server,voice]"
+```
+
+The server extra provides HTTP and WebSocket support. The voice extra adds WebRTC and local turn detection. Local detection models are downloaded on first use; the first session can take longer while they load.
+
+## Configure credentials
+
+Create a `.env` beside `agent.py`:
+
+```bash .env
+OPENAI_API_KEY=your_openai_key
+ELEVENLABS_API_KEY=your_elevenlabs_key
+ELEVENLABS_VOICE_ID=your_accessible_voice_id
+```
+
+The example uses OpenAI for the text agent and ElevenLabs for transcription and speech. Choose a voice accessible to your ElevenLabs account. Credentials remain on the server.
+
+## Create the agent
+
+```python agent.py
+from timbal import Agent
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-4.1-mini",
+    system_prompt=(
+        "You are a helpful voice assistant. Reply in one or two short spoken "
+        "sentences. Ask one question at a time."
+    ),
+    voice_config={"language": "en"},
+)
+```
+
+`voice_config` configures the server's speech session. The defaults are ElevenLabs `scribe_v2_realtime` for transcription and `eleven_flash_v2_5` for speech. It can be a dict, a `VoiceConfig`, or a callable returning configuration. Unknown keys fail validation at server startup.
+
+## Start and speak
+
+```bash
+python -m timbal.server --import_spec agent.py::agent --host 127.0.0.1 --port 4444
+```
+
+With uv, use `uv run python -m timbal.server` with the same arguments. The server loads `.env` from the working directory. `TIMBAL_RUNNABLE=agent.py::agent` can supply the import spec instead of the flag.
+
+Open `http://127.0.0.1:4444/voice`, allow microphone access, and start a session. Say "Hello, what can you help me with?" The agent should transcribe your words and speak a short reply. Ask a follow-up question to try a conversation. A browser microphone requires localhost or HTTPS.
+
+The agent waits for you to speak first. This example has no greeting, tools, fillers, or background audio. Leave the playground's thinking sound and ambience controls off for this first conversation.
+
+The agent is also available at `POST /run` and `POST /stream`. Voice routes require an `Agent` runnable; a `Workflow` or standalone `Tool` cannot be used as the voice conversation runnable.
+
+## Next: let the agent say hello
+
+Keep this `agent.py`, its `.env`, and the same server command for the following lessons. After changing the file, restart the server and start a new browser session.
+
+Continue to [Greetings](/voice/greetings) to make the agent speak first, then [Using tools](/voice/tools) to give it a useful action. You can change speech providers later in [Providers and configuration](/voice/configuration).

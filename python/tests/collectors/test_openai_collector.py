@@ -987,7 +987,7 @@ class TestChatCompletionCollectorPricingTiers:
             f"xai/grok-4.7:output_text_tokens{suffix}": 10,
         }
 
-    @pytest.mark.parametrize("model", ["openai/gpt-6-sol", "openai/gpt-6-luna"])
+    @pytest.mark.parametrize("model", ["openai/gpt-6.1-sol", "openai/gpt-6-sol", "openai/gpt-6-luna"])
     @pytest.mark.parametrize("tokens,context_suffix", [(272_000, ""), (272_001, "_long_context")])
     @pytest.mark.parametrize(
         "tier,tier_suffix", [("default", ""), ("flex", "_flex"), ("fast", "_fast"), ("priority", "_fast")],
@@ -1647,7 +1647,7 @@ class TestResponseCollectorPricingTiers:
             f"xai/grok-4.7:output_text_tokens{suffix}": 10,
         }
 
-    @pytest.mark.parametrize("model", ["openai/gpt-6-sol", "openai/gpt-6-luna"])
+    @pytest.mark.parametrize("model", ["openai/gpt-6.1-sol", "openai/gpt-6-sol", "openai/gpt-6-luna"])
     @pytest.mark.parametrize("tokens,context_suffix", [(272_000, ""), (272_001, "_long_context")])
     @pytest.mark.parametrize(
         "tier,tier_suffix", [("default", ""), ("flex", "_flex"), ("fast", "_fast"), ("priority", "_fast")],

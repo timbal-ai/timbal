@@ -3,7 +3,7 @@ title: "TogetherAI"
 description: "Open-source models via TogetherAI inference with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [TogetherAI model docs](https://docs.together.ai/docs/chat-models). All model IDs use the prefix `togetherai/`. Models with a dedicated-only warning are not serverless — you must create and start a dedicated endpoint first.</Note>
+<Note>Verified 2026-10-03 against [serverless catalog](https://docs.together.ai/docs/serverless/models), [pricing](https://www.together.ai/pricing), and [deprecations](https://docs.together.ai/docs/deprecations). Prices are USD per 1M tokens at standard online rates. Model IDs use the `togetherai/` prefix. Dedicated endpoints require provisioning and use deployment-specific billing.</Note>
 
 ## Meta LLaMA
 
@@ -15,10 +15,9 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Multilingual instruction-tuned model with 70B parameters, delivering enhanced performance relative to Llama 3.1 70B and matching Llama 3.2 90B on text-only tasks.
 
-  - &#36;1.04 / &#36;1.04
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;1.04 / &#36;1.04 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Dec 2023
   </Card>
 </CardGroup>
 
@@ -34,13 +33,13 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Multimodal foundation model with 397B total parameters (17B active) featuring a Hybrid MoE architecture with early fusion vision-language training. State-of-the-art across chat, RAG, vision-language, and agentic workflows.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3.5-397B-A17B) before use.</Warning>
 
-  - &#36;0.30 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Hybrid thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~2025
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="Qwen3-235B-A22B-Instruct-2507-tput">
@@ -50,12 +49,12 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   MoE model with 235B total parameters (22B active) in non-thinking mode, optimized for throughput. Supports multilingual dialogue across 100+ languages.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3-235B-A22B-Instruct-2507-tput) before use.</Warning>
 
-  - &#36;0.20 / &#36;0.60
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~early 2025
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="Qwen3-Coder-480B-A35B-Instruct-FP8">
@@ -65,11 +64,12 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Qwen's most agentic code model, a 480B-parameter MoE (35B active) achieving results comparable to Claude Sonnet on agentic coding, browser-use, and repository-scale tasks.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8) before use.</Warning>
 
-  - &#36;0.22 / &#36;1
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="Qwen3-Coder-Next-FP8">
@@ -79,12 +79,13 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Next-generation coding model with hybrid thinking mode for adaptive reasoning depth.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3-Coder-Next-FP8) before use.</Warning>
 
-  - &#36;0.50 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 256K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 256,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Hybrid thinking
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="Qwen3-Next-80B-A3B-Instruct">
@@ -94,12 +95,13 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   First model in the Qwen3-Next series with 80B total parameters (3.9B active), featuring hybrid attention. Matches Qwen3-235B performance while using less than 10% training cost.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3-Next-80B-A3B-Instruct) before use.</Warning>
 
-  - &#36;0.15 / &#36;1.50
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Hybrid thinking
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="Qwen2.5-7B-Instruct-Turbo">
@@ -109,12 +111,12 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Part of the Qwen2.5 family with 7B parameters, featuring improvements in coding, mathematics, instruction following, and structured data understanding.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen2.5-7B-Instruct-Turbo) before use.</Warning>
 
-  - &#36;0.30 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 128,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~Oct 2023
+
+  <Note>Availability unresolved: marketing/pricing pages list serverless, but the current serverless catalog omits this ID. Existing dedicated-only restriction is retained pending provider confirmation; no dedicated per-token rate is assumed.</Note>
   </Card>
 </CardGroup>
 
@@ -130,13 +132,13 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Hybrid model supporting both thinking and non-thinking modes. Features significantly improved tool usage and agent task performance, with quality comparable to DeepSeek-R1-0528 in thinking mode.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/deepseek-ai/DeepSeek-V3.1) before use.</Warning>
 
-  - &#36;0.60 / &#36;1.70
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 128,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Hybrid thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~mid 2025
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="DeepSeek-V4-Pro">
@@ -144,15 +146,15 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   `togetherai/deepseek-ai/DeepSeek-V4-Pro`
 
-  DeepSeek V4 Pro on Together serverless: hybrid attention, up to 512K context, strong coding and agent benchmarks.
+  DeepSeek V4 Pro on Together dedicated endpoints: hybrid attention, up to 512K context, strong coding and agent benchmarks.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/deepseek-ai/DeepSeek-V4-Pro) before use.</Warning>
 
-  - &#36;1.74 / &#36;3.48
-  - <Icon icon="window-maximize" size={14} /> 512K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 512,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Hybrid thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~2025
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 </CardGroup>
 
@@ -166,14 +168,15 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   `togetherai/moonshotai/Kimi-K2.6`
 
-  Moonshot Kimi K2.6 on Together serverless: 1T-scale MoE with tool calling and JSON mode for agentic and multimodal workloads.
+  Moonshot Kimi K2.6 on Together dedicated endpoints: 1T-scale MoE with tool calling and JSON mode for agentic and multimodal workloads.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/moonshotai/Kimi-K2.6) before use.</Warning>
 
-  - &#36;1.20 / &#36;4.50
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~2025
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="Kimi-K2.7-Code">
@@ -183,10 +186,12 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Moonshot Kimi K2.7 Code on Together for long-context programming agents with thinking mode.
 
-  - &#36;0.95 / &#36;4.00
-  - <Icon icon="window-maximize" size={14} /> 262K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 262,144 tokens context
   - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="MiniMax-M2.7">
@@ -194,13 +199,14 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   `togetherai/MiniMaxAI/MiniMax-M2.7`
 
-  MiniMax successor MoE (~229B) with improved coding and agentic tool use, JSON mode, and prompt caching on Together serverless.
+  MiniMax successor MoE (~229B) with improved coding and agentic tool use, JSON mode, and prompt caching on Together dedicated endpoints.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/MiniMaxAI/MiniMax-M2.7) before use.</Warning>
 
-  - &#36;0.30 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 203K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 202,752 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+
+  <Note>Availability unresolved: marketing/pricing pages list serverless, but the current serverless catalog omits this ID. Existing dedicated-only restriction is retained pending provider confirmation; no dedicated per-token rate is assumed.</Note>
   </Card>
 
   <Card title="MiniMax-M3">
@@ -210,25 +216,11 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   MiniMax M3 multimodal model on Together for chat, agents, and long-context workloads.
 
-  - &#36;0.30 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 512K context
+  - &#36;0.3 / &#36;1.2 per 1M input / output tokens
+  - Cached input: &#36;0.06 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 524,288 tokens context
   - <Icon icon="keyboard" size={14} /> Text, Image input
-  </Card>
-
-  <Card title="GLM-5">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/zai-org/GLM-5`
-
-  Zhipu AI's fifth-generation model with ~745B parameters in a MoE architecture (44B active), designed for complex system engineering and long-range agent tasks. Trained entirely on Huawei Ascend chips.
-
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/zai-org/GLM-5) before use.</Warning>
-
-  - &#36;1 / &#36;3.20
-  - <Icon icon="window-maximize" size={14} /> 200K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff late 2025
+  - <Icon icon="brain" size={14} /> Reasoning
   </Card>
 
   <Card title="GLM-5.1">
@@ -238,13 +230,13 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Z.ai post-training upgrade to GLM-5: 754B MoE (40B active), 200K context, thinking mode, tool calling, and stronger coding via RL.
 
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/zai-org/GLM-5.1) before use.</Warning>
 
-  - &#36;1.40 / &#36;4.40
-  - <Icon icon="window-maximize" size={14} /> 200K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 200,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff late 2025
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
   <Card title="GLM-5.2">
@@ -254,26 +246,11 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Z.ai GLM-5.2 flagship on Together for coding, reasoning, and agentic tool use.
 
-  - &#36;1.40 / &#36;4.40
-  - <Icon icon="window-maximize" size={14} /> 200K context
+  - &#36;1.4 / &#36;4.4 per 1M input / output tokens
+  - Cached input: &#36;0.26 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,048,575 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  </Card>
-
-  <Card title="GLM-4.7">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/zai-org/GLM-4.7`
-
-  Zhipu AI's foundation model with ~400B parameters and 200K context, designed for real-world development environments with strong coding, reasoning, and agentic capabilities.
-
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/zai-org/GLM-4.7) before use.</Warning>
-
-  - &#36;0.45 / &#36;2
-  - <Icon icon="window-maximize" size={14} /> 200K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~mid 2024
+  - <Icon icon="brain" size={14} /> Reasoning
   </Card>
 
   <Card title="gpt-oss-120b">
@@ -283,11 +260,10 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   OpenAI's open-weight MoE model with 120B total parameters (5.1B active per token). Achieves near-parity with o4-mini on core reasoning benchmarks while running on a single 80GB GPU. Apache 2.0.
 
-  - &#36;0.15 / &#36;0.60
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.15 / &#36;0.6 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - <Icon icon="brain" size={14} /> Reasoning
   </Card>
 
   <Card title="gpt-oss-20b">
@@ -295,71 +271,156 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   `togetherai/openai/gpt-oss-20b`
 
-  OpenAI's compact 20B MoE delivering o3-mini-level results on Together serverless. Apache 2.0.
+  OpenAI's compact 20B MoE delivering o3-mini-level results on Together dedicated endpoints. Apache 2.0.
 
-  - &#36;0.05 / &#36;0.20
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - Dedicated deployment pricing; no fixed per-token rate
+  - <Icon icon="window-maximize" size={14} /> 128,000 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Dedicated endpoint required. Provisioning is billed by GPU time; historical serverless per-token prices do not apply. Use the deployed endpoint ID. https://docs.together.ai/docs/deprecations</Note>
   </Card>
 
-  <Card title="gemma-3n-E4B-it">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/google/gemma-3n-E4B-it`
-
-  Google's on-device multimodal model with 8B raw parameters but an effective 4B memory footprint. First sub-10B model to exceed 1300 on LMArena, running with as little as 3GB of memory.
-
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/google/gemma-3n-E4B-it) before use.</Warning>
-
-  - &#36;0.02 / &#36;0.04
-  - <Icon icon="window-maximize" size={14} /> 32K context
-  - <Icon icon="keyboard" size={14} /> Text, Image, Audio, Video input
-  </Card>
-
-  <Card title="gemma-3-27b-it">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/google/gemma-3-27b-it`
-
-  Google's multimodal open model with 27B parameters, built from the same technology as Gemini 2.0. Supports 128K context, 140+ languages, and runs on a single GPU/TPU.
-
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/google/gemma-3-27b-it) before use.</Warning>
-
-  - ~&#36;0.10 / ~&#36;0.10
-  - <Icon icon="window-maximize" size={14} /> 128K context
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2024
-  </Card>
-
-  <Card title="cogito-v2-1-671b">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/deepcogito/cogito-v2-1-671b`
-
-  DeepCogito's MoE model with 671B total parameters (37B active), trained via a novel process supervision approach that guides reasoning chains. Competitive with frontier closed models while using fewer tokens.
-
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/deepcogito/cogito-v2-1-671b) before use.</Warning>
-
-  - &#36;1.25 / &#36;1.25
-  - <Icon icon="window-maximize" size={14} /> 128K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  </Card>
-
-  <Card title="Mistral-Small-24B-Instruct-2501">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/mistralai/Mistral-Small-24B-Instruct-2501`
-
-  A 24B-parameter dense model setting new benchmarks in the sub-70B category, with native function calling, JSON output, and support for dozens of languages. Fits on a single RTX 4090.
-
-  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/mistralai/Mistral-Small-24B-Instruct-2501) before use.</Warning>
-
-  - &#36;0.10 / &#36;0.30
-  - <Icon icon="window-maximize" size={14} /> 32K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Oct 2023
-  </Card>
 </CardGroup>
+
+## Newly verified models
+
+<CardGroup cols={2}>
+  <Card title="Kimi K3 (Together)">
+
+  `togetherai/moonshotai/Kimi-K3`
+
+  Kimi K3 on Together serverless.
+
+  - &#36;3 / &#36;15 per 1M input / output tokens
+  - Cached input: &#36;0.3 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,048,576 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+  </Card>
+
+  <Card title="DeepSeek V4 Pro 0813 (Together)">
+
+  `togetherai/deepseek-ai/DeepSeek-V4-Pro-0813`
+
+  DeepSeek V4 Pro 0813 on Together serverless.
+
+  - &#36;1.32 / &#36;3.96 per 1M input / output tokens
+  - Cached input: &#36;0.13 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,048,576 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+  </Card>
+
+  <Card title="DeepSeek V4 Flash 0731 (Together)">
+
+  `togetherai/deepseek-ai/DeepSeek-V4-Flash-0731`
+
+  DeepSeek V4 Flash 0731 on Together serverless.
+
+  - &#36;0.14 / &#36;0.28 per 1M input / output tokens
+  - Cached input: &#36;0.03 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,048,576 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+  </Card>
+
+  <Card title="DeepSeek V4.1 Flash (Together)">
+
+  `togetherai/deepseek-ai/DeepSeek-V4.1-Flash`
+
+  DeepSeek V4.1 Flash on Together serverless.
+
+  - &#36;0.3 / &#36;1.2 per 1M input / output tokens
+  - Cached input: &#36;0.006 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+  </Card>
+
+  <Card title="GLM-5.3 (Together)">
+
+  `togetherai/zai-org/GLM-5.3`
+
+  GLM-5.3 on Together serverless.
+
+  - &#36;1.4 / &#36;4.4 per 1M input / output tokens
+  - Cached input: &#36;0.26 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,048,575 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+  </Card>
+
+  <Card title="GLM-5.3 Flash (Together)">
+
+  `togetherai/zai-org/GLM-5.3-Flash`
+
+  GLM-5.3 Flash on Together serverless.
+
+  - &#36;0.15 / &#36;0.5 per 1M input / output tokens
+  - Cached input: &#36;0.03 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,048,575 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+  </Card>
+
+  <Card title="Inkling (Together)">
+
+  `togetherai/thinkingmachines/Inkling`
+
+  Inkling on Together serverless.
+
+  - &#36;1 / &#36;4.05 per 1M input / output tokens
+  - Cached input: &#36;0.17 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 524,288 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Listed token rates cover text. Together also advertises native audio, but audio-specific billing and transport are not represented here.</Note>
+  </Card>
+
+  <Card title="Muse Glimmer 30B (Together)">
+
+  `togetherai/meta-models/Muse-Glimmer-30B`
+
+  Muse Glimmer 30B on Together serverless.
+
+  - &#36;0.35 / &#36;1.5 per 1M input / output tokens
+  - Cached input: &#36;0.04 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  </Card>
+
+  <Card title="Qwen 3.5 9B (Together)">
+
+  `togetherai/Qwen/Qwen3.5-9B`
+
+  Qwen 3.5 9B on Together serverless.
+
+  - &#36;0.17 / &#36;0.25 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 262,144 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+  </Card>
+
+  <Card title="Qwen 3.8 2.4T A95B (Together)">
+
+  `togetherai/Qwen/Qwen3.8-2.4T-A95B`
+
+  Qwen 3.8 2.4T A95B on Together serverless.
+
+  - &#36;2 / &#36;6 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Cached-input pricing unresolved: serverless docs quote &#36;0.50/1M, while pricing and model pages quote &#36;0.25/1M. No cached rate is assigned until confirmed. https://docs.together.ai/docs/serverless/models and https://www.together.ai/models/qwen3-8-max</Note>
+  </Card>
+
+</CardGroup>
+
+## Retirement and pricing notes
+
+The deprecation ledger removes GLM-5, GLM-4.7, Gemma 3n E4B, Cogito v2.1, and Mistral Small 24B from serverless with no on-demand endpoint support. Gemma 3 27B was also retired from dedicated inference. These IDs are no longer in this catalog. Monthly reserved arrangements, where offered, require a separate agreement. GPT-OSS 20B and Kimi K2.7 Code remain listed above for dedicated deployments only.
+
+Qwen 3.8 cached input has conflicting official rates: &#36;0.50 in the serverless catalog versus &#36;0.25 on pricing and model pages. Its cached price is deliberately unassigned. MiniMax M2.7 and Qwen2.5 7B have conflicting availability listings; their existing dedicated restriction is retained pending confirmation.

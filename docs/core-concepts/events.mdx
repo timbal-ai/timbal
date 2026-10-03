@@ -232,6 +232,9 @@ output_event = OutputEvent(
     path="agent.llm",
     call_id="068c4458383678be800031537a8df42e",
     parent_call_id="068c4458382e708f8000cc0f9b19d970",
+    status={"code": "success"},
+    t0=1640995200000,
+    t1=1640995201000,
     output={
         "role": "assistant",
         "content": [{"type": "text", "text": "Hello! How can I assist you today?"}]
@@ -242,21 +245,17 @@ output_event = OutputEvent(
 
 ## Handling Errors
 
-When a Runnable encounters an error during execution, it **won't raise an exception**. Instead, it will always return an `OutputEvent` with error information. This ensures the event stream continues and you can handle errors gracefully:
+Handler errors are recorded in the runnable's final `OutputEvent`. Check the root result's `status` and `error`; a nested tool can fail while its agent recovers successfully. Construction errors, errors in your own event consumer, and task cancellation can still propagate outside this result contract.
 
 ```python
-try:
-    result = await runnable(**kwargs).collect()
-except Exception as e:
-    # This won't happen - errors are in the OutputEvent
-    pass
-
-# Result will always be an instance of OutputEvent
+result = await runnable(**kwargs).collect()
 if result.error:
     print(f"Error: {result.error['message']}")
+elif result.status.code == "cancelled":
+    print(f"Run paused or cancelled: {result.status.reason}")
 ```
 
-Errors will always have this structure:
+Execution errors use this structure:
 
 ```python
 error = {

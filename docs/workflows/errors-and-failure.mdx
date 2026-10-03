@@ -71,7 +71,13 @@ If validation fails, both `process` and `save_results` are skipped.
 Steps that only need ordering (not data) can use `depends_on` to run after a branch resolves:
 
 ```python
-.step(finalize, depends_on=["handle_new", "handle_existing"])
+workflow = (
+    Workflow(name="pipeline")
+    .step(route)
+    .step(handle_new, when=lambda: get_run_context().step_span("route").output == "new")
+    .step(handle_existing, when=lambda: get_run_context().step_span("route").output == "existing")
+    .step(finalize, depends_on=["handle_new", "handle_existing"])
+)
 ```
 
 See [Branching](/workflows/branching#skipped-steps) for the full pattern.

@@ -9,7 +9,7 @@ from ._creds import resolve_api_key
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # Image generation/editing: stable GA model (listed as "Nano Banana 2" in the Gemini API).
-# Preview sibling gemini-3.1-flash-image-preview still works but is not the stable default.
+# Preview sibling gemini-3.1-flash-image-preview shut down on June 25, 2026.
 _DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image"
 # Vision analysis: general multimodal flash — no image output modality needed.
 _DEFAULT_ANALYZE_MODEL = "gemini-3.5-flash"

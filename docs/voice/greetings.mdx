@@ -1,0 +1,73 @@
+---
+title: "Greetings"
+description: "Start with a fixed hello, then control when the opener plays and how it is generated"
+---
+
+First complete [Your first voice agent](/voice/quickstart). Keep the same credentials and server command. The basic agent waits for the caller; add a greeting to make it speak when a session starts.
+
+## A fixed hello
+
+Keep the quickstart's dict-based config and add this line after the `Agent(...)` definition:
+
+```python
+agent.voice_config["greeting"] = "Hi, I'm your assistant. How can I help?"
+```
+
+Restart the server and start a new session. You should hear the opener before saying anything. A fixed greeting goes straight to speech synthesis and needs no LLM generation.
+
+## Let the caller interrupt
+
+Greetings are non-interruptible by default. To let the caller cut the opener short, expand the string into a block:
+
+```python
+agent.voice_config["greeting"] = {
+    "text": "Hi, I'm your assistant. How can I help?",
+    "interruptible": True,
+}
+```
+
+Start a new session and speak over the greeting. With interruption enabled, the opener can stop. With it disabled, the caller's committed words can still open a turn, but the reply waits behind the greeting.
+
+## Choose when to speak
+
+`delay_ms` adds a pause before the opener. `after_user_silence_secs` gives the caller a chance to speak first; if they speak within that window, their words start the conversation instead of the greeting.
+
+```python
+agent.voice_config["greeting"] = {
+    "text": "Hello, how can I help?",
+    "delay_ms": 300,
+    "after_user_silence_secs": 2.0,
+}
+```
+
+The silence window starts after the initial delay. Try one session where you stay quiet and another where you immediately say hello.
+
+## Generate the wording
+
+Use `instructions` when the opener needs generated wording:
+
+```python
+agent.voice_config["greeting"] = {
+    "instructions": "Introduce yourself as the support assistant and ask how you can help.",
+}
+```
+
+This adds an LLM call and its latency and usage. `text` wins if both fields are supplied. A fixed opener is a useful starting point before adding generation.
+
+## Outbound calls
+
+An outbound host can select a separate opener with `outbound_greeting`:
+
+```python
+agent.voice_config = {
+    "greeting": "Hi, thanks for calling support.",
+    "outbound_greeting": {
+        "text": "Hi, this is support calling you back.",
+        "after_user_silence_secs": 2.0,
+    },
+}
+```
+
+The host must identify the call as outbound. The config does not place a phone call; see [Transports and phone calls](/voice/transports). Omitting `outbound_greeting` inherits `greeting`; an empty string disables the outbound opener. Set `agent.voice_config["greeting"] = ""` to disable an inherited greeting. Empty optional objects mean unset.
+
+Continue to [Using tools](/voice/tools).

@@ -1,0 +1,48 @@
+---
+title: "Silence and Timeouts"
+description: "Add an idle check-in, then bound quiet calls and slow turns"
+---
+
+After a reply, the basic voice agent waits for the caller indefinitely. Add an idle policy when you want it to check whether the caller still needs help.
+
+## Ask whether the caller is still there
+
+Keep the dict-based configuration from the earlier lessons and add:
+
+```python
+agent.voice_config["user_idle"] = {
+    "timeout_secs": 8.0,
+    "text": "Are you still there?",
+    "max_count": 1,
+}
+```
+
+Restart the server, have one exchange, then stay quiet after the assistant finishes. The prompt should play after the idle interval. The timer starts after playback drains and the turn finishes; it does not run while a tool is still working.
+
+## Bound a quiet call
+
+Expand the policy to use two prompts and an eventual hangup:
+
+```python
+agent.voice_config["user_idle"] = {
+    "timeout_secs": 8.0,
+    "text": ["Are you still there?", "Would you like any more help?"],
+    "max_count": 2,
+    "hangup_after_secs": 30.0,
+}
+```
+
+The assistant's own prompts do not reset the user-silence hangup clock. Omit `hangup_after_secs` to keep waiting after the prompts. `instructions` can generate a check-in instead of using fixed text; this adds model generation and speech usage. Empty optional blocks mean unset and preserve server inheritance.
+
+## A slow agent turn
+
+The voice turn timeout defaults to 60 seconds. To change it and its spoken fallback:
+
+```python
+agent.voice_config["turn_timeout_secs"] = 45.0
+agent.voice_config["turn_timeout_fallback"] = "Sorry, that took too long. Could you try again?"
+```
+
+On expiry the session emits an error and stays open for the next turn. The fallback is spoken only if no audio was produced. An empty string disables the fallback. This bounds the voice turn; `Agent.timeout` separately bounds the runnable's execution. Neither a timeout nor hangup rolls back completed side effects.
+
+Once the conversation behaves as intended, continue to [Recording calls](/voice/recording), [Transports and phone calls](/voice/transports), and [Events and usage](/voice/observability).

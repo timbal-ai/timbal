@@ -64,14 +64,14 @@ workflow = (
 After the workflow runs, each step has the following variables in their context:
 
 **`process_user`:**
-```python
+```text
 .input["user_id"]  = "user_123"
 .output             = "Processed user: user_123"
 .user_status        = "active"
 ```
 
 **`check_status`:**
-```python
+```text
 .input   = {}
 .output  = "User status: active"
 ```

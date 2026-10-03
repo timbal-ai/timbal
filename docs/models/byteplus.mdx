@@ -1,9 +1,88 @@
 ---
 title: "BytePlus"
-description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities"
+description: "Current Seed, DeepSeek, and GLM models, verified pricing, and retirement dates"
 ---
 
-<Note>Source: [BytePlus ModelArk docs](https://docs.byteplus.com/en/docs/ModelArk). All models support tool/function calling. Models with an activation warning must be enabled in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before use.</Note>
+<Note>All token prices are USD per 1M tokens (input / output). Source: [BytePlus ModelArk docs](https://docs.byteplus.com/en/docs/ModelArk). All models support tool/function calling. Models with an activation warning must be enabled in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before use.</Note>
+
+## Current additions
+
+These model services require activation in the Ark Console. Rates below are standard online inference, with cached input shown separately.
+
+<CardGroup cols={2}>
+  <Card title="dola-seed-2-1-turbo-260628">
+  `byteplus/dola-seed-2-1-turbo-260628`
+
+  Dola Seed 2.1 Turbo: multimodal reasoning and tools.
+
+  - &#36;0.50 / &#36;2.50; cache &#36;0.10
+  - 256K context
+  </Card>
+
+  <Card title="seed-2-0-lite-260428">
+  `byteplus/seed-2-0-lite-260428`
+
+  April Seed 2.0 Lite with image, video, and audio input.
+
+  - &#36;0.25 / &#36;2; cache &#36;0.05. Above 128K: &#36;0.50 / &#36;4; cache &#36;0.10
+  - 256K context
+  </Card>
+
+  <Card title="seed-2-0-mini-260428">
+  `byteplus/seed-2-0-mini-260428`
+
+  April Seed 2.0 Mini with image, video, and audio input.
+
+  - &#36;0.10 / &#36;0.40; cache &#36;0.02. Above 128K: &#36;0.20 / &#36;0.80; cache &#36;0.04
+  - 256K context
+  </Card>
+
+  <Card title="deepseek-v4-pro-ga-260813">
+  `byteplus/deepseek-v4-pro-ga-260813`
+
+  DeepSeek V4 Pro GA for reasoning and tools.
+
+  - &#36;1.32 / &#36;3.96; cache &#36;0.044
+  - 1024K context
+  </Card>
+
+  <Card title="deepseek-v4-flash-ga-260731">
+  `byteplus/deepseek-v4-flash-ga-260731`
+
+  DeepSeek V4 Flash GA for reasoning and tools.
+
+  - &#36;0.44 / &#36;1.32; cache &#36;0.014
+  - 1024K context
+  </Card>
+
+  <Card title="glm-5-2-260617">
+  `byteplus/glm-5-2-260617`
+
+  GLM 5.2 for reasoning and tools.
+
+  - &#36;1.40 / &#36;4.40; cache &#36;0.26
+  - 1024K context
+  </Card>
+
+  <Card title="glm-5-3-flash-260828">
+  `byteplus/glm-5-3-flash-260828`
+
+  GLM 5.3 Flash with multimodal input and tools.
+
+  - &#36;0.15 / &#36;0.50; cache &#36;0.03
+  - 1024K context
+  </Card>
+
+  <Card title="deepseek-v4-1-flash-260910">
+  `byteplus/deepseek-v4-1-flash-260910`
+
+  DeepSeek V4.1 Flash with vision, video, reasoning, and tools. Supports JSON object output, but not strict JSON schema.
+
+  - Off-peak &#36;0.15 / &#36;0.60; cache &#36;0.003. Peak &#36;0.30 / &#36;1.20; cache &#36;0.006
+  - 1024K context
+  </Card>
+
+</CardGroup>
 
 ## Seed 2.0
 
@@ -42,9 +121,9 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   Lightweight Seed 2.0 model designed for edge deployments and cost-sensitive scenarios requiring fast responses with minimal resource usage.
 
-  - ~&#36;0.10 / ~&#36;0.40
+  - &#36;0.10 / &#36;0.40 (&#36;0.20 / &#36;0.80 above 128K)
   - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
   </Card>
 </CardGroup>
 
@@ -60,7 +139,7 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   Advanced multimodal model with deep thinking and strong agent capabilities. Supports text, image, video, and document understanding with structured output (beta) and context caching.
 
-  - &#36;0.25 / &#36;2
+  - &#36;0.25 / &#36;2 (&#36;0.50 / &#36;4 above 128K); cached input &#36;0.05 at both tiers
   - <Icon icon="window-maximize" size={14} /> 256K context
   - <Icon icon="right-from-bracket" size={14} /> 64K max output
   - <Icon icon="keyboard" size={14} /> Text, Image, Video input
@@ -74,9 +153,9 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   Stable text generation model from the Seed 1.x series, suited for general-purpose NLP tasks, summarisation, and instruction following.
 
-  - ~&#36;0.25 / ~&#36;2
-  - <Icon icon="window-maximize" size={14} /> 262K context
-  - <Icon icon="keyboard" size={14} /> Text input
+  - &#36;0.25 / &#36;2 (&#36;0.50 / &#36;4 above 128K); cached input &#36;0.05 at both tiers
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
   </Card>
 </CardGroup>
 
@@ -85,35 +164,6 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 ## Third-party (Ark)
 
 <CardGroup cols={2}>
-  <Card title="kimi-k2-250905">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `byteplus/kimi-k2-250905`
-
-  Moonshot Kimi K2 agentic model on BytePlus ModelArk for tool calling and autonomous tasks.
-
-  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
-
-  - ~&#36;0.60 / ~&#36;2.50
-  - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  </Card>
-
-  <Card title="kimi-k2-thinking-251104">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `byteplus/kimi-k2-thinking-251104`
-
-  Moonshot Kimi K2 thinking variant on BytePlus ModelArk with chain-of-thought reasoning and tool use.
-
-  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
-
-  - ~&#36;0.60 / ~&#36;2.50
-  - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
-  </Card>
-
   <Card title="deepseek-v4-pro-260425">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
@@ -123,8 +173,8 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
 
-  - ~&#36;0.47 / ~&#36;2.37
-  - <Icon icon="window-maximize" size={14} /> 256K context
+  - &#36;1.32 / &#36;3.96; cached input &#36;0.044
+  - <Icon icon="window-maximize" size={14} /> 1024K context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
 
@@ -137,8 +187,8 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
 
-  - ~&#36;0.25 / ~&#36;1
-  - <Icon icon="window-maximize" size={14} /> 256K context
+  - &#36;0.44 / &#36;1.32; cached input &#36;0.014
+  - <Icon icon="window-maximize" size={14} /> 1024K context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
 
@@ -149,24 +199,9 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   DeepSeek V3.2 on BytePlus ModelArk with improved reasoning and tool use over V3.1.
 
-  - ~&#36;0.25 / ~&#36;1
-  - <Icon icon="window-maximize" size={14} /> 256K context
+  - &#36;0.28 / &#36;0.42 (&#36;0.56 / &#36;0.84 above 32K); cached input &#36;0.056 at both tiers
+  - <Icon icon="window-maximize" size={14} /> 128K context
   - <Icon icon="keyboard" size={14} /> Text input
-  </Card>
-
-  <Card title="deepseek-r1-250528">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `byteplus/deepseek-r1-250528`
-
-  DeepSeek R1 reasoning model on BytePlus ModelArk (May 2025 checkpoint).
-
-  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
-
-  - ~&#36;0.50 / ~&#36;2
-  - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
   </Card>
 
   <Card title="gpt-oss-120b-250805">
@@ -176,7 +211,7 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   OpenAI GPT OSS 120B on BytePlus ModelArk. Apache 2.0.
 
-  - ~&#36;0.15 / ~&#36;0.60
+  - &#36;0.10 / &#36;0.50
   - <Icon icon="window-maximize" size={14} /> 128K context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
@@ -188,8 +223,8 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   Zhipu GLM-4.7 on BytePlus ModelArk for coding, reasoning, and agentic tasks.
 
-  - ~&#36;0.25 / ~&#36;1
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.60 / &#36;2.20; cached input &#36;0.11
+  - <Icon icon="window-maximize" size={14} /> 256K context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
 
@@ -202,8 +237,22 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
 
-  - ~&#36;0.25 / ~&#36;1
+  - &#36;0.50 / &#36;3 (&#36;1 / &#36;6 above 128K); cached input &#36;0.10 / &#36;0.20
   - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
   </Card>
 </CardGroup>
+
+## Pricing verification and limits
+
+Audited October 3, 2026 using the September 28 [pricing table](https://docs.byteplus.com/en/docs/modelark/model-pricing), [model list](https://docs.byteplus.com/en/docs/modelark/model-list), and [release announcements](https://docs.byteplus.com/en/docs/modelark/model-release-announcement). Old indexed July pricing for DeepSeek V4 differs; the catalog uses the newer table. Limits are recorded using the catalog's existing decimal K convention.
+
+DeepSeek V4.1 Flash peak periods are Monday–Friday, 09:00–12:00 and 14:00–18:00 UTC+8; all other periods are off-peak. Its catalog prices are `null` because the current schema cannot represent a time-based rate. This means unknown to the cost calculator, not free.
+
+April Seed Lite audio input / cached audio is &#36;3.75 / &#36;0.75, and April Seed Mini is &#36;1.50 / &#36;0.30; both double above 128K. These differ from the catalog's non-audio rates. Explicit cache storage is an additional &#36;0.0083 per million tokens per hour; implicit caching has no storage fee. Storage and audio charges require separate reconciliation.
+
+[Flex](https://docs.byteplus.com/en/docs/ModelArk/online-inference-flex) halves input/output prices on Seed 2.1 Turbo and DeepSeek V4 GA while leaving cache prices unchanged. It cannot be encoded as a uniform multiplier across all token types. The catalog records standard rates. Batch discounts also leave cached input unchanged; do not halve the whole bill. GPT OSS's model page lists a cache rate while the current aggregate price table shows no cache rate; no cache discount is assumed in the catalog.
+
+## Retirements
+
+The [deprecation notice](https://docs.byteplus.com/en/docs/modelark/model-deprecation-notice) confirms Kimi K2, Kimi K2 Thinking, and DeepSeek R1 snapshots ceased service May 13, 2026; they have been removed. Seed 1.6, Seed 1.8, February Seed Lite/Mini, DeepSeek V3.2, GLM 4.7, and GPT OSS retire November 11, 2026 and remain listed for migration. The model-list page already labels some of them “Retired”; the dated deactivation notice governs the catalog. Seed Mini's February snapshot is already unavailable in eu-west-1, but remains available on the configured ap-southeast-1 endpoint until its scheduled shutdown.

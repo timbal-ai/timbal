@@ -60,5 +60,3 @@ planning/
 
 .claude/
 .cursor/
-
-scripts/generate_costs_sql.py

@@ -1,0 +1,58 @@
+---
+title: "Using Tools"
+description: "Give a spoken assistant a function and hear it answer from the result"
+---
+
+A voice agent uses regular Timbal tools. The caller asks a question, the text agent decides to call a function, and its answer is spoken back. Speech adapters do not execute the tool themselves.
+
+## Add one lookup
+
+After the [quickstart](/voice/quickstart) and [greetings](/voice/greetings), replace `agent.py` with this complete example. Keep the same `.env` and server command:
+
+```python agent.py
+import asyncio
+
+from timbal import Agent
+
+
+async def get_delivery_status(order_id: str) -> dict:
+    """Look up the delivery status of an order by its ID."""
+    # Demo delay so you can hear what waiting for a tool feels like.
+    # Remove it when replacing this mock with your real service.
+    await asyncio.sleep(4)
+    orders = {
+        "101": {"status": "shipped", "expected_delivery": "tomorrow"},
+        "102": {"status": "processing", "expected_delivery": "not yet scheduled"},
+    }
+    return orders.get(order_id, {"status": "not found"})
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-4.1-mini",
+    system_prompt=(
+        "You help callers check deliveries. Ask for the order ID if it is missing. "
+        "Use get_delivery_status before giving a delivery status; never invent it. "
+        "Reply in one or two short spoken sentences."
+    ),
+    tools=[get_delivery_status],
+    voice_config={
+        "language": "en",
+        "greeting": "Hi, I can help check your delivery. What's your order ID?",
+    },
+)
+```
+
+Restart the server and start a new session. Say "Check order 101." You should see `Calling get_delivery_status…`, wait through the demo lookup, then hear that the order is shipped and expected tomorrow. An unknown ID should produce a not-found answer. These are mock records, not a live delivery integration.
+
+## What the caller hears while waiting
+
+With the thinking sound off and no filler configured, a tool call can leave a quiet gap. This is a good baseline: first verify that the tool is called and its result is used. The next lessons add a [thinking sound](/voice/thinking-sounds) or a [spoken filler](/voice/fillers) to that gap.
+
+## Add real actions carefully
+
+Replace the mock with an async service call when the basic flow works. For actions requiring approval, wrap the function in `Tool(handler=..., requires_approval=True)` and implement the approval UI and HTTP resume flow. The playground displays a pending request; it does not resolve approval from spoken words. See [Approval gates](/human-in-the-loop/approval-gates) and [Voice approval events](/voice/transports#approval-and-input-requests).
+
+A filler is an acknowledgement of waiting, not confirmation that an action succeeded. Give the final spoken confirmation only after the tool result supports it.
+
+Continue to [Thinking sounds](/voice/thinking-sounds).

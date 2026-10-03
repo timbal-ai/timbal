@@ -14,7 +14,7 @@ This guide shows how to create a Slack bot using Timbal that can:
   <Accordion title="Installing Packages">
     Install the Slack SDK:
     ```bash
-    pip install slack-sdk
+    pip install "timbal[server]" slack-sdk
     ```
     <Note>
       For all available Slack API methods and capabilities, see the [Slack API Methods Reference](https://docs.slack.dev/reference/methods).
@@ -157,16 +157,18 @@ async def pre_hook():
     if "_webhook" not in span.input:
         return  # Not triggered by Slack
 
-    slack_event = span.input["_webhook"]["event"]
+    slack_event = span.input["_webhook"].get("event") or {}
 
     # Ignore bot's own messages to prevent infinite loops
-    if slack_event.get("user") == SLACK_BOT_USER_ID:
-        raise bail()
+    if slack_event.get("bot_id") or slack_event.get("user") == SLACK_BOT_USER_ID:
+        bail()
 
     # Extract and validate message text
+    if slack_event.get("type") not in ("message", "app_mention"):
+        bail()
     text = slack_event.get("text", "")
     if not text:
-        raise bail()
+        bail()
 
     # Store Slack context for response
     span.slack_channel = slack_event["channel"]
@@ -205,7 +207,7 @@ def post_hook():
 
 ### Complete Example
 
-Here's the full implementation ready to use:
+Combine the snippets into these files for local development. Thread timestamps control where replies appear; maintaining history per thread additionally requires storing each thread's latest run ID and passing it as `parent_id` with a suitable tracing provider. See [Memory](/agents/memory).
 
 ```python agent.py
 import os
@@ -232,16 +234,18 @@ async def pre_hook():
     if "_webhook" not in span.input:
         return
 
-    slack_event = span.input["_webhook"]["event"]
+    slack_event = span.input["_webhook"].get("event") or {}
 
     # Prevent infinite loops by ignoring bot's own messages
-    if slack_event.get("user") == SLACK_BOT_USER_ID:
-        raise bail()
+    if slack_event.get("bot_id") or slack_event.get("user") == SLACK_BOT_USER_ID:
+        bail()
 
     # Extract message text
+    if slack_event.get("type") not in ("message", "app_mention"):
+        bail()
     text = slack_event.get("text", "")
     if not text:
-        raise bail()
+        bail()
 
     # Store context for response
     span.slack_channel = slack_event["channel"]
@@ -279,7 +283,7 @@ agent = Agent(
 
 ## Running the Agent
 
-Timbal provides built-in ngrok integration for easy local development. To use this feature:
+This example uses `pyngrok` to expose the FastAPI app during local development. For production, verify Slack request signatures, deduplicate event IDs, acknowledge before Slack's request deadline, and process events in a durable worker.
 
 <Steps>
   <Step title="Set up ngrok account and authtoken">
@@ -355,7 +359,6 @@ Timbal provides built-in ngrok integration for easy local development. To use th
         message.groups    # Bot receives messages in private channels it's added to
         message.im        # Bot receives direct messages sent to it
         app_mention       # Bot receives messages that mention it (@botname)
-        reaction_added    # Bot receives events when reactions are added to messages
         ```
       </Step>
 </Steps>
@@ -365,7 +368,7 @@ Your Slack bot is now ready! 🚀 Start a direct message with your bot or mentio
 ## Key Features
 
 - **Real-time Responses**: Instantly processes Slack messages via webhooks
-- **Thread Support**: Maintains conversation context in Slack threads  
+- **Thread Replies**: Sends replies to the incoming message's thread; history requires explicit run chaining
 - **Loop Prevention**: Automatically ignores bot's own messages
 - **Flexible AI**: Uses any LLM model supported by Timbal
 - **Easy Integration**: Minimal setup with existing Slack handlers

@@ -16,7 +16,8 @@ import yaml
 LONG_CONTEXT_USAGE_SUFFIX = "_long_context"
 FAST_USAGE_SUFFIX = "_fast"
 FLEX_USAGE_SUFFIX = "_flex"
-_PRICING_USAGE_SUFFIXES = (FAST_USAGE_SUFFIX, FLEX_USAGE_SUFFIX, LONG_CONTEXT_USAGE_SUFFIX)
+ULTRAFAST_USAGE_SUFFIX = "_ultrafast"
+_PRICING_USAGE_SUFFIXES = (ULTRAFAST_USAGE_SUFFIX, FAST_USAGE_SUFFIX, FLEX_USAGE_SUFFIX, LONG_CONTEXT_USAGE_SUFFIX)
 
 
 def base_usage_metric(metric: str) -> str:
@@ -42,7 +43,7 @@ def _load_models() -> dict[str, dict[str, Any]]:
     models_path = Path(__file__).parent.parent / "models.yaml"
     if not models_path.exists():
         return {}
-    with open(models_path) as f:
+    with open(models_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return {m["id"]: m for m in data.get("models", [])}
 
@@ -115,6 +116,8 @@ def service_tier_usage_suffix(model_id: str, service_tier: str | None) -> str:
         return FAST_USAGE_SUFFIX
     if tier == "flex":
         return FLEX_USAGE_SUFFIX
+    if tier == "ultrafast":
+        return ULTRAFAST_USAGE_SUFFIX
     return ""
 
 
@@ -145,11 +148,11 @@ Model = Literal[
     "anthropic/claude-opus-4-7",
     "anthropic/claude-opus-4-6",
     "anthropic/claude-opus-4-5",
-    "anthropic/claude-opus-4-1",
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-sonnet-4-5",
     "anthropic/claude-haiku-4-5",
     "openai/gpt-6-astra",
+    "openai/gpt-6.1-sol",
     "openai/gpt-6-sol",
     "openai/gpt-6-luna",
     "openai/gpt-5.5",
@@ -164,7 +167,6 @@ Model = Literal[
     "openai/gpt-5.2",
     "openai/gpt-5.2-pro",
     "openai/gpt-5.1",
-    "openai/gpt-5.1-codex",
     "openai/gpt-5",
     "openai/gpt-5-mini",
     "openai/gpt-5-nano",
@@ -174,11 +176,9 @@ Model = Literal[
     "openai/gpt-4o",
     "openai/gpt-4o-mini",
     "openai/o4-mini",
-    "openai/o4-mini-deep-research",
     "openai/o3",
     "openai/o3-mini",
     "openai/o3-pro",
-    "openai/o3-deep-research",
     "openai/o1",
     "openai/gpt-5.5-2026-04-23",
     "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -194,20 +194,27 @@ Model = Literal[
     "togetherai/moonshotai/Kimi-K2.7-Code",
     "togetherai/MiniMaxAI/MiniMax-M2.7",
     "togetherai/MiniMaxAI/MiniMax-M3",
-    "togetherai/zai-org/GLM-5",
     "togetherai/zai-org/GLM-5.1",
     "togetherai/zai-org/GLM-5.2",
-    "togetherai/zai-org/GLM-4.7",
     "togetherai/openai/gpt-oss-120b",
     "togetherai/openai/gpt-oss-20b",
-    "togetherai/google/gemma-3n-E4B-it",
-    "togetherai/google/gemma-3-27b-it",
-    "togetherai/deepcogito/cogito-v2-1-671b",
-    "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
+    "togetherai/moonshotai/Kimi-K3",
+    "togetherai/deepseek-ai/DeepSeek-V4-Pro-0813",
+    "togetherai/deepseek-ai/DeepSeek-V4-Flash-0731",
+    "togetherai/deepseek-ai/DeepSeek-V4.1-Flash",
+    "togetherai/zai-org/GLM-5.3",
+    "togetherai/zai-org/GLM-5.3-Flash",
+    "togetherai/thinkingmachines/Inkling",
+    "togetherai/meta-models/Muse-Glimmer-30B",
+    "togetherai/Qwen/Qwen3.5-9B",
+    "togetherai/Qwen/Qwen3.8-2.4T-A95B",
+    "google/gemini-3.8-flash",
+    "google/gemini-3.7-flash",
     "google/gemini-3.6-flash",
     "google/gemini-3.5-flash",
     "google/gemini-3.5-flash-lite",
     "google/gemini-3.1-pro-preview",
+    "google/gemini-3.1-pro-preview-customtools",
     "google/gemini-3.1-flash-lite",
     "google/gemini-3-flash-preview",
     "google/gemini-2.5-pro",
@@ -216,6 +223,7 @@ Model = Literal[
     "google/gemini-2.5-flash-lite",
     "google/gemini-2.5-flash-image",
     "google/gemini-2.5-flash-preview-tts",
+    "xai/grok-build-0.1",
     "xai/grok-4.7",
     "xai/grok-4.6",
     "xai/grok-4.5",
@@ -230,29 +238,43 @@ Model = Literal[
     "fireworks/accounts/fireworks/models/minimax-m3",
     "fireworks/accounts/fireworks/models/gpt-oss-120b",
     "fireworks/accounts/fireworks/models/glm-5p2",
+    "fireworks/accounts/fireworks/models/deepseek-v4p1-flash",
+    "fireworks/accounts/fireworks/models/kimi-k3",
+    "fireworks/accounts/fireworks/models/glm-5p3",
+    "fireworks/accounts/fireworks/models/glm-5p3-flash",
+    "fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+    "fireworks/accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+    "fireworks/accounts/fireworks/models/ember-1",
     "xiaomi/mimo-v2.5",
     "xiaomi/mimo-v2.5-pro",
+    "byteplus/dola-seed-2-1-turbo-260628",
+    "byteplus/seed-2-0-lite-260428",
+    "byteplus/seed-2-0-mini-260428",
+    "byteplus/deepseek-v4-pro-ga-260813",
+    "byteplus/deepseek-v4-flash-ga-260731",
+    "byteplus/glm-5-2-260617",
+    "byteplus/glm-5-3-flash-260828",
+    "byteplus/deepseek-v4-1-flash-260910",
     "byteplus/seed-2-0-lite-260228",
     "byteplus/seed-2-0-mini-260215",
     "byteplus/seed-1-8-251228",
     "byteplus/seed-1-6-250915",
     "byteplus/seed-2-0-pro-260328",
-    "byteplus/kimi-k2-250905",
-    "byteplus/kimi-k2-thinking-251104",
     "byteplus/deepseek-v4-pro-260425",
     "byteplus/deepseek-v4-flash-260425",
     "byteplus/deepseek-v3-2-251201",
-    "byteplus/deepseek-r1-250528",
     "byteplus/gpt-oss-120b-250805",
     "byteplus/glm-4-7-251222",
     "byteplus/seed-2-0-code-preview-260328",
     "cerebras/gpt-oss-120b",
+    "cerebras/qwen-3.8-27b",
     "sambanova/DeepSeek-V3.1",
     "sambanova/DeepSeek-V3.2",
     "sambanova/Meta-Llama-3.3-70B-Instruct",
     "sambanova/gpt-oss-120b",
     "sambanova/MiniMax-M2.7",
     "sambanova/gemma-4-31B-it",
+    "sambanova/MiniMax-M3",
     "moonshot/kimi-k3",
     "moonshot/kimi-k2.7-code",
     "moonshot/kimi-k2.7-code-highspeed",

@@ -36,6 +36,8 @@ POST http://localhost:<port>/stream   # SSE event stream
 GET  http://localhost:<port>/healthcheck
 ```
 
+An Agent also exposes `/voice`, `/voice/ws`, and `/voice/rtc`. Install `timbal[server,voice]` for browser voice and WebRTC, or add `voice-livekit` for LiveKit rooms. Voice connections are long-lived: configure WebSocket upgrades, connection timeouts, and the appropriate media networking in your reverse proxy. See [Voice transports](/voice/transports) for carrier routes and ICE/TURN configuration.
+
 ### 2. API
 
 ```bash

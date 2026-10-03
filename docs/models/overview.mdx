@@ -3,14 +3,18 @@ title: "Overview"
 description: "Specs, pricing, and capabilities for every supported model"
 ---
 
-Every model supported by Timbal with full specs, pricing, capability scores, and short descriptions. **Price** = per 1M tokens (input / output) at the provider's standard short-context tier. Models with a long-context surcharge (OpenAI &gt;272K, xAI ≥200K, BytePlus &gt;128K input tokens) reprice the whole request; Timbal reports those requests under `<unit>_long_context` usage keys so they can be billed at the higher rate — see the [OpenAI page](/models/openai#how-long-context-and-cache-pricing-is-tracked). All models support tool/function calling unless noted.
+Model specifications, availability, and pricing reviewed October 3, 2026. **Price** means USD per 1M text tokens (input / output) at the provider's Standard short-context tier, preferring published post-promotion rates. Where only promotional rates are published, those rates are retained and explicitly labeled. Long-context thresholds vary by model: OpenAI &gt;272K, Google Pro &gt;200K, xAI ≥200K, and selected BytePlus models &gt;128K input tokens. These models reprice the whole request; Timbal reports distinct `<unit>_long_context` usage keys — see the [OpenAI page](/models/openai#how-long-context-and-cache-pricing-is-tracked).
+
+Dedicated deployments, restricted access, unknown prices, conflicting sources, and future retirement dates are noted on each provider page. Unknown prices are not free. Audio, image generation, tool calls, cache storage, regional premiums, and time-dependent pricing need separate billing. Model capabilities do not imply every provider-native endpoint is available through `Agent`.
+
+`scripts/generate_costs_sql.py` generates catalog token rates, including published cache, long-context, and supported service-tier rates. It omits unknown prices and dedicated deployments instead of estimating them. It also omits ambiguous OpenAI search fees because the current usage metric does not distinguish standard search from the more expensive non-reasoning preview search. Generated SQL updates matching rates but does not delete existing rows for retired or omitted models; review those rows before applying a billing update.
 
 <CardGroup cols={3}>
   <Card title="Anthropic" icon="https://timbalusercontent.com/assets/claude_favicon.svg" href="/models/anthropic">
-    Claude Fable 5.1, Opus 5.5, Sonnet 5, and Haiku
+    Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku
   </Card>
   <Card title="BytePlus" icon="https://timbalusercontent.com/assets/byteplus_favicon.svg" href="/models/byteplus">
-    Seed 2.0 and Seed 1.8 models
+    Dola Seed 2.1, Seed 2.0, DeepSeek, and GLM
   </Card>
   <Card title="Cerebras" icon="https://timbalusercontent.com/assets/cerebras_favicon.svg" href="/models/cerebras">
     Wafer-scale inference at world-record token speeds
@@ -19,7 +23,7 @@ Every model supported by Timbal with full specs, pricing, capability scores, and
     Open-source models via Fireworks
   </Card>
   <Card title="Google" icon="https://timbalusercontent.com/assets/gemini_favicon.svg" href="/models/google">
-    Gemini 3.6, 3.5, 3.1 and 2.5 series
+    Gemini 3.8, 3.7, earlier Gemini models, and Gemini 4 availability
   </Card>
   <Card title="Groq" icon="https://timbalusercontent.com/assets/groq_favicon.svg" href="/models/groq">
     Ultra-low latency via Groq LPU
@@ -28,7 +32,7 @@ Every model supported by Timbal with full specs, pricing, capability scores, and
     Kimi K3 / K2.x via Moonshot's OpenAI-compatible API
   </Card>
   <Card title="OpenAI" icon="https://timbalusercontent.com/assets/openai_favicon.svg" href="/models/openai">
-    GPT-6 Astra, Sol, Luna, GPT-5, GPT-4, and o-series reasoning models
+    GPT-6.1 Sol, GPT-6 Astra/Luna, and earlier GPT and o-series models
   </Card>
   <Card title="SambaNova" icon="https://timbalusercontent.com/assets/sambanova_favicon.svg" href="/models/sambanova">
     High-throughput inference on custom RDU hardware
@@ -37,10 +41,10 @@ Every model supported by Timbal with full specs, pricing, capability scores, and
     Open-source models via TogetherAI
   </Card>
   <Card title="xAI" icon="https://timbalusercontent.com/assets/grok_favicon.svg" href="/models/xai">
-    Grok 4.7, Grok 4.6, Grok 4.5, and Grok 4.3
+    Grok 4.7, Grok Build 0.1, and earlier Grok models
   </Card>
   <Card title="Xiaomi MiMo" icon="https://timbalusercontent.com/assets/xiaomi_favicon_rounded.svg" href="/models/xiaomi">
-    MiMo V2 Pro, Omni, and Flash
+    MiMo V2.5 and V2.5 Pro
   </Card>
 </CardGroup>
 

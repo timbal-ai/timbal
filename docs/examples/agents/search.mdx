@@ -1,9 +1,9 @@
 ---
 title: "Web Search"
-description: "AI agents can search the web for real-time information using OpenAI or Anthropic models"
+description: "Use provider-native web search or an executable search service with any tool-capable model"
 ---
 
-Agents can search the web for current information using the built-in `WebSearch` tool. This tool works with **OpenAI** and **Anthropic** models.
+Agents can search the web using the built-in `WebSearch` tool. Native `WebSearch()` works with Anthropic and OpenAI/xAI Responses. Select an executable search provider to use it with other tool-capable models.
 
 <Note>
 See the [Model Reference](/models/overview) to check which specific models support web search.
@@ -26,6 +26,21 @@ result = await agent(
     prompt="When was the last match of Liverpool?"
 ).collect()
 ```
+
+## Search with another model provider
+
+Set `TAVILY_API_KEY` and use an executable search tool:
+
+```python
+agent = Agent(
+    name="search_assistant",
+    model="google/gemini-2.5-flash",
+    tools=[WebSearch(provider="tavily")],
+    system_prompt="Search for current information and cite the sources you use.",
+)
+```
+
+Other executable selectors are `scraperapi`, `cala`, `firecrawl`, and `google`. See [Tools](/agents/tools#websearch) for credential resolution and native search constraints.
 
 ## Key Features
 

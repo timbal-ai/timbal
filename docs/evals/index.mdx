@@ -26,7 +26,6 @@ Timbal's eval system uses a YAML-based test definition format with a powerful va
   description: Test that agent returns the time in Madrid
   runnable: agent.py::agent
   tags: ["datetime", "smoke"]
-  timeout: 30000
   
   params:
     prompt: "what time is it in madrid"
@@ -64,11 +63,9 @@ Timbal's eval system uses a YAML-based test definition format with a powerful va
 
 ## Prerequisites
 
-Before running evals, ensure the following environment variables are set:
+Install `timbal[evals]` for the CLI. Configure the model provider keys used by your runnable and any LLM validators, such as `OPENAI_API_KEY`. Local evals do not require a Timbal Platform account.
 
-- `TIMBAL_API_KEY` - Your Timbal API key
-- `TIMBAL_API_HOST` - The Timbal API host URL
-- `TIMBAL_ORG_ID` - Your organization ID
+If the runnable uses platform services, also configure `TIMBAL_API_KEY`, `TIMBAL_API_HOST` (hostname without a scheme), and the resource IDs that service needs.
 
 These can be set in your environment or in a `.env` file in your project directory.
 
@@ -133,7 +130,7 @@ Each eval consists of:
 | `params` | Input parameters for the runnable | No |
 | `description` | Human-readable description | No |
 | `tags` | List of tags for filtering | No |
-| `timeout` | Maximum execution time in milliseconds | No |
+| `timeout` | Accepted but currently not enforced; use the runnable's timeout and a CI/process deadline | No |
 | `output` | Validators for the final output | No |
 | `elapsed` | Validators for total execution time | No |
 | `seq!` | Sequence flow validator | No |

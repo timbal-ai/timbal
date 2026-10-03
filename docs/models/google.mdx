@@ -1,219 +1,265 @@
 ---
 title: "Google"
-description: "Gemini 3.6, 3.5, and 2.5 series models with specs, pricing, and capabilities"
+description: "Gemini API availability, verified Standard pricing, and migration guidance"
 ---
 
-<Note>Source: [Google AI model docs](https://ai.google.dev/gemini-api/docs/models)</Note>
+<Note>
+Reviewed October 3, 2026 against Google's [model catalog](https://ai.google.dev/gemini-api/docs/models),
+[pricing](https://ai.google.dev/gemini-api/docs/pricing), [release notes](https://ai.google.dev/gemini-api/docs/changelog),
+and [deprecations](https://ai.google.dev/gemini-api/docs/deprecations).
+Prices below are USD per **1 million tokens**, paid **Standard** tier, using published post-promotion rates and excluding temporary introductory discounts.
+Output rates include thinking tokens for reasoning models. Batch, Flex, Priority, free-tier allowances,
+cache storage, grounding, and media generation are separate charges or pricing plans.
+</Note>
 
-## Gemini 3.6
+## Gemini 4 availability
+
+Google [announced Gemini 4 Argon on September 30](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-argon/).
+Access is currently limited to trusted testers and Fairwind cyber defenders; the announcement describes broader paid API access as forthcoming.
+There is no public Gemini 4 model ID in the Gemini API catalog as of this review, so Timbal does not register a speculative ID.
+The announced post-promotion input / output price is &#36;4 / &#36;20. These are announced future rates, not a currently callable public API price.
+
+## Gemini 3.8, 3.7, and 3.6 Flash
+
+<Note>
+All three use published post-promotion Standard input / output / cached-input rates of **&#36;1.50 / &#36;7.50 / &#36;0.15**, effective January 1, 2027.
+This timing is crosschecked in the [latest-model guide](https://ai.google.dev/gemini-api/docs/latest-model#pricing).
+The catalog already uses these post-promotion rates; temporary introductory discounts are excluded.
+Post-promotion cache storage is an additional &#36;1 per million token-hours.
+Batch and Flex token rates are half Standard; Priority token rates are 1.8 times Standard. These are not the default catalog prices.
+</Note>
 
 <CardGroup cols={2}>
-  <Card title="gemini-3.6-flash">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+  <Card title="gemini-3.8-flash">
+  `google/gemini-3.8-flash`
 
+  Current stable Flash generation for coding and multi-step agent work.
+
+  - Input / output: &#36;1.50 / &#36;7.50 (post-promotion)
+  - Cached input: &#36;0.15
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Text, image, video, audio, and PDF input; text output
+  - Tools and thinking; `low`, `medium` (default), or `high`; `minimal` is rejected
+
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash)
+  </Card>
+
+  <Card title="gemini-3.7-flash">
+  `google/gemini-3.7-flash`
+
+  Previous stable Flash generation, still supported.
+
+  - Input / output: &#36;1.50 / &#36;7.50 (post-promotion)
+  - Cached input: &#36;0.15
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Text, image, video, audio, and PDF input; text output
+  - Tools and thinking; `low`, `medium`, or `high`; `minimal` is rejected
+
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash)
+  </Card>
+
+  <Card title="gemini-3.6-flash">
   `google/gemini-3.6-flash`
 
-  Workhorse Flash model with better token efficiency, code generation, and multimodal reasoning for multi-step orchestration and agentic workflows.
+  Earlier stable Flash generation for multimodal and agent workloads.
 
-  - &#36;1.50 / &#36;7.50
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 64K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio, PDF input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  - Input / output: &#36;1.50 / &#36;7.50 (post-promotion)
+  - Cached input: &#36;0.15
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Text, image, video, audio, and PDF input; text output
+  - Tools and thinking
+
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash)
   </Card>
 </CardGroup>
 
----
+For Gemini 3.8 migration details, including removed sampling parameters and thinking configuration,
+see Google's [migration checklist](https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist).
+Timbal's Google Agent route uses the OpenAI-compatible chat API; model-level native capabilities do not imply every native tool or modality is exposed through that route.
 
-## Gemini 3.5
+## Other Gemini 3 models
 
 <CardGroup cols={2}>
   <Card title="gemini-3.5-flash">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-3.5-flash`
 
-  Sustained frontier-level intelligence for agentic workflows, sub-agent deployment, and long-horizon tasks at scale — optimized for speed and cost.
+  - Input / output: &#36;1.50 / &#36;9
+  - Cached input: &#36;0.15
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Multimodal input, text output, tools, and thinking
 
-  - &#36;1.50 / &#36;9
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 64K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio, PDF input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash)
   </Card>
 
   <Card title="gemini-3.5-flash-lite">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-3.5-flash-lite`
 
-  Fastest, most cost-effective 3.5-class model for high-throughput agentic search, document processing, and lightweight subagent workflows.
+  - Input / output: &#36;0.30 / &#36;2.50, including audio input at the same input rate
+  - Cached input: &#36;0.03
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Multimodal input, text output, tools, and thinking
 
-  - &#36;0.30 / &#36;2.50
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 64K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio, PDF input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite)
   </Card>
-</CardGroup>
 
----
-
-## Gemini 3
-
-<CardGroup cols={2}>
   <Card title="gemini-3.1-pro-preview">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-3.1-pro-preview`
 
-  The upgraded core intelligence model representing a step forward in reasoning, a smarter and more capable baseline for complex problem-solving across consumer and developer products.
+  - Input / output: &#36;2 / &#36;12 at up to 200,000 input tokens
+  - Above 200,000 input tokens: &#36;4 / &#36;18 for the entire request
+  - Cached input: &#36;0.20; &#36;0.40 above 200,000 input tokens
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Multimodal input, text output, tools, and thinking
+  - Preview; no shutdown date announced
 
-  - &#36;2 / &#36;12
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 64K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio, PDF input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview)
+  </Card>
+
+  <Card title="gemini-3.1-pro-preview-customtools">
+  `google/gemini-3.1-pro-preview-customtools`
+
+  Variant that prioritizes custom tools and bash. Same token limits and Standard prices as Gemini 3.1 Pro Preview,
+  including its 200,000-input-token threshold. Preview quality can differ on tasks that do not benefit from tools.
+
+  [Variant documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview#gemini-3.1-pro-preview-customtools)
   </Card>
 
   <Card title="gemini-3.1-flash-lite">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-3.1-flash-lite`
 
-  The fastest and most cost-efficient Gemini 3 model, built for high-volume developer workloads at scale with 2.5x faster time to first token versus 2.5 Flash.
+  - Text/image/video input / text output: &#36;0.25 / &#36;1.50
+  - Audio input: &#36;0.50
+  - Cached input: &#36;0.025 text/image/video; &#36;0.05 audio
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Tools and thinking
+  - Earliest announced shutdown: May 7, 2027; replacement: `gemini-3.5-flash-lite`
 
-  - &#36;0.25 / &#36;1.50
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 64K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite)
   </Card>
 
   <Card title="gemini-3-flash-preview">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-3-flash-preview`
 
-  Combines Gemini 3 Pro's reasoning capabilities with the Flash line's latency, efficiency, and cost, designed for the most complex agentic workflows.
+  - Text/image/video input / text output: &#36;0.50 / &#36;3
+  - Audio input: &#36;1
+  - Cached input: &#36;0.05 text/image/video; &#36;0.10 audio
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Tools and thinking
+  - Preview; no shutdown date announced. Prefer a current stable Flash model for new applications.
 
-  - &#36;0.50 / &#36;3
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 64K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview)
   </Card>
 </CardGroup>
 
----
+Google's [Gemini 3 guide](https://ai.google.dev/gemini-api/docs/gemini-3) independently lists the 3.1 Pro, 3.1 Flash-Lite,
+and 3 Flash base prices. For current Standard prices and modality differences, the dedicated pricing page takes precedence over older preview summaries.
+Do not derive every cache tier from a flat multiplier: for example, 3.1 Pro's Batch/Flex cache read rate stays at the Standard rate,
+while 3.5 Flash-Lite's pricing page rounds Batch/Flex cached input to &#36;0.02.
 
-## Gemini 2.5
+## Gemini 2.5 legacy access
 
-<Note>&#36;2.50 / &#36;15 above 200K input tokens. All Gemini models support Google Search grounding.</Note>
+<Warning>
+Since September 18, 2026, Google limits Gemini 2.5 access to previous users. The general-purpose 2.5 Pro, Flash,
+and Flash-Lite models are **not deprecated** and have no announced shutdown date. For new projects use 3.5 Flash-Lite or 3.8 Flash.
+See the [access announcement](https://ai.google.dev/gemini-api/docs/changelog#september-18-2026).
+</Warning>
 
 <CardGroup cols={2}>
   <Card title="gemini-2.5-pro">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-2.5-pro`
 
-  The most advanced reasoning Gemini model, capable of solving complex problems across text, audio, images, video, and code repositories.
+  - Input / output: &#36;1.25 / &#36;10 at up to 200,000 input tokens
+  - Above 200,000 input tokens: &#36;2.50 / &#36;15 for the entire request
+  - Cached input: &#36;0.125; &#36;0.25 above 200,000 input tokens
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Multimodal input, text output, tools, and thinking
 
-  - &#36;1.25 / &#36;10
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 65K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio, PDF input
-  - <Icon icon="brain" size={14} /> Extended thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
-  </Card>
-
-  <Card title="gemini-2.5-pro-preview-tts">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `google/gemini-2.5-pro-preview-tts`
-
-  Text-to-speech variant of Gemini 2.5 Pro for generating audio output from text input.
-
-  - &#36;1 / &#36;20
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 66K max output
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="right-from-bracket" size={14} /> Audio output
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro)
   </Card>
 
   <Card title="gemini-2.5-flash">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-2.5-flash`
 
-  The best model in terms of price and performance with well-rounded capabilities, the first Flash model featuring thinking capabilities.
+  - Text/image/video input / text output: &#36;0.30 / &#36;2.50
+  - Audio input: &#36;1
+  - Cached input: &#36;0.03 text/image/video; &#36;0.10 audio
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Multimodal input, text output, tools, and thinking
 
-  - &#36;0.30 / &#36;2.50
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 65K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash)
   </Card>
 
   <Card title="gemini-2.5-flash-lite">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-2.5-flash-lite`
 
-  The fastest and most budget-friendly multimodal reasoning model in the 2.5 family, ideal for classification, translation, and high-scale operations.
+  - Text/image/video input / text output: &#36;0.10 / &#36;0.40
+  - Audio input: &#36;0.30
+  - Cached input: &#36;0.01 text/image/video; &#36;0.03 audio
+  - Input limit: 1,048,576 tokens; output limit: 65,536
+  - Multimodal input, text output, tools, and thinking
 
-  - &#36;0.10 / &#36;0.40
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 65K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video, Audio input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="globe" size={14} /> Web search
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite)
   </Card>
+</CardGroup>
 
-  <Card title="gemini-2.5-flash-image">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+## Image and speech models
 
+These require native Gemini media APIs. Image generation is available through Timbal's GeminiImages tools;
+audio synthesis is not provided by the Google Agent chat route. Media rates must not be used as text-output rates.
+
+<CardGroup cols={2}>
+  <Card title="gemini-2.5-flash-image — migrate">
   `google/gemini-2.5-flash-image`
 
-  Specialized model for image generation and editing from text and image prompts. ~&#36;0.039 per image output.
+  Google's pricing page announces an October 2, 2026 shutdown, while its model index still lists this model.
+  Treat it as deprecated and migrate to stable `gemini-3.1-flash-image` (the GeminiImages default) or `gemini-3.1-flash-lite-image`.
+  The catalog keeps the legacy ID for compatibility, without claiming its endpoint remains available.
 
-  - &#36;0.30 / &#36;30
-  - <Icon icon="window-maximize" size={14} /> 32K context
-  - <Icon icon="right-from-bracket" size={14} /> 32K max output
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="right-from-bracket" size={14} /> Text, Image output
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  - Text/image input: &#36;0.30; text output: &#36;2.50
+  - Image output: &#36;30 per million image tokens (about &#36;0.039 per image)
+  - Input and output limits: 32,768 tokens each
+
+  [Pricing and shutdown notice](https://ai.google.dev/gemini-api/docs/pricing#gemini-2.5-flash-image)
+  </Card>
+
+  <Card title="gemini-2.5-pro-preview-tts">
+  `google/gemini-2.5-pro-preview-tts`
+
+  - Text input: &#36;1; audio output: &#36;20
+  - Input limit: 8,192 tokens; output limit: 16,384
+  - Native TTS only; no tools, thinking, or caching
+  - Catalog text-output price is null because this model outputs audio
+
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro-preview-tts)
   </Card>
 
   <Card title="gemini-2.5-flash-preview-tts">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
   `google/gemini-2.5-flash-preview-tts`
 
-  Text-to-speech variant of Gemini 2.5 Flash for generating audio output at lower cost.
+  - Text input: &#36;0.50; audio output: &#36;10
+  - Input limit: 8,192 tokens; output limit: 16,384
+  - Native TTS only; no tools, thinking, or caching
+  - Catalog text-output price is null because this model outputs audio
 
-  - &#36;0.50 / &#36;10
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="right-from-bracket" size={14} /> 66K max output
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="right-from-bracket" size={14} /> Audio output
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jan 2025
+  [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-preview-tts)
   </Card>
 </CardGroup>
+
+The [current native model catalog](https://ai.google.dev/gemini-api/docs/models) also includes `gemini-3.8-flash-tts`,
+`gemini-3.8-flash-lite-tts`, `gemini-3.8-live`, `gemini-3.8-live-extended-thinking`, `gemini-3.5-transcribe`,
+`gemini-3.5-transcribe-live`, `gemini-3.5-live-translate-preview`, `gemini-omni-1.1-flash`,
+and the stable image models `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`, and `gemini-3-pro-image`.
+Their native endpoints and output types require separate integrations; listing them here does not register them as Agent chat models.
+Use the [native pricing sections](https://ai.google.dev/gemini-api/docs/pricing) for their modality-specific rates.
+
+## Cost accounting boundaries
+
+The catalog's `input_price`, `output_price`, and `cached_input_price` describe text rates; `long_context` records full-request thresholds.
+Audio, generated images/video, grounding calls, and cache storage are not represented by these fields and are not included in text-only cost estimates.
+Even when a model prices audio input like text, that does not add an audio charge to the text cost table.
+Cached audio also has its own rates on some models; do not apply the text-cache rate to it.
+
+Standard cache storage for 3.1 Pro and 2.5 Pro is &#36;4.50 per million token-hours; the other listed general-purpose Flash models at post-promotion rates use &#36;1.
+Google Search grounding on Gemini 3 is billed per individual search query after its shared monthly allowance,
+while Gemini 2.5 uses grounded-prompt billing after its daily allowance. A request can trigger multiple search queries.
+Consult [Google's billing details](https://ai.google.dev/gemini-api/docs/pricing) before estimating an entire workflow.

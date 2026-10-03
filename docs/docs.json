@@ -46,6 +46,33 @@
             ]
           },
           {
+            "group": "Voice Agents",
+            "pages": [
+              "voice/index",
+              "voice/quickstart",
+              {
+                "group": "Conversation",
+                "pages": [
+                  "voice/greetings",
+                  "voice/tools",
+                  "voice/thinking-sounds",
+                  "voice/fillers",
+                  "voice/background-audio",
+                  "voice/turn-taking",
+                  "voice/silence"
+                ]
+              },
+              {
+                "group": "Connecting and operating",
+                "pages": ["voice/recording", "voice/transports", "voice/observability"]
+              },
+              {
+                "group": "Reference and extensions",
+                "pages": ["voice/configuration", "voice/custom-pipelines"]
+              }
+            ]
+          },
+          {
             "group": "Workflows",
             "pages": [
               "workflows/index",

@@ -3,7 +3,7 @@ title: "SambaNova"
 description: "High-throughput inference on custom RDU hardware with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [SambaNova model docs](https://docs.sambanova.ai/docs/en/get-started/overview). All model IDs use the prefix `sambanova/`. Powered by SambaNova RDU (Reconfigurable Dataflow Unit) chips designed for large-scale AI inference.</Note>
+<Note>Verified 2026-10-03 against [model catalog](https://docs.sambanova.ai/docs/en/models/sambacloud-models), [pricing](https://cloud.sambanova.ai/plans/pricing), and [release notes](https://docs.sambanova.ai/docs/en/release-notes/sambacloud). Prices are USD per 1M tokens at standard online rates. Model IDs use the `sambanova/` prefix. Dedicated endpoints require provisioning and use deployment-specific billing.</Note>
 
 ## DeepSeek
 
@@ -15,9 +15,11 @@ description: "High-throughput inference on custom RDU hardware with specs, prici
 
   DeepSeek V3.2 running on SambaNova RDU hardware.
 
-  - &#36;3.00 / &#36;4.50
-  - <Icon icon="window-maximize" size={14} /> 8K context
+  - &#36;3 / &#36;4.5 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 32,768 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+
+  <Note>Preview. SambaCloud lists 32k context; structured output may fail per release notes.</Note>
   </Card>
 
   <Card title="DeepSeek-V3.1">
@@ -27,8 +29,8 @@ description: "High-throughput inference on custom RDU hardware with specs, prici
 
   DeepSeek V3.1 running on SambaNova RDU hardware.
 
-  - &#36;3.00 / &#36;4.50
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;3 / &#36;4.5 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
 </CardGroup>
@@ -43,8 +45,8 @@ description: "High-throughput inference on custom RDU hardware with specs, prici
 
   Meta Llama 3.3 70B instruction-tuned model running on SambaNova RDU hardware.
 
-  - &#36;0.60 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.6 / &#36;1.2 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
 </CardGroup>
@@ -59,9 +61,11 @@ description: "High-throughput inference on custom RDU hardware with specs, prici
 
   Google Gemma 4 31B instruction-tuned model on SambaNova RDU hardware.
 
-  - &#36;0.22 / &#36;0.59
-  - <Icon icon="window-maximize" size={14} /> 128K context
-  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - &#36;0.38 / &#36;1.15 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
+  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
+
+  <Note>Preview. Model catalog lists 128k context; July release notes mention 256k for text-only requests. Catalog uses the conservative 128k limit. No audio input.</Note>
   </Card>
 </CardGroup>
 
@@ -75,9 +79,10 @@ description: "High-throughput inference on custom RDU hardware with specs, prici
 
   OpenAI's open-weight 120B MoE on SambaNova RDU hardware. Near-parity with o4-mini on reasoning benchmarks. Apache 2.0.
 
-  - &#36;0.22 / &#36;0.59
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.22 / &#36;0.59 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
   </Card>
 
   <Card title="MiniMax-M2.7">
@@ -87,8 +92,30 @@ description: "High-throughput inference on custom RDU hardware with specs, prici
 
   MiniMax M2.7 large-scale MoE running on SambaNova RDU hardware.
 
-  - &#36;0.60 / &#36;2.40
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - Pricing not publicly verified
+  - <Icon icon="window-maximize" size={14} /> 196,608 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
+
+  <Note>Still listed as a production model, but the current public pricing table omits M2.7. Token and cache rates are unverified; do not reuse M3 pricing. See https://cloud.sambanova.ai/plans/pricing</Note>
   </Card>
+</CardGroup>
+
+## Newly verified models
+
+<CardGroup cols={2}>
+  <Card title="MiniMax M3 (SambaNova)">
+
+  `sambanova/MiniMax-M3`
+
+  MiniMax M3 preview on SambaCloud; this deployment accepts text only.
+
+  - &#36;0.6 / &#36;2.4 per 1M input / output tokens
+  - Cached input: &#36;0.06 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 1,000,000 tokens context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Preview. Image and video requests are rejected by SambaCloud. Context advertised as 1M. https://docs.sambanova.ai/docs/en/models/sambacloud-models</Note>
+  </Card>
+
 </CardGroup>

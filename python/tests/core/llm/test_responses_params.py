@@ -10,7 +10,8 @@ from timbal.core.llm.responses import normalize_responses_params, prepare_respon
 
 
 @pytest.mark.asyncio
-async def test_legacy_effort_reaches_responses_in_native_shape():
+@pytest.mark.parametrize("model_name", ["gpt-6-luna", "gpt-6.1-sol"])
+async def test_legacy_effort_reaches_responses_in_native_shape(model_name):
     received = {}
 
     async def empty():
@@ -27,13 +28,14 @@ async def test_legacy_effort_reaches_responses_in_native_shape():
     original = copy.deepcopy(params)
     stream, _ = prepare_responses_request(
         client=SimpleNamespace(responses=SimpleNamespace(create=create)),
-        model_name="gpt-6-luna", request_headers={}, system_prompt=None,
+        model_name=model_name, request_headers={}, system_prompt=None,
         messages=[], tools=None, max_tokens=2048, temperature=None,
         output_model=None, provider_params=params,
     )
     async for _ in stream():
         pass
     assert received["reasoning"] == {"effort": "low", "summary": "auto"}
+    assert received["model"] == model_name
     assert "reasoning_effort" not in received
     assert received["max_output_tokens"] == 2048
     assert params == original

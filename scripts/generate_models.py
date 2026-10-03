@@ -28,7 +28,7 @@ def main() -> None:
         print(f"error: {MODELS_YAML} not found", file=sys.stderr)
         sys.exit(1)
 
-    with MODELS_YAML.open() as f:
+    with MODELS_YAML.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     models = data.get("models", [])
@@ -45,7 +45,7 @@ def main() -> None:
     lines.append("]")
     new_block = "".join(lines)
 
-    source = MODELS_PY.read_text()
+    source = MODELS_PY.read_text(encoding="utf-8")
 
     if not _LITERAL_PATTERN.search(source):
         print(
@@ -56,7 +56,7 @@ def main() -> None:
 
     new_source = _LITERAL_PATTERN.sub(r"\g<1>" + new_block, source)
 
-    MODELS_PY.write_text(new_source)
+    MODELS_PY.write_text(new_source, encoding="utf-8")
     print(f"Updated {MODELS_PY} with {len(model_ids)} models.")
 
 

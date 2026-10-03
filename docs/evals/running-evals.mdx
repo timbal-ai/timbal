@@ -289,7 +289,8 @@ Failed validators:
 |------|---------|
 | 0 | All evals passed |
 | 1 | One or more evals failed |
-| 2 | Configuration or setup error |
+
+Configuration and setup errors also exit with code `1`; the CLI does not use a distinct setup-error code.
 
 ## CI/CD Integration
 
@@ -318,8 +319,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install -e .
-          pip install timbal
+          pip install -e ".[evals]"
       
       - name: Run evals
         env:
@@ -343,8 +343,7 @@ evals:
   stage: test
   image: python:3.11
   script:
-    - pip install -e .
-    - pip install timbal
+    - pip install -e ".[evals]"
     - python -m timbal.evals.cli --runnable agent.py::agent evals/
   variables:
     OPENAI_API_KEY: $OPENAI_API_KEY
@@ -451,17 +450,15 @@ fi
 </Accordion>
 
 <Accordion title="Set timeouts">
-Prevent hanging tests with timeouts (in milliseconds):
+Set a runnable timeout in seconds to bound the agent turn:
 
-```yaml
-- name: slow_test
-  runnable: agent.py::agent
-  timeout: 60000  # 60 second timeout
-  params:
-    prompt: "Complex query"
-  output:
-    not_null!: true
+```python agent.py
+from timbal import Agent
+
+agent = Agent(name="assistant", model="openai/gpt-4.1-mini", timeout=60)
 ```
+
+The eval YAML's `timeout` field is currently accepted but not enforced by the runner. Do not rely on it to stop a hung evaluation. A runnable timeout bounds the run; external judge calls and the overall CLI job need their own process or CI deadline.
 </Accordion>
 
 <Accordion title="Use tags for filtering">

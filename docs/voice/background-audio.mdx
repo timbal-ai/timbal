@@ -1,0 +1,32 @@
+---
+title: "Background Audio"
+description: "Add a quiet continuous ambience track to the browser conversation"
+---
+
+Background audio runs continuously during a conversation. A [thinking sound](/voice/thinking-sounds) runs while tools are working, and a [spoken filler](/voice/fillers) is generated speech. Try each separately before combining them.
+
+## Add a preset
+
+Keep a dict-based `voice_config` as in the [tool example](/voice/tools), and add:
+
+```python
+agent.voice_config["ambient"] = {"source": "office", "volume": 0.2}
+```
+
+Restart the server and start a new session in `/voice`. You should hear low room tone with typing, including while neither side is speaking. Use the playground's local volume control to adjust what you hear.
+
+Available presets are `office`, `call-center`, `cafe`, `city`, and `typing`. Tracks are fetched on first use from the Timbal CDN, verified against a pinned checksum, and cached locally. `volume` defaults to `0.3` and accepts values from zero to one.
+
+## Use your own track
+
+Set `source` to an existing server-side audio file instead of a preset. Prefer a clean loop with no intelligible speech; audio leaking through a speaker into the microphone can otherwise become a false transcript. Keep the track quiet enough that the caller can understand the assistant.
+
+The source path must exist when the config validates. A client cannot send an arbitrary file path through the configuration hello. Operator defaults use `TIMBAL_VOICE_AMBIENT_SOURCE` and `TIMBAL_VOICE_AMBIENT_VOLUME`.
+
+## Transport limits
+
+The current playground fetches `/voice/ambience/current` and plays the loop in the browser. Its ambience picker and volume controls affect local playback. This repository's built-in media transports do not mix ambience into outgoing WebRTC, LiveKit, Twilio, or Telnyx tracks, and the server recording does not include this browser audio.
+
+A browser can play the track alongside received media, but a phone caller needs ambience mixing in the media host. Declaring `ambient` alone does not add a phone-call background track. A custom client needs access to the ambience asset endpoint or its own audio asset.
+
+Continue to [Turn-taking and interruptions](/voice/turn-taking).

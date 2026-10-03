@@ -3,7 +3,7 @@ title: "Groq"
 description: "Ultra-low latency inference via Groq LPU with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [Groq model docs](https://console.groq.com/docs/models). All model IDs use the prefix `groq/`. Ultra-low latency inference via custom LPU hardware.</Note>
+<Note>Verified 2026-10-03 against [model catalog](https://console.groq.com/docs/models), [individual model specs](https://console.groq.com/docs/model/qwen/qwen3.8-27b), [cache pricing](https://console.groq.com/docs/prompt-caching), and [deprecations](https://console.groq.com/docs/deprecations). Prices are USD per 1M tokens at standard online rates. Model IDs use the `groq/` prefix. Dedicated endpoints require provisioning and use deployment-specific billing.</Note>
 
 ## All Models
 
@@ -13,12 +13,14 @@ description: "Ultra-low latency inference via Groq LPU with specs, pricing, and 
 
   `groq/qwen/qwen3.8-27b`
 
-  Qwen3.8 27B multimodal with hybrid thinking/instruct modes, delivered at Groq's ultra-low latency. Preview tier; successor to Qwen3.6 27B in this catalog (Groq still lists 3.6 as Preview).
+  Qwen3.8 27B multimodal with hybrid thinking/instruct modes, delivered at Groq's ultra-low latency. Preview tier; successor to Qwen3.6 27B in this catalog (3.6 retired for free/developer accounts on September 14, 2026).
 
-  - &#36;0.80 / &#36;4.00
-  - <Icon icon="window-maximize" size={14} /> 131K context
+  - &#36;0.8 / &#36;4 per 1M input / output tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="brain" size={14} /> Hybrid thinking
+  - <Icon icon="brain" size={14} /> Reasoning
+
+  <Note>Preview tier. Qwen3.6 27B was retired for free/developer accounts on 2026-09-14. See https://console.groq.com/docs/deprecations</Note>
   </Card>
 
   <Card title="openai/gpt-oss-120b">
@@ -28,10 +30,11 @@ description: "Ultra-low latency inference via Groq LPU with specs, pricing, and 
 
   OpenAI's open-weight MoE model with 120B total parameters (5.1B active per token), running at Groq speeds. Near-parity with o4-mini on reasoning benchmarks. Apache 2.0.
 
-  - &#36;0.15 / &#36;0.60
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.15 / &#36;0.6 per 1M input / output tokens
+  - Cached input: &#36;0.075 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="brain" size={14} /> Reasoning
   </Card>
 
   <Card title="openai/gpt-oss-20b">
@@ -41,10 +44,11 @@ description: "Ultra-low latency inference via Groq LPU with specs, pricing, and 
 
   OpenAI's compact open-weight MoE model with 20B total parameters (3.6B active), delivering results similar to o3-mini at Groq's ultra-low latency. Apache 2.0.
 
-  - &#36;0.075 / &#36;0.30
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;0.075 / &#36;0.3 per 1M input / output tokens
+  - Cached input: &#36;0.0375 per 1M tokens
+  - <Icon icon="window-maximize" size={14} /> 131,072 tokens context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="brain" size={14} /> Reasoning
   </Card>
 
 </CardGroup>

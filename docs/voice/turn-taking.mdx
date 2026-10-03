@@ -1,0 +1,49 @@
+---
+title: "Turn-Taking and Interruptions"
+description: "Test pauses and interruptions before tuning end-of-turn detection"
+---
+
+Once the basic conversation and [tools](/voice/tools) work, check how the session handles a pause and a caller speaking over the assistant. Start with the default detector before changing thresholds.
+
+## Try the defaults
+
+Use the same server and browser playground:
+
+1. Say a complete question and pause. The assistant should take its turn.
+2. Start a phrase, pause briefly, then finish it. Listen for a premature answer.
+3. While the assistant speaks, ask a different question. Playback should stop and the next turn should respond to your new words.
+4. Repeat with a short acknowledgement such as "yes" and with a longer request.
+
+An interruption cancels the current reply and clears queued playback. Conversation memory is adjusted to the portion the caller is estimated or known to have heard. A cancelled tool may already have performed work; stopping speech does not undo external side effects.
+
+Greetings have their own `interruptible` setting, which defaults to false; see [Greetings](/voice/greetings).
+
+## How the boundary is chosen
+
+Voice activity detection (VAD) identifies speech and silence. End-of-utterance detection decides whether a pause ends a thought. The server uses local audio detection when its dependencies are installed, otherwise lexical detection. The local path combines Smart Turn audio scoring, Namo text scoring, and Silero VAD endpointing.
+
+Inspect `session_started` for the resolved detector and endpointing settings. A requested mode can be changed by the server: STT adapters with native utterance boundaries, currently Flux and Munsit, use `provider` mode and disable local VAD endpointing.
+
+## Choose another mode
+
+For a controlled comparison, add to the dict-based config:
+
+```python
+agent.voice_config["turn_detector"] = "lexical"
+```
+
+Available modes are:
+
+- `local`: combines audio and text evidence and can hold an unfinished thought. Install the voice extra; explicitly choosing this mode without its dependencies loses audio detection.
+- `lexical`: uses punctuation and unfinished phrases to decide whether to hold a committed transcript.
+- `provider`: trusts the provider's committed transcript as the boundary.
+- `heuristic`: lightweight text filtering without holding unfinished thoughts.
+- `raw`: accepts committed transcripts with minimal policy; useful for debugging.
+
+`vad_endpointing=None` enables the local fast path when supported. Set it to `False` to disable it. A Python declaration may also supply a `TurnDetector` instance or zero-argument factory; clients may send supported mode names, and sessions own detector clones.
+
+## Custom clients
+
+WebSocket clients must report cumulative milliseconds of audio actually played and discard queued audio on `interrupted`. Reporting received bytes as played can preserve words the caller never heard. WebRTC and LiveKit use the server's paced media clock. See [Transports](/voice/transports) for the wire contract and [Events and usage](/voice/observability) for interruption metrics.
+
+Continue to [Silence and timeouts](/voice/silence).
