@@ -3,7 +3,7 @@ title: "Memory"
 description: "Understand and manage how Agent memory works"
 ---
 
-Memory in Timbal agents enables multi-turn conversations and context persistence across agent interactions. **Agents automatically maintain conversation history without requiring additional configuration**.
+Memory enables multi-turn conversations by loading history from a previous run's trace. Sequential calls in the same task can chain automatically. Across HTTP requests, processes, or explicitly separate tasks, pass `parent_id` to continue the intended conversation and use a tracing provider that can retrieve that prior run.
 
 ## How Memory Works
 
@@ -18,14 +18,15 @@ During each agent execution:
 3. Previous messages are automatically included in the current conversation
 4. The agent processes the new input with full conversation context
 
-This happens transparently - agents receive conversation memory without any code changes.
+When the run is linked to a prior run, history resolution happens automatically. An unrelated request does not acquire a conversation merely because it invokes the same Agent object.
 
 ### Storage Options
 
 Memory storage depends on your deployment environment:
 
-- **Timbal Platform**: Conversation history is automatically persisted with high availability and cross-instance sharing
-- **Local Development**: Uses in-memory storage that's fast but cleared on restart
+- **Platform tracing**: Stores runs remotely so an authorized continuation can retrieve them across processes.
+- **In-memory tracing**: The local default; history disappears on process restart.
+- **JSONL or SQLite tracing**: Local persistence options for applications that configure them.
 
 ## Nested Agent Memory
 
@@ -51,13 +52,15 @@ To hand the child specific context, put it in the tool call (the parent's prompt
 
 ## Configuration
 
-Memory is automatically configured based on your deployment:
+Configure the tracing provider for your deployment and keep run IDs with the conversation. The server also supports explicit continuation:
 
-- **Platform Deployment**: No configuration needed
-- **Self-Hosted**: Uses in-memory storage by default, with platform integration available
+```python
+first = await agent(prompt="My name is David").collect()
+second = await agent(parent_id=first.run_id, prompt="What's my name?").collect()
+```
 
 <Tip>
-Memory works automatically. For deeper understanding of the underlying mechanisms, see [Tracing](/core-concepts/tracing) and [Context](/core-concepts/context).
+Run IDs identify continuation points; the host must authorize access to the conversation before accepting a client-supplied `parent_id`. See [Tracing](/core-concepts/tracing) and [Context](/core-concepts/context) for storage and context behavior.
 </Tip>
 
 ## Rewind

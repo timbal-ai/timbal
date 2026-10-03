@@ -1,60 +1,60 @@
 ---
-title: "SQL Queries & Data Management"
-description: "AI agents can add data to knowledge bases and then query it through natural conversation"
+title: "SQL Queries and Data Management"
+description: "Expose parameterized knowledge-base queries and explicit data operations as agent tools"
 ---
 
-Agents can manage your knowledge base data through simple conversations. Add records naturally, then ask questions about your data - the agent handles all the complex SQL operations behind the scenes:
+Use `timbal.platform.knowledge_bases.query` to execute SQL against a Timbal knowledge base. Configure `TIMBAL_API_HOST`, `TIMBAL_API_KEY`, `TIMBAL_ORG_ID`, and `TIMBAL_KB_ID` before creating the run context, or supply an authenticated platform configuration. See [Semantic search](/examples/agents/semantic-search) for a complete environment example.
+
+Create the `tickets` table through your database setup or migration process first. This example assumes `customer_id` and `priority` columns. The agent receives specific operations rather than a tool accepting arbitrary SQL:
 
 ```python
+import asyncio
+
+from dotenv import load_dotenv
 from timbal import Agent, Tool
-from timbal.platform.kbs.tables import create_table, import_records, query, get_tables, get_table
+from timbal.platform.knowledge_bases import query
+
+load_dotenv()
+
+
+async def count_high_priority_tickets(customer_id: str) -> dict:
+    """Count high-priority tickets for a customer."""
+    return await query(
+        "SELECT count(*) AS count FROM tickets WHERE customer_id = $1 AND priority = $2",
+        [customer_id, "high"],
+    )
+
+
+async def add_ticket(customer_id: str, priority: str) -> dict:
+    """Insert a support ticket into the configured tickets table."""
+    return await query(
+        "INSERT INTO tickets (customer_id, priority) VALUES ($1, $2) RETURNING *",
+        [customer_id, priority],
+    )
+
 
 agent = Agent(
-    name="SupportAnalyst",
+    name="support_analyst",
     model="openai/gpt-4.1-mini",
-    system_prompt=("""
-        You are a support data manager. Help users add tickets to the database and analyze the data. Be conversational and helpful.
-        
-        Configuration:
-        - org_id: 'your-org-id'
-        - kb_id: 'your-kb-id' 
-        - table_name: 'tickets'
-        
-        If the tickets table doesn't exist, create it immediately without asking for confirmation.
-        Always use these configuration values when calling KB functions.
-    """),
+    system_prompt="Use the ticket tools to record support requests and answer ticket-count questions.",
     tools=[
-        Tool(handler=get_tables, description="Use it to check if a table it is already created"),
-        Tool(handler=get_table, description="Use it to get the table definition"),
-        Tool(handler=create_table, description="Use it to create the table"),
-        Tool(handler=query, description="Use it to query the table"),
-        Tool(handler=import_records, description="Use it to import records to the table")
-    ]  # Add multiple KB functions as tools
-) 
+        count_high_priority_tickets,
+        Tool(handler=add_ticket, requires_approval=True),
+    ],
+)
 
-# First conversation: Adding records to the knowledge base
-await agent(
-    prompt="I need to add a new support ticket. Customer ID 103 reported a login issue with high priority."
-).collect()
 
-# Second conversation: Querying the data we just added
-result2 = await agent(
-    prompt="How many high priority tickets do we have from customer 103?"
-).collect()
+async def main():
+    result = await agent(prompt="How many high-priority tickets does customer 103 have?").collect()
+    if result.error:
+        raise RuntimeError(result.error["message"])
+    print(result.output.collect_text())
 
-print(result2.output.collect_text())
 
-# There is currently 1 high priority ticket from customer 103. Would you like to see more details or do anything else?
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-![Tickets table in Timbal Platform](/images/sql.png)
+`query(sql, params, org_id=..., kb_id=...)` targets the current K2 endpoint and returns parsed response JSON, typically with a `rows` list. Set `legacy=True` only for an existing legacy knowledge base. The removed `timbal.platform.kbs.tables` and embedding-management helpers are not part of the current Python package.
 
-*The tickets table as it appears in the Timbal Platform interface, showing the record added by the agent.*
-
-## Key Features
-
-- **Natural Conversations**: Add data and ask questions in plain English
-- **Automatic SQL Generation**: Agent converts your requests into complex SQL queries
-- **Data Management**: Add individual records or import bulk CSV files
-- **Real-time Analysis**: Get instant insights from your data
-- **PostgreSQL Power**: Full database capabilities behind simple conversations
+User values belong in positional parameters, while table and column identifiers stay fixed in code. The sample insert tool requires approval; handle and resume it as described in [Approval gates](/human-in-the-loop/approval-gates). Query counts depend on the records already in your database.

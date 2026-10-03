@@ -1,0 +1,70 @@
+---
+title: "Custom Voice Pipelines"
+description: "Embed VoiceSession in your application and implement custom speech adapters"
+---
+
+## Use VoiceSession directly
+
+`VoiceSession` consumes an async iterable of microphone PCM and emits an async event stream. Create a new session and fresh speech adapters for each live conversation:
+
+```python
+from timbal import Agent
+from timbal.voice import (
+    AudioInputConfig,
+    AudioOutput,
+    AudioOutputConfig,
+    OpenAIRealtimeSTT,
+    OpenAIStreamTTS,
+    SessionInterrupted,
+    VoiceSession,
+)
+
+
+async def converse(microphone_chunks, playback):
+    agent = Agent(
+        name="voice_assistant",
+        model="openai/gpt-4.1-mini",
+        system_prompt="Reply in short spoken sentences.",
+    )
+    session = VoiceSession(
+        agent=agent,
+        stt=OpenAIRealtimeSTT(),
+        tts=OpenAIStreamTTS(),
+        audio_input=AudioInputConfig(model="gpt-transcribe", sample_rate=24000),
+        audio_output=AudioOutputConfig(
+            model="gpt-4o-mini-tts", voice="coral", sample_rate=24000,
+        ),
+        turn_detector="lexical",
+    )
+    try:
+        async for event in session.run(microphone_chunks):
+            if isinstance(event, AudioOutput):
+                await playback.write(event.data)
+            elif isinstance(event, SessionInterrupted):
+                await playback.clear()
+    finally:
+        await session.close()
+    return session.transcript
+```
+
+`microphone_chunks` and `playback` are interfaces you implement for your device or transport. The example's bytes are mono PCM16 little-endian at 24 kHz. Set `OPENAI_API_KEY` before starting it.
+
+The session connects and closes its adapters. `Agent.voice_config` is interpreted by the built-in server; a direct `VoiceSession` receives its own constructor arguments. Supply greeting, filler, idle policy, model override, or timeout there when embedding it.
+
+Use a `PlaybackTracker` to report the position actually played by your transport. The default `BufferedPlaybackTracker` estimates playback from its buffered schedule until acknowledgements arrive. Accurate playback evidence helps the session truncate an interrupted reply to the portion the caller heard.
+
+## Implement speech adapters
+
+Implement `SpeechToText` with `connect(AudioInputConfig)`, `push_audio(bytes)`, `commit()`, `events()`, and `close()`. Its event iterator yields `TranscriptEvent` values with `type="partial"`, `"committed"`, or `"error"`. Set `native_eou=True` only when committed transcripts represent provider-decided utterance boundaries.
+
+Implement `TextToSpeech` with `connect(AudioOutputConfig)`, `synthesize(text)`, and `close()`. `synthesize` is an async iterator of output PCM bytes. A provider supporting incremental text can implement `open_stream()` and return a `TTSStream` with `feed`, `end`, `abort`, and `audio`. Aborting must unblock the audio iterator so interruption does not leave a turn waiting for synthesis.
+
+Keep provider options in each audio config's `extra` mapping. These interfaces define the session seam; adding a custom adapter does not automatically add it to the server's provider selectors. Instantiate it directly or extend server resolution.
+
+## Speech-to-speech extension interface
+
+`RealtimeModel` and `RealtimeSession` provide a sibling interface for a provider that owns audio input, reasoning, audio output, and turn-taking. No concrete provider implementation ships yet. The built-in `/voice` server does not select a `RealtimeSession` from `voice_config`.
+
+A `RealtimeModel` implements `connect`, `send_audio`, `events`, and `close`, and may implement `truncate(played_ms)`. It emits `RealtimeEvent` values that `RealtimeSession` maps to the same transcript, audio, interruption, and metrics event vocabulary.
+
+Conversation state stays in the provider session; this interface does not run a Timbal `Agent`, create its trace spans, or inherit its tools and memory. Latency fields for internal LLM and TTS stages remain unavailable. Implement and validate provider behavior before using this seam in production.

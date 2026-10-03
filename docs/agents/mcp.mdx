@@ -112,7 +112,7 @@ github_mcp = MCPServer(
 MCP tool results are converted so the LLM always receives something useful:
 
 - **Text content** becomes a plain string (or a list of strings for multiple blocks)
-- **Images, audio, and binary resources** become Timbal [`File`](/core-concepts/runnables#files)s, forwarded to the model as file content — vision models can see returned images directly
+- **Images, audio, and binary resources** become Timbal [`File`](/agents#files)s, forwarded to the model as file content — vision models can see returned images directly
 - **Structured content** is returned as-is when the server sends no text representation
 - **Errors** (`isError`) raise inside the tool call, so the model receives a proper error tool result and can self-correct
 

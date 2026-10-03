@@ -3,7 +3,7 @@ title: "Tracing & Observability"
 description: "Comprehensive execution tracing with input/output/error/timing capture for complete observability"
 ---
 
-Events are **not persisted to memory** - they are **immutable** temporary notifications that stream during execution. They provide immediate feedback about what's happening (_e.g._ start, progress chunks, completion) but are not stored permanently. Events are consumed as they're generated and are ideal for real-time monitoring, progress tracking, and streaming responses. For permanent storage and analysis, this information is captured in Traces.
+Events stream execution notifications such as starts, content deltas, pauses, and completion. They do not themselves persist conversation memory. Applications can consume or record them, and the HTTP job store and background-task APIs retain bounded event logs. Traces capture span input, output, errors, timing, and usage through the configured tracing provider.
 
 ## Traces
 
@@ -32,8 +32,8 @@ llm_span = Span(
         "content": [{"type": "text", "text": "Hello! How can I assist you today?"}],
     },
     usage={
-        "openai/gpt-4o-mini:input_tokens": 32,
-        "openai/gpt-4o-mini:output_tokens": 10,
+        "openai/gpt-4o-mini:input_text_tokens": 32,
+        "openai/gpt-4o-mini:output_text_tokens": 10,
     },
     metadata={
         "type": "LLM",

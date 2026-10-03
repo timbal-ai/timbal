@@ -1,69 +1,62 @@
 ---
-title: "Semantic Search with Embeddings"
-description: "AI agents can create embeddings and perform intelligent semantic search through natural conversation"
+title: "Semantic and Hybrid Search"
+description: "Give an agent a parameterized search tool over an existing Timbal knowledge base"
 ---
 
-Agents can set up semantic search capabilities and find relevant content through simple conversations. The agent handles embedding creation and meaning-based search automatically:
+Create or connect a knowledge base and ingest your documents in the Timbal Platform first. Inspect its schema to find the table and columns to search. This example assumes an indexed `articles` table; replace that fixed table name with your own.
 
-```python
-from timbal import Agent, Tool
-from timbal.platform.kbs.embeddings import create_embedding, list_embedding_models
-from timbal.platform.kbs.tables import create_table, get_table, get_tables, import_csv, search_table
-from timbal.state import RunContext, set_run_context
-from timbal.types.file import File
+Configure platform access before the first call:
 
-agent = Agent(
-    name="ResearchAgent",
-    model="openai/gpt-4.1-mini",
-    system_prompt=("""
-        You are a research assistant. Help users set up semantic search and find relevant articles. Be conversational and helpful.
-        
-        Configuration:
-        - org_id: '1'
-        - kb_id: '70'
-        
-        If a table doesn't exist, create it immediately without asking for confirmation.
-        If an embedding already exists, skip creating it and proceed with the search.
-        Always use these configuration values when calling KB functions.
-    """),
-    tools=[
-        Tool(handler=create_table, description="Use it to create the articles table. ALWAYS use 'text' data type for all columns. Match exactly the CSV file columns."),
-        Tool(handler=import_csv, description="Use it to import the CSV file itself to the table."),
-        Tool(handler=list_embedding_models, description="Use it to list the available embedding models."),
-        Tool(handler=create_embedding, description="Use it to create embeddings for semantic search. Only create if they don't already exist. Use an available model."),
-        Tool(handler=search_table, description="Use it to search articles using semantic search. First you have to know the column name of the embeddings."),
-        Tool(handler=get_table, description="Use it to get the table definitio."),
-        Tool(handler=get_tables, description="Use it to get the table definition"),
-    ]
-)
-
-# First conversation: Setting up the knowledge base
-csv_file = File.validate("/path/to/documents.csv")
-result1 = await agent(
-    prompt=["I need to set up a technical support knowledge base. Create an 'articles' table with the columns from the CSV file /path/to/documents.csv and add the CSV file to the table.", csv_file]
-).collect()
-
-# Second conversation: Creating embeddings for semantic search
-result2 = await agent(
-    prompt="Now create embeddings for the technical content so I can do semantic search on support documents."
-).collect()
-
-# Reset context to simulate a fresh conversation (no memory of previous steps)
-run_context = RunContext()  # Creates a new empty context
-set_run_context(run_context)  # Replaces current context, wiping all memory
-
-# Third conversation: Performing semantic search
-result3 = await agent(
-    prompt="Search in articles table for 'How can I install music software on my computer?'"
-).collect()
-
-print(result3.output.collect_text())
+```bash .env
+TIMBAL_API_HOST=api.timbal.ai
+TIMBAL_API_KEY=your_platform_token
+TIMBAL_ORG_ID=your_org_id
+TIMBAL_KB_ID=your_knowledge_base_id
+OPENAI_API_KEY=your_openai_key
 ```
 
-## Key Features
+The Python helper is `timbal.platform.knowledge_bases.query`. It accepts SQL and positional parameters and resolves organization/knowledge-base IDs from explicit keywords or the environment. Platform authentication also needs the API host and token, or existing Timbal credentials.
 
-- **Natural Setup**: Create tables, add content, and set up embeddings through conversation
-- **Semantic Understanding**: Find content by meaning, not exact keywords
-- **Automatic Embeddings**: Agent creates vector embeddings for intelligent search
-- **Contextual Matching**: Understand synonyms, related concepts, and intent
-- **Flexible Queries**: Natural language queries work better than keyword searches
+```python
+import asyncio
+
+from dotenv import load_dotenv
+from timbal import Agent
+from timbal.platform.knowledge_bases import query
+
+load_dotenv()
+
+
+async def search_articles(question: str) -> dict:
+    """Search the indexed articles table by meaning and keywords."""
+    return await query(
+        "SELECT * FROM hybrid_search('articles', $1, $2, 8)",
+        [question, question],
+    )
+
+
+agent = Agent(
+    name="research_assistant",
+    model="openai/gpt-4.1-mini",
+    system_prompt=(
+        "Use search_articles to answer questions about our documentation. "
+        "Base your answer on retrieved records and say when the records are insufficient."
+    ),
+    tools=[search_articles],
+)
+
+
+async def main():
+    result = await agent(prompt="How do I configure authentication?").collect()
+    if result.error:
+        raise RuntimeError(result.error["message"])
+    print(result.output.collect_text())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Search-position string parameters are embedded by the platform for vector retrieval. Hybrid search takes a vector query and a full-text query, so pass the same question twice to combine semantic and keyword matching. Use `vector_search('articles', $1, 8)` for semantic-only retrieval or `fts_search('articles', $1, 8)` for keyword-only retrieval.
+
+Keep table identifiers fixed in application code and pass user text through `$1`, `$2`, and `params`. An unindexed or nonexistent table needs ingestion/index setup; the tool does not create it. See the [Knowledge base query API](/api-reference/knowledge-bases/query) for the request contract.

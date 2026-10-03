@@ -55,9 +55,6 @@ Eval names must be unique across all eval files in your project. The CLI will er
   tags:
     - greeting
     - smoke-test
-  timeout: 30000            # Milliseconds
-  env:
-    API_KEY: "test-key"
   
   params:
     prompt: "Hello"
@@ -68,6 +65,8 @@ Eval names must be unique across all eval files in your project. The CLI will er
   elapsed:
     lt!: 5000
 ```
+
+The model accepts `timeout` and `env` fields, but the current runner does not enforce the timeout or apply per-eval environment variables. Configure credentials in the process environment or a loaded `.env`, and set timeouts on the runnable. See [Running evals](/evals/running-evals).
 
 ## Params Structure
 
@@ -264,7 +263,6 @@ seq!:
   description: "Test time query with validation"
   runnable: "agent.py::agent"
   tags: ["datetime", "smoke"]
-  timeout: 30000
   
   params:
     prompt: "what time is it in madrid"

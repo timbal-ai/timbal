@@ -113,9 +113,7 @@ Timbal provides built-in tools for common use cases. These tools are ready to us
 
 `WebSearch` enables agents to search the web. 
 
-<Warning>
-`WebSearch` only works with **OpenAI** and **Anthropic** models. It's a specification-only tool that defines the tool schema for the LLM but doesn't contain executable logic. The actual web search execution is handled by the model provider. Other model providers are not supported.
-</Warning>
+With no `provider`, `WebSearch()` defines native search for Anthropic and OpenAI/xAI Responses. The model provider executes it; native search is unavailable through Chat Completions. With `provider="tavily"`, `"scraperapi"`, `"cala"`, `"firecrawl"`, or `"google"`, it becomes an executable function tool usable with any tool-capable model. Configure the selected search service's credentials separately.
 
 ```python
 from timbal import Agent
@@ -139,8 +137,10 @@ agent = Agent(
 
 Available options:
 - `allowed_domains`: List of domains to restrict searches to
-- `blocked_domains`: List of domains to exclude (Anthropic only)
+- `blocked_domains`: List of domains to exclude; native Anthropic uses `blocked_domains`, OpenAI/xAI Responses uses `filters.excluded_domains`
 - `user_location`: Dictionary with location info to localize search results. Must include `type` field. Common values are `"approximate"` or `"exact"`, but valid values depend on the provider.
+
+For example, set `TAVILY_API_KEY` and use `WebSearch(provider="tavily")` with a Gemini or Groq agent. Executable mode resolves an explicit `api_key` first, then a platform integration, then the search provider's environment credentials. Google Custom Search additionally needs `GOOGLE_CSE_CX` or an explicit `cx`.
 
 #### Multiple Instances of the Same Tool
 

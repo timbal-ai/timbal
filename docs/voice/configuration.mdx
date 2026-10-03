@@ -1,0 +1,103 @@
+---
+title: "Voice Configuration"
+description: "Configure speech providers, turn detection, greetings, fillers, and silence behavior"
+---
+
+Set `Agent(voice_config=...)` to configure sessions created by the server. Use a sparse dict or `VoiceConfig` so the fields you omit inherit operator defaults. The server applies environment defaults, then the agent's declared settings, then allowed per-call client overrides. The client cannot supply credentials, arbitrary provider hosts, recording paths, or Python detector objects.
+
+## Transcription providers
+
+Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech model IDs, separate from the `provider/model` IDs used by `Agent.model`.
+
+- **`elevenlabs`**: defaults to `scribe_v2_realtime`; requires `ELEVENLABS_API_KEY`.
+- **`deepgram`** or **`deepgram-flux`**: defaults to `flux-general-multi`; requires `DEEPGRAM_API_KEY`. Flux reports native end-of-turn events.
+- **`deepgram-nova`**: defaults to `nova-3`; requires `DEEPGRAM_API_KEY`. Select Nova explicitly or supply a `nova-*` model.
+- **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
+- **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD.
+
+Set `language` to a provider-supported language hint or omit it for automatic detection. Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
+
+## Speech providers
+
+Set `tts_provider`, `tts_model`, and `voice` for the output provider:
+
+- **`elevenlabs`**: defaults to `eleven_flash_v2_5`; requires `ELEVENLABS_API_KEY` and an accessible ElevenLabs voice ID. Supports incremental text through one streaming context per reply.
+- **`deepgram`**: defaults to `aura-2-thalia-en`; requires `DEEPGRAM_API_KEY`. The full Aura model ID identifies the voice and language.
+- **`fishaudio`**: defaults to `s2.1-pro`; requires `FISH_API_KEY`. Use a Fish reference voice ID for `voice` when selecting a reference voice.
+- **`munsit`**: defaults to `faseeh-v1-preview`; requires `MUNSIT_API_KEY`. The fallback voice is `MUNSIT_VOICE_ID` or `ar-uae-male-1`.
+- **`openai`**: defaults to `gpt-4o-mini-tts` and `coral`; requires `OPENAI_API_KEY`. Synthesizes complete text segments as they become ready.
+
+Use the chosen provider's voice ID. `language` controls transcription; it does not select a Deepgram Aura voice. Output style options belong in `tts_extra`. See [Speech examples](/examples/agents/tts) for detailed OpenAI and Deepgram settings.
+
+The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate=16000`, `encoding="pcm_s16le"`). Transports convert their wire formats where needed. OpenAI uses 24 kHz on the provider connection and requires the voice extra to resample other session rates.
+
+## Turn detection
+
+Leave `turn_detector` unset to use the server's default: local audio detection when the voice dependencies are installed, otherwise lexical detection. The local path combines Smart Turn audio end-of-utterance scoring, Namo text scoring, and Silero VAD endpointing. VAD identifies speech activity; end-of-utterance scoring decides whether a pause is a finished thought.
+
+Available mode names include:
+
+- **`local`**: audio and text evidence can hold an unfinished thought before replying. Install the voice extra for this mode; an explicit local pin without the dependencies loses its audio detection.
+- **`lexical`**: punctuation and unfinished phrases guide whether to hold a committed transcript.
+- **`provider`**: trusts the provider's committed transcript as the turn boundary.
+- **`heuristic`**: lightweight text filtering without holding unfinished thoughts.
+- **`raw`**: accepts committed transcripts with minimal policy; useful for debugging.
+
+When an STT adapter reports native end-of-utterance support, the server selects `provider` and disables local VAD endpointing. This applies to Flux and Munsit. Inspect `session_started` to see the resolved settings; a requested mode is not necessarily the mode that runs.
+
+`vad_endpointing=None` enables the local fast path when the detector supports it. Set `False` to disable it. A Python server declaration can also supply a `TurnDetector` instance or a zero-argument factory; clients may only send supported mode names. Each session owns a clone of its detector.
+
+## Greetings and silence
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="phone_assistant",
+    model="openai/gpt-4.1-mini",
+    voice_config={
+        "greeting": "Hi, thanks for calling. How can I help?",
+        "outbound_greeting": {
+            "text": "Hi, this is the appointment desk calling back.",
+            "after_user_silence_secs": 2.0,
+        },
+        "user_idle": {
+            "timeout_secs": 8.0,
+            "text": ["Are you still there?", "Would you like any more help?"],
+            "max_count": 2,
+            "hangup_after_secs": 30.0,
+        },
+        "turn_timeout_secs": 60.0,
+    },
+)
+```
+
+Without a greeting, the session waits for the user to speak. A static `text` opener goes straight to TTS. Use `instructions` instead to have an LLM write it; `text` wins when both are set. Greetings are non-interruptible by default; set `interruptible=True` to allow the caller to cut them short. `delay_ms` waits before the opener, and `after_user_silence_secs` lets the caller speak first with an opener fallback if they stay silent.
+
+`outbound_greeting` applies when the host identifies an outbound call. Omission inherits `greeting`; an empty string disables the outbound opener. Empty optional objects such as `{}` mean unset and preserve inheritance.
+
+`user_idle` starts after agent playback drains and the turn finishes. It can repeat static lines or generate lines from `instructions`. The agent's own prompts do not reset the user-silence hangup clock. Omit this block to wait indefinitely.
+
+The default turn timeout is 60 seconds. On expiry, the session emits an error and remains open for the next turn. `turn_timeout_fallback` supplies a spoken retry request only when no audio was produced; an empty string disables it. This session timeout is separate from the runnable's `Agent.timeout`.
+
+## Tool-call fillers
+
+```python
+agent.voice_config = {
+    "filler": {
+        "enabled": True,
+        "delay_secs": 1.0,
+        "timeout_secs": 5.0,
+        "repeat_secs": 6.0,
+        "max_per_turn": 2,
+    },
+}
+```
+
+A filler is a short generated phrase spoken while a tool is still running. Generation starts when the tool call is detected; a quick tool finishing before `delay_secs` gets no filler. The default generator uses the session's LLM; `model` can choose another. Without `repeat_secs`, at most one filler is spoken per turn. Use `{"enabled": False}` to disable an inherited filler.
+
+## Operator defaults
+
+The server reads `TIMBAL_STT_PROVIDER`, `TIMBAL_STT_MODEL`, `TIMBAL_TTS_MODEL`, `ELEVENLABS_VOICE_ID` (before `TIMBAL_VOICE_ID`), `TIMBAL_VOICE_LANGUAGE`, and `TIMBAL_VOICE_GREETING`. Use `voice_config.tts_provider` to select the output provider; there is no `TIMBAL_TTS_PROVIDER` reader in the server.
+
+`TIMBAL_VOICE_FILLER=1` enables default fillers. The `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, and `TIMBAL_VOICE_FILLER_REPEAT_SECS` variables customize them. Recording and ambience are covered in [Observability](/voice/observability).

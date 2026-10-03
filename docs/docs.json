@@ -46,6 +46,17 @@
             ]
           },
           {
+            "group": "Voice Agents",
+            "pages": [
+              "voice/index",
+              "voice/quickstart",
+              "voice/configuration",
+              "voice/transports",
+              "voice/observability",
+              "voice/custom-pipelines"
+            ]
+          },
+          {
             "group": "Workflows",
             "pages": [
               "workflows/index",

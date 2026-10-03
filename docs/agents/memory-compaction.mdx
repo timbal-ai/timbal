@@ -120,9 +120,11 @@ The model uses it on its own — the placeholder tells it how.
 Spilled payloads go through a narrow protocol, so the backend is swappable:
 
 ```python
+from typing import Protocol
+
 class OffloadStore(Protocol):
-    async def write(self, key: str, data: bytes) -> str:  # returns a handle
-    async def read(self, handle: str) -> bytes:
+    async def write(self, key: str, data: bytes) -> str: ...  # returns a handle
+    async def read(self, handle: str) -> bytes: ...
 ```
 
 The default `LocalOffloadStore` writes one file per result under `~/.timbal/offload/` (owner-only permissions; reads are hardened against path traversal and symlink escapes). Handles are store-relative keys, not absolute paths, so a different backend can resolve the same handle in another process.

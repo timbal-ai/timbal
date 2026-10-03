@@ -29,9 +29,9 @@ Both share the same interface and emit the same event stream, so you can compose
 
 ## Why Timbal
 
-- **The most performant agent framework.** In overhead benchmarks against LangGraph, CrewAI, the OpenAI Agents SDK, PydanticAI, and Agno (observability on both sides, faked LLMs to isolate framework cost), Timbal runs agent loops several times faster while using a fraction of the memory.
+- **Measured framework overhead.** The [benchmark suite](https://github.com/timbal-ai/timbal/tree/main/benchmarks) compares agent-loop overhead with fake LLMs to isolate framework cost. Real application latency also depends on models, tools, speech providers, and network calls.
 
-- **Simple and hackable.** The core framework is under 10k lines with no hidden magic, just async functions and Pydantic. You can read it, modify it, and fork it to fit your needs. The others are bloated with legacy, indirection, and abstraction that make doing the same nearly impossible.
+- **Simple and hackable.** Python source, async functions, and explicit interfaces make the framework inspectable and extensible.
 
 - **One interface.** Agents, Workflows, and Tools share the same calling convention and event stream. Learn it once.
 
@@ -46,6 +46,9 @@ Both share the same interface and emit the same event stream, so you can compose
 <Columns cols={3}>
   <Card title="Memory" icon="database" href="/agents/memory">
     Persistent context with tool-result offloading and compaction for long conversations.
+  </Card>
+  <Card title="Voice Agents" icon="microphone" href="/voice">
+    Streaming speech, interruption handling, browser calls, and telephony with your agent's tools.
   </Card>
   <Card title="Model Routing" icon="arrow-progress" href="/models/overview">
     One interface across every provider, with fallback chains for failover.

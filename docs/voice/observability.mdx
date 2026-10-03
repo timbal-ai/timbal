@@ -1,0 +1,93 @@
+---
+title: "Voice Events and Usage"
+description: "Inspect transcripts, response latency, provider-reported usage, and call recordings"
+---
+
+## Events and transcripts
+
+`VoiceSession.run()` yields typed events from `timbal.voice`. The server converts them to transport JSON; WebRTC and LiveKit carry speech on audio tracks instead of JSON audio frames.
+
+```python
+from timbal.voice import (
+    AudioOutput,
+    SessionInterrupted,
+    TurnMetricsEvent,
+    VoiceUsageEvent,
+)
+
+# session is a VoiceSession; microphone_chunks yields PCM16 mono bytes.
+async for event in session.run(microphone_chunks):
+    if isinstance(event, AudioOutput):
+        await playback.write(event.data)
+    elif isinstance(event, SessionInterrupted):
+        await playback.clear()
+    elif isinstance(event, TurnMetricsEvent):
+        print(event.metrics.model_dump())
+    elif isinstance(event, VoiceUsageEvent):
+        print(event.model_dump())
+```
+
+`session.transcript` contains committed user and assistant entries with timestamps. Fillers are marked `filler=True`. At session end, the server sends `session_transcript` followed by `session_ended`. Transcript text reflects interruption handling and may contain only the heard prefix of a cancelled assistant reply.
+
+## Latency
+
+`TurnMetricsEvent` reports millisecond durations and a `run_id` for joining a voice turn to the agent trace. Unobserved stages have `None`, not zero.
+
+- `speech_end_to_transcript_ms`: speech-end evidence to the committed transcript. `speech_end_source` identifies VAD or the coarser partial-transcript estimate.
+- `eou_to_llm_first_token_ms`: committed transcript to the first model text delta.
+- `eou_to_first_audio_ms`: committed transcript to the first emitted speech bytes. This excludes transcription delay and network/client playback delay.
+- `turn_total_ms`, `llm_total_ms`, and `tts_total_ms`: turn and stage durations.
+- `interrupted`, `heard_bytes`, and `playback_acks_received`: interruption and playback evidence.
+- `filler_spoken` and `filler_count`: whether a latency-masking phrase was spoken. When present, first-audio latency can measure the filler rather than the substantive answer.
+
+Measure time to the useful answer as well as first audio. Compare providers on representative calls, including slow tools, short acknowledgements, background noise, and interruptions.
+
+## Provider-reported speech usage
+
+OpenAI transcription and mini-TTS adapters emit `VoiceUsageEvent` independently of transcripts and audio. These events carry provider quantities, not dollar amounts. Other providers and custom adapters emit nothing unless they implement the usage capability.
+
+For billing, register a non-blocking listener on the adapters before the session starts. Delivery through the client connection alone can lose teardown events:
+
+```python
+import asyncio
+
+from timbal.voice import VoiceUsageEvent
+
+usage_queue: asyncio.Queue[VoiceUsageEvent] = asyncio.Queue()
+listener = usage_queue.put_nowait
+session.stt.add_usage_listener(listener)
+session.tts.add_usage_listener(listener)
+# A separate consumer drains and persists the queue, including after disconnect.
+# Remove listeners when these adapters are no longer used.
+```
+
+Listeners are synchronous and must not block. Listener failures are logged and isolated from speech. Delivery is in-process; your consumer must persist records durably.
+
+`provider`, `operation` (`stt` or `tts`), and `model` identify the resolved operation. Deduplicate by `usage_id`; prefer a complete report over an earlier incomplete report with the same ID. `request_id` and `item_id`, when present, help reconcile provider operations.
+
+`status="complete"` means terminal provider counters arrived. `status="incomplete"` means quantities are missing, invalid, or unavailable after cancellation, error, or closure. Incomplete is not zero cost. `usage` preserves the provider object, including any partial details.
+
+OpenAI transcription can report token usage with separate input audio/text details, or duration usage with `seconds`. Mini-TTS reports input text and output audio tokens through the Speech API's SSE completion event. Legacy `tts-1` and `tts-1-hd` use PCM streaming and do not supply these SSE usage reports. Do not apply one text rate to `total_tokens` or charge both an estimate and the reported quantities. Generated or cancelled audio can be billed even when the caller never hears it.
+
+Apply the resolved speech model's published rates separately from the text agent's `OutputEvent.usage`. The text model catalog and cost SQL generator do not provide a complete speech rate card. Use an explicit estimate policy for incomplete operations, and label those estimates.
+
+## Recordings and ambience
+
+Recording is opt-in and requires the voice dependencies. Configure it on the server:
+
+```python
+agent.voice_config = {
+    "recording": {
+        "dir": "./call-recordings",
+        "layout": "split",
+        "bitrate_kbps": 32,
+    },
+    "ambient": {"source": "office", "volume": 0.2},
+}
+```
+
+`layout="mixed"` is the default; `split` keeps caller and agent on separate channels. `recording.on_saved` accepts a Python async callback receiving the recording result. Recordings are written locally; storage, access, retention, and any upload integration belong to your application.
+
+Operator defaults use `TIMBAL_VOICE_RECORDING_DIR`, `TIMBAL_VOICE_RECORDING_LAYOUT`, and `TIMBAL_VOICE_RECORDING_BITRATE_KBPS`; the agent's recording fields override them. Recording paths and callbacks are server-only. Direct `VoiceSession(record_audio=True)` instead retains raw PCM in memory and does not configure durable file recording.
+
+Ambience accepts a built-in preset or a server-side audio file. Presets are fetched on first use. `volume` defaults to `0.3` and must be between zero and one. For the WebSocket playground, ambience is played by the browser; paced media transports mix it into outgoing audio. It contributes to what is heard, rather than model text or provider-generated speech counters.

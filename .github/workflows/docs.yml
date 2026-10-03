@@ -1,0 +1,45 @@
+name: Docs
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "python/**"
+      - "scripts/audit_docs.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install all documented import dependencies
+        run: uv sync --dev --extra all
+      - name: Check navigation, snippets, imports, endpoints, and catalog prices
+        run: uv run python scripts/audit_docs.py --runtime
+      - name: Check audit regressions
+        run: uv run pytest python/tests/test_docs_audit.py
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Validate Mintlify build
+        working-directory: docs
+        run: npx --yes mint@4.2.452 validate
+      - name: Check Mintlify internal links
+        working-directory: docs
+        run: npx --yes mint@4.2.452 broken-links

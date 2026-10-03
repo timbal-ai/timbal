@@ -1,0 +1,92 @@
+---
+title: "Voice Transports"
+description: "Connect browser clients, WebRTC, LiveKit rooms, and Twilio or Telnyx phone calls"
+---
+
+All built-in transports create the same transcription → agent → speech session. Speech credentials stay on the server. Use an `Agent` runnable and install `timbal[server,voice]`; LiveKit also needs `timbal[voice-livekit]`.
+
+## Browser playground
+
+Open `/voice` on the running server. The playground exposes provider and model selection, microphone controls, transcripts, and turn metrics. `GET /voice/meta` describes the loaded runnable and its declared configuration. `GET /voice_config` returns `{"voice_config": ...}` with portable declared settings; it is not the fully resolved environment configuration.
+
+## WebSocket clients
+
+Connect to `/voice/ws` and send a JSON configuration hello without a `type` field:
+
+```json
+{"sample_rate": 16000, "language": "en", "turn_detector": "local"}
+```
+
+The server waits up to two seconds for the hello. A binary first frame starts immediately with defaults. Send mono PCM16 little-endian chunks as binary frames, or as base64 JSON:
+
+```json
+{"type": "audio", "data": "BASE64_PCM_BYTES"}
+```
+
+The server sends speech as `{"type": "audio", "data": "..."}` in the same PCM format. Decode and queue it for playback. Report cumulative milliseconds of output audio actually played:
+
+```json
+{"type": "playback", "played_ms": 1250.0}
+```
+
+Count playback, not bytes received or merely scheduled. On `interrupted`, stop playback and discard queued audio. The session uses playback acknowledgements to align the caller's heard reply with conversation memory; without them it estimates the position from the buffered playback schedule. Closing the socket closes the session.
+
+Other JSON messages include `session_started`, `transcript_partial`, `transcript_committed`, `agent_text_delta`, `agent_text_done`, `filler`, `metrics`, `voice_usage`, `interrupted`, `error`, `session_transcript`, and `session_ended`. A committed transcript with `replace=true` replaces the previous user transcript bubble rather than appending another.
+
+## WebRTC
+
+Create a peer connection with a microphone audio track **and a data channel before creating the offer**. Complete ICE gathering, then send:
+
+```http
+POST /voice/rtc
+Content-Type: application/json
+
+{"sdp": "YOUR_OFFER_SDP", "type": "offer", "config": {"language": "en"}}
+```
+
+Apply the returned SDP answer. The server completes its ICE gathering before replying; this route does not use trickle ICE. Speech arrives on an audio track. Session JSON events arrive on the data channel, with no base64 audio messages and no client playback acknowledgements. Playback tracking uses the server's paced media clock.
+
+Configure `TIMBAL_STUN_URL` and, when needed, `TIMBAL_TURN_URL`, `TIMBAL_TURN_USERNAME`, and `TIMBAL_TURN_PASSWORD` for your network. `TIMBAL_VOICE_RTC_FORCE_RELAY=1` filters to relay candidates only when TURN is configured. The route returns 501 if WebRTC dependencies are unavailable.
+
+## LiveKit
+
+Install the LiveKit extra:
+
+```bash
+pip install "timbal[server,voice,voice-livekit]"
+```
+
+Create a room and an agent join token through your LiveKit integration, then ask a long-lived Timbal server to join it:
+
+```http
+POST /voice/rtc
+Content-Type: application/json
+X-Timbal-Dial-Secret: YOUR_SERVER_DIAL_SECRET
+
+{"transport": "livekit", "url": "wss://YOUR_LIVEKIT_HOST", "token": "AGENT_JOIN_TOKEN", "room": "YOUR_ROOM"}
+```
+
+Set `TIMBAL_VOICE_DIAL_SECRET` to validate this header and `TIMBAL_LIVEKIT_URL` to restrict the destination. Clients join and publish microphone audio using LiveKit's client SDK. Audio uses room tracks; session events use the `timbal.events` data topic.
+
+`hello_wait_secs` controls the browser configuration-hello window (default two seconds), and `sip_hello_wait_secs` controls the SIP caller window (default zero). Phone callers normally have no data channel to send a hello.
+
+The separate boot-environment path uses `TIMBAL_VOICE_TRANSPORT=livekit`, `TIMBAL_LIVEKIT_URL`, and `TIMBAL_LIVEKIT_TOKEN` to join one room at startup. Reserve that path for a process created for a single call; long-lived deployments should dial per request.
+
+## Twilio and Telnyx
+
+Expose the server through HTTPS with WebSocket upgrades and configure the carrier's voice webhook:
+
+- Twilio: `POST https://YOUR_HOST/voice/twilio/incoming`.
+- Telnyx: `POST https://YOUR_HOST/voice/telnyx/incoming`.
+
+The webhook returns TwiML or TeXML connecting a bidirectional media stream to `/voice/twilio/stream` or `/voice/telnyx/stream`. The bridge decodes carrier 8 kHz G.711 μ-law audio into the session format and converts speech back to the carrier format. Interruption clears carrier playback; mark echoes track playback position.
+
+Set `TWILIO_AUTH_TOKEN` or `TELNYX_PUBLIC_KEY` to enable incoming-webhook signature verification. Without these variables, the webhook accepts requests with a development-mode warning. Configure your reverse proxy so the externally visible URL used by the carrier is the URL validated by the webhook.
+
+The routes answer and bridge calls. Placing an outbound call requires your carrier integration to originate it and connect the media stream. A host that knows the call direction can select `outbound_greeting`; setting the greeting alone does not originate a call.
+
+## Approval and input requests
+
+Voice sessions forward `agent_approval` and `agent_interaction` events when the agent pauses. Render the request and resume through `POST /stream` with the event's `run_id` as `parent_id` and the decision in `resume`. Speaking into the microphone is not an approval resolution. See [Client integration](/human-in-the-loop/client-integration).
+
+An `agent_text_done` event also carries the agent `run_id`, allowing an authorized application to continue that conversation through the text endpoint. Identity and prior-run continuation require host-controlled authorization; they are separate from speech tuning in the hello.
