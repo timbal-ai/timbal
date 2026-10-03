@@ -14,8 +14,7 @@ Usage keys match timbal collectors:
 
 Rates are USD per single token for token rows. Prefer published post-promotion
 prices; use published promotional rates when no post-promotion rates are available.
-Generate catalog prices and
-published Anthropic cache multipliers. Unknown cache/audio/tool rates are omitted,
+Generate only explicit catalog token prices. Unknown cache/audio/tool rates are omitted,
 never estimated. Dedicated endpoints need deployment-specific billing.
 Only global streaming rates are generated: Batch and inference geography need separate billing.
 Anthropic code execution is billed by duration and is not priced here.
@@ -106,8 +105,8 @@ def main(*, output_path: Path | None = None, provider_filter: str | None = None)
             if inp is None or out is None:
                 lines.append(f"-- Skipped unknown Anthropic pricing: {mid}")
                 continue
-            cache_read = m.get("cached_input_price", inp * 0.1)
-            cache_write = m.get("cache_write_price", inp * 1.25)
+            cache_read = m.get("cached_input_price")
+            cache_write = m.get("cache_write_price")
             token_rates = {
                 "input_tokens": inp,
                 "output_tokens": out,
@@ -115,7 +114,7 @@ def main(*, output_path: Path | None = None, provider_filter: str | None = None)
                 # Legacy aggregate fallback assumes 5m; mixed/1h TTL requires the breakdown.
                 "cache_creation_input_tokens": cache_write,
                 "ephemeral_5m_input_tokens": cache_write,
-                "ephemeral_1h_input_tokens": inp * 2.0,
+                "ephemeral_1h_input_tokens": m.get("cache_write_1h_price"),
             }
             tiers = {"": 1.0}
             if "fast" in m.get("service_tiers", {}):

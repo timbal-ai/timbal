@@ -179,7 +179,7 @@ def _check_pricing_fields(m: dict) -> list[str]:
     errors: list[str] = []
     mid = m["id"]
 
-    for field in _PRICE_FIELDS:
+    for field in (*_PRICE_FIELDS, "cache_write_1h_price"):
         value = m.get(field)
         if value is not None and (not isinstance(value, (int, float)) or value < 0):
             errors.append(f"{field} must be a non-negative number on {mid}: {value!r}")

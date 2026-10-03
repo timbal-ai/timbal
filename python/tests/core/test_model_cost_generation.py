@@ -72,3 +72,51 @@ def test_unknown_and_dedicated_prices_are_never_invented(tmp_path, monkeypatch):
     anthropic = _rates(dest.read_text(encoding="utf-8"), "anthropic/unknown-cache")
     assert "cache_read_input_tokens" not in anthropic
     assert "cache_creation_input_tokens" not in anthropic
+    assert "ephemeral_5m_input_tokens" not in anthropic
+    assert "ephemeral_1h_input_tokens" not in anthropic
+
+
+@pytest.mark.parametrize("missing", [True, False], ids=["omitted", "null"])
+@pytest.mark.parametrize("published", [None, "cached_input_price", "cache_write_price", "cache_write_1h_price"])
+def test_anthropic_cache_prices_are_independently_optional(tmp_path, monkeypatch, missing, published):
+    fields = {
+        "cached_input_price": ["cache_read_input_tokens"],
+        "cache_write_price": ["cache_creation_input_tokens", "ephemeral_5m_input_tokens"],
+        "cache_write_1h_price": ["ephemeral_1h_input_tokens"],
+    }
+    model = {"id": "anthropic/test", "provider": "anthropic", "input_price": 1, "output_price": 5,
+             "service_tiers": {"fast": 2}}
+    if not missing:
+        model.update(dict.fromkeys(fields))
+    if published is not None:
+        # Deliberately differs from the traditional multipliers: use the catalog verbatim.
+        model[published] = 0.7
+    catalog = tmp_path / "models.yaml"
+    catalog.write_text(yaml.safe_dump({"models": [model]}), encoding="utf-8")
+    monkeypatch.setattr(costs, "MODELS_YAML", catalog)
+    dest = tmp_path / "costs.sql"
+    costs.main(output_path=dest)
+    rates = _rates(dest.read_text(encoding="utf-8"), model["id"])
+    for suffix, multiplier in [("", 1), ("_fast", 2)]:
+        assert rates["input_tokens" + suffix] == pytest.approx(multiplier)
+        assert rates["output_tokens" + suffix] == pytest.approx(5 * multiplier)
+        for field, units in fields.items():
+            for unit in units:
+                if field == published:
+                    assert rates[unit + suffix] == pytest.approx(0.7 * multiplier)
+                else:
+                    assert unit + suffix not in rates
+
+
+def test_anthropic_published_cache_rates_and_fast_mode(tmp_path):
+    dest = tmp_path / "costs.sql"
+    costs.main(output_path=dest, provider_filter="anthropic")
+    rates = _rates(dest.read_text(encoding="utf-8"), "anthropic/claude-opus-5-5")
+    for suffix, multiplier in [("", 1), ("_fast", 2)]:
+        for unit, price in {
+            "cache_read_input_tokens": 0.2,
+            "cache_creation_input_tokens": 5,
+            "ephemeral_5m_input_tokens": 5,
+            "ephemeral_1h_input_tokens": 8,
+        }.items():
+            assert rates[unit + suffix] == pytest.approx(price * multiplier)

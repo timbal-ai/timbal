@@ -14,6 +14,9 @@
 # Optional pricing detail (USD per 1M tokens; omit when the provider does not publish it):
 #   cached_input_price  — prompt-cache read rate (usage unit `input_cached_tokens`)
 #   cache_write_price   — prompt-cache write rate (usage unit `input_cache_write_tokens`)
+#                         For Anthropic, this is the 5m write rate.
+#   cache_write_1h_price — Anthropic 1h write rate (usage unit `ephemeral_1h_input_tokens`)
+#                         Cache rates are independent; missing/null means unpublished, not free.
 #   long_context:       — tier applied to the FULL request once input tokens exceed `threshold`.
 #     threshold: 272000   Collectors emit `<unit>_long_context` usage keys (e.g. `input_text_tokens_long_context`)
 #     input_price: 20.0   for these requests so cost tables can bill each tier at its own rate.
@@ -39,6 +42,7 @@ models:
   output_price: 50.0
   cached_input_price: 0.25
   cache_write_price: 12.5
+  cache_write_1h_price: 20.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-fable-5
@@ -52,6 +56,7 @@ models:
   output_price: 50.0
   cached_input_price: 1.0
   cache_write_price: 12.5
+  cache_write_1h_price: 20.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-5-5
@@ -67,6 +72,7 @@ models:
   output_price: 20.0
   cached_input_price: 0.2
   cache_write_price: 5.0
+  cache_write_1h_price: 8.0
   service_tiers:
     fast: 2.0
   context_window: 1000000
@@ -82,6 +88,7 @@ models:
   output_price: 25.0
   cached_input_price: 0.5
   cache_write_price: 6.25
+  cache_write_1h_price: 10.0
   service_tiers:
     fast: 2.0
   context_window: 1000000
@@ -96,6 +103,7 @@ models:
   output_price: 25.0
   cached_input_price: 0.5
   cache_write_price: 6.25
+  cache_write_1h_price: 10.0
   service_tiers:
     fast: 2.0
   context_window: 1000000
@@ -114,6 +122,7 @@ models:
   output_price: 10.0
   cached_input_price: 0.2
   cache_write_price: 2.5
+  cache_write_1h_price: 4.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-sonnet-5
@@ -127,6 +136,7 @@ models:
   output_price: 10.0
   cached_input_price: 0.2
   cache_write_price: 2.5
+  cache_write_1h_price: 4.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-7
@@ -137,6 +147,7 @@ models:
   output_price: 25.0
   cached_input_price: 0.5
   cache_write_price: 6.25
+  cache_write_1h_price: 10.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-6
@@ -147,6 +158,7 @@ models:
   output_price: 25.0
   cached_input_price: 0.5
   cache_write_price: 6.25
+  cache_write_1h_price: 10.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-opus-4-5
@@ -157,6 +169,7 @@ models:
   output_price: 25.0
   cached_input_price: 0.5
   cache_write_price: 6.25
+  cache_write_1h_price: 10.0
   context_window: 200000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-sonnet-4-6
@@ -168,6 +181,7 @@ models:
   output_price: 15.0
   cached_input_price: 0.3
   cache_write_price: 3.75
+  cache_write_1h_price: 6.0
   context_window: 1000000
   capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-sonnet-4-5
@@ -178,6 +192,7 @@ models:
   output_price: 15.0
   cached_input_price: 0.3
   cache_write_price: 3.75
+  cache_write_1h_price: 6.0
   notes: 'Deprecated September 30, 2026; retires November 30, 2026. Migrate to claude-sonnet-5-5.'
   context_window: 200000
   capabilities: [vision, tools, reasoning]
@@ -189,6 +204,7 @@ models:
   output_price: 5.0
   cached_input_price: 0.1
   cache_write_price: 1.25
+  cache_write_1h_price: 2.0
   context_window: 200000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-6-astra

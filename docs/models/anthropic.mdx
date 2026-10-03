@@ -23,7 +23,7 @@ Claude 4.6 and later models bill the full 1M window at standard rates. For globa
 
 Web search costs &#36;0.01 per search plus token charges; web fetch has no additional per-call fee. Code execution is free alongside the current web search/fetch tools; otherwise Anthropic bills execution time, with 1,550 free hours per organization per month, then &#36;0.05 per container-hour and a five-minute minimum. A `code_execution_requests` count alone is insufficient to calculate that charge.
 
-The catalog stores global standard input, output, cache-read, and 5m cache-write rates explicitly. The collector does not distinguish Batch API or US-only inference pricing in its usage keys. Apply those provider modifiers separately when reconciling billing. An aggregate cache-write count without a valid TTL breakdown cannot exactly price 1h or mixed-TTL writes.
+The catalog stores global standard input, output, cache-read, and both cache-write rates explicitly: `cached_input_price` for reads, `cache_write_price` for 5m writes, and `cache_write_1h_price` for 1h writes. The SQL generator omits each missing or null rate independently, including its fast-mode variant; it never derives cache prices from the input price. Omitted rates are unknown, not free. The collector does not distinguish Batch API or US-only inference pricing in its usage keys. Apply those provider modifiers separately when reconciling billing. An aggregate cache-write count without a valid TTL breakdown cannot exactly price 1h or mixed-TTL writes.
 
 ## Latest
 
