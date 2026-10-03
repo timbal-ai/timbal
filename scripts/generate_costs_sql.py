@@ -69,7 +69,7 @@ def append_cost_row(
 
 
 def main(*, output_path: Path | None = None, provider_filter: str | None = None) -> None:
-    data = yaml.safe_load(MODELS_YAML.read_text())
+    data = yaml.safe_load(MODELS_YAML.read_text(encoding="utf-8"))
     models = [m for m in data.get("models", []) if provider_filter is None or m["provider"] == provider_filter]
 
     lines: list[str] = [
@@ -164,7 +164,7 @@ def main(*, output_path: Path | None = None, provider_filter: str | None = None)
     lines.append("")
     lines.append("COMMIT;")
     out_path = output_path or Path(__file__).resolve().parent / "costs_inserts.sql"
-    out_path.write_text("\n".join(lines) + "\n")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"Wrote {out_path} ({len(models)} models)")  # noqa: T201 — CLI result
 
 

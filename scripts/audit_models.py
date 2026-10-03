@@ -116,7 +116,7 @@ def _load_dotenv() -> None:
     env_path = ROOT / ".env"
     if not env_path.exists():
         return
-    for line in env_path.read_text().splitlines():
+    for line in env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -125,7 +125,7 @@ def _load_dotenv() -> None:
 
 
 def _load_models() -> list[dict]:
-    with MODELS_YAML.open() as f:
+    with MODELS_YAML.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data.get("models", [])
 
@@ -243,7 +243,7 @@ def _check_pricing_fields(m: dict) -> list[str]:
 
 
 def _literal_model_ids() -> list[str]:
-    source = MODELS_PY.read_text()
+    source = MODELS_PY.read_text(encoding="utf-8")
     match = _LITERAL_PATTERN.search(source)
     if not match:
         raise ValueError(f"could not find Model = Literal[...] block in {MODELS_PY}")
@@ -285,7 +285,7 @@ def _check_docs_sync(models: list[dict]) -> list[str]:
             errors.append(f"no docs file for provider {provider} (model {m['id']})")
             continue
         if provider not in doc_cache:
-            doc_cache[provider] = doc_path.read_text()
+            doc_cache[provider] = doc_path.read_text(encoding="utf-8")
         if f"`{m['id']}`" not in doc_cache[provider]:
             rel = doc_path.relative_to(ROOT)
             errors.append(f"model id not documented in {rel}: {m['id']}")

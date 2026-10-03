@@ -43,7 +43,7 @@ def _load_models() -> dict[str, dict[str, Any]]:
     models_path = Path(__file__).parent.parent / "models.yaml"
     if not models_path.exists():
         return {}
-    with open(models_path) as f:
+    with open(models_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return {m["id"]: m for m in data.get("models", [])}
 

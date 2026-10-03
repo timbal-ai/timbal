@@ -27,7 +27,7 @@ def get_models() -> list[dict]:
     output_price, context_window, capabilities, and optional availability fields
     (requires_activation, dedicated_only, notes).
     """
-    with _MODELS_YAML.open() as f:
+    with _MODELS_YAML.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data.get("models", [])
 
