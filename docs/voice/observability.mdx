@@ -71,23 +71,6 @@ OpenAI transcription can report token usage with separate input audio/text detai
 
 Apply the resolved speech model's published rates separately from the text agent's `OutputEvent.usage`. The text model catalog and cost SQL generator do not provide a complete speech rate card. Use an explicit estimate policy for incomplete operations, and label those estimates.
 
-## Recordings and ambience
+## Recordings and client audio
 
-Recording is opt-in and requires the voice dependencies. Configure it on the server:
-
-```python
-agent.voice_config = {
-    "recording": {
-        "dir": "./call-recordings",
-        "layout": "split",
-        "bitrate_kbps": 32,
-    },
-    "ambient": {"source": "office", "volume": 0.2},
-}
-```
-
-`layout="mixed"` is the default; `split` keeps caller and agent on separate channels. `recording.on_saved` accepts a Python async callback receiving the recording result. Recordings are written locally; storage, access, retention, and any upload integration belong to your application.
-
-Operator defaults use `TIMBAL_VOICE_RECORDING_DIR`, `TIMBAL_VOICE_RECORDING_LAYOUT`, and `TIMBAL_VOICE_RECORDING_BITRATE_KBPS`; the agent's recording fields override them. Recording paths and callbacks are server-only. Direct `VoiceSession(record_audio=True)` instead retains raw PCM in memory and does not configure durable file recording.
-
-Ambience accepts a built-in preset or a server-side audio file. Presets are fetched on first use. `volume` defaults to `0.3` and must be between zero and one. For the WebSocket playground, ambience is played by the browser; paced media transports mix it into outgoing audio. It contributes to what is heard, rather than model text or provider-generated speech counters.
+See [Recording calls](/voice/recording) to save session audio locally or separate the speakers. [Thinking sounds](/voice/thinking-sounds) and [background audio](/voice/background-audio) are played by the browser and do not appear in the server's audio recording. Spoken fillers use speech synthesis and do appear in session audio and usage.

@@ -3,7 +3,22 @@ title: "Voice Agents"
 description: "Build live spoken conversations with streaming transcription, agents, tools, and speech output"
 ---
 
-A voice agent listens to a live audio stream, runs a regular Timbal `Agent`, and speaks its response as text arrives. Your agent keeps its tools, system prompt, memory, guardrails, and tracing. Speech providers and transports are configured separately from the language model.
+A voice agent listens to you and speaks its reply. Start with a simple browser conversation, then add one behavior at a time. The lessons reuse the same `agent.py`, credentials, and server command.
+
+## From first conversation to a deployed application
+
+1. **[Your first voice agent](/voice/quickstart)**: install, start, and talk. No tools, greeting, or added audio.
+2. **[Greetings](/voice/greetings)**: add a fixed hello, then control timing and generated wording.
+3. **[Using tools](/voice/tools)**: look up a mock delivery and hear the result.
+4. **[Thinking sounds](/voice/thinking-sounds)**, **[spoken fillers](/voice/fillers)**, and **[background audio](/voice/background-audio)**: try each optional sound behavior separately.
+5. **[Turn-taking and interruptions](/voice/turn-taking)** and **[silence and timeouts](/voice/silence)**: test how the conversation handles pauses, interruptions, and waiting.
+6. **[Recording calls](/voice/recording)**, **[transports and phone calls](/voice/transports)**, and **[events and usage](/voice/observability)**: connect a client or carrier and operate the session.
+
+Use [Providers and configuration](/voice/configuration) as a reference when changing speech providers. Continue to [Custom pipelines](/voice/custom-pipelines) when you need to embed the session or implement an adapter.
+
+## How it works
+
+The built-in pipeline runs a regular Timbal `Agent` between transcription and speech synthesis. It keeps the agent's tools, system prompt, memory, guardrails, and tracing. Speech providers and transports are configured separately from the language model.
 
 ```mermaid
 flowchart LR
@@ -17,29 +32,7 @@ flowchart LR
 
 The built-in server serves the same agent through text and voice endpoints. Open `/voice` for the browser playground, or connect your own client using WebSocket, WebRTC, LiveKit, or a Twilio/Telnyx media stream.
 
-<CardGroup cols={2}>
-  <Card title="Your first voice agent" icon="microphone" href="/voice/quickstart">
-    Install the speech dependencies and speak to an agent in your browser.
-  </Card>
-  <Card title="Providers and configuration" icon="sliders" href="/voice/configuration">
-    Choose transcription, speech output, turn detection, and call behavior.
-  </Card>
-  <Card title="Clients and phone calls" icon="phone" href="/voice/transports">
-    Connect browser clients, LiveKit rooms, and carrier media streams.
-  </Card>
-  <Card title="Events, usage, and latency" icon="wave-pulse" href="/voice/observability">
-    Track transcripts, interruptions, provider usage, recordings, and response time.
-  </Card>
-  <Card title="Custom pipelines" icon="code" href="/voice/custom-pipelines">
-    Use `VoiceSession` directly or implement a speech provider.
-  </Card>
-</CardGroup>
-
-## Spoken conversations
-
-The session decides when a user has finished speaking, starts an agent turn, and feeds response text to speech synthesis. If the caller interrupts, it cancels the current reply, clears queued playback, and adjusts conversation memory to the estimated or acknowledged portion the caller heard. Accurate playback reporting matters: generated audio and heard audio are different quantities.
-
-Keep spoken replies concise, ask one question at a time, and avoid tables, URLs, or long lists that are difficult to follow aloud. Choose a model and tools based on measured time to the first useful spoken response. A short filler can cover a slow tool call, but still consumes model and speech usage.
+Keep replies concise and ask one question at a time. Tables, URLs, and long lists are difficult to follow aloud. Start with a conversation you can understand and measure before adding optional behavior.
 
 ## Scope of the built-in pipeline
 

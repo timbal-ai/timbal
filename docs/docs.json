@@ -50,10 +50,26 @@
             "pages": [
               "voice/index",
               "voice/quickstart",
-              "voice/configuration",
-              "voice/transports",
-              "voice/observability",
-              "voice/custom-pipelines"
+              {
+                "group": "Conversation",
+                "pages": [
+                  "voice/greetings",
+                  "voice/tools",
+                  "voice/thinking-sounds",
+                  "voice/fillers",
+                  "voice/background-audio",
+                  "voice/turn-taking",
+                  "voice/silence"
+                ]
+              },
+              {
+                "group": "Connecting and operating",
+                "pages": ["voice/recording", "voice/transports", "voice/observability"]
+              },
+              {
+                "group": "Reference and extensions",
+                "pages": ["voice/configuration", "voice/custom-pipelines"]
+              }
             ]
           },
           {

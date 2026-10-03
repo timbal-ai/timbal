@@ -1,0 +1,30 @@
+---
+title: "Thinking Sounds"
+description: "Play a quiet browser sound while a tool is running"
+---
+
+Start with the slow lookup in [Using tools](/voice/tools). The local `/voice` playground has a **Thinking sound while tools run** checkbox. This adds a quiet keyboard loop to a tool's waiting period.
+
+## Try it without changing Python
+
+1. Run the tool example and open `/voice` on your local server.
+2. Enable **Thinking sound while tools run** in the sound controls.
+3. Start a session and ask "Check order 101."
+4. Listen for typing during the lookup and for it to stop when the answer begins.
+5. Disable the checkbox and repeat to compare the quiet gap.
+
+The checkbox defaults to off on a fresh browser and is remembered in that browser's local storage. It uses the `typing` ambience asset fetched from `/voice/ambience/typing`. The asset is downloaded on first use.
+
+## When it plays
+
+The playground starts the loop on `agent_status` when a tool call is reported. It stops on reply text or speech audio, interruption, a request for approval/input, or disconnect. A spoken filler can also stop it when that speech begins. A fast tool may finish before the asset is loaded or any loop is audible.
+
+This sound indicates tool activity. It does not play throughout every LLM reasoning step and does not make the tool complete sooner.
+
+## Where it works
+
+The sound is played locally by the browser. There is no `voice_config.thinking_sound` field, and enabling the checkbox does not add typing audio to Twilio, Telnyx, or another caller's media stream. The playground's platform target also needs an accessible ambience asset source; its local helper skips fetching when no voice HTTP base is available.
+
+A custom client can implement its own sound using the same event lifecycle. Stop and discard it when the session pauses or ends, and when speech begins. Browser-generated typing is not provider-generated speech and is not included in the server's PCM recording.
+
+[Spoken fillers](/voice/fillers) are the next step when you want the assistant itself to say something while a tool is running. For a continuous background track, see [Background audio](/voice/background-audio).

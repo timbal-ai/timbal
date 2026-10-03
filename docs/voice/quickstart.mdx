@@ -1,5 +1,5 @@
 ---
-title: "Voice Quickstart"
+title: "Your First Voice Agent"
 description: "Run a live voice agent locally and talk to it in the browser"
 ---
 
@@ -34,14 +34,7 @@ The example uses OpenAI for the text agent and ElevenLabs for transcription and 
 ## Create the agent
 
 ```python agent.py
-from datetime import datetime, timezone
-
 from timbal import Agent
-
-
-def current_time() -> str:
-    """Return the current UTC time."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 agent = Agent(
@@ -49,13 +42,9 @@ agent = Agent(
     model="openai/gpt-4.1-mini",
     system_prompt=(
         "You are a helpful voice assistant. Reply in one or two short spoken "
-        "sentences. Ask one question at a time. Use current_time for time questions."
+        "sentences. Ask one question at a time."
     ),
-    tools=[current_time],
-    voice_config={
-        "language": "en",
-        "greeting": "Hi, how can I help you?",
-    },
+    voice_config={"language": "en"},
 )
 ```
 
@@ -69,23 +58,14 @@ python -m timbal.server --import_spec agent.py::agent --host 127.0.0.1 --port 44
 
 With uv, use `uv run python -m timbal.server` with the same arguments. The server loads `.env` from the working directory. `TIMBAL_RUNNABLE=agent.py::agent` can supply the import spec instead of the flag.
 
-Open `http://127.0.0.1:4444/voice`, allow microphone access, and start a session. Try asking for the time, then interrupt the answer to check that playback stops and the next turn responds to you. A browser microphone requires localhost or HTTPS.
+Open `http://127.0.0.1:4444/voice`, allow microphone access, and start a session. Say "Hello, what can you help me with?" The agent should transcribe your words and speak a short reply. Ask a follow-up question to try a conversation. A browser microphone requires localhost or HTTPS.
+
+The agent waits for you to speak first. This example has no greeting, tools, fillers, or background audio. Leave the playground's thinking sound and ambience controls off for this first conversation.
 
 The agent is also available at `POST /run` and `POST /stream`. Voice routes require an `Agent` runnable; a `Workflow` or standalone `Tool` cannot be used as the voice conversation runnable.
 
-## Use another speech provider
+## Next: let the agent say hello
 
-You can mix providers independently. For example, set `OPENAI_API_KEY` and replace the voice configuration with:
+Keep this `agent.py`, its `.env`, and the same server command for the following lessons. After changing the file, restart the server and start a new browser session.
 
-```python
-agent.voice_config = {
-    "stt_provider": "openai",
-    "stt_model": "gpt-transcribe",
-    "tts_provider": "openai",
-    "tts_model": "gpt-4o-mini-tts",
-    "voice": "coral",
-    "language": "en",
-}
-```
-
-This still runs the text model specified by `agent.model`. See [Providers and configuration](/voice/configuration) for other choices and [Observability](/voice/observability) to inspect usage and latency.
+Continue to [Greetings](/voice/greetings) to make the agent speak first, then [Using tools](/voice/tools) to give it a useful action. You can change speech providers later in [Providers and configuration](/voice/configuration).

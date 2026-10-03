@@ -1,0 +1,40 @@
+---
+title: "Recording Calls"
+description: "Save a conversation locally, then separate caller and assistant channels"
+---
+
+Recording is opt-in and requires the voice dependencies. Configure it on the server after checking the basic conversation and [silence policy](/voice/silence).
+
+## Save one recording
+
+Add to the earlier lessons' dict-based configuration:
+
+```python
+agent.voice_config["recording"] = {"dir": "./call-recordings"}
+```
+
+Restart the server, start a session, have a short exchange, then end the session. The recorder writes an MP3 in the configured directory. Check the file after the session closes and the recorder finishes.
+
+## Separate the speakers
+
+The default layout is mixed mono. To keep the caller on the left channel and the assistant on the right:
+
+```python
+agent.voice_config["recording"] = {
+    "dir": "./call-recordings",
+    "layout": "split",
+    "bitrate_kbps": 32,
+}
+```
+
+The default bitrate is 32 kbps. Recordings contain the session audio, including spoken fillers. Browser-local thinking sounds and ambience are not part of the server's recorded PCM.
+
+## After the file is saved
+
+`recording.on_saved` accepts a Python async callback receiving the recording result. Use it for your storage integration after the files are written. Recordings are local files until your application uploads them; configure access, retention, and any required caller notice in your host application.
+
+Operator defaults use `TIMBAL_VOICE_RECORDING_DIR`, `TIMBAL_VOICE_RECORDING_LAYOUT`, and `TIMBAL_VOICE_RECORDING_BITRATE_KBPS`. Agent recording fields override them. File paths and callbacks are server-only settings and cannot be supplied by a browser hello.
+
+Direct `VoiceSession(record_audio=True)` keeps raw PCM in memory; it does not enable this file recorder. See [Custom pipelines](/voice/custom-pipelines) when embedding a session directly.
+
+Continue to [Transports and phone calls](/voice/transports) to connect your application, and [Events and usage](/voice/observability) to measure it.

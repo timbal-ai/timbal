@@ -1,0 +1,56 @@
+---
+title: "Spoken Fillers"
+description: "Have the assistant acknowledge a slow tool call with a short spoken phrase"
+---
+
+A filler is a generated phrase such as "One moment, let me check." It can cover a tool's waiting period before the substantive answer arrives. It uses the session's speech output, so it can be heard on phone and browser transports.
+
+## Enable one filler
+
+Keep the agent and slow lookup from [Using tools](/voice/tools). Add this line after the `Agent(...)` definition, preserving the existing greeting and language:
+
+```python
+agent.voice_config["filler"] = {"enabled": True}
+```
+
+Restart the server and start a new session. Ask "Check order 101." When the lookup remains pending, the assistant can say a short waiting phrase, then give the delivery result. Turn the browser thinking sound off for this test so you can hear the filler behavior on its own.
+
+The default delay is one second; generation has a five-second timeout. A fast tool gets no filler. If generation is too slow or the reply starts first, the phrase is skipped. The default is at most one filler per turn.
+
+## Control the wording and timing
+
+Replace that line with:
+
+```python
+agent.voice_config["filler"] = {
+    "enabled": True,
+    "delay_secs": 1.0,
+    "timeout_secs": 5.0,
+    "system_prompt": (
+        "Write one brief, natural waiting phrase in the caller's language. "
+        "Do not answer the question or claim the lookup succeeded. "
+        "Return only the phrase, without quotes."
+    ),
+}
+```
+
+Generation starts when the tool call is detected and overlaps the delay. The phrase is spoken only while the turn still needs a filler and no substantive reply has started. Omit `model` to use the session's LLM, or set a full `provider/model` ID to choose a separate generator.
+
+## Longer waits
+
+For tools that legitimately take longer, opt into repeats:
+
+```python
+agent.voice_config["filler"] = {
+    "enabled": True,
+    "delay_secs": 1.0,
+    "repeat_secs": 6.0,
+    "max_per_turn": 2,
+}
+```
+
+Repeats are bounded and stop being useful once the answer arrives or the turn is interrupted. Test with representative tool latency; repeated acknowledgements can distract from the actual answer. Fillers consume LLM and TTS usage and appear in transcripts as fillers. First-audio latency can measure a filler instead of the useful answer; see [Events and usage](/voice/observability).
+
+Set `agent.voice_config["filler"] = {"enabled": False}` to explicitly disable an inherited filler. Empty objects mean unset, rather than disabling a server default.
+
+Continue to [Background audio](/voice/background-audio) for a separate, optional room-tone layer, or [Turn-taking and interruptions](/voice/turn-taking).

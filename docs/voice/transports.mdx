@@ -5,6 +5,8 @@ description: "Connect browser clients, WebRTC, LiveKit rooms, and Twilio or Teln
 
 All built-in transports create the same transcription → agent → speech session. Speech credentials stay on the server. Use an `Agent` runnable and install `timbal[server,voice]`; LiveKit also needs `timbal[voice-livekit]`.
 
+First get a conversation working in the [quickstart](/voice/quickstart). Then choose one transport below. Browser-local [thinking sounds](/voice/thinking-sounds) and [background audio](/voice/background-audio) are not automatically included in a carrier's audio stream; spoken [fillers](/voice/fillers) are part of the session's speech output.
+
 ## Browser playground
 
 Open `/voice` on the running server. The playground exposes provider and model selection, microphone controls, transcripts, and turn metrics. `GET /voice/meta` describes the loaded runnable and its declared configuration. `GET /voice_config` returns `{"voice_config": ...}` with portable declared settings; it is not the fully resolved environment configuration.
@@ -31,7 +33,7 @@ The server sends speech as `{"type": "audio", "data": "..."}` in the same PCM fo
 
 Count playback, not bytes received or merely scheduled. On `interrupted`, stop playback and discard queued audio. The session uses playback acknowledgements to align the caller's heard reply with conversation memory; without them it estimates the position from the buffered playback schedule. Closing the socket closes the session.
 
-Other JSON messages include `session_started`, `transcript_partial`, `transcript_committed`, `agent_text_delta`, `agent_text_done`, `filler`, `metrics`, `voice_usage`, `interrupted`, `error`, `session_transcript`, and `session_ended`. A committed transcript with `replace=true` replaces the previous user transcript bubble rather than appending another.
+Other JSON messages include `session_started`, `transcript_partial`, `transcript_committed`, `agent_status`, `agent_text_delta`, `agent_text_done`, `filler`, `metrics`, `voice_usage`, `interrupted`, `error`, `session_transcript`, and `session_ended`. `agent_status` reports tool activity. A committed transcript with `replace=true` replaces the previous user transcript bubble rather than appending another.
 
 ## WebRTC
 
