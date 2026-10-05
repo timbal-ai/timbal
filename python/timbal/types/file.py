@@ -1,6 +1,7 @@
 import base64
 import io
 import mimetypes
+import re
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from urllib.request import urlopen
 
+import structlog
 from pydantic import (
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
@@ -21,6 +23,12 @@ from uuid_extensions import uuid7
 from .. import __version__
 from ..platform.types import UploadFileResponse
 from ..state import get_or_create_run_context
+
+logger = structlog.get_logger("timbal.types.file")
+
+# Path of a private run artifact on the content CDN (see timbal.platform.artifacts).
+_ARTIFACT_PATH = re.compile(r"^/orgs/\d+/projects/\d+/users/\d+/artifacts/.+")
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def _is_local_path(source: str) -> bool:
@@ -41,7 +49,8 @@ def _is_local_path(source: str) -> bool:
 # the object using the encoded basename. `platform_config.cdn` is checked too;
 # content.timbal.ai is kept here so URLs minted before the timbalusercontent.com
 # move (or configs still pinning the old host) are still recognized.
-_PLATFORM_CDN_HOSTS = ("timbalusercontent.com", "content.timbal.ai")
+_LEGACY_CDN_HOST = "content.timbal.ai"
+_PLATFORM_CDN_HOSTS = ("timbalusercontent.com", _LEGACY_CDN_HOST)
 
 
 def _extract_filename(headers: dict, url: str) -> str:
@@ -437,11 +446,14 @@ class File(io.IOBase):
     async def persist(self) -> str | None:
         """Persist the file to some storage.
         If there's no run context or valid platform config, the file will be persisted to local disk.
-        If there's a platform configuration, the file will be uploaded to the platform.
+        If there's a platform configuration, the file will be uploaded to the platform: as a
+        private run artifact when the run has an app subject, else as a temporary upload.
         If the file is already persisted, it will be returned as is.
         """
         if self.__persisted__ is not None:
             return self.__persisted__
+
+        from ..platform.artifacts import artifacts_available
 
         run_context = get_or_create_run_context()
 
@@ -452,11 +464,27 @@ class File(io.IOBase):
             # .hostname (unlike .netloc) drops port/userinfo and lowercases,
             # so e.g. "content.timbal.ai:443" still matches. The configured cdn
             # may carry a port too — strip it the same way.
-            host = urlparse(url).hostname
+            parsed = urlparse(url)
+            host = parsed.hostname
             cdn_host = urlparse(f"//{run_context.platform_config.cdn}").hostname
             if host and (host == cdn_host or host in _PLATFORM_CDN_HOSTS):
-                object.__setattr__(self, "__persisted__", url)
-                return url
+                if host == _LEGACY_CDN_HOST and cdn_host and cdn_host != _LEGACY_CDN_HOST:
+                    # The legacy host serves private prefixes unsigned: never store it.
+                    # Same bucket, same key, on the configured CDN.
+                    url = parsed._replace(netloc=cdn_host).geturl()
+                    parsed = urlparse(url)
+                path = unquote(parsed.path)
+                persisted = url
+                if _ARTIFACT_PATH.match(path):
+                    # A run artifact, likely signed on read: keep the stable URL. The
+                    # platform re-signs it whenever it serves the trace.
+                    persisted = url.split("?", 1)[0]
+                elif path.startswith("/tmp/") and artifacts_available():
+                    # A `POST /files` upload is public for as long as it exists: move the
+                    # run's copy into its private artifacts.
+                    persisted = await self._persist_artifact() or url
+                object.__setattr__(self, "__persisted__", persisted)
+                return persisted
 
         if not run_context.platform_config or not run_context.platform_config.subject:
             if self.__source_scheme__ == "local_path":
@@ -474,12 +502,20 @@ class File(io.IOBase):
             object.__setattr__(self, "__persisted__", temp_path)
             return temp_path
 
+        if artifacts_available():
+            url = await self._persist_artifact()
+            if url is not None:
+                object.__setattr__(self, "__persisted__", url)
+                return url
+
         self.seek(0)
         content = self.read()
         self.seek(0)  # Return the pointer to the beginning of the file
 
         path = "files"
-        files = {"file": (self.name, content, self.__content_type__)}
+        # Bytes and data-URL sources have no name.
+        filename = getattr(self, "name", None) or f"file{self.__source_extension__ or ''}"
+        files = {"file": (Path(str(filename)).name, content, self.__content_type__)}
 
         from ..platform.utils import _request
         res = await _request("POST", path, files=files)
@@ -492,6 +528,29 @@ class File(io.IOBase):
         url = upload_response.url
         object.__setattr__(self, "__persisted__", url)
         return url
+
+    async def _persist_artifact(self) -> str | None:
+        """Store the file as a private run artifact and return its stable URL, or ``None`` when
+        that fails (e.g. a platform without artifacts) so the caller keeps its old behavior."""
+        from ..platform.artifacts import put_artifact
+
+        try:
+            if self.__source_scheme__ == "url":
+                await self.load()
+            self.seek(0)
+            content = self.read()
+            self.seek(0)
+            name = getattr(self, "name", None) or ""
+            name = _UNSAFE_NAME_CHARS.sub("_", Path(str(name)).name)[:200].strip(".") or "file"
+            res = await put_artifact(
+                f"files/{uuid7(as_type='hex')}/{name}",
+                content,
+                self.__content_type__ or "application/octet-stream",
+            )
+            return res["url"]
+        except Exception:
+            logger.warning("Could not persist the file as a run artifact.", exc_info=True)
+            return None
 
     @classmethod
     def serialize(

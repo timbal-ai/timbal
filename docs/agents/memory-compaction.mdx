@@ -57,7 +57,7 @@ agent = Agent(
     tool_result_limit=ToolResultLimit(
         threshold=20_000,                  # chars of text content (default 20,000)
         action=Spill(preview_chars=1_000), # what to do when the threshold is reached
-        store=LocalOffloadStore(),         # where spilled payloads live
+        store=LocalOffloadStore(),         # where spilled payloads live (default: PlatformOffloadStore)
     ),
 )
 ```
@@ -128,9 +128,12 @@ class OffloadStore(Protocol):
     async def read(self, handle: str) -> bytes: ...
 ```
 
-The default `LocalOffloadStore` writes one file per result under `~/.timbal/offload/` (owner-only permissions; reads are hardened against path traversal and symlink escapes). Handles are store-relative keys, not absolute paths, so a different backend can resolve the same handle in another process.
+A handle is only readable while its payload exists, so the store must outlive the run that wrote it: later turns of the conversation still hold the handle. The default store, `PlatformOffloadStore`, picks the backend on every call:
 
-A handle is only readable while its payload exists, so the store must outlive the run that wrote it: later turns of the conversation still hold the handle. Set `TIMBAL_OFFLOAD_DIR` to move the default root wherever that holds. This matters when the home directory is thrown away with the process, as in containers and sandboxes. Timbal platform runs set it to the workforce's persistent directory. An explicit `LocalOffloadStore(root=...)` takes precedence. When a payload is gone anyway, `read_offloaded` returns an error telling the model not to retry the handle.
+- **On the Timbal platform** (the run has an app subject), payloads are stored as **run artifacts**: private, readable from any host and any later process, and only by the user whose run wrote them (the same owner rule as the run's trace). Platform runs execute in a fresh sandbox per request, so nothing local would survive to the next turn.
+- **Elsewhere**, it is a `LocalOffloadStore`: one file per result under `~/.timbal/offload/` (owner-only permissions; reads are hardened against path traversal and symlink escapes). Set `TIMBAL_OFFLOAD_DIR` to move that root somewhere that outlives the process, e.g. a volume in a container. An explicit `LocalOffloadStore(root=...)` takes precedence.
+
+If the platform rejects a write (for example an older platform without artifacts), the payload is stored locally instead, and reads try both. Handles are store-relative keys, not absolute paths, so a different backend can resolve the same handle in another process. When a payload is gone anyway, `read_offloaded` returns an error telling the model not to retry the handle.
 
 Payloads are kept **forever by default** — deleting on run end would break a resumed or chained session that still holds handles. Bound disk usage with opt-in age-based pruning:
 
