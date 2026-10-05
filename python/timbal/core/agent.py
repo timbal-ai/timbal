@@ -75,11 +75,12 @@ from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_result_offload import (
+    LEGACY_READ_OFFLOADED_NAMES,
     LocalOffloadStore,
     Spill,
     ToolResultLimit,
     apply_tool_result_limit,
-    create_read_tool_result,
+    create_read_offloaded,
 )
 from .tool_set import ToolSet
 
@@ -335,7 +336,7 @@ class Agent(Runnable):
     """Size limit applied to every tool result when it is produced (before it enters memory).
     An int is shorthand for ToolResultLimit(threshold=int). The default action (Spill) persists
     oversized results to an offload store, keeps a preview + handle inline, and auto-registers a
-    read_tool_result tool so the model can page the full content back on demand. Override per
+    read_offloaded tool so the model can page the full content back on demand. Override per
     tool with Tool(result_limit=...); pinned tools and error results are always exempt.
     See timbal.core.tool_result_offload."""
     attachment_limit: SkipValidation[ToolResultLimit | int | None] = None
@@ -343,7 +344,7 @@ class Agent(Runnable):
     images, PDFs and audio). Applied to each request, not to memory: an attachment whose text
     reaches the threshold is sent as a stand-in, while memory and traces keep the file. With
     Spill (the default action) the text is saved once to the offload store (shared with
-    tool_result_limit) and read back through read_tool_result. Default None sends attachments
+    tool_result_limit) and read back through read_offloaded. Default None sends attachments
     as before, except one that cannot fit the model's context window at all, which every model
     call cuts to a preview. See timbal.core.attachment_limit."""
     guardrails: SkipValidation[Any] = None
@@ -498,7 +499,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """Normalize tool result limits and set up the offload store + read-back tool.
 
         The store is only created when some configuration can actually spill (agent-level or
-        static per-tool Spill action). ``read_tool_result`` is registered whenever a store is
+        static per-tool Spill action). ``read_offloaded`` is registered whenever a store is
         reachable — including a store brought by a ``summarize(store=...)`` compactor for its
         canonical record — so every handle the model may encounter is readable.
         """
@@ -539,15 +540,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 None,
             )
             if configured is None and not tool_spills:
-                # Only attachments spill: share the compactor's store, which read_tool_result reads.
+                # Only attachments spill: share the compactor's store, which read_offloaded reads.
                 configured = compactor_store
             self._offload_store = configured or LocalOffloadStore()
 
         read_store = self._offload_store if self._offload_store is not None else compactor_store
-        self._read_tool_result = None
+        self._read_offloaded = None
         if read_store is not None:
-            self._read_tool_result = create_read_tool_result(read_store)
-            self._read_tool_result.nest(self._path)
+            self._read_offloaded = create_read_offloaded(read_store)
+            self._read_offloaded.nest(self._path)
 
     def _init_guardrails(self) -> None:
         """Build the guardrail runner and wire it into the agent's tools.
@@ -555,14 +556,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         Agent-level rails are injected into every tool so tool_args checks run inside
         ``Runnable._stream`` (after validation, before the approval gate — where an
         ``escalate`` verdict can force the gate). The internal LLM wrapper and
-        ``read_tool_result`` are exempt: their inputs are framework-owned.
+        ``read_offloaded`` are exempt: their inputs are framework-owned.
         """
         self._guardrail_runner = build_guardrail_runner(
             self.guardrails, mode=self.guardrail_mode, max_retries=self.max_guardrail_retries
         )
         self._llm._guardrails_exempt = True
-        if self._read_tool_result is not None:
-            self._read_tool_result._guardrails_exempt = True
+        if self._read_offloaded is not None:
+            self._read_offloaded._guardrails_exempt = True
         for tool in self.tools:
             if isinstance(tool, Runnable):
                 self._wire_tool_guardrails(tool)
@@ -1137,7 +1138,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         for compactor in compactors:
             # Set the agent's model on compactors that support it (e.g. summarize), and share
             # the offload store so summarize can write its canonical record of compacted
-            # messages (readable back via read_tool_result).
+            # messages (readable back via read_offloaded).
             if hasattr(compactor, "_state"):
                 compactor._state["agent_model"] = model
                 if "store" in compactor._state and compactor._state["store"] is None:
@@ -1194,8 +1195,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 _register(t)
 
-        if self._read_tool_result is not None:
-            _register(self._read_tool_result)
+        if self._read_offloaded is not None:
+            _register(self._read_offloaded)
 
         store = current_background_store()
         if store is not None and len(store) > 0:
@@ -1341,6 +1342,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
         """Find the tool for a call, logging when the LLM asked for an unknown one."""
         tool = next((t for t in tools if t.name == tool_call.name), None)
+        if (
+            tool is None
+            and tool_call.name in LEGACY_READ_OFFLOADED_NAMES
+            and any(t is self._read_offloaded for t in tools)
+        ):
+            tool = self._read_offloaded
         if tool is None:
             logger.warning(
                 "LLM called unknown tool; feeding error back so it can self-correct.",

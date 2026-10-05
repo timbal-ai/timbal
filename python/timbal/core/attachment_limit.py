@@ -17,7 +17,7 @@ Two layers:
 - :func:`apply_attachment_limit` — opt-in through ``Agent(attachment_limit=...)``, using the
   same :class:`~.tool_result_offload.ToolResultLimit` config as tool results. ``Spill`` saves
   the text to the offload store under a content hash; the model pages it back with
-  ``read_tool_result``.
+  ``read_offloaded``.
 - :func:`bound_unfittable_attachments` — always on, in the LLM router: a text attachment that
   cannot fit the model's context window on its own is cut to a preview. It only changes
   requests the provider would reject.
@@ -33,7 +33,15 @@ from ..types.content import FileContent, TextContent
 from ..types.content.file import AVAILABLE_ENCODINGS, _extract_docx_content, _extract_xlsx_content
 from ..types.message import Message
 from .models import get_context_window
-from .tool_result_offload import OffloadStore, Spill, ToolResultLimit, Truncate, _shape_sketch, _truncate_text
+from .tool_result_offload import (
+    OffloadStore,
+    Spill,
+    ToolResultLimit,
+    Truncate,
+    _shape_sketch,
+    _truncate_text,
+    read_offloaded_call,
+)
 
 logger = structlog.get_logger("timbal.core.attachment_limit")
 
@@ -136,7 +144,7 @@ def _offload_stand_in(content: FileContent, text: str, handle: str, preview_char
     total = len(text)
     lines = [
         f"{ATTACHMENT_OFFLOAD_MARKER} {_label(content)}, {total:,} chars. The full text was saved and can "
-        f'be read with read_tool_result(handle="{handle}") — page with offset/limit or filter with pattern.]',
+        f"be read with {read_offloaded_call(handle)} — page with offset/limit or filter with pattern.]",
     ]
     sketch = _shape_sketch(text)
     if sketch:

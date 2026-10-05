@@ -21,7 +21,7 @@ from timbal.types.content import FileContent, TextContent, ToolResultContent, To
 from timbal.types.file import File
 from timbal.types.message import Message
 
-_HANDLE_RE = re.compile(r'read_tool_result\(handle="([^"]+)"\)')
+_HANDLE_RE = re.compile(r'read_offloaded\(handle="([^"]+)"\)')
 _PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
     b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
@@ -174,7 +174,7 @@ class TestAgentAttachmentLimit:
                 handle = _HANDLE_RE.search(messages[-1].content[1].text).group(1)
                 return Message(
                     role="assistant",
-                    content=[ToolUseContent(id="r1", name="read_tool_result", input={"handle": handle, "limit": 1})],
+                    content=[ToolUseContent(id="r1", name="read_offloaded", input={"handle": handle, "limit": 1})],
                     stop_reason="tool_use",
                 )
             return "done"
@@ -217,7 +217,7 @@ class TestAgentAttachmentLimit:
         inherited = seen[0][0]
         assert inherited.role == "user" and inherited.content[1].text.startswith(ATTACHMENT_OFFLOAD_MARKER)
 
-    def test_a_compactor_store_stays_the_one_read_tool_result_reads(self, tmp_path) -> None:
+    def test_a_compactor_store_stays_the_one_read_offloaded_reads(self, tmp_path) -> None:
         store = LocalOffloadStore(root=tmp_path / "compactor")
         agent = Agent(
             name="compacting",
@@ -235,4 +235,4 @@ class TestAgentAttachmentLimit:
         item = _file(tmp_path, "data.json", "z" * 50_000)
         await agent(prompt=Message(role="user", content=[TextContent(text="x"), item])).collect()
         assert isinstance(seen[0][-1].content[1], FileContent)
-        assert agent._read_tool_result is None
+        assert agent._read_offloaded is None

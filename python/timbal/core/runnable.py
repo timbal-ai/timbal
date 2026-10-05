@@ -596,7 +596,7 @@ class Runnable(ABC, BaseModel):
         self._blocking_warned: bool = False
         # Guardrail wiring (see timbal.guardrails). _agent_guardrails is injected by the
         # owning Agent; _guardrails_exempt marks framework-internal runnables (the LLM
-        # wrapper, read_tool_result) whose inputs are framework-owned.
+        # wrapper, read_offloaded) whose inputs are framework-owned.
         self._agent_guardrails: Any = None
         self._guardrails_exempt: bool = False
         self._own_guardrail_runner: Any = None

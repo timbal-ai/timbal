@@ -13,8 +13,9 @@ Three pieces:
 - ``OffloadStore`` / ``LocalOffloadStore`` — where spilled payloads live. Handles are
   backend-relative keys (never absolute paths), so a different backend can resolve the same
   handle in another process.
-- ``read_tool_result`` (via :func:`create_read_tool_result`) — a bounded paging tool the
-  model uses to read spilled payloads back on demand.
+- ``read_offloaded`` (via :func:`create_read_offloaded`) — a bounded paging tool the model
+  uses to read spilled payloads back on demand (also offloaded attachments and compacted
+  transcripts). Calls to its earlier name, ``read_tool_result``, still reach it.
 
 Distinct from ``memory_compaction``: that layer rewrites history that is already inside the
 window; this layer keeps oversized payloads out of the window at production time. Compaction
@@ -39,22 +40,34 @@ from ..types.content.tool_result import ToolResultContent
 logger = structlog.get_logger("timbal.core.tool_result_offload")
 
 __all__ = [
+    "LEGACY_READ_OFFLOADED_NAMES",
+    "READ_OFFLOADED_TOOL",
     "LocalOffloadStore",
     "OffloadStore",
     "Spill",
     "ToolResultLimit",
     "Truncate",
     "apply_tool_result_limit",
+    "create_read_offloaded",
     "create_read_tool_result",
+    "read_offloaded_call",
 ]
 
 OFFLOAD_MARKER = "[Tool result offloaded:"
 """Prefix of the inline placeholder text for spilled results. Kept stable for tests and
 downstream detection; programmatic detection should use ``ToolResultContent.offload_handle``."""
 
+READ_OFFLOADED_TOOL = "read_offloaded"
+"""Name of the read-back tool for everything behind a handle: offloaded tool results, offloaded
+attachments, and compacted transcripts."""
+
+LEGACY_READ_OFFLOADED_NAMES = frozenset({"read_tool_result"})
+"""Earlier names of the read-back tool. Placeholders already stored in memory name them, so the
+agent still dispatches calls to them; they are never advertised to the model."""
+
 _SEGMENT_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
-# read_tool_result hard caps — the read-back tool must never blow the window back up.
+# read_offloaded hard caps — the read-back tool must never blow the window back up.
 _READ_MAX_LINES = 500
 _READ_MAX_CHARS = 50_000
 _READ_SEGMENT_CHARS = 10_000
@@ -80,7 +93,7 @@ class Truncate(BaseModel):
 class Spill(BaseModel):
     """Persist the full payload to the offload store and keep a preview + handle inline.
 
-    Lossless: the model reads the payload back on demand through ``read_tool_result``.
+    Lossless: the model reads the payload back on demand through ``read_offloaded``.
     ``fallback`` applies when no store is available or the store write fails — default is a
     bounded truncation so an oversized result is never silently passed through.
     """
@@ -94,7 +107,7 @@ class ToolResultLimit(BaseModel):
 
     Results whose concatenated text content reaches ``threshold`` characters get ``action``
     applied. Smaller results pass through untouched. Error results, pinned results, and
-    ``read_tool_result``'s own output are always exempt.
+    ``read_offloaded``'s own output are always exempt.
 
     ``store`` is only honored on the agent-level config (``Agent(tool_result_limit=...)``);
     per-tool configs share the agent's store.
@@ -249,10 +262,15 @@ def _truncate_text(text: str, tool_name: str, action: Truncate, kind: str = "too
     return text[:head] + marker + text[-tail:]
 
 
+def read_offloaded_call(handle: str) -> str:
+    """How placeholders tell the model to read ``handle`` back."""
+    return f'{READ_OFFLOADED_TOOL}(handle="{handle}")'
+
+
 def _spill_placeholder(tool_name: str, total_chars: int, handle: str, preview: str, sketch: str | None) -> str:
     lines = [
         f"{OFFLOAD_MARKER} {total_chars:,} chars from '{tool_name}'. The full content was saved and "
-        f'can be read with read_tool_result(handle="{handle}") — page with offset/limit or filter '
+        f"can be read with {read_offloaded_call(handle)} — page with offset/limit or filter "
         "with pattern.]",
     ]
     if sketch:
@@ -327,12 +345,12 @@ async def apply_tool_result_limit(
 
 
 # ---------------------------------------------------------------------------
-# read_tool_result
+# read_offloaded
 # ---------------------------------------------------------------------------
 
 
 def _read_lines(text: str) -> tuple[list[str], bool]:
-    """Lines as ``read_tool_result`` numbers them, and whether any were split. A line longer than
+    """Lines as ``read_offloaded`` numbers them, and whether any were split. A line longer than
     the per-read char cap could never be returned, so minified content (one huge line) is split
     into fixed-size segments."""
     lines: list[str] = []
@@ -346,8 +364,8 @@ def _read_lines(text: str) -> tuple[list[str], bool]:
     return lines, segmented
 
 
-def create_read_tool_result(store: OffloadStore) -> Any:
-    """Build the bounded ``read_tool_result`` tool for a store.
+def create_read_offloaded(store: OffloadStore) -> Any:
+    """Build the bounded ``read_offloaded`` tool for a store.
 
     Output is hard-capped (lines and chars) so a read can never blow the context window back
     up, and ``pattern`` is a literal substring — a model-supplied value cannot trigger regex
@@ -355,8 +373,11 @@ def create_read_tool_result(store: OffloadStore) -> Any:
     """
     from .tool import Tool  # Local import: tool.py imports this module for the config types.
 
-    async def _read_tool_result(
-        handle: str = Field(..., description="The handle from an offload placeholder or compacted-transcript list."),
+    async def _read_offloaded(
+        handle: str = Field(
+            ...,
+            description="The handle shown where the content was removed (a tool result, an attached file, or a compacted-transcript list).",
+        ),
         offset: int = Field(0, description="Line offset to start reading from (0-based)."),
         limit: int = Field(200, description=f"Maximum lines to return (capped at {_READ_MAX_LINES})."),
         pattern: str | None = Field(
@@ -364,7 +385,7 @@ def create_read_tool_result(store: OffloadStore) -> Any:
             description="Optional literal substring filter: only lines containing it are returned (offset/limit then apply to the matches).",
         ),
     ) -> str:
-        """Read part of an offloaded tool result. Results are line-numbered; page with offset/limit."""
+        """Read part of offloaded content. Results are line-numbered; page with offset/limit."""
         data = await store.read(handle)
         text = data.decode("utf-8", errors="replace")
         lines, segmented = _read_lines(text)
@@ -399,12 +420,17 @@ def create_read_tool_result(store: OffloadStore) -> Any:
         return "\n".join(out_lines)
 
     return Tool(
-        name="read_tool_result",
+        name=READ_OFFLOADED_TOOL,
         description=(
-            "Read the full content of an offloaded tool result. Use the handle from the "
-            "offload placeholder. Page through long content with offset/limit, or pass a "
-            "literal substring as pattern to return only matching lines."
+            "Read content that was moved out of the conversation to save context: large tool "
+            "results, attached files, and compacted history. Pass the handle shown where the "
+            "content was removed. Results are line-numbered; page with offset/limit, or pass a "
+            "literal substring as pattern to return only the matching lines."
         ),
-        handler=_read_tool_result,
+        handler=_read_offloaded,
         result_limit=None,  # its own output is bounded and must never be offloaded again
     )
+
+
+create_read_tool_result = create_read_offloaded
+"""Earlier name of :func:`create_read_offloaded`."""
