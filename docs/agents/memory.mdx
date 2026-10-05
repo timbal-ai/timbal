@@ -113,7 +113,7 @@ Each branch maintains independent memory from the branching point. Learn more ab
 
 For long-running conversations, memory can grow large enough to exceed the model's context window. Timbal has two complementary layers:
 
-1. **[Tool result offloading](/agents/memory-compaction#tool-result-offloading)** — oversized tool results are spilled to a store *when produced*, so they never dominate every later LLM call. Lossless; the model pages content back via `read_tool_result`.
+1. **[Tool result offloading](/agents/memory-compaction#tool-result-offloading)** — oversized tool results are spilled to a store *when produced*, so they never dominate every later LLM call. Lossless; the model pages content back via `read_offloaded`.
 2. **[Memory compaction](/agents/memory-compaction)** — strategies (keep last N turns, shrink old tool results, LLM summarize) that fire when context utilization crosses `memory_compaction_ratio` (default 75%).
 
 Most long-running agents want both: offloading prevents the bloat at the source; compaction handles everything else. See [Memory Compaction](/agents/memory-compaction) for the full reference.

@@ -2957,7 +2957,7 @@ class TestSummarizeV2:
         transcript_handle = next(line[2:].strip() for line in text.splitlines() if line.startswith("- "))
         transcript = (await store.read(transcript_handle)).decode()
         # The transcript points back to the original spill via the structured field.
-        assert f'read_tool_result(handle="{spill_handle}")' in transcript
+        assert f'read_offloaded(handle="{spill_handle}")' in transcript
         assert "(offloaded; full content:" in transcript
         # And the chain actually resolves to the payload.
         assert (await store.read(spill_handle)).decode() == "the original 100k payload"
@@ -2988,7 +2988,7 @@ class TestSummarizeV2:
     @pytest.mark.asyncio
     async def test_agent_injects_offload_store_for_canonical_record(self, tmp_path) -> None:
         """When the agent has an offload store, summarize's canonical record uses it and
-        read_tool_result can read the transcript back."""
+        read_offloaded can read the transcript back."""
         from timbal.core.agent import Agent
         from timbal.core.memory_compaction import _TRANSCRIPT_MARKER
         from timbal.core.tool_result_offload import LocalOffloadStore, ToolResultLimit
@@ -3008,7 +3008,7 @@ class TestSummarizeV2:
         )
         # The read-back tool is registered because the offload store exists.
         tools, _ = await agent._resolve_tools(0)
-        assert "read_tool_result" in {t.name for t in tools}
+        assert "read_offloaded" in {t.name for t in tools}
 
         ctx = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx)

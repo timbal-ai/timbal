@@ -13,8 +13,9 @@ Three pieces:
 - ``OffloadStore`` / ``LocalOffloadStore`` — where spilled payloads live. Handles are
   backend-relative keys (never absolute paths), so a different backend can resolve the same
   handle in another process.
-- ``read_tool_result`` (via :func:`create_read_tool_result`) — a bounded paging tool the
-  model uses to read spilled payloads back on demand.
+- ``read_offloaded`` (via :func:`create_read_offloaded`) — a bounded paging tool the model
+  uses to read spilled payloads back on demand (also offloaded attachments and compacted
+  transcripts). Calls to its earlier name, ``read_tool_result``, still reach it.
 
 Distinct from ``memory_compaction``: that layer rewrites history that is already inside the
 window; this layer keeps oversized payloads out of the window at production time. Compaction
@@ -22,6 +23,7 @@ strategies treat offloaded results as already-compacted (see ``compact_tool_resu
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -39,24 +41,44 @@ from ..types.content.tool_result import ToolResultContent
 logger = structlog.get_logger("timbal.core.tool_result_offload")
 
 __all__ = [
+    "LEGACY_READ_OFFLOADED_NAMES",
+    "OFFLOAD_DIR_ENV",
+    "READ_OFFLOADED_TOOL",
     "LocalOffloadStore",
     "OffloadStore",
     "Spill",
     "ToolResultLimit",
     "Truncate",
     "apply_tool_result_limit",
+    "create_read_offloaded",
     "create_read_tool_result",
+    "read_offloaded_call",
 ]
 
 OFFLOAD_MARKER = "[Tool result offloaded:"
 """Prefix of the inline placeholder text for spilled results. Kept stable for tests and
 downstream detection; programmatic detection should use ``ToolResultContent.offload_handle``."""
 
+READ_OFFLOADED_TOOL = "read_offloaded"
+"""Name of the read-back tool for everything behind a handle: offloaded tool results, offloaded
+attachments, and compacted transcripts."""
+
+LEGACY_READ_OFFLOADED_NAMES = frozenset({"read_tool_result"})
+"""Earlier names of the read-back tool. Placeholders already stored in memory name them, so the
+agent still dispatches calls to them; they are never advertised to the model."""
+
+OFFLOAD_DIR_ENV = "TIMBAL_OFFLOAD_DIR"
+"""Overrides :class:`LocalOffloadStore`'s default root. A handle is only readable while the
+payload it points at exists, so runtimes whose home directory dies with the process (the Timbal
+platform runs each request in a sandbox with a throwaway ``$HOME``) point this at storage that
+persists between runs."""
+
 _SEGMENT_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
-# read_tool_result hard caps — the read-back tool must never blow the window back up.
+# read_offloaded hard caps — the read-back tool must never blow the window back up.
 _READ_MAX_LINES = 500
 _READ_MAX_CHARS = 50_000
+_READ_SEGMENT_CHARS = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +101,7 @@ class Truncate(BaseModel):
 class Spill(BaseModel):
     """Persist the full payload to the offload store and keep a preview + handle inline.
 
-    Lossless: the model reads the payload back on demand through ``read_tool_result``.
+    Lossless: the model reads the payload back on demand through ``read_offloaded``.
     ``fallback`` applies when no store is available or the store write fails — default is a
     bounded truncation so an oversized result is never silently passed through.
     """
@@ -93,7 +115,7 @@ class ToolResultLimit(BaseModel):
 
     Results whose concatenated text content reaches ``threshold`` characters get ``action``
     applied. Smaller results pass through untouched. Error results, pinned results, and
-    ``read_tool_result``'s own output are always exempt.
+    ``read_offloaded``'s own output are always exempt.
 
     ``store`` is only honored on the agent-level config (``Agent(tool_result_limit=...)``);
     per-tool configs share the agent's store.
@@ -145,26 +167,43 @@ def _sanitize_key(key: str) -> Path:
 class LocalOffloadStore:
     """Default store: one file per key under a stable local root.
 
+    The root is ``root`` when given, else ``$TIMBAL_OFFLOAD_DIR``, else ``~/.timbal/offload``.
+
     Keep-forever by default — deleting on run end would break a later run (session chaining,
     resume) that still holds handles. Opt into age-based pruning with ``cleanup_after``;
     pruning runs on a daemon thread off the hot path and never raises into the agent run.
     """
 
     def __init__(self, root: str | Path | None = None, cleanup_after: timedelta | None = None) -> None:
-        self.root = (Path(root) if root else Path.home() / ".timbal" / "offload").expanduser().resolve()
+        self.root = root
         self.cleanup_after = cleanup_after
 
-    def _ensure_root(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
+    @property
+    def root(self) -> Path:
+        # Without an explicit root this is resolved on every use, so the environment of a process
+        # restored from a snapshot (where the store may be built before it is set) still applies.
+        if self._root is not None:
+            return self._root
+        configured = os.environ.get(OFFLOAD_DIR_ENV)
+        return (Path(configured) if configured else Path.home() / ".timbal" / "offload").expanduser().resolve()
+
+    @root.setter
+    def root(self, value: str | Path | None) -> None:
+        self._root = Path(value).expanduser().resolve() if value else None
+
+    @staticmethod
+    def _ensure_root(root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
         try:
-            self.root.chmod(0o700)
+            root.chmod(0o700)
         except OSError:  # e.g. exotic filesystems — permissions are best-effort hardening
             pass
 
     async def write(self, key: str, data: bytes) -> str:
-        self._ensure_root()
+        root = self.root
+        self._ensure_root(root)
         rel = _sanitize_key(key)
-        path = self.root / rel
+        path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         # Never clobber: a retried call or key collision gets a distinct file.
         final = path
@@ -174,24 +213,25 @@ class LocalOffloadStore:
             n += 1
         final.write_bytes(data)
         if self.cleanup_after is not None:
-            threading.Thread(target=self._prune, daemon=True).start()
-        return final.relative_to(self.root).as_posix()
+            threading.Thread(target=self._prune, args=(root,), daemon=True).start()
+        return final.relative_to(root).as_posix()
 
     async def read(self, handle: str) -> bytes:
+        root = self.root
         rel = _sanitize_key(handle)
-        path = (self.root / rel).resolve()
+        path = (root / rel).resolve()
         # Resolve (following symlinks) and re-check containment so neither a crafted handle
         # nor a symlink planted inside the root can escape it.
-        if not path.is_relative_to(self.root):
+        if not path.is_relative_to(root):
             raise ValueError(f"Handle escapes the offload root: {handle!r}")
         if not path.is_file():
             raise FileNotFoundError(f"No offloaded content found for handle {handle!r}.")
         return path.read_bytes()
 
-    def _prune(self) -> None:
+    def _prune(self, root: Path) -> None:
         try:
             cutoff = time.time() - self.cleanup_after.total_seconds()
-            for path in self.root.rglob("*"):
+            for path in root.rglob("*"):
                 if path.is_file() and path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001 — cleanup must never fail a run
@@ -232,13 +272,13 @@ def _shape_sketch(text: str) -> str | None:
     return sketch[:200]
 
 
-def _truncate_text(text: str, tool_name: str, action: Truncate) -> str:
+def _truncate_text(text: str, tool_name: str, action: Truncate, kind: str = "tool result") -> str:
     total = len(text)
     max_chars = action.max_chars
     if total <= max_chars:
         return text
     removed = total - max_chars
-    marker = f"\n[... truncated {removed:,} of {total:,} chars from '{tool_name}' tool result ...]\n"
+    marker = f"\n[... truncated {removed:,} of {total:,} chars from '{tool_name}' {kind} ...]\n"
     if action.strategy == "head":
         return text[:max_chars] + marker
     if action.strategy == "tail":
@@ -248,10 +288,15 @@ def _truncate_text(text: str, tool_name: str, action: Truncate) -> str:
     return text[:head] + marker + text[-tail:]
 
 
+def read_offloaded_call(handle: str) -> str:
+    """How placeholders tell the model to read ``handle`` back."""
+    return f'{READ_OFFLOADED_TOOL}(handle="{handle}")'
+
+
 def _spill_placeholder(tool_name: str, total_chars: int, handle: str, preview: str, sketch: str | None) -> str:
     lines = [
         f"{OFFLOAD_MARKER} {total_chars:,} chars from '{tool_name}'. The full content was saved and "
-        f'can be read with read_tool_result(handle="{handle}") — page with offset/limit or filter '
+        f"can be read with {read_offloaded_call(handle)} — page with offset/limit or filter "
         "with pattern.]",
     ]
     if sketch:
@@ -326,12 +371,40 @@ async def apply_tool_result_limit(
 
 
 # ---------------------------------------------------------------------------
-# read_tool_result
+# read_offloaded
 # ---------------------------------------------------------------------------
 
 
-def create_read_tool_result(store: OffloadStore) -> Any:
-    """Build the bounded ``read_tool_result`` tool for a store.
+def _read_lines(text: str, pattern: str | None = None) -> tuple[list[str], bool, list[int]]:
+    """Numbered segments, whether any lines were split, and matching segment indices.
+
+    Match against the original line so a literal spanning a segment boundary is still
+    found. Return every segment overlapped by a match without crossing a real newline.
+    """
+    lines: list[str] = []
+    segmented = False
+    matches: list[int] = []
+    for line in text.splitlines():
+        if len(line) <= _READ_SEGMENT_CHARS:
+            if pattern is not None and pattern in line:
+                matches.append(len(lines))
+            lines.append(line)
+        else:
+            for start in range(0, len(line), _READ_SEGMENT_CHARS):
+                end = start + _READ_SEGMENT_CHARS
+                if pattern is not None:
+                    # Each side is shorter than the pattern, so a match in this slice
+                    # must overlap the current segment (possibly also its neighbours).
+                    overlap = max(0, len(pattern) - 1)
+                    if pattern in line[max(0, start - overlap) : end + overlap]:
+                        matches.append(len(lines))
+                lines.append(line[start:end])
+            segmented = True
+    return lines, segmented, matches
+
+
+def create_read_offloaded(store: OffloadStore) -> Any:
+    """Build the bounded ``read_offloaded`` tool for a store.
 
     Output is hard-capped (lines and chars) so a read can never blow the context window back
     up, and ``pattern`` is a literal substring — a model-supplied value cannot trigger regex
@@ -339,8 +412,11 @@ def create_read_tool_result(store: OffloadStore) -> Any:
     """
     from .tool import Tool  # Local import: tool.py imports this module for the config types.
 
-    async def _read_tool_result(
-        handle: str = Field(..., description="The handle from an offload placeholder or compacted-transcript list."),
+    async def _read_offloaded(
+        handle: str = Field(
+            ...,
+            description="The handle shown where the content was removed (a tool result, an attached file, or a compacted-transcript list).",
+        ),
         offset: int = Field(0, description="Line offset to start reading from (0-based)."),
         limit: int = Field(200, description=f"Maximum lines to return (capped at {_READ_MAX_LINES})."),
         pattern: str | None = Field(
@@ -348,23 +424,33 @@ def create_read_tool_result(store: OffloadStore) -> Any:
             description="Optional literal substring filter: only lines containing it are returned (offset/limit then apply to the matches).",
         ),
     ) -> str:
-        """Read part of an offloaded tool result. Results are line-numbered; page with offset/limit."""
-        data = await store.read(handle)
+        """Read part of offloaded content. Results are line-numbered; page with offset/limit."""
+        try:
+            data = await store.read(handle)
+        except FileNotFoundError as e:
+            # Still an error (the trace should show it), but one that tells the model a retry
+            # is pointless.
+            raise FileNotFoundError(
+                f"The content behind handle {handle!r} is no longer available, and retrying will not "
+                "bring it back. Continue with what is already in the conversation, or ask the user "
+                "for what you need."
+            ) from e
         text = data.decode("utf-8", errors="replace")
-        lines = text.splitlines()
+        lines, segmented, matching_indices = _read_lines(text, pattern)
         total = len(lines)
 
         offset = max(0, offset)
         limit = max(1, min(limit, _READ_MAX_LINES))
 
         if pattern is not None:
-            numbered = [(i, line) for i, line in enumerate(lines, start=1) if pattern in line]
-            matched = len(numbered)
-            selected = numbered[offset : offset + limit]
+            matched = len(matching_indices)
+            selected = [(i + 1, lines[i]) for i in matching_indices[offset : offset + limit]]
             header = f"[{len(selected)} of {matched} matching lines ({total} total) for {pattern!r} in {handle}]"
         else:
             selected = list(enumerate(lines, start=1))[offset : offset + limit]
             header = f"[lines {offset + 1}-{offset + len(selected)} of {total} in {handle}]"
+        if segmented:
+            header += f" (lines over {_READ_SEGMENT_CHARS:,} chars are split into consecutive numbered segments)"
 
         out_lines = [header]
         used = len(header)
@@ -381,12 +467,18 @@ def create_read_tool_result(store: OffloadStore) -> Any:
         return "\n".join(out_lines)
 
     return Tool(
-        name="read_tool_result",
+        name=READ_OFFLOADED_TOOL,
         description=(
-            "Read the full content of an offloaded tool result. Use the handle from the "
-            "offload placeholder. Page through long content with offset/limit, or pass a "
-            "literal substring as pattern to return only matching lines."
+            "Read content that was moved out of the conversation to save context: large tool "
+            "results, attached files, and compacted history. Pass the handle shown where the "
+            "content was removed. Results are line-numbered; page with offset/limit, or pass a "
+            "literal substring as pattern to return matching lines, including segments "
+            "overlapped by a match."
         ),
-        handler=_read_tool_result,
+        handler=_read_offloaded,
         result_limit=None,  # its own output is bounded and must never be offloaded again
     )
+
+
+create_read_tool_result = create_read_offloaded
+"""Earlier name of :func:`create_read_offloaded`."""

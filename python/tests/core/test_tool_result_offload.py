@@ -16,7 +16,7 @@ from timbal.core.tool_result_offload import (
     _shape_sketch,
     _truncate_text,
     apply_tool_result_limit,
-    create_read_tool_result,
+    create_read_offloaded,
 )
 from timbal.state import set_run_context
 from timbal.state.context import RunContext
@@ -24,7 +24,7 @@ from timbal.state.tracing.providers import InMemoryTracingProvider
 from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.message import Message
 
-_HANDLE_RE = re.compile(r'read_tool_result\(handle="([^"]+)"\)')
+_HANDLE_RE = re.compile(r'read_offloaded\(handle="([^"]+)"\)')
 
 
 def _result(text: str, uid: str = "c1") -> ToolResultContent:
@@ -154,6 +154,25 @@ class TestLocalOffloadStore:
         assert not old_path.exists(), "expired file must be pruned"
         assert await store.read(fresh_handle) == b"fresh"
 
+    @pytest.mark.asyncio
+    async def test_root_from_env_and_explicit_root_wins(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("TIMBAL_OFFLOAD_DIR", str(tmp_path / "from-env"))
+        handle = await LocalOffloadStore().write("run/c1", b"env")
+        assert (tmp_path / "from-env" / handle).read_bytes() == b"env"
+
+        explicit = LocalOffloadStore(root=tmp_path / "explicit")
+        assert explicit.root == (tmp_path / "explicit").resolve()
+
+    @pytest.mark.asyncio
+    async def test_env_set_after_construction_applies(self, tmp_path, monkeypatch) -> None:
+        """A process restored from a snapshot can build its store before its env is set."""
+        monkeypatch.delenv("TIMBAL_OFFLOAD_DIR", raising=False)
+        store = LocalOffloadStore()
+        monkeypatch.setenv("TIMBAL_OFFLOAD_DIR", str(tmp_path / "late"))
+        handle = await store.write("run/c1", b"late")
+        assert await store.read(handle) == b"late"
+        assert (tmp_path / "late" / handle).is_file()
+
 
 # ---------------------------------------------------------------------------
 # apply_tool_result_limit
@@ -192,7 +211,7 @@ class TestApplyToolResultLimit:
         placeholder = result.content[0].text
         assert placeholder.startswith(OFFLOAD_MARKER)
         assert "'search'" in placeholder
-        assert f'read_tool_result(handle="{record["handle"]}")' in placeholder
+        assert f'read_offloaded(handle="{record["handle"]}")' in placeholder
         assert "Preview (first 100" in placeholder
         # Lossless: the store holds the full payload.
         assert (await store.read(record["handle"])).decode() == payload
@@ -315,7 +334,7 @@ class TestApplyToolResultLimit:
 
 
 # ---------------------------------------------------------------------------
-# read_tool_result
+# read_offloaded
 # ---------------------------------------------------------------------------
 
 
@@ -324,7 +343,7 @@ class TestReadToolResult:
     async def test_paging(self, tmp_path) -> None:
         store = LocalOffloadStore(root=tmp_path)
         handle = await store.write("run/c1", "\n".join(f"line-{i}" for i in range(1, 1_001)).encode())
-        tool = create_read_tool_result(store)
+        tool = create_read_offloaded(store)
 
         out = (await tool(handle=handle, offset=0, limit=3).collect()).output
         assert "[lines 1-3 of 1000" in out
@@ -337,7 +356,7 @@ class TestReadToolResult:
     async def test_pattern_is_literal(self, tmp_path) -> None:
         store = LocalOffloadStore(root=tmp_path)
         handle = await store.write("run/c1", b"alpha\nbeta a.c one\ngamma\nabc two\n")
-        tool = create_read_tool_result(store)
+        tool = create_read_offloaded(store)
         # "a.c" must match the literal substring, not the regex (which would also hit "abc").
         out = (await tool(handle=handle, pattern="a.c").collect()).output
         assert "2: beta a.c one" in out
@@ -348,29 +367,75 @@ class TestReadToolResult:
     async def test_limit_clamped(self, tmp_path) -> None:
         store = LocalOffloadStore(root=tmp_path)
         handle = await store.write("run/c1", ("x\n" * 2_000).encode())
-        tool = create_read_tool_result(store)
+        tool = create_read_offloaded(store)
         out = (await tool(handle=handle, limit=100_000).collect()).output
         assert "[lines 1-500 of 2000" in out
 
     @pytest.mark.asyncio
     async def test_unknown_handle_errors(self, tmp_path) -> None:
         store = LocalOffloadStore(root=tmp_path)
-        tool = create_read_tool_result(store)
+        tool = create_read_offloaded(store)
         result = await tool(handle="run/nope").collect()
         assert result.status.code == "error"
+        assert "no longer available" in str(result.error) and "retrying will not" in str(result.error)
 
     @pytest.mark.asyncio
     async def test_output_clipped_at_char_cap(self, tmp_path) -> None:
         """500 long lines would exceed the char cap — output must clip, not balloon."""
         store = LocalOffloadStore(root=tmp_path)
         handle = await store.write("run/c1", ("\n".join("y" * 1_000 for _ in range(500))).encode())
-        tool = create_read_tool_result(store)
+        tool = create_read_offloaded(store)
         out = (await tool(handle=handle, limit=500).collect()).output
         assert len(out) <= 51_000
         assert "output clipped" in out
 
+    @pytest.mark.asyncio
+    async def test_a_line_longer_than_the_char_cap_is_readable(self, tmp_path) -> None:
+        """Minified JSON is one line; it must page in segments, not clip to nothing."""
+        line = "".join(f'{{"id":{i}}},' for i in range(20_000))
+        store = LocalOffloadStore(root=tmp_path)
+        handle = await store.write("run/c1", f"first\n{line}".encode())
+        tool = create_read_offloaded(store)
+
+        out = (await tool(handle=handle, limit=500).collect()).output
+        assert len(out) <= 51_000
+        assert "split into consecutive numbered segments" in out
+        assert "1: first" in out and '2: {"id":0},' in out
+
+        out = (await tool(handle=handle, pattern='"id":19999}').collect()).output
+        assert "of 1 matching lines" in out and '"id":19999}' in out
+
+        pages = []
+        offset = 1
+        while True:
+            body = (await tool(handle=handle, offset=offset, limit=4).collect()).output.splitlines()[1:]
+            if not body:
+                break
+            pages.extend(entry.split(": ", 1)[1] for entry in body)
+            offset += len(body)
+        assert "".join(pages) == line
+
+    @pytest.mark.asyncio
+    async def test_pattern_across_segment_boundary_is_found(self, tmp_path) -> None:
+        store = LocalOffloadStore(root=tmp_path)
+        payload = "x" * 9_998 + "needle" + "y" * 10_000
+        handle = await store.write("run/boundary", payload.encode())
+        tool = create_read_offloaded(store)
+
+        out = (await tool(handle=handle, pattern="needle").collect()).output
+
+        assert "of 2 matching lines" in out
+        body = out.splitlines()[1:]
+        assert "needle" in "".join(entry.split(": ", 1)[1] for entry in body)
+        page = (await tool(handle=handle, pattern="needle", offset=1, limit=1).collect()).output
+        assert "of 2 matching lines" in page and "2: edle" in page
+
+        separate = await store.write("run/separate", b"need\nle")
+        out = (await tool(handle=separate, pattern="needle").collect()).output
+        assert "of 0 matching lines" in out
+
     def test_own_results_exempt(self, tmp_path) -> None:
-        tool = create_read_tool_result(LocalOffloadStore(root=tmp_path))
+        tool = create_read_offloaded(LocalOffloadStore(root=tmp_path))
         assert tool.result_limit is None
 
 
@@ -386,7 +451,7 @@ def _big_payload() -> str:
 class TestAgentOffload:
     @pytest.mark.asyncio
     async def test_spill_and_read_back_end_to_end(self, tmp_path) -> None:
-        """Big tool result → placeholder in memory → model pages it back via read_tool_result."""
+        """Big tool result → placeholder in memory → model pages it back via read_offloaded."""
         plan = {"n": 0}
 
         def model_handler(messages):
@@ -405,7 +470,7 @@ class TestAgentOffload:
                     role="assistant",
                     content=[
                         ToolUseContent(
-                            id="t2", name="read_tool_result", input={"handle": handle, "offset": 499, "limit": 1}
+                            id="t2", name="read_offloaded", input={"handle": handle, "offset": 499, "limit": 1}
                         )
                     ],
                     stop_reason="tool_use",
@@ -601,6 +666,7 @@ class TestAgentOffload:
         # Path.home() ignores $HOME on Windows (USERPROFILE wins) — patch the method
         # itself so the default store root lands in tmp_path on every platform.
         monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.delenv("TIMBAL_OFFLOAD_DIR", raising=False)
 
         def model_handler(_messages):
             if _messages[-1].role == "user":
@@ -640,9 +706,9 @@ class TestAgentOffload:
             tools=[Tool(name="fetch", handler=lambda: "x")],
         )
         assert agent._offload_store is None
-        assert agent._read_tool_result is None
+        assert agent._read_offloaded is None
         tools, _ = await agent._resolve_tools(0)
-        assert "read_tool_result" not in {t.name for t in tools}
+        assert "read_offloaded" not in {t.name for t in tools}
 
     @pytest.mark.asyncio
     async def test_read_tool_registered_when_configured(self, tmp_path) -> None:
@@ -653,7 +719,47 @@ class TestAgentOffload:
             tool_result_limit=ToolResultLimit(store=LocalOffloadStore(root=tmp_path)),
         )
         tools, _ = await agent._resolve_tools(0)
-        assert "read_tool_result" in {t.name for t in tools}
+        assert "read_offloaded" in {t.name for t in tools}
+
+    @pytest.mark.asyncio
+    async def test_calls_to_the_earlier_name_still_read(self, tmp_path) -> None:
+        """Placeholders stored before the rename tell the model to call read_tool_result."""
+        from timbal.core.tool_result_offload import create_read_offloaded, create_read_tool_result
+
+        store = LocalOffloadStore(root=tmp_path)
+        handle = await store.write("old/run", "\n".join(f"line-{i}" for i in range(1, 11)).encode())
+        seen: list[list[Message]] = []
+
+        def model_handler(messages):
+            seen.append(messages)
+            if len(seen) == 1:
+                call = ToolUseContent(
+                    id="old1", name="read_tool_result", input={"handle": handle, "offset": 4, "limit": 1}
+                )
+                return Message(role="assistant", content=[call], stop_reason="tool_use")
+            return "done"
+
+        agent = Agent(
+            name="legacy_agent",
+            model=TestModel(handler=model_handler),
+            tools=[],
+            tool_result_limit=ToolResultLimit(store=store),
+        )
+        result = await agent(prompt="read it").collect()
+        assert result.status.code == "success", result.error
+        reply = [c for m in seen[1] if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
+        assert reply[0].id == "old1" and "5: line-5" in reply[0].content[0].text
+
+        tools, _ = await agent._resolve_tools(0)
+        assert "read_tool_result" not in {t.name for t in tools}
+        assert create_read_tool_result is create_read_offloaded
+
+    @pytest.mark.asyncio
+    async def test_the_earlier_name_is_unknown_without_offloading(self) -> None:
+        agent = Agent(name="plain", model=TestModel(responses=["done"]), tools=[])
+        tools, _ = await agent._resolve_tools(0)
+        call = ToolUseContent(id="x", name="read_tool_result", input={"handle": "h"})
+        assert agent._resolve_tool_for_call(tools, call) is None
 
     @pytest.mark.asyncio
     async def test_offloaded_placeholders_survive_midloop_compaction(self, tmp_path, monkeypatch) -> None:
@@ -696,13 +802,7 @@ class TestAgentOffload:
         assert len(agent_span.metadata.get("offload", [])) == 3
 
         # All three placeholders survived drop-mode compaction, handles intact.
-        kept = [
-            c
-            for m in agent_span.memory
-            if m.role == "tool"
-            for c in m.content
-            if isinstance(c, ToolResultContent)
-        ]
+        kept = [c for m in agent_span.memory if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
         assert len(kept) == 3
         assert all(c.offload_handle for c in kept)
         InMemoryTracingProvider._storage.clear()

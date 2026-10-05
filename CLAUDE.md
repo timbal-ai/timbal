@@ -461,7 +461,7 @@ agent = Agent(
  tool_result_limit=ToolResultLimit( # or an int shorthand for the threshold
  threshold=20_000, # chars of text content
  action=Spill(preview_chars=1_000), # or Truncate(strategy="head"|"tail"|"head_tail")
- store=LocalOffloadStore(), # default; keep-forever, opt-in cleanup_after=timedelta
+ store=LocalOffloadStore(), # default root $TIMBAL_OFFLOAD_DIR or ~/.timbal/offload; keep-forever, opt-in cleanup_after=timedelta
  ),
  tools=[
  Tool(name="logs", handler=..., result_limit=ToolResultLimit(threshold=8_000, action=Truncate(strategy="tail"))),
@@ -471,15 +471,17 @@ agent = Agent(
 ```
 
 - Oversized results are reduced **once, when produced** — before entering memory/dumps — so history stays append-only (prompt-cache friendly) and the reduction persists into traces.
-- `Spill` is lossless: payload goes to the store, a preview + handle stays inline, and a bounded `read_tool_result(handle, offset, limit, pattern)` tool is auto-registered for paged read-back. Falls back to `Truncate` when the store fails.
-- Always exempt: error results, pinned tools (`pin_result=True`), `read_tool_result` itself. Precedence: `Tool.result_limit` > agent `tool_result_limit`.
+- `Spill` is lossless: payload goes to the store, a preview + handle stays inline, and a bounded `read_offloaded(handle, offset, limit, pattern)` tool is auto-registered for paged read-back. Falls back to `Truncate` when the store fails.
+- Always exempt: error results, pinned tools (`pin_result=True`), `read_offloaded` itself. Precedence: `Tool.result_limit` > agent `tool_result_limit`.
 - Offload events are recorded in `span.metadata["offload"]`; the handle lives on `ToolResultContent.offload_handle`.
+- `attachment_limit=` (same `ToolResultLimit`/int config, default `None`) bounds file attachments that providers receive as pasted text (anything but images, PDFs, audio, `.eml`). Applied **per request**, not to memory (`python/timbal/core/attachment_limit.py`): memory and traces keep the `FileContent`, the model gets a deterministic stand-in (`Spill` saves the text once under a content hash in the shared store, readable via `read_offloaded`), and conversations that already hold an oversized file are fixed on their next call. Always on, even without it: the LLM router cuts a text attachment estimated to exceed the model's context window (> 4 chars per window token) to a 20,000-char preview.
+- `read_offloaded` (earlier `read_tool_result`; calls to the old name still dispatch to it, unadvertised) reads every handle: tool results, attachments, compacted transcripts. It splits lines over 10,000 chars into numbered segments, so minified content is pageable.
 
 ### History compaction (utilization-triggered, whole memory)
 
 `memory_compaction=` strategies fire at `memory_compaction_ratio` (default 0.75) of the context window: `compact_tool_results(keep_last_n, replacement, keep_offloaded=True)`, `keep_last_n_messages(n)`, `keep_last_n_turns(n)`, `summarize(...)`.
 
-`summarize()` builds a sectioned summary message where everything except the LLM summary is mechanical: user messages carried **verbatim** (`preserve_user_messages=True`), a **canonical record** of each summarized region written to the offload store and readable via `read_tool_result` (`canonical_record=True`; store shared automatically from `tool_result_limit`), a conservative continuation note, and an optional `rehydrate=` callable re-run every pass. `compact_tool_results` keeps offloaded placeholders intact by default so their handles stay dereferenceable.
+`summarize()` builds a sectioned summary message where everything except the LLM summary is mechanical: user messages carried **verbatim** (`preserve_user_messages=True`), a **canonical record** of each summarized region written to the offload store and readable via `read_offloaded` (`canonical_record=True`; store shared automatically from `tool_result_limit`), a conservative continuation note, and an optional `rehydrate=` callable re-run every pass. `compact_tool_results` keeps offloaded placeholders intact by default so their handles stay dereferenceable.
 
 ---
 

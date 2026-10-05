@@ -31,7 +31,7 @@ Results under the threshold pass through untouched. Oversized ones are replaced 
 
 ```text
 [Tool result offloaded: 184,203 chars from 'search_docs'. The full content was saved and
-can be read with read_tool_result(handle="06a7.../t1") — page with offset/limit or filter
+can be read with read_offloaded(handle="06a7.../t1") — page with offset/limit or filter
 with pattern.]
 Shape: {"results": list[92], "total": int}
 Preview (first 1,000 of 184,203 chars):
@@ -99,19 +99,20 @@ Some results are never reduced, regardless of configuration:
 
 - **Error results** — the model needs the full error to recover.
 - **Pinned tools** (`pin_result=True`) — durable context like [skill](/agents/skills) documentation. See [Pinned results](#pinned-results).
-- **`read_tool_result`'s own output** — it is bounded by construction.
+- **`read_offloaded`'s own output** — it is bounded by construction.
 
 ### Reading content back
 
-When offloading is active, the agent auto-registers a `read_tool_result` tool:
+When offloading is active, the agent auto-registers a `read_offloaded` tool. It reads everything behind a handle: offloaded tool results, [offloaded attachments](#attachments), and compacted transcripts.
 
 ```python
-read_tool_result(handle, offset=0, limit=200, pattern=None)
+read_offloaded(handle, offset=0, limit=200, pattern=None)
 ```
 
-- Line-numbered paging via `offset`/`limit` (hard-capped at 500 lines / 50,000 chars per call, so a read can never blow the window back up).
-- `pattern` filters to lines containing a **literal substring** (not a regex).
+- Line-numbered paging via `offset`/`limit` (hard-capped at 500 lines / 50,000 chars per call, so a read can never blow the window back up). Lines over 10,000 chars, such as minified JSON, are split into consecutive numbered segments so they can be paged too.
+- `pattern` filters to lines containing a **literal substring** (not a regex). A match spanning a segment boundary returns both segments; real newline boundaries are preserved.
 - Unknown or expired handles return a clean tool error the model can react to.
+- Earlier versions named it `read_tool_result`. Placeholders already stored in memory still say so, and calls to that name reach the same tool; it is not advertised to the model.
 
 The model uses it on its own — the placeholder tells it how.
 
@@ -129,6 +130,8 @@ class OffloadStore(Protocol):
 
 The default `LocalOffloadStore` writes one file per result under `~/.timbal/offload/` (owner-only permissions; reads are hardened against path traversal and symlink escapes). Handles are store-relative keys, not absolute paths, so a different backend can resolve the same handle in another process.
 
+A handle is only readable while its payload exists, so the store must outlive the run that wrote it: later turns of the conversation still hold the handle. Set `TIMBAL_OFFLOAD_DIR` to move the default root wherever that holds. This matters when the home directory is thrown away with the process, as in containers and sandboxes. Timbal platform runs set it to the workforce's persistent directory. An explicit `LocalOffloadStore(root=...)` takes precedence. When a payload is gone anyway, `read_offloaded` returns an error telling the model not to retry the handle.
+
 Payloads are kept **forever by default** — deleting on run end would break a resumed or chained session that still holds handles. Bound disk usage with opt-in age-based pruning:
 
 ```python
@@ -140,6 +143,42 @@ agent = Agent(..., tool_result_limit=ToolResultLimit(store=store))
 ```
 
 Pruning runs off the hot path and never fails a run.
+
+### Attachments
+
+Files in a user message reach the model in one of two ways. Images, PDFs and audio are sent natively. Everything else (plain text, JSON, CSV, logs, code, HAR captures, and `.xlsx`/`.docx` after text extraction) is pasted into the prompt whole. One large upload can overflow the context window, and because the message stays in memory, every later turn of that conversation fails the same way.
+
+`attachment_limit` bounds those pasted attachments with the same `ToolResultLimit` config:
+
+```python
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    tool_result_limit=20_000,
+    attachment_limit=20_000,  # attachments whose text reaches 20,000 chars are offloaded
+)
+```
+
+The model sees a stand-in instead of the file, and reads the full text back with `read_offloaded`:
+
+```text
+[Attached file offloaded: "export.json" (application/json), 3,754,724 chars. The full text was saved
+and can be read with read_offloaded(handle="attachments/ae87...") — page with offset/limit or filter
+with pattern.]
+Shape: {"log": object}
+Preview (first 1,000 of 3,754,724 chars):
+...
+```
+
+Unlike tool results, attachments are reduced in **each request**, not when they enter memory:
+
+- **Memory and traces keep the file.** The `FileContent` the caller sent is what gets stored and replayed; only the request to the model differs.
+- **Existing conversations are fixed on their next call.** A chat that already holds an oversized upload is bounded as soon as the limit is configured, without rewriting stored history.
+- **Prompt-cache friendly.** The stand-in depends only on the file's text and the limit. The text is saved under a content hash and reused while its payload exists. If cleanup removes it, the next request restores it from the original attachment. With `LocalOffloadStore`, the restored handle and stand-in stay identical.
+
+`Spill` (default) shares the offload store with `tool_result_limit` and registers `read_offloaded` if it isn't already there. `Truncate` needs no store. If no store is available, the attachment is truncated rather than pasted whole. Images, PDFs, audio, `.eml` files and attachments under the threshold are always sent as before.
+
+Without `attachment_limit` (the default), a text attachment estimated to exceed the model's context window on its own (more than 4 characters per token of the window) is replaced by its first 20,000 chars and a note on every model call, and a warning is logged. This is a character-based heuristic: token density varies, so it can also shorten files that would fit, and it does not account for the combined size of other attachments, history, or output tokens. Use `attachment_limit` to explicitly bound attachments. Models with an unknown context window are left alone.
 
 ## How Compaction Works
 
@@ -166,7 +205,7 @@ agent = Agent(
 
 Set `memory_compaction_ratio=0.0` to always compact, or `1.0` to effectively disable auto-triggering.
 
-Offloading and compaction compose cleanly: offloaded placeholders are small, so they push utilization down and compaction triggers later or never; `compact_tool_results` keeps offloaded placeholders intact by default so their handles stay dereferenceable; and `summarize` writes its canonical record to the same store, readable back through the same `read_tool_result` tool.
+Offloading and compaction compose cleanly: offloaded placeholders are small, so they push utilization down and compaction triggers later or never; `compact_tool_results` keeps offloaded placeholders intact by default so their handles stay dereferenceable; and `summarize` writes its canonical record to the same store, readable back through the same `read_offloaded` tool.
 
 ## Built-in Strategies
 
@@ -268,7 +307,7 @@ Use a smaller, cheaper model for summarization to reduce cost. For example, `mod
 The summary message is **sectioned**, and everything except the LLM summary itself is assembled mechanically — never paraphrased by the summarizer:
 
 - **Verbatim User Messages** — the user's own words from the summarized region, carried forward verbatim across passes (`preserve_user_messages=True`, default). Summaries that drop or mischaracterize user instructions are the most damaging compaction failure, so the user's words are never trusted to the LLM. Budgeted by `max_verbatim_chars` (default 10,000; oldest entries dropped first).
-- **Compacted Transcripts** — when an offload store is available, the full untruncated text of every summarized region is persisted and its handle listed, readable via `read_tool_result` (`canonical_record=True`, default). Summarization becomes recoverable instead of destructive. The store is shared automatically from the agent's [`tool_result_limit`](#tool-result-offloading), or passed explicitly via `store=`.
+- **Compacted Transcripts** — when an offload store is available, the full untruncated text of every summarized region is persisted and its handle listed, readable via `read_offloaded` (`canonical_record=True`, default). Summarization becomes recoverable instead of destructive. The store is shared automatically from the agent's [`tool_result_limit`](#tool-result-offloading), or passed explicitly via `store=`.
 - **Note** — conservative continuation guidance: the model is told to verify intent against the user's verbatim words rather than acting on the summary alone.
 - **Rehydrated Context** — output of an optional `rehydrate=` callable (sync or async, returning `str`, `list[str]`, or `None`), re-run on **every** compaction pass. Use it to re-inject working state that must survive summarization — the active plan, recently edited files:
 

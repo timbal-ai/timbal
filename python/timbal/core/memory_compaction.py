@@ -15,6 +15,7 @@ from uuid_extensions import uuid7
 
 from ..types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.message import Message
+from .tool_result_offload import read_offloaded_call
 
 logger = structlog.get_logger("timbal.core.memory_compaction")
 
@@ -168,7 +169,7 @@ def _format_message_for_summary(msg: Message) -> str | None:
 def _format_message_for_transcript(msg: Message) -> str | None:
     """Format a message for the canonical-record transcript. Unlike
     ``_format_message_for_summary`` nothing is truncated — the transcript is the lossless
-    record of what compaction removed, read back on demand via ``read_tool_result``.
+    record of what compaction removed, read back on demand via ``read_offloaded``.
 
     Results that were offloaded at production time hold only a placeholder inline; their
     payload lives in the offload store. The transcript records the handle from the
@@ -187,7 +188,7 @@ def _format_message_for_transcript(msg: Message) -> str | None:
             if c.offload_handle:
                 parts.append(
                     f"[Tool result for '{c.id}' (offloaded; full content: "
-                    f'read_tool_result(handle="{c.offload_handle}")): {result_text}]'
+                    f"{read_offloaded_call(c.offload_handle)}): {result_text}]"
                 )
             else:
                 parts.append(f"[Tool result for '{c.id}': {result_text}]")
@@ -261,7 +262,7 @@ def _build_summary_message_text(
         parts.append(
             f"{_TRANSCRIPT_MARKER}\n"
             "Full transcripts of the compacted messages were saved. Read them with "
-            'read_tool_result(handle="..."):\n' + "\n".join(f"- {h}" for h in kept_handles)
+            f"{read_offloaded_call('...')}:\n" + "\n".join(f"- {h}" for h in kept_handles)
         )
 
     parts.append(f"{_NOTE_MARKER}\n{_CONTINUATION_NOTE}")
@@ -636,7 +637,7 @@ def summarize(
       the user's words are ground truth, so they are never trusted to the summarizer.
     - Compacted Transcripts: when a store is available (``store=``, or shared from the
       agent's ``tool_result_limit`` offload store), the full text of every summarized
-      region is persisted and its handle listed, readable via ``read_tool_result``
+      region is persisted and its handle listed, readable via ``read_offloaded``
       (``canonical_record``). Summarization thus becomes recoverable, not destructive.
     - Note: conservative continuation guidance — the model is told to verify intent
       against the user's words instead of barreling ahead on the summary.

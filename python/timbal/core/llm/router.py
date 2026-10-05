@@ -8,6 +8,7 @@ from pydantic import BaseModel, SecretStr
 
 from ...state import get_call_id, get_or_create_run_context, get_run_context, set_billing_id
 from ...types.message import Message
+from ..attachment_limit import bound_unfittable_attachments
 from ..runnable import Runnable
 from .chat_completions import prepare_chat_completions_request
 from .clients import _get_file_client, _resolve_client
@@ -133,6 +134,9 @@ async def _llm_router(
     ]
     if _unloaded_files:
         await asyncio.gather(*(f.load(client=_get_file_client()) for f in _unloaded_files))
+    # Bound attachments estimated to exceed this model's window, so a huge upload in
+    # memory does not keep overflowing later requests.
+    messages = bound_unfittable_attachments(messages, model)
 
     # Per-API request builders return the stream factory; the single retry
     # loop below is shared, so the per-chunk generator nesting is identical
