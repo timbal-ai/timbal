@@ -195,6 +195,16 @@ class TestFilePersistArtifacts:
         assert platform.calls == []
 
     @pytest.mark.asyncio
+    async def test_legacy_host_urls_are_stored_on_the_content_cdn(self, platform) -> None:
+        _platform(app_id=None)
+        file = File.validate("https://content.timbal.ai/assets/logo.svg")
+        assert await file.persist() == "https://timbalusercontent.com/assets/logo.svg"
+        _platform()
+        legacy_artifact = File.validate(ARTIFACT_URL.replace("timbalusercontent.com", "content.timbal.ai"))
+        assert await legacy_artifact.persist() == ARTIFACT_URL
+        assert platform.calls == []
+
+    @pytest.mark.asyncio
     async def test_a_public_upload_is_moved_into_artifacts(self, platform) -> None:
         _platform()
         upload = "https://timbalusercontent.com/tmp/019f/Invoice%2042.pdf"

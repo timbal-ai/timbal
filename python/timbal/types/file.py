@@ -49,7 +49,8 @@ def _is_local_path(source: str) -> bool:
 # the object using the encoded basename. `platform_config.cdn` is checked too;
 # content.timbal.ai is kept here so URLs minted before the timbalusercontent.com
 # move (or configs still pinning the old host) are still recognized.
-_PLATFORM_CDN_HOSTS = ("timbalusercontent.com", "content.timbal.ai")
+_LEGACY_CDN_HOST = "content.timbal.ai"
+_PLATFORM_CDN_HOSTS = ("timbalusercontent.com", _LEGACY_CDN_HOST)
 
 
 def _extract_filename(headers: dict, url: str) -> str:
@@ -467,6 +468,11 @@ class File(io.IOBase):
             host = parsed.hostname
             cdn_host = urlparse(f"//{run_context.platform_config.cdn}").hostname
             if host and (host == cdn_host or host in _PLATFORM_CDN_HOSTS):
+                if host == _LEGACY_CDN_HOST and cdn_host and cdn_host != _LEGACY_CDN_HOST:
+                    # The legacy host serves private prefixes unsigned: never store it.
+                    # Same bucket, same key, on the configured CDN.
+                    url = parsed._replace(netloc=cdn_host).geturl()
+                    parsed = urlparse(url)
                 path = unquote(parsed.path)
                 persisted = url
                 if _ARTIFACT_PATH.match(path):
