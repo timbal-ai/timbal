@@ -22,6 +22,7 @@ window; this layer keeps oversized payloads out of the window at production time
 strategies treat offloaded results as already-compacted (see ``compact_tool_results``).
 """
 
+import inspect
 import json
 import os
 import re
@@ -46,6 +47,7 @@ __all__ = [
     "READ_OFFLOADED_TOOL",
     "LocalOffloadStore",
     "OffloadStore",
+    "PlatformOffloadStore",
     "Spill",
     "ToolResultLimit",
     "Truncate",
@@ -126,7 +128,8 @@ class ToolResultLimit(BaseModel):
     threshold: int = Field(default=20_000, ge=1)
     action: Spill | Truncate = Field(default_factory=Spill)
     store: Any = None
-    """Optional OffloadStore for spilled payloads. Defaults to a LocalOffloadStore."""
+    """Optional OffloadStore for spilled payloads. Defaults to a PlatformOffloadStore (platform
+    run artifacts when the run has an app subject, a LocalOffloadStore otherwise)."""
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +231,14 @@ class LocalOffloadStore:
             raise FileNotFoundError(f"No offloaded content found for handle {handle!r}.")
         return path.read_bytes()
 
+    async def exists(self, handle: str) -> bool:
+        root = self.root
+        try:
+            path = (root / _sanitize_key(handle)).resolve()
+        except ValueError:
+            return False
+        return path.is_relative_to(root) and path.is_file()
+
     def _prune(self, root: Path) -> None:
         try:
             cutoff = time.time() - self.cleanup_after.total_seconds()
@@ -236,6 +247,67 @@ class LocalOffloadStore:
                     path.unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001 — cleanup must never fail a run
             warnings.warn(f"Offload store prune failed: {e}", stacklevel=2)
+
+
+class PlatformOffloadStore:
+    """Default store: the Timbal platform's run artifacts when the run has an app subject,
+    else ``fallback`` (a :class:`LocalOffloadStore` unless given).
+
+    Platform runs execute in a fresh sandbox per request, so no local directory outlives the
+    turn that wrote it; artifacts do, on any host, readable only by the run's owner (see
+    :mod:`timbal.platform.artifacts`). The backend is chosen on every call from the current
+    run context, because the store is built with the agent, before any run exists. If the
+    platform call fails the payload goes to ``fallback`` and reads try both, so an older
+    platform without artifacts still offloads as before.
+    """
+
+    def __init__(self, fallback: OffloadStore | None = None) -> None:
+        self.fallback = fallback if fallback is not None else LocalOffloadStore()
+
+    @staticmethod
+    def _platform() -> Any:
+        from ..platform import artifacts
+
+        return artifacts if artifacts.artifacts_available() else None
+
+    async def write(self, key: str, data: bytes) -> str:
+        platform = self._platform()
+        if platform is not None:
+            safe_key = _sanitize_key(key).as_posix()
+            try:
+                await platform.put_artifact(safe_key, data)
+                return safe_key
+            except Exception:
+                logger.warning("Platform offload write failed; storing locally.", key=safe_key, exc_info=True)
+        return await self.fallback.write(key, data)
+
+    async def read(self, handle: str) -> bytes:
+        platform = self._platform()
+        if platform is None:
+            return await self.fallback.read(handle)
+        try:
+            return await platform.get_artifact(_sanitize_key(handle).as_posix())
+        except Exception as platform_error:
+            try:
+                return await self.fallback.read(handle)
+            except Exception:
+                raise platform_error from None
+
+    async def exists(self, handle: str) -> bool:
+        platform = self._platform()
+        if platform is not None:
+            try:
+                if await platform.artifact_exists(_sanitize_key(handle).as_posix()):
+                    return True
+            except Exception:
+                logger.warning("Platform offload probe failed; checking locally.", handle=handle, exc_info=True)
+        exists = getattr(self.fallback, "exists", None)
+        if exists is None:
+            return False
+        found = exists(handle)
+        if inspect.isawaitable(found):
+            found = await found
+        return bool(found)
 
 
 # ---------------------------------------------------------------------------

@@ -1,17 +1,16 @@
 """Model-string dispatch: fallback/TestModel short-circuits, client resolution,
 file loading, and per-API request dispatch through the shared retry loop."""
 
-import asyncio
 from typing import Any
 
 from pydantic import BaseModel, SecretStr
 
 from ...state import get_call_id, get_or_create_run_context, get_run_context, set_billing_id
 from ...types.message import Message
-from ..attachment_limit import bound_unfittable_attachments
+from ..attachment_limit import bound_unfittable_attachments, load_attachments
 from ..runnable import Runnable
 from .chat_completions import prepare_chat_completions_request
-from .clients import _get_file_client, _resolve_client
+from .clients import _resolve_client
 from .messages import prepare_messages_request
 from .registry import _PROVIDERS, TIMBAL_OPENAI_API
 from .responses import prepare_responses_request
@@ -123,17 +122,8 @@ async def _llm_router(
     #   2. to_*_input() stays sync and pure (format conversion, no I/O).
     # The double iteration (scan here + serialize in to_*_input) is intentional:
     # content arrays are small (1-5 items) and the cost is negligible vs the
-    # network calls that follow.
-    from ...types.content import FileContent
-
-    _unloaded_files = [
-        c.file
-        for m in messages
-        for c in m.content
-        if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
-    ]
-    if _unloaded_files:
-        await asyncio.gather(*(f.load(client=_get_file_client()) for f in _unloaded_files))
+    # network calls that follow. A file whose source is gone is sent as a note.
+    messages = await load_attachments(messages)
     # A text attachment that cannot fit this model's window would fail the whole request
     # (and, once in memory, every later one): send a preview instead.
     messages = bound_unfittable_attachments(messages, model)

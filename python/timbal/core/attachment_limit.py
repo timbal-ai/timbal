@@ -25,6 +25,7 @@ Two layers:
 
 import asyncio
 import hashlib
+import inspect
 from typing import Any
 
 import structlog
@@ -48,10 +49,12 @@ logger = structlog.get_logger("timbal.core.attachment_limit")
 __all__ = [
     "ATTACHMENT_OFFLOAD_MARKER",
     "ATTACHMENT_TOO_LARGE_MARKER",
+    "ATTACHMENT_UNAVAILABLE_MARKER",
     "AttachmentSpills",
     "apply_attachment_limit",
     "attachment_text",
     "bound_unfittable_attachments",
+    "load_attachments",
 ]
 
 ATTACHMENT_OFFLOAD_MARKER = "[Attached file offloaded:"
@@ -59,6 +62,9 @@ ATTACHMENT_OFFLOAD_MARKER = "[Attached file offloaded:"
 
 ATTACHMENT_TOO_LARGE_MARKER = "[Attached file too large for the model's context window:"
 """Prefix of the safety-net stand-in (no attachment limit configured)."""
+
+ATTACHMENT_UNAVAILABLE_MARKER = "[Attached file no longer available:"
+"""Prefix of the note sent in place of a file whose source is gone (see :func:`load_attachments`)."""
 
 # A text with more characters than this many per token of the context window cannot fit:
 # real text averages ~4 chars/token (code and JSON fewer), so this only fires on requests
@@ -125,14 +131,22 @@ class AttachmentSpills:
         async with self._lock:
             if key in self._handles:
                 return self._handles[key]
-            try:
-                # Persisted by an earlier process (LocalOffloadStore handles are their keys).
-                await store.read(key)
-                handle = key
-            except Exception:  # noqa: BLE001 — unknown key: write it
-                handle = await store.write(key, text.encode())
+            # Persisted by an earlier process (built-in stores' handles are their keys).
+            handle = key if await _stored(store, key) else await store.write(key, text.encode())
             self._handles[key] = handle
             return handle
+
+
+async def _stored(store: OffloadStore, key: str) -> bool:
+    exists = getattr(store, "exists", None)
+    try:
+        if exists is not None:
+            found = exists(key)
+            return bool(await found if inspect.isawaitable(found) else found)
+        await store.read(key)
+        return True
+    except Exception:  # noqa: BLE001 — unknown key (or an unreachable store): write it
+        return False
 
 
 def _label(content: FileContent) -> str:
@@ -163,17 +177,62 @@ def _truncate_stand_in(content: FileContent, text: str, action: Truncate) -> str
     )
 
 
-async def _load(messages: list[Message]) -> None:
+def _gone_status(error: BaseException) -> int | None:
+    """The status to report when ``error`` means the file is gone for good, else ``None``."""
+    import httpx
+
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if 400 <= status < 500 and status not in (408, 429):
+            return status
+    if isinstance(error, FileNotFoundError):
+        return 404
+    return None
+
+
+async def load_attachments(messages: list[Message]) -> list[Message]:
+    """Load every unloaded file in ``messages`` and return the messages to send.
+
+    A file whose source is gone for good (a 4xx, a missing local path) is replaced by a note
+    instead of failing the request: the message stays in memory, so failing would fail every
+    later turn of the conversation too. Transient errors still raise. ``messages`` is never
+    modified; untouched messages are returned as the same objects.
+    """
     unloaded = [
-        c.file
+        c
         for m in messages
         for c in m.content
         if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
     ]
-    if unloaded:
-        from .llm.clients import _get_file_client
+    if not unloaded:
+        return messages
+    from .llm.clients import _get_file_client
 
-        await asyncio.gather(*(f.load(client=_get_file_client()) for f in unloaded))
+    results = await asyncio.gather(*(c.file.load(client=_get_file_client()) for c in unloaded), return_exceptions=True)
+    gone: dict[int, int] = {}
+    for content, result in zip(unloaded, results, strict=True):
+        if not isinstance(result, BaseException):
+            continue
+        status = _gone_status(result)
+        if status is None:
+            raise result
+        gone[id(content)] = status
+        logger.warning("Attached file is no longer available; sending a note instead.", attachment=content.name, status=status)
+    if not gone:
+        return messages
+    out: list[Message] = []
+    for message in messages:
+        if not any(id(c) in gone for c in message.content):
+            out.append(message)
+            continue
+        content = [
+            TextContent(text=f"{ATTACHMENT_UNAVAILABLE_MARKER} {_label(c)} (status {gone[id(c)]}); it was not sent.]")
+            if id(c) in gone
+            else c
+            for c in message.content
+        ]
+        out.append(_replaced(message, content))
+    return out
 
 
 def _replaced(message: Message, content: list[Any]) -> Message:
@@ -190,7 +249,7 @@ async def apply_attachment_limit(
     """The messages to send: attachments whose text reaches ``limit.threshold`` are replaced
     by a stand-in. ``messages`` and its items are never modified; untouched messages are
     returned as the same objects."""
-    await _load(messages)
+    messages = await load_attachments(messages)
     out = list(messages)
     for i, message in enumerate(messages):
         content: list[Any] = []

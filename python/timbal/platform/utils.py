@@ -168,7 +168,7 @@ def _resolve_url_and_headers(
 
 
 async def _request(
-    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"],
+    method: Literal["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
     path: str,
     headers: dict[str, str] = {},
     params: dict[str, Any] | None = None,

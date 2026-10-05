@@ -461,7 +461,7 @@ agent = Agent(
  tool_result_limit=ToolResultLimit( # or an int shorthand for the threshold
  threshold=20_000, # chars of text content
  action=Spill(preview_chars=1_000), # or Truncate(strategy="head"|"tail"|"head_tail")
- store=LocalOffloadStore(), # default root $TIMBAL_OFFLOAD_DIR or ~/.timbal/offload; keep-forever, opt-in cleanup_after=timedelta
+ store=LocalOffloadStore(), # default PlatformOffloadStore: platform run artifacts with an app subject, else local ($TIMBAL_OFFLOAD_DIR or ~/.timbal/offload; keep-forever, opt-in cleanup_after)
  ),
  tools=[
  Tool(name="logs", handler=..., result_limit=ToolResultLimit(threshold=8_000, action=Truncate(strategy="tail"))),
@@ -475,6 +475,7 @@ agent = Agent(
 - Always exempt: error results, pinned tools (`pin_result=True`), `read_offloaded` itself. Precedence: `Tool.result_limit` > agent `tool_result_limit`.
 - Offload events are recorded in `span.metadata["offload"]`; the handle lives on `ToolResultContent.offload_handle`.
 - `attachment_limit=` (same `ToolResultLimit`/int config, default `None`) bounds file attachments that providers receive as pasted text (anything but images, PDFs, audio, `.eml`). Applied **per request**, not to memory (`python/timbal/core/attachment_limit.py`): memory and traces keep the `FileContent`, the model gets a deterministic stand-in (`Spill` saves the text once under a content hash in the shared store, readable via `read_offloaded`), and conversations that already hold an oversized file are fixed on their next call. Always on, even without it: the LLM router cuts a text attachment that cannot fit the model's context window (> 4 chars per window token) to a 20,000-char preview.
+- Files in platform traces (`File.persist()` when the run has an app subject) are stored as private run artifacts (`timbal/platform/artifacts.py`); the trace keeps the stable unsigned URL and the platform re-signs it whenever it serves the trace. `POST /files` uploads (`tmp/`, public, never expired) found in a run are moved into artifacts. Before every model call, a file whose source is gone for good (4xx, missing path) is sent as a note instead of failing the call (`load_attachments`); memory keeps the file.
 - `read_offloaded` (earlier `read_tool_result`; calls to the old name still dispatch to it, unadvertised) reads every handle: tool results, attachments, compacted transcripts. It splits lines over 10,000 chars into numbered segments, so minified content is pageable.
 
 ### History compaction (utilization-triggered, whole memory)
