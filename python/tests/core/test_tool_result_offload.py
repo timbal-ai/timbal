@@ -415,6 +415,25 @@ class TestReadToolResult:
             offset += len(body)
         assert "".join(pages) == line
 
+    @pytest.mark.asyncio
+    async def test_pattern_across_segment_boundary_is_found(self, tmp_path) -> None:
+        store = LocalOffloadStore(root=tmp_path)
+        payload = "x" * 9_998 + "needle" + "y" * 10_000
+        handle = await store.write("run/boundary", payload.encode())
+        tool = create_read_offloaded(store)
+
+        out = (await tool(handle=handle, pattern="needle").collect()).output
+
+        assert "of 2 matching lines" in out
+        body = out.splitlines()[1:]
+        assert "needle" in "".join(entry.split(": ", 1)[1] for entry in body)
+        page = (await tool(handle=handle, pattern="needle", offset=1, limit=1).collect()).output
+        assert "of 2 matching lines" in page and "2: edle" in page
+
+        separate = await store.write("run/separate", b"need\nle")
+        out = (await tool(handle=separate, pattern="needle").collect()).output
+        assert "of 0 matching lines" in out
+
     def test_own_results_exempt(self, tmp_path) -> None:
         tool = create_read_offloaded(LocalOffloadStore(root=tmp_path))
         assert tool.result_limit is None
@@ -783,13 +802,7 @@ class TestAgentOffload:
         assert len(agent_span.metadata.get("offload", [])) == 3
 
         # All three placeholders survived drop-mode compaction, handles intact.
-        kept = [
-            c
-            for m in agent_span.memory
-            if m.role == "tool"
-            for c in m.content
-            if isinstance(c, ToolResultContent)
-        ]
+        kept = [c for m in agent_span.memory if m.role == "tool" for c in m.content if isinstance(c, ToolResultContent)]
         assert len(kept) == 3
         assert all(c.offload_handle for c in kept)
         InMemoryTracingProvider._storage.clear()

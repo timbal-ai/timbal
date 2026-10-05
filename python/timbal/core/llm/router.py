@@ -134,8 +134,8 @@ async def _llm_router(
     ]
     if _unloaded_files:
         await asyncio.gather(*(f.load(client=_get_file_client()) for f in _unloaded_files))
-    # A text attachment that cannot fit this model's window would fail the whole request
-    # (and, once in memory, every later one): send a preview instead.
+    # Bound attachments estimated to exceed this model's window, so a huge upload in
+    # memory does not keep overflowing later requests.
     messages = bound_unfittable_attachments(messages, model)
 
     # Per-API request builders return the stream factory; the single retry

@@ -19,8 +19,8 @@ Two layers:
   the text to the offload store under a content hash; the model pages it back with
   ``read_offloaded``.
 - :func:`bound_unfittable_attachments` — always on, in the LLM router: a text attachment that
-  cannot fit the model's context window on its own is cut to a preview. It only changes
-  requests the provider would reject.
+  is estimated to exceed the model's context window on its own is cut to a preview.
+  This is a character-based heuristic, not an exact token budget.
 """
 
 import asyncio
@@ -60,10 +60,9 @@ ATTACHMENT_OFFLOAD_MARKER = "[Attached file offloaded:"
 ATTACHMENT_TOO_LARGE_MARKER = "[Attached file too large for the model's context window:"
 """Prefix of the safety-net stand-in (no attachment limit configured)."""
 
-# A text with more characters than this many per token of the context window cannot fit:
-# real text averages ~4 chars/token (code and JSON fewer), so this only fires on requests
-# the provider would reject.
-_CHARS_PER_TOKEN_CEILING = 4
+# Approximate token density. Actual tokenization varies with content and model; this
+# catches obviously oversized uploads but cannot guarantee that a full request fits.
+_ESTIMATED_CHARS_PER_TOKEN = 4
 _SAFETY_PREVIEW_CHARS = 20_000
 
 
@@ -113,8 +112,8 @@ def attachment_text(content: FileContent, threshold: int = 0) -> str | None:
 
 
 class AttachmentSpills:
-    """Content hash → offload handle, so an attachment is persisted once and every request
-    that carries it reuses the same handle (and therefore the same stand-in bytes)."""
+    """Content hash → offload handle. Reuse readable payloads and restore missing ones
+    from the original attachment before sending another stand-in."""
 
     def __init__(self) -> None:
         self._handles: dict[str, str] = {}
@@ -123,13 +122,14 @@ class AttachmentSpills:
     async def handle(self, store: OffloadStore, text: str) -> str:
         key = f"attachments/{hashlib.sha256(text.encode()).hexdigest()[:32]}"
         async with self._lock:
-            if key in self._handles:
-                return self._handles[key]
+            # Cached handles may have been pruned, or the lazily resolved store root may
+            # have changed. Validate them before emitting another stand-in; memory still
+            # has the original attachment, so a missing payload can be persisted again.
+            # On a fresh process, LocalOffloadStore handles are their content-hash keys.
+            handle = self._handles.get(key, key)
             try:
-                # Persisted by an earlier process (LocalOffloadStore handles are their keys).
-                await store.read(key)
-                handle = key
-            except Exception:  # noqa: BLE001 — unknown key: write it
+                await store.read(handle)
+            except Exception:  # noqa: BLE001 — missing or unreadable payload: restore it
                 handle = await store.write(key, text.encode())
             self._handles[key] = handle
             return handle
@@ -228,15 +228,15 @@ async def _stand_in(
 
 
 def bound_unfittable_attachments(messages: list[Message], model: str) -> list[Message]:
-    """Safety net for every model call: a text attachment that cannot fit ``model``'s context
-    window on its own is replaced by a preview. Unknown windows leave the messages as they are.
+    """Safety net for every model call: a text attachment estimated to exceed ``model``'s
+    context window on its own is replaced by a preview. Unknown windows leave messages alone.
 
     Files must already be loaded (the router loads them right before this runs).
     """
     window = get_context_window(model)
     if not window:
         return messages
-    ceiling = window * _CHARS_PER_TOKEN_CEILING
+    ceiling = window * _ESTIMATED_CHARS_PER_TOKEN
     out: list[Message] | None = None
     for i, message in enumerate(messages):
         content: list[Any] = []
@@ -247,7 +247,7 @@ def bound_unfittable_attachments(messages: list[Message], model: str) -> list[Me
                 content.append(item)
                 continue
             logger.warning(
-                "Attachment cannot fit the model's context window; sending a preview.",
+                "Attachment is estimated to exceed the model's context window; sending a preview.",
                 attachment=item.name,
                 chars=len(text),
                 model=model,

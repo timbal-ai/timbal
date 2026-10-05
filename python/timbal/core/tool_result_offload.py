@@ -375,19 +375,32 @@ async def apply_tool_result_limit(
 # ---------------------------------------------------------------------------
 
 
-def _read_lines(text: str) -> tuple[list[str], bool]:
-    """Lines as ``read_offloaded`` numbers them, and whether any were split. A line longer than
-    the per-read char cap could never be returned, so minified content (one huge line) is split
-    into fixed-size segments."""
+def _read_lines(text: str, pattern: str | None = None) -> tuple[list[str], bool, list[int]]:
+    """Numbered segments, whether any lines were split, and matching segment indices.
+
+    Match against the original line so a literal spanning a segment boundary is still
+    found. Return every segment overlapped by a match without crossing a real newline.
+    """
     lines: list[str] = []
     segmented = False
+    matches: list[int] = []
     for line in text.splitlines():
         if len(line) <= _READ_SEGMENT_CHARS:
+            if pattern is not None and pattern in line:
+                matches.append(len(lines))
             lines.append(line)
         else:
-            lines.extend(line[i : i + _READ_SEGMENT_CHARS] for i in range(0, len(line), _READ_SEGMENT_CHARS))
+            for start in range(0, len(line), _READ_SEGMENT_CHARS):
+                end = start + _READ_SEGMENT_CHARS
+                if pattern is not None:
+                    # Each side is shorter than the pattern, so a match in this slice
+                    # must overlap the current segment (possibly also its neighbours).
+                    overlap = max(0, len(pattern) - 1)
+                    if pattern in line[max(0, start - overlap) : end + overlap]:
+                        matches.append(len(lines))
+                lines.append(line[start:end])
             segmented = True
-    return lines, segmented
+    return lines, segmented, matches
 
 
 def create_read_offloaded(store: OffloadStore) -> Any:
@@ -423,16 +436,15 @@ def create_read_offloaded(store: OffloadStore) -> Any:
                 "for what you need."
             ) from e
         text = data.decode("utf-8", errors="replace")
-        lines, segmented = _read_lines(text)
+        lines, segmented, matching_indices = _read_lines(text, pattern)
         total = len(lines)
 
         offset = max(0, offset)
         limit = max(1, min(limit, _READ_MAX_LINES))
 
         if pattern is not None:
-            numbered = [(i, line) for i, line in enumerate(lines, start=1) if pattern in line]
-            matched = len(numbered)
-            selected = numbered[offset : offset + limit]
+            matched = len(matching_indices)
+            selected = [(i + 1, lines[i]) for i in matching_indices[offset : offset + limit]]
             header = f"[{len(selected)} of {matched} matching lines ({total} total) for {pattern!r} in {handle}]"
         else:
             selected = list(enumerate(lines, start=1))[offset : offset + limit]
@@ -460,7 +472,8 @@ def create_read_offloaded(store: OffloadStore) -> Any:
             "Read content that was moved out of the conversation to save context: large tool "
             "results, attached files, and compacted history. Pass the handle shown where the "
             "content was removed. Results are line-numbered; page with offset/limit, or pass a "
-            "literal substring as pattern to return only the matching lines."
+            "literal substring as pattern to return matching lines, including segments "
+            "overlapped by a match."
         ),
         handler=_read_offloaded,
         result_limit=None,  # its own output is bounded and must never be offloaded again

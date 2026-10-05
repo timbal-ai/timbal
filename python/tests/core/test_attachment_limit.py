@@ -1,7 +1,10 @@
 """Tests for request-time bounding of oversized file attachments."""
 
+import asyncio
 import json
+import os
 import re
+from datetime import timedelta
 
 import pytest
 from timbal.core.agent import Agent
@@ -116,6 +119,59 @@ class TestApplyAttachmentLimit:
         assert _texts(first[0]) == _texts(again[0])
         # A fresh AttachmentSpills (a new process) finds the persisted copy instead of writing another.
         assert len([p for p in (tmp_path / "offload").rglob("*") if p.is_file()]) == 1
+
+    @pytest.mark.asyncio
+    async def test_pruned_attachment_is_restored_with_the_same_stand_in(self, tmp_path) -> None:
+        store = LocalOffloadStore(root=tmp_path / "offload")
+        spills = AttachmentSpills()
+        limit = ToolResultLimit(threshold=1_000)
+        payload = _har(500)
+        messages = [_user(_file(tmp_path, "capture.har", payload))]
+        first = await apply_attachment_limit(messages, limit=limit, store=store, spills=spills)
+        handle = _HANDLE_RE.search(first[0].content[0].text).group(1)
+        os.utime(store.root / handle, (0, 0))
+        store.cleanup_after = timedelta(hours=1)
+        store._prune(store.root)
+        with pytest.raises(FileNotFoundError):
+            await store.read(handle)
+
+        restored = await apply_attachment_limit(messages, limit=limit, store=store, spills=spills)
+
+        assert _texts(restored[0]) == _texts(first[0])
+        assert (await store.read(handle)).decode() == payload
+        assert isinstance(messages[0].content[0], FileContent)
+
+    @pytest.mark.asyncio
+    async def test_opaque_handles_are_reused_and_restored_after_eviction(self) -> None:
+        class OpaqueStore:
+            def __init__(self):
+                self.payloads = {}
+                self.writes = 0
+
+            async def write(self, _key, data):
+                self.writes += 1
+                handle = f"opaque-{self.writes}"
+                self.payloads[handle] = data
+                return handle
+
+            async def read(self, handle):
+                if handle not in self.payloads:
+                    raise FileNotFoundError(handle)
+                return self.payloads[handle]
+
+        store = OpaqueStore()
+        spills = AttachmentSpills()
+        handles = await asyncio.gather(*(spills.handle(store, "payload") for _ in range(5)))
+        assert handles == ["opaque-1"] * 5
+        assert store.writes == 1
+        store.payloads.clear()
+
+        restored = await spills.handle(store, "payload")
+
+        assert restored == "opaque-2"
+        assert await store.read(restored) == b"payload"
+        assert await spills.handle(store, "payload") == restored
+        assert store.writes == 2
 
     @pytest.mark.asyncio
     async def test_truncate_and_missing_store_never_paste_the_whole_file(self, tmp_path) -> None:
