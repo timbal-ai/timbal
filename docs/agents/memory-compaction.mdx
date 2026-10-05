@@ -110,7 +110,7 @@ read_offloaded(handle, offset=0, limit=200, pattern=None)
 ```
 
 - Line-numbered paging via `offset`/`limit` (hard-capped at 500 lines / 50,000 chars per call, so a read can never blow the window back up). Lines over 10,000 chars, such as minified JSON, are split into consecutive numbered segments so they can be paged too.
-- `pattern` filters to lines containing a **literal substring** (not a regex).
+- `pattern` filters to lines containing a **literal substring** (not a regex). A match spanning a segment boundary returns both segments; real newline boundaries are preserved.
 - Unknown or expired handles return a clean tool error the model can react to.
 - Earlier versions named it `read_tool_result`. Placeholders already stored in memory still say so, and calls to that name reach the same tool; it is not advertised to the model.
 
@@ -177,11 +177,11 @@ Unlike tool results, attachments are reduced in **each request**, not when they 
 
 - **Memory and traces keep the file.** The `FileContent` the caller sent is what gets stored and replayed; only the request to the model differs.
 - **Existing conversations are fixed on their next call.** A chat that already holds an oversized upload is bounded as soon as the limit is configured, without rewriting stored history.
-- **Prompt-cache friendly.** The stand-in depends only on the file's text and the limit. The text is saved once under a content hash, so every request sends the same bytes.
+- **Prompt-cache friendly.** The stand-in depends only on the file's text and the limit. The text is saved under a content hash and reused while its payload exists. If cleanup removes it, the next request restores it from the original attachment. With `LocalOffloadStore`, the restored handle and stand-in stay identical.
 
 `Spill` (default) shares the offload store with `tool_result_limit` and registers `read_offloaded` if it isn't already there. `Truncate` needs no store. If no store is available, the attachment is truncated rather than pasted whole. Images, PDFs, audio, `.eml` files and attachments under the threshold are always sent as before.
 
-Without `attachment_limit` (the default), attachments are sent as before, with one exception: a text attachment that cannot fit the model's context window at all (more than 4 characters per token of the window) is replaced by its first 20,000 chars and a note on every model call, and a warning is logged. The provider would have rejected that request anyway. Models with an unknown context window are left alone.
+Without `attachment_limit` (the default), a text attachment estimated to exceed the model's context window on its own (more than 4 characters per token of the window) is replaced by its first 20,000 chars and a note on every model call, and a warning is logged. This is a character-based heuristic: token density varies, so it can also shorten files that would fit, and it does not account for the combined size of other attachments, history, or output tokens. Use `attachment_limit` to explicitly bound attachments. Models with an unknown context window are left alone.
 
 ## How Compaction Works
 

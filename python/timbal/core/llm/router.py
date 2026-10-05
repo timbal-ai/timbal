@@ -124,8 +124,8 @@ async def _llm_router(
     # content arrays are small (1-5 items) and the cost is negligible vs the
     # network calls that follow. A file whose source is gone is sent as a note.
     messages = await load_attachments(messages)
-    # A text attachment that cannot fit this model's window would fail the whole request
-    # (and, once in memory, every later one): send a preview instead.
+    # Bound attachments estimated to exceed this model's window, so a huge upload in
+    # memory does not keep overflowing later requests.
     messages = bound_unfittable_attachments(messages, model)
 
     # Per-API request builders return the stream factory; the single retry

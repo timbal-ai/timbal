@@ -345,8 +345,8 @@ class Agent(Runnable):
     reaches the threshold is sent as a stand-in, while memory and traces keep the file. With
     Spill (the default action) the text is saved once to the offload store (shared with
     tool_result_limit) and read back through read_offloaded. Default None sends attachments
-    as before, except one that cannot fit the model's context window at all, which every model
-    call cuts to a preview. See timbal.core.attachment_limit."""
+    as before, except one estimated to exceed the model's context window on its own, which
+    every model call cuts to a preview. See timbal.core.attachment_limit."""
     guardrails: SkipValidation[Any] = None
     """Content guardrails applied at the four edges of the run (input, model output, tool
     args, tool results). Accepts the string "default" (PII redact + secret redaction +
