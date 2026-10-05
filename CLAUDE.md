@@ -461,7 +461,7 @@ agent = Agent(
  tool_result_limit=ToolResultLimit( # or an int shorthand for the threshold
  threshold=20_000, # chars of text content
  action=Spill(preview_chars=1_000), # or Truncate(strategy="head"|"tail"|"head_tail")
- store=LocalOffloadStore(), # default; keep-forever, opt-in cleanup_after=timedelta
+ store=LocalOffloadStore(), # default root $TIMBAL_OFFLOAD_DIR or ~/.timbal/offload; keep-forever, opt-in cleanup_after=timedelta
  ),
  tools=[
  Tool(name="logs", handler=..., result_limit=ToolResultLimit(threshold=8_000, action=Truncate(strategy="tail"))),

@@ -154,6 +154,25 @@ class TestLocalOffloadStore:
         assert not old_path.exists(), "expired file must be pruned"
         assert await store.read(fresh_handle) == b"fresh"
 
+    @pytest.mark.asyncio
+    async def test_root_from_env_and_explicit_root_wins(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("TIMBAL_OFFLOAD_DIR", str(tmp_path / "from-env"))
+        handle = await LocalOffloadStore().write("run/c1", b"env")
+        assert (tmp_path / "from-env" / handle).read_bytes() == b"env"
+
+        explicit = LocalOffloadStore(root=tmp_path / "explicit")
+        assert explicit.root == (tmp_path / "explicit").resolve()
+
+    @pytest.mark.asyncio
+    async def test_env_set_after_construction_applies(self, tmp_path, monkeypatch) -> None:
+        """A process restored from a snapshot can build its store before its env is set."""
+        monkeypatch.delenv("TIMBAL_OFFLOAD_DIR", raising=False)
+        store = LocalOffloadStore()
+        monkeypatch.setenv("TIMBAL_OFFLOAD_DIR", str(tmp_path / "late"))
+        handle = await store.write("run/c1", b"late")
+        assert await store.read(handle) == b"late"
+        assert (tmp_path / "late" / handle).is_file()
+
 
 # ---------------------------------------------------------------------------
 # apply_tool_result_limit
@@ -358,6 +377,7 @@ class TestReadToolResult:
         tool = create_read_offloaded(store)
         result = await tool(handle="run/nope").collect()
         assert result.status.code == "error"
+        assert "no longer available" in str(result.error) and "retrying will not" in str(result.error)
 
     @pytest.mark.asyncio
     async def test_output_clipped_at_char_cap(self, tmp_path) -> None:
@@ -627,6 +647,7 @@ class TestAgentOffload:
         # Path.home() ignores $HOME on Windows (USERPROFILE wins) — patch the method
         # itself so the default store root lands in tmp_path on every platform.
         monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.delenv("TIMBAL_OFFLOAD_DIR", raising=False)
 
         def model_handler(_messages):
             if _messages[-1].role == "user":

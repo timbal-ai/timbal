@@ -23,6 +23,7 @@ strategies treat offloaded results as already-compacted (see ``compact_tool_resu
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -41,6 +42,7 @@ logger = structlog.get_logger("timbal.core.tool_result_offload")
 
 __all__ = [
     "LEGACY_READ_OFFLOADED_NAMES",
+    "OFFLOAD_DIR_ENV",
     "READ_OFFLOADED_TOOL",
     "LocalOffloadStore",
     "OffloadStore",
@@ -64,6 +66,12 @@ attachments, and compacted transcripts."""
 LEGACY_READ_OFFLOADED_NAMES = frozenset({"read_tool_result"})
 """Earlier names of the read-back tool. Placeholders already stored in memory name them, so the
 agent still dispatches calls to them; they are never advertised to the model."""
+
+OFFLOAD_DIR_ENV = "TIMBAL_OFFLOAD_DIR"
+"""Overrides :class:`LocalOffloadStore`'s default root. A handle is only readable while the
+payload it points at exists, so runtimes whose home directory dies with the process (the Timbal
+platform runs each request in a sandbox with a throwaway ``$HOME``) point this at storage that
+persists between runs."""
 
 _SEGMENT_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -159,26 +167,43 @@ def _sanitize_key(key: str) -> Path:
 class LocalOffloadStore:
     """Default store: one file per key under a stable local root.
 
+    The root is ``root`` when given, else ``$TIMBAL_OFFLOAD_DIR``, else ``~/.timbal/offload``.
+
     Keep-forever by default — deleting on run end would break a later run (session chaining,
     resume) that still holds handles. Opt into age-based pruning with ``cleanup_after``;
     pruning runs on a daemon thread off the hot path and never raises into the agent run.
     """
 
     def __init__(self, root: str | Path | None = None, cleanup_after: timedelta | None = None) -> None:
-        self.root = (Path(root) if root else Path.home() / ".timbal" / "offload").expanduser().resolve()
+        self.root = root
         self.cleanup_after = cleanup_after
 
-    def _ensure_root(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
+    @property
+    def root(self) -> Path:
+        # Without an explicit root this is resolved on every use, so the environment of a process
+        # restored from a snapshot (where the store may be built before it is set) still applies.
+        if self._root is not None:
+            return self._root
+        configured = os.environ.get(OFFLOAD_DIR_ENV)
+        return (Path(configured) if configured else Path.home() / ".timbal" / "offload").expanduser().resolve()
+
+    @root.setter
+    def root(self, value: str | Path | None) -> None:
+        self._root = Path(value).expanduser().resolve() if value else None
+
+    @staticmethod
+    def _ensure_root(root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
         try:
-            self.root.chmod(0o700)
+            root.chmod(0o700)
         except OSError:  # e.g. exotic filesystems — permissions are best-effort hardening
             pass
 
     async def write(self, key: str, data: bytes) -> str:
-        self._ensure_root()
+        root = self.root
+        self._ensure_root(root)
         rel = _sanitize_key(key)
-        path = self.root / rel
+        path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         # Never clobber: a retried call or key collision gets a distinct file.
         final = path
@@ -188,24 +213,25 @@ class LocalOffloadStore:
             n += 1
         final.write_bytes(data)
         if self.cleanup_after is not None:
-            threading.Thread(target=self._prune, daemon=True).start()
-        return final.relative_to(self.root).as_posix()
+            threading.Thread(target=self._prune, args=(root,), daemon=True).start()
+        return final.relative_to(root).as_posix()
 
     async def read(self, handle: str) -> bytes:
+        root = self.root
         rel = _sanitize_key(handle)
-        path = (self.root / rel).resolve()
+        path = (root / rel).resolve()
         # Resolve (following symlinks) and re-check containment so neither a crafted handle
         # nor a symlink planted inside the root can escape it.
-        if not path.is_relative_to(self.root):
+        if not path.is_relative_to(root):
             raise ValueError(f"Handle escapes the offload root: {handle!r}")
         if not path.is_file():
             raise FileNotFoundError(f"No offloaded content found for handle {handle!r}.")
         return path.read_bytes()
 
-    def _prune(self) -> None:
+    def _prune(self, root: Path) -> None:
         try:
             cutoff = time.time() - self.cleanup_after.total_seconds()
-            for path in self.root.rglob("*"):
+            for path in root.rglob("*"):
                 if path.is_file() and path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
         except Exception as e:  # noqa: BLE001 — cleanup must never fail a run
@@ -386,7 +412,16 @@ def create_read_offloaded(store: OffloadStore) -> Any:
         ),
     ) -> str:
         """Read part of offloaded content. Results are line-numbered; page with offset/limit."""
-        data = await store.read(handle)
+        try:
+            data = await store.read(handle)
+        except FileNotFoundError as e:
+            # Still an error (the trace should show it), but one that tells the model a retry
+            # is pointless.
+            raise FileNotFoundError(
+                f"The content behind handle {handle!r} is no longer available, and retrying will not "
+                "bring it back. Continue with what is already in the conversation, or ask the user "
+                "for what you need."
+            ) from e
         text = data.decode("utf-8", errors="replace")
         lines, segmented = _read_lines(text)
         total = len(lines)

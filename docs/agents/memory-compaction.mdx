@@ -130,6 +130,8 @@ class OffloadStore(Protocol):
 
 The default `LocalOffloadStore` writes one file per result under `~/.timbal/offload/` (owner-only permissions; reads are hardened against path traversal and symlink escapes). Handles are store-relative keys, not absolute paths, so a different backend can resolve the same handle in another process.
 
+A handle is only readable while its payload exists, so the store must outlive the run that wrote it: later turns of the conversation still hold the handle. Set `TIMBAL_OFFLOAD_DIR` to move the default root wherever that holds. This matters when the home directory is thrown away with the process, as in containers and sandboxes. Timbal platform runs set it to the workforce's persistent directory. An explicit `LocalOffloadStore(root=...)` takes precedence. When a payload is gone anyway, `read_offloaded` returns an error telling the model not to retry the handle.
+
 Payloads are kept **forever by default** — deleting on run end would break a resumed or chained session that still holds handles. Bound disk usage with opt-in age-based pruning:
 
 ```python
