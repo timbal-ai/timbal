@@ -67,6 +67,7 @@ from ..types.events.delta import TextDelta, ThinkingDelta
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump
+from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
@@ -337,6 +338,14 @@ class Agent(Runnable):
     read_tool_result tool so the model can page the full content back on demand. Override per
     tool with Tool(result_limit=...); pinned tools and error results are always exempt.
     See timbal.core.tool_result_offload."""
+    attachment_limit: SkipValidation[ToolResultLimit | int | None] = None
+    """Size limit for file attachments that providers receive as pasted text (anything but
+    images, PDFs and audio). Applied to each request, not to memory: an attachment whose text
+    reaches the threshold is sent as a stand-in, while memory and traces keep the file. With
+    Spill (the default action) the text is saved once to the offload store (shared with
+    tool_result_limit) and read back through read_tool_result. Default None sends attachments
+    as before, except one that cannot fit the model's context window at all, which every model
+    call cuts to a preview. See timbal.core.attachment_limit."""
     guardrails: SkipValidation[Any] = None
     """Content guardrails applied at the four edges of the run (input, model output, tool
     args, tool results). Accepts the string "default" (PII redact + secret redaction +
@@ -495,6 +504,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """
         if isinstance(self.tool_result_limit, int):
             self.tool_result_limit = ToolResultLimit(threshold=self.tool_result_limit)
+        if isinstance(self.attachment_limit, int):
+            self.attachment_limit = ToolResultLimit(threshold=self.attachment_limit)
         for t in self.tools:
             if isinstance(t, Tool) and isinstance(t.result_limit, int):
                 t.result_limit = ToolResultLimit(threshold=t.result_limit)
@@ -502,24 +513,37 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         def _can_spill(limit: Any) -> bool:
             return isinstance(limit, ToolResultLimit) and isinstance(limit.action, Spill)
 
-        needs_store = _can_spill(self.tool_result_limit) or any(
-            _can_spill(getattr(t, "result_limit", None)) for t in self.tools if isinstance(t, Tool)
-        )
-        self._offload_store = None
-        if needs_store:
-            configured = self.tool_result_limit.store if isinstance(self.tool_result_limit, ToolResultLimit) else None
-            self._offload_store = configured or LocalOffloadStore()
-
-        read_store = self._offload_store
-        if read_store is None and self.memory_compaction is not None:
+        compactor_store = None
+        if self.memory_compaction is not None:
             compactors = (
                 self.memory_compaction if isinstance(self.memory_compaction, list) else [self.memory_compaction]
             )
             for compactor in compactors:
                 state = getattr(compactor, "_state", None)
                 if isinstance(state, dict) and state.get("store") is not None:
-                    read_store = state["store"]
+                    compactor_store = state["store"]
                     break
+
+        tool_spills = _can_spill(self.tool_result_limit) or any(
+            _can_spill(getattr(t, "result_limit", None)) for t in self.tools if isinstance(t, Tool)
+        )
+        self._offload_store = None
+        self._attachment_spills = AttachmentSpills()
+        if tool_spills or _can_spill(self.attachment_limit):
+            configured = next(
+                (
+                    limit.store
+                    for limit in (self.tool_result_limit, self.attachment_limit)
+                    if isinstance(limit, ToolResultLimit) and limit.store is not None
+                ),
+                None,
+            )
+            if configured is None and not tool_spills:
+                # Only attachments spill: share the compactor's store, which read_tool_result reads.
+                configured = compactor_store
+            self._offload_store = configured or LocalOffloadStore()
+
+        read_store = self._offload_store if self._offload_store is not None else compactor_store
         self._read_tool_result = None
         if read_store is not None:
             self._read_tool_result = create_read_tool_result(read_store)
@@ -1932,9 +1956,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 guardrail_retry = False
 
                 sent = len(current_span.memory)
+                llm_messages = current_span.memory
+                if self.attachment_limit is not None:
+                    # Same length and order as memory; only oversized attachments differ.
+                    llm_messages = await apply_attachment_limit(
+                        llm_messages,
+                        limit=self.attachment_limit,
+                        store=self._offload_store,
+                        spills=self._attachment_spills,
+                    )
                 active_events = self._llm._stream(
                     model=model,
-                    messages=current_span.memory,
+                    messages=llm_messages,
                     system_prompt=system_prompt,
                     tools=tools,
                     output_model=self.output_model,

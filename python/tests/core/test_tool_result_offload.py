@@ -369,6 +369,32 @@ class TestReadToolResult:
         assert len(out) <= 51_000
         assert "output clipped" in out
 
+    @pytest.mark.asyncio
+    async def test_a_line_longer_than_the_char_cap_is_readable(self, tmp_path) -> None:
+        """Minified JSON is one line; it must page in segments, not clip to nothing."""
+        line = "".join(f'{{"id":{i}}},' for i in range(20_000))
+        store = LocalOffloadStore(root=tmp_path)
+        handle = await store.write("run/c1", f"first\n{line}".encode())
+        tool = create_read_tool_result(store)
+
+        out = (await tool(handle=handle, limit=500).collect()).output
+        assert len(out) <= 51_000
+        assert "split into consecutive numbered segments" in out
+        assert "1: first" in out and '2: {"id":0},' in out
+
+        out = (await tool(handle=handle, pattern='"id":19999}').collect()).output
+        assert "of 1 matching lines" in out and '"id":19999}' in out
+
+        pages = []
+        offset = 1
+        while True:
+            body = (await tool(handle=handle, offset=offset, limit=4).collect()).output.splitlines()[1:]
+            if not body:
+                break
+            pages.extend(entry.split(": ", 1)[1] for entry in body)
+            offset += len(body)
+        assert "".join(pages) == line
+
     def test_own_results_exempt(self, tmp_path) -> None:
         tool = create_read_tool_result(LocalOffloadStore(root=tmp_path))
         assert tool.result_limit is None

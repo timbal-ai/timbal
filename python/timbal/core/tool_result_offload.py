@@ -57,6 +57,7 @@ _SEGMENT_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 # read_tool_result hard caps — the read-back tool must never blow the window back up.
 _READ_MAX_LINES = 500
 _READ_MAX_CHARS = 50_000
+_READ_SEGMENT_CHARS = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +233,13 @@ def _shape_sketch(text: str) -> str | None:
     return sketch[:200]
 
 
-def _truncate_text(text: str, tool_name: str, action: Truncate) -> str:
+def _truncate_text(text: str, tool_name: str, action: Truncate, kind: str = "tool result") -> str:
     total = len(text)
     max_chars = action.max_chars
     if total <= max_chars:
         return text
     removed = total - max_chars
-    marker = f"\n[... truncated {removed:,} of {total:,} chars from '{tool_name}' tool result ...]\n"
+    marker = f"\n[... truncated {removed:,} of {total:,} chars from '{tool_name}' {kind} ...]\n"
     if action.strategy == "head":
         return text[:max_chars] + marker
     if action.strategy == "tail":
@@ -330,6 +331,21 @@ async def apply_tool_result_limit(
 # ---------------------------------------------------------------------------
 
 
+def _read_lines(text: str) -> tuple[list[str], bool]:
+    """Lines as ``read_tool_result`` numbers them, and whether any were split. A line longer than
+    the per-read char cap could never be returned, so minified content (one huge line) is split
+    into fixed-size segments."""
+    lines: list[str] = []
+    segmented = False
+    for line in text.splitlines():
+        if len(line) <= _READ_SEGMENT_CHARS:
+            lines.append(line)
+        else:
+            lines.extend(line[i : i + _READ_SEGMENT_CHARS] for i in range(0, len(line), _READ_SEGMENT_CHARS))
+            segmented = True
+    return lines, segmented
+
+
 def create_read_tool_result(store: OffloadStore) -> Any:
     """Build the bounded ``read_tool_result`` tool for a store.
 
@@ -351,7 +367,7 @@ def create_read_tool_result(store: OffloadStore) -> Any:
         """Read part of an offloaded tool result. Results are line-numbered; page with offset/limit."""
         data = await store.read(handle)
         text = data.decode("utf-8", errors="replace")
-        lines = text.splitlines()
+        lines, segmented = _read_lines(text)
         total = len(lines)
 
         offset = max(0, offset)
@@ -365,6 +381,8 @@ def create_read_tool_result(store: OffloadStore) -> Any:
         else:
             selected = list(enumerate(lines, start=1))[offset : offset + limit]
             header = f"[lines {offset + 1}-{offset + len(selected)} of {total} in {handle}]"
+        if segmented:
+            header += f" (lines over {_READ_SEGMENT_CHARS:,} chars are split into consecutive numbered segments)"
 
         out_lines = [header]
         used = len(header)

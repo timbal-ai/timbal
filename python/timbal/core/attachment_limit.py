@@ -1,0 +1,259 @@
+"""Bound oversized file attachments in the request sent to the model.
+
+Providers receive an image as an image and a PDF as a file, but every other attachment
+(plain text, JSON, logs, code, and ``.xlsx``/``.docx`` after extraction) is pasted into the
+prompt whole, as text. One large upload can overflow the context window, and because the
+message stays in memory, every later turn of that conversation fails the same way.
+
+Tool results are reduced once, when they are produced (:mod:`.tool_result_offload`).
+Attachments are reduced in the *request* instead: memory and traces keep the original
+``FileContent``, and each LLM call sends a bounded stand-in. The stand-in is a pure function
+of the file's text and the limit, so repeated calls send identical bytes (prompt-cache
+friendly), and a conversation that already holds an oversized attachment is bounded on its
+next call without rewriting stored history.
+
+Two layers:
+
+- :func:`apply_attachment_limit` — opt-in through ``Agent(attachment_limit=...)``, using the
+  same :class:`~.tool_result_offload.ToolResultLimit` config as tool results. ``Spill`` saves
+  the text to the offload store under a content hash; the model pages it back with
+  ``read_tool_result``.
+- :func:`bound_unfittable_attachments` — always on, in the LLM router: a text attachment that
+  cannot fit the model's context window on its own is cut to a preview. It only changes
+  requests the provider would reject.
+"""
+
+import asyncio
+import hashlib
+from typing import Any
+
+import structlog
+
+from ..types.content import FileContent, TextContent
+from ..types.content.file import AVAILABLE_ENCODINGS, _extract_docx_content, _extract_xlsx_content
+from ..types.message import Message
+from .models import get_context_window
+from .tool_result_offload import OffloadStore, Spill, ToolResultLimit, Truncate, _shape_sketch, _truncate_text
+
+logger = structlog.get_logger("timbal.core.attachment_limit")
+
+__all__ = [
+    "ATTACHMENT_OFFLOAD_MARKER",
+    "ATTACHMENT_TOO_LARGE_MARKER",
+    "AttachmentSpills",
+    "apply_attachment_limit",
+    "attachment_text",
+    "bound_unfittable_attachments",
+]
+
+ATTACHMENT_OFFLOAD_MARKER = "[Attached file offloaded:"
+"""Prefix of the stand-in for a spilled attachment. Kept stable for tests and detection."""
+
+ATTACHMENT_TOO_LARGE_MARKER = "[Attached file too large for the model's context window:"
+"""Prefix of the safety-net stand-in (no attachment limit configured)."""
+
+# A text with more characters than this many per token of the context window cannot fit:
+# real text averages ~4 chars/token (code and JSON fewer), so this only fires on requests
+# the provider would reject.
+_CHARS_PER_TOKEN_CEILING = 4
+_SAFETY_PREVIEW_CHARS = 20_000
+
+
+def _decode(raw: bytes) -> str | None:
+    for encoding in AVAILABLE_ENCODINGS:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+def attachment_text(content: FileContent, threshold: int = 0) -> str | None:
+    """The text the provider converters would paste for ``content``, when it has at least
+    ``threshold`` characters.
+
+    ``None`` when the file is sent natively (image, PDF, audio), has its own conversion
+    (``.eml``), does not decode, or is smaller than ``threshold``. The file must be loaded.
+    """
+    file = content.file
+    mime = file.__content_type__ or ""
+    extension = (file.__source_extension__ or "").lower()
+    if extension == ".eml" or mime.startswith(("image/", "audio/")) or mime == "application/pdf":
+        return None
+    try:
+        file.seek(0)
+        if extension == ".xlsx":
+            text = _extract_xlsx_content(file)
+        elif extension == ".docx":
+            text = _extract_docx_content(file)
+        else:
+            raw = file.read()
+            # Decoded text never has more characters than the file has bytes.
+            if len(raw) < threshold:
+                return None
+            text = _decode(raw)
+    except Exception:  # noqa: BLE001 — leave unreadable files to the converters, as before
+        return None
+    finally:
+        try:
+            file.seek(0)
+        except Exception:  # noqa: BLE001
+            pass
+    if text is None or len(text) < threshold:
+        return None
+    return text
+
+
+class AttachmentSpills:
+    """Content hash → offload handle, so an attachment is persisted once and every request
+    that carries it reuses the same handle (and therefore the same stand-in bytes)."""
+
+    def __init__(self) -> None:
+        self._handles: dict[str, str] = {}
+        self._lock = asyncio.Lock()
+
+    async def handle(self, store: OffloadStore, text: str) -> str:
+        key = f"attachments/{hashlib.sha256(text.encode()).hexdigest()[:32]}"
+        async with self._lock:
+            if key in self._handles:
+                return self._handles[key]
+            try:
+                # Persisted by an earlier process (LocalOffloadStore handles are their keys).
+                await store.read(key)
+                handle = key
+            except Exception:  # noqa: BLE001 — unknown key: write it
+                handle = await store.write(key, text.encode())
+            self._handles[key] = handle
+            return handle
+
+
+def _label(content: FileContent) -> str:
+    mime = content.file.__content_type__ or "application/octet-stream"
+    return f'"{content.name or "attachment"}" ({mime})'
+
+
+def _offload_stand_in(content: FileContent, text: str, handle: str, preview_chars: int) -> str:
+    total = len(text)
+    lines = [
+        f"{ATTACHMENT_OFFLOAD_MARKER} {_label(content)}, {total:,} chars. The full text was saved and can "
+        f'be read with read_tool_result(handle="{handle}") — page with offset/limit or filter with pattern.]',
+    ]
+    sketch = _shape_sketch(text)
+    if sketch:
+        lines.append(f"Shape: {sketch}")
+    preview = text[:preview_chars]
+    if preview:
+        lines.append(f"Preview (first {len(preview):,} of {total:,} chars):")
+        lines.append(preview)
+    return "\n".join(lines)
+
+
+def _truncate_stand_in(content: FileContent, text: str, action: Truncate) -> str:
+    name = content.name or "attachment"
+    return f"[Attached file {_label(content)}, {len(text):,} chars:]\n" + _truncate_text(
+        text, name, action, kind="attachment"
+    )
+
+
+async def _load(messages: list[Message]) -> None:
+    unloaded = [
+        c.file
+        for m in messages
+        for c in m.content
+        if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
+    ]
+    if unloaded:
+        from .llm.clients import _get_file_client
+
+        await asyncio.gather(*(f.load(client=_get_file_client()) for f in unloaded))
+
+
+def _replaced(message: Message, content: list[Any]) -> Message:
+    return Message(role=message.role, content=content, stop_reason=message.stop_reason, metadata=message._metadata)
+
+
+async def apply_attachment_limit(
+    messages: list[Message],
+    *,
+    limit: ToolResultLimit,
+    store: OffloadStore | None,
+    spills: AttachmentSpills,
+) -> list[Message]:
+    """The messages to send: attachments whose text reaches ``limit.threshold`` are replaced
+    by a stand-in. ``messages`` and its items are never modified; untouched messages are
+    returned as the same objects."""
+    await _load(messages)
+    out = list(messages)
+    for i, message in enumerate(messages):
+        content: list[Any] = []
+        changed = False
+        for item in message.content:
+            text = attachment_text(item, limit.threshold) if isinstance(item, FileContent) else None
+            if text is None:
+                content.append(item)
+                continue
+            content.append(TextContent(text=await _stand_in(item, text, limit, store, spills)))
+            changed = True
+        if changed:
+            out[i] = _replaced(message, content)
+    return out
+
+
+async def _stand_in(
+    content: FileContent, text: str, limit: ToolResultLimit, store: OffloadStore | None, spills: AttachmentSpills
+) -> str:
+    action = limit.action
+    if isinstance(action, Truncate):
+        return _truncate_stand_in(content, text, action)
+    if isinstance(action, Spill):
+        if store is not None:
+            try:
+                handle = await spills.handle(store, text)
+                return _offload_stand_in(content, text, handle, action.preview_chars)
+            except Exception:
+                logger.exception("Attachment offload failed; falling back.", attachment=content.name)
+        if action.fallback is not None:
+            return _truncate_stand_in(content, text, action.fallback)
+        # No store and no fallback: still never paste the whole file.
+        return _truncate_stand_in(content, text, Truncate())
+    return _truncate_stand_in(content, text, Truncate())
+
+
+def bound_unfittable_attachments(messages: list[Message], model: str) -> list[Message]:
+    """Safety net for every model call: a text attachment that cannot fit ``model``'s context
+    window on its own is replaced by a preview. Unknown windows leave the messages as they are.
+
+    Files must already be loaded (the router loads them right before this runs).
+    """
+    window = get_context_window(model)
+    if not window:
+        return messages
+    ceiling = window * _CHARS_PER_TOKEN_CEILING
+    out: list[Message] | None = None
+    for i, message in enumerate(messages):
+        content: list[Any] = []
+        changed = False
+        for item in message.content:
+            text = attachment_text(item, ceiling) if isinstance(item, FileContent) else None
+            if text is None:
+                content.append(item)
+                continue
+            logger.warning(
+                "Attachment cannot fit the model's context window; sending a preview.",
+                attachment=item.name,
+                chars=len(text),
+                model=model,
+                context_window=window,
+            )
+            preview = text[:_SAFETY_PREVIEW_CHARS]
+            content.append(
+                TextContent(
+                    text=f"{ATTACHMENT_TOO_LARGE_MARKER} {_label(item)}, {len(text):,} chars; "
+                    f"showing the first {len(preview):,}.]\n{preview}"
+                )
+            )
+            changed = True
+        if changed:
+            out = out if out is not None else list(messages)
+            out[i] = _replaced(message, content)
+    return out if out is not None else messages
