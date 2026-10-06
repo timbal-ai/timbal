@@ -84,6 +84,12 @@ Set `TIMBAL_VOICE_DIAL_SECRET` to validate this header and `TIMBAL_LIVEKIT_URL` 
 
 `hello_wait_secs` controls the browser configuration-hello window (default two seconds), and `sip_hello_wait_secs` controls the SIP caller window (default zero). Phone callers normally have no data channel to send a hello.
 
+A session holds its capacity slot and room until it ends. On a long-lived server it ends when:
+
+- the room is deleted or the LiveKit connection is lost, before or after the session starts;
+- the caller leaves and does not rejoin within `TIMBAL_VOICE_ABANDON_SECS` (default 45; SIP hangups end immediately);
+- the caller's microphone does not arrive within `TIMBAL_VOICE_CALLER_WAIT_SECS` of the agent joining (default 120; `0` waits indefinitely).
+
 The separate boot-environment path uses `TIMBAL_VOICE_TRANSPORT=livekit`, `TIMBAL_LIVEKIT_URL`, and `TIMBAL_LIVEKIT_TOKEN` to join one room at startup. Reserve that path for a process created for a single call; long-lived deployments should dial per request.
 
 ## Twilio and Telnyx
