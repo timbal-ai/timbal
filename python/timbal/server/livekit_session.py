@@ -294,13 +294,12 @@ async def start_livekit_session(
     if live is not None and not live.done():
         return 409, {"error": f"a voice session is already live for room {dial.room or key}"}
 
-    # Rejecting here beats degrading the calls already on this process. This is
-    # the one path that defaults to a ceiling: nothing predates it, so nothing
-    # regresses, and a request-driven join is otherwise unbounded.
-    if not acquire_session_slot(default_auto=True):
+    # Admission is uncapped unless the operator configured a limit. Track
+    # every session so diagnostics and explicit caps use the same counter.
+    if not acquire_session_slot():
         return 503, {
             "error": f"server is at its voice session capacity "
-            f"({max_concurrent_sessions(default_auto=True)} concurrent)"
+            f"({max_concurrent_sessions()} concurrent)"
         }
 
     join = _Join()

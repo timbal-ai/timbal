@@ -15,23 +15,12 @@ that knows how many sessions it is actually running. A platform-side limit
 sits in front of some deployments and not others, and can be several
 schedulers wide.
 
-**Off unless asked for, on the transports that predate it.**
-``TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS`` takes an integer, or ``auto``; unset
-means no cap on those. Opt-in because turning a cap on is a behaviour change
-for a deployment that is already overcommitted — rejecting its fifth call is
-the *right* answer, but it should be a decision someone made, not one an
-upgrade made for them.
-
-That argument does not cover the per-request LiveKit dial, which is new: no
-deployment can regress to a ceiling on a path it never had, and it is the one
-entry point that is unbounded by construction (a request can start session
-N+1 forever). So ``acquire_session_slot(default_auto=True)`` — used only
-there — falls back to the ``auto`` ceiling when nothing is configured. One
-counter, two ceilings: an explicit env value still wins everywhere.
-
-Which makes ``0`` distinct from unset: it is the way to say "I know, leave it
-uncapped" and it turns the dial path's default off too. A typo reads as unset
-(a log line, not a wave of rejections).
+**Off unless asked for, including per-request LiveKit dials.**
+``TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS`` takes a positive integer for a fixed
+cap, or ``auto`` for a deployment-sized cap. Unset, empty, or ``0`` means no
+cap. Blocking incoming calls on capacity is an operator decision. A typo
+reads as unset (a log line, not a wave of rejections). Sessions are counted
+even when uncapped so active-session diagnostics remain available.
 
 ``auto`` sizes the cap from the CPU the process may actually use — the
 **cgroup quota**, not ``os.cpu_count()``, which reports the host's cores and
@@ -292,9 +281,9 @@ def _auto_limit() -> int:
 def _resolve_limit() -> int | None:
     """The configured ceiling, or None when nothing was configured.
 
-    ``0`` and ``None`` are different answers: ``0`` is an operator saying "I
-    know, leave it uncapped", which has to beat the ``auto`` default the
-    per-request path would otherwise apply.
+    ``0`` explicitly disables the cap; ``None`` means no setting. Both leave
+    built-in transports uncapped. An explicit zero also overrides callers
+    that opt into ``default_auto=True`` through the capacity API.
     """
     raw = os.environ.get(_ENV_VAR, "").strip()
     if not raw:
@@ -392,8 +381,8 @@ _capacity = _VoiceCapacity()
 def acquire_session_slot(*, default_auto: bool = False) -> bool:
     """Claim a session slot. False means the process is at capacity.
 
-    ``default_auto`` applies the ``auto`` ceiling when nothing is configured —
-    for entry points new enough that a default cap cannot regress anyone.
+    ``default_auto=True`` explicitly opts into the ``auto`` ceiling when
+    nothing is configured. Built-in transports leave this off.
     """
     return _capacity.acquire(default_auto=default_auto)
 
@@ -423,7 +412,7 @@ def log_capacity() -> None:
     logger.info(
         "voice_capacity",
         limit="unconfigured" if configured is None else (configured or "uncapped"),
-        livekit_dial_limit=max_concurrent_sessions(default_auto=True) or "uncapped",
+        livekit_dial_limit=max_concurrent_sessions() or "uncapped",
         auto=_auto_limit(),
         # Which detector the cap was sized for is the first thing to check when
         # `auto` looks surprising.

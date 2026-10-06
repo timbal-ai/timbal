@@ -7,6 +7,18 @@ All built-in transports create the same transcription → agent → speech sessi
 
 First get a conversation working in the [quickstart](/voice/quickstart). Then choose one transport below. Browser-local [thinking sounds](/voice/thinking-sounds) and [background audio](/voice/background-audio) are not automatically included in a carrier's audio stream; spoken [fillers](/voice/fillers) are part of the session's speech output.
 
+## Concurrent calls
+
+Voice admission is unbounded by default, including per-request LiveKit calls. Configure `TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS` at server startup to opt into a per-process limit:
+
+- Unset, empty, or `0`: no admission cap.
+- A positive integer, such as `16`: admit up to that many concurrent sessions.
+- `auto`: derive the cap from available CPU, worker count, the server's voice configuration, and recording cost.
+
+With a cap enabled, excess calls are rejected; a LiveKit dial returns HTTP 503. Sessions are still counted when admission is unbounded.
+
+Custom hosts that bypass `timbal.server.http.lifespan` should call `configure_capacity(voice_config)` and `log_capacity()` from `timbal.server.capacity` once at startup with the server's resolved voice configuration. `active_sessions()` and `max_concurrent_sessions()` expose the process's active count and effective cap (`0` means uncapped).
+
 ## Browser playground
 
 Open `/voice` on the running server. The playground exposes provider and model selection, microphone controls, transcripts, and turn metrics. `GET /voice/meta` describes the loaded runnable and its declared configuration. `GET /voice_config` returns `{"voice_config": ...}` with portable declared settings; it is not the fully resolved environment configuration.
