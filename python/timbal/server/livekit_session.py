@@ -34,6 +34,9 @@ Env contract for the boot-env path (all platform-owned):
 * ``TIMBAL_VOICE_HELLO_WAIT_SECS`` / ``TIMBAL_VOICE_SIP_HELLO_WAIT_SECS`` —
   the config-hello window for browser (default 2) and SIP (default 0) callers;
   see ``hello_wait_secs``.
+* ``TIMBAL_VOICE_CALLER_WAIT_SECS`` — default 120; how long the agent waits in
+  the room for the caller's microphone before ending the session. ``0``
+  waits indefinitely. See ``caller_wait_secs``.
 
 Env contract for the per-request path (both optional, both recommended on
 anything long-lived — the dial tells the process where to connect and what to
@@ -46,10 +49,9 @@ place calls for you):
 * ``TIMBAL_VOICE_DIAL_SECRET`` — when set, a dial must present it in
   ``X-Timbal-Dial-Secret``. See :mod:`timbal.server.rtc`.
 
-On the per-request path the process may hold several rooms at once. Session
-count is bounded by :mod:`timbal.server.capacity` — and on *this* path the
-``auto`` ceiling applies even when nothing is configured, because no
-deployment can regress to a cap on a path that did not exist. A full process
+On the per-request path the process may hold several rooms at once. Every
+session holds a :mod:`timbal.server.capacity` slot until its driver task ends.
+Admission is uncapped unless the operator configures a limit; a full process
 answers 503 rather than degrading the calls it already has.
 
 ``TIMBAL_VOICE_SINGLE_SESSION=1`` still applies where it is set (serverless).
@@ -58,6 +60,13 @@ fires on the caller's mic track being subscribed. Session + TTS track are built
 only after that subscribe (and the hello window), so playground config actually
 applies. Without the guard (the per-request path) nothing exits the process:
 one room ends, the next request starts another.
+
+Every terminal path ends the driver task, which is what releases the slot and
+the room key on a long-lived process: the room or SFU connection going away
+(before or after the session is built), the caller abandoning (the guard's
+window, or ``TIMBAL_VOICE_ABANDON_SECS`` when there is no guard), and a caller
+whose microphone never arrives (``TIMBAL_VOICE_CALLER_WAIT_SECS``). Each
+teardown step is bounded, so a stalled disconnect cannot hold the slot.
 """
 
 from __future__ import annotations
@@ -66,6 +75,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import os
 import time
 import uuid
@@ -129,6 +139,54 @@ def hello_wait_secs(*, caller_is_sip: bool, defaults: Any = None) -> float:
 # in the same VPC, so this covers the FFI import on a cold process, not a WAN
 # round trip.
 _JOIN_TIMEOUT_SECS = 15.0
+
+# Joined, but no caller microphone yet. Covers a browser's permission prompt
+# and an outbound SIP leg ringing out (its audio lands on answer). Past this,
+# nobody is coming, and the session would hold its slot for nothing.
+_CALLER_WAIT_SECS = 120.0
+
+# A browser caller's rejoin window when no guard owns their lifetime — the
+# same default ``SingleSessionGuard`` gives them on a single-session box.
+_ABANDON_SECS = 45.0
+
+# Upper bound on each teardown step. The slot and room key are released only
+# when the driver task ends, so one stalled await must not hold them forever.
+_TEARDOWN_STEP_SECS = 10.0
+
+
+def _env_secs(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value):
+        logger.warning("livekit_bad_env_secs", env=name, value=raw)
+        return default
+    return max(0.0, value)
+
+
+def caller_wait_secs() -> float | None:
+    """How long to wait for the caller's mic after joining; ``None`` = forever.
+
+    ``TIMBAL_VOICE_CALLER_WAIT_SECS``, read per call. ``0`` disables the bound.
+    """
+    secs = _env_secs("TIMBAL_VOICE_CALLER_WAIT_SECS", _CALLER_WAIT_SECS)
+    return secs or None
+
+
+def guardless_abandon_secs() -> float:
+    """A browser caller's rejoin window on a host without a session guard."""
+    return _env_secs("TIMBAL_VOICE_ABANDON_SECS", _ABANDON_SECS)
+
+
+async def _bounded_teardown_step(step: str, awaitable: Any) -> None:
+    try:
+        await asyncio.wait_for(awaitable, _TEARDOWN_STEP_SECS)
+    except TimeoutError:
+        logger.warning("voice_livekit_teardown_step_timeout", step=step, timeout=_TEARDOWN_STEP_SECS)
 
 
 @dataclass(frozen=True)
@@ -687,6 +745,15 @@ async def _run_livekit_session(
             return
         if guard is not None:
             guard.mark_disconnected(on_abandon=_close_session_if_any)
+            return
+        # No guard owns this caller's lifetime (a long-lived per-request
+        # host): give them the window to rejoin, then end the call. A rejoin
+        # cancels it in `_on_participant_connected`.
+        _cancel_pending_disconnect()
+        pending_disconnect = asyncio.create_task(
+            _close_session_later(guardless_abandon_secs()),
+            name="voice-livekit-abandon",
+        )
 
     def _note_caller(participant: Any) -> None:
         nonlocal caller_participant, caller_identity, caller_is_sip
@@ -727,8 +794,14 @@ async def _run_livekit_session(
         caller_ready.set()
 
     def _close_session_if_any() -> Any:
+        # The guard's abandon callback. Before the session is built there is
+        # nothing to close, so stop the startup waits instead: otherwise the
+        # driver waits on a microphone that is not coming back.
         sess = session_holder.get("s")
-        return sess.close() if sess is not None else None
+        if sess is None:
+            _abort()
+            return None
+        return sess.close()
 
     def _on_participant_disconnected(participant: Any) -> None:
         identity = getattr(participant, "identity", "") or ""
@@ -744,8 +817,11 @@ async def _run_livekit_session(
             if guard is not None:
                 guard.mark_reconnected()
 
-    def _on_disconnected(*_args: object) -> None:
-        logger.warning("voice_livekit_sfu_disconnected")
+    def _on_disconnected(*args: object) -> None:
+        logger.warning("voice_livekit_sfu_disconnected", reason=str(args[0]) if args else None)
+        # Terminal: the room was deleted, or the SDK gave up reconnecting.
+        # Before the session exists, the startup waits must end too.
+        _abort()
         sess = session_holder.get("s")
         if sess is not None:
             asyncio.create_task(sess.close())
@@ -869,7 +945,16 @@ async def _run_livekit_session(
         # the platform has already answered 200.
         if join is not None:
             join.ok()
-        await _wait_event_or_abort(caller_ready)
+        caller_wait = caller_wait_secs()
+        await _wait_event_or_abort(caller_ready, timeout=caller_wait)
+        if not caller_ready.is_set() and not session_aborted.is_set():
+            logger.warning(
+                "voice_livekit_caller_never_arrived",
+                room=room_name or getattr(room, "name", None),
+                caller_identity=caller_identity,
+                waited_secs=caller_wait,
+            )
+            _abort()
         if session_aborted.is_set():
             _release_if_never_connected()
             return
@@ -1012,14 +1097,17 @@ async def _run_livekit_session(
         # would skip the rest — room left connected, guard.finish never runs.
         # Suppress BaseException per step so the whole tail always executes;
         # the original unwind (if any) re-raises when the finally completes.
+        # The media steps are also bounded: this task ending is what frees the
+        # slot. ``guard.finish`` is not — a single-session box drains its
+        # recording uploads there before it exits.
         if downlink is not None:
             with contextlib.suppress(BaseException):
-                await downlink.aclose()
+                await _bounded_teardown_step("downlink", downlink.aclose())
         send_q.put_nowait(None)  # unbounded queue — no cancellation point
         with contextlib.suppress(BaseException):
-            await sender_task
+            await _bounded_teardown_step("sender", sender_task)
         with contextlib.suppress(BaseException):
-            await room.disconnect()
+            await _bounded_teardown_step("room_disconnect", room.disconnect())
         logger.info("voice_livekit_disconnected")
         if guard is not None and caller_ready.is_set():
             with contextlib.suppress(BaseException):

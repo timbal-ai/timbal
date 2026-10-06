@@ -447,7 +447,7 @@ class TestGuardLifetimeAroundSessionBuild:
         room.handlers["participant_disconnected"](participant)
         assert guard.disconnect_calls == 1
         assert guard.on_abandon is not None
-        assert guard.on_abandon() is None  # no session yet — closure is a no-op
+        assert guard.on_abandon() is None  # no session yet: nothing to close, the waits stop
         await asyncio.wait({task}, timeout=2.0)
 
     async def test_hello_window_is_anchored_at_caller_connect_not_mic(
@@ -1463,3 +1463,181 @@ class TestStartLivekitSession:
         live.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await live
+
+
+def _browser(identity: str = "browser-1") -> SimpleNamespace:
+    return SimpleNamespace(identity=identity, kind="PARTICIPANT_KIND_STANDARD", attributes={}, disconnect_reason=None)
+
+
+async def _ends(task: asyncio.Task, timeout: float = 2.0) -> bool:
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    return task in done
+
+
+async def _stop(task: asyncio.Task) -> None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+class TestAbandonedSessionsAreReclaimed:
+    """Every terminal path ends the driver, which frees the slot and room key
+    on a long-lived process without restarting it."""
+
+    @pytest.fixture(autouse=True)
+    def _capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "1")
+        capacity.reset_for_tests()
+
+    async def _admitted(self, app: object, room: str = "v1_1_2_3_abc") -> asyncio.Task:
+        assert (await start_livekit_session(app, dial_from_body(_dial(room=room))))[0] == 200
+        assert capacity.active_sessions() == 1
+        return app.state.livekit_sessions[room]
+
+    async def _assert_reclaimed(self, app: object, task: asyncio.Task) -> None:
+        assert await _ends(task)
+        assert capacity.active_sessions() == 0
+        assert "v1_1_2_3_abc" not in app.state.livekit_sessions
+        # The replacement call is admitted on the same process.
+        replacement = await self._admitted(app)
+        await _stop(replacement)
+
+    async def test_room_deleted_before_the_caller_arrives(self, ecs_app: tuple[_FakeRoom, object]) -> None:
+        room, app = ecs_app
+        task = await self._admitted(app)
+        room.handlers["disconnected"]("ROOM_DELETED")
+        await self._assert_reclaimed(app, task)
+
+    async def test_room_deleted_after_the_caller_joined_without_audio(self, ecs_app: tuple[_FakeRoom, object]) -> None:
+        room, app = ecs_app
+        task = await self._admitted(app)
+        room.handlers["participant_connected"](_browser())
+        room.handlers["disconnected"]("ROOM_DELETED")
+        await self._assert_reclaimed(app, task)
+
+    async def test_caller_never_joins(
+        self, ecs_app: tuple[_FakeRoom, object], driver_env: tuple, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _room, app = ecs_app
+        log = driver_env[2]
+        monkeypatch.setenv("TIMBAL_VOICE_CALLER_WAIT_SECS", "0.05")
+        task = await self._admitted(app)
+        assert "voice_livekit_caller_never_arrived" not in log.events
+        await self._assert_reclaimed(app, task)
+        assert "voice_livekit_caller_never_arrived" in log.events
+
+    async def test_caller_joins_but_never_publishes_audio(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_CALLER_WAIT_SECS", "0.05")
+        task = await self._admitted(app)
+        room.handlers["participant_connected"](_browser())
+        await self._assert_reclaimed(app, task)
+
+    async def test_zero_caller_wait_keeps_waiting(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_CALLER_WAIT_SECS", "0")
+        task = await self._admitted(app)
+        assert not await _ends(task, timeout=0.2)
+        await _stop(task)
+
+    async def test_browser_abandons_before_audio_without_a_guard(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_ABANDON_SECS", "0.05")
+        task = await self._admitted(app)
+        caller = _browser()
+        room.handlers["participant_connected"](caller)
+        room.handlers["participant_disconnected"](caller)
+        await self._assert_reclaimed(app, task)
+
+    async def test_browser_rejoin_inside_the_window_keeps_the_call(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_ABANDON_SECS", "0.2")
+        task = await self._admitted(app)
+        caller = _browser()
+        room.handlers["participant_connected"](caller)
+        room.handlers["participant_disconnected"](caller)
+        await asyncio.sleep(0.05)
+        room.handlers["participant_connected"](caller)
+        assert not await _ends(task, timeout=0.4)
+        assert capacity.active_sessions() == 1
+        await _stop(task)
+
+    async def test_guard_abandon_before_the_session_is_built(
+        self, driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object]
+    ) -> None:
+        room, guard, _log, app = driver_env
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        caller = _browser()
+        room.handlers["participant_connected"](caller)
+        room.handlers["participant_disconnected"](caller)
+        assert guard.disconnect_calls == 1
+        assert not await _ends(task, timeout=0.05)  # the guard owns the window
+        assert guard.on_abandon() is None
+        assert await _ends(task)
+        assert guard.released and not guard.finished
+        assert room.disconnected
+
+    async def test_a_stalled_room_disconnect_is_bounded(
+        self,
+        ecs_app: tuple[_FakeRoom, object],
+        driver_env: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        room, app = ecs_app
+        log = driver_env[2]
+        monkeypatch.setattr("timbal.server.livekit_session._TEARDOWN_STEP_SECS", 0.05)
+        room.disconnect_gate = asyncio.Event()  # never set: disconnect hangs
+        task = await self._admitted(app)
+        room.handlers["disconnected"]("ROOM_DELETED")
+        assert await _ends(task)
+        assert capacity.active_sessions() == 0
+        assert "voice_livekit_teardown_step_timeout" in log.events
+
+    async def test_repeated_abandoned_starts_do_not_exhaust_capacity(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        room, app = ecs_app
+        monkeypatch.setenv("TIMBAL_VOICE_CALLER_WAIT_SECS", "0.05")
+        monkeypatch.setenv("TIMBAL_VOICE_ABANDON_SECS", "0.05")
+
+        def room_deleted() -> None:
+            room.handlers["disconnected"]("ROOM_DELETED")
+
+        def browser_left() -> None:
+            caller = _browser()
+            room.handlers["participant_connected"](caller)
+            room.handlers["participant_disconnected"](caller)
+
+        def nobody_came() -> None:
+            pass
+
+        for end in [room_deleted, browser_left, nobody_came] * 3:
+            task = await self._admitted(app)
+            end()
+            assert await _ends(task), end.__name__
+            assert capacity.active_sessions() == 0
+        assert not app.state.livekit_sessions
+        await self._assert_reclaimed(app, task)
+
+    def test_bad_lifecycle_env_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.livekit_session import caller_wait_secs, guardless_abandon_secs
+
+        monkeypatch.delenv("TIMBAL_VOICE_CALLER_WAIT_SECS", raising=False)
+        assert caller_wait_secs() == 120.0
+        for bad in ["soon", "inf", "nan"]:
+            monkeypatch.setenv("TIMBAL_VOICE_CALLER_WAIT_SECS", bad)
+            assert caller_wait_secs() == 120.0
+        monkeypatch.setenv("TIMBAL_VOICE_CALLER_WAIT_SECS", "-5")
+        assert caller_wait_secs() is None
+        monkeypatch.setenv("TIMBAL_VOICE_ABANDON_SECS", "7")
+        assert guardless_abandon_secs() == 7.0
