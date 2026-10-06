@@ -1046,10 +1046,8 @@ def ecs_app(
     """A long-lived server: no single-session guard, no LiveKit boot env."""
     room, _guard, _log, app = driver_env
     app.state.single_session_guard = None
-    # The dial path defaults to the `auto` ceiling, which is sized from this
-    # machine's CPU — pin it so a test that runs two rooms doesn't depend on how
-    # many cores the runner has. Capacity tests below set their own.
-    monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", "16")
+    # Exercise the uncapped default. Capacity tests below opt into a limit.
+    monkeypatch.delenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", raising=False)
     capacity.reset_for_tests()
     return room, app
 
@@ -1069,6 +1067,31 @@ def _dial(**over: object) -> dict:
 
 class TestStartLivekitSession:
     """Per-request join (ECS / on-premise): the process serves room after room."""
+
+    @pytest.mark.parametrize("limit", [None, "", "0", "auto", "2"])
+    async def test_capacity_is_opt_in(
+        self, ecs_app: tuple[_FakeRoom, object], monkeypatch: pytest.MonkeyPatch, limit: str | None
+    ) -> None:
+        _room, app = ecs_app
+        if limit is not None:
+            monkeypatch.setenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", limit)
+        monkeypatch.setattr(capacity, "_auto_limit", lambda: 2)
+        capacity.reset_for_tests()
+        capped = limit in ("auto", "2")
+        try:
+            statuses = [
+                (await start_livekit_session(app, dial_from_body(_dial(room=f"room-{i}"))))[0]
+                for i in range(10)
+            ]
+            assert statuses == ([200] * 2 + [503] * 8 if capped else [200] * 10)
+            assert capacity.active_sessions() == (2 if capped else 10)
+        finally:
+            tasks = list(app.state.livekit_sessions.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        assert capacity.active_sessions() == 0
+        assert not app.state.livekit_sessions
 
     async def test_join_answers_200_and_leaves_the_session_running(self, ecs_app: tuple[_FakeRoom, object]) -> None:
         room, app = ecs_app

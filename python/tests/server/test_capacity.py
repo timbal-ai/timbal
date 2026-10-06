@@ -183,12 +183,10 @@ class TestCounter:
         assert capacity.active_sessions() == 0
 
 
-class TestDefaultAuto:
-    """One counter, two ceilings. Entry points that predate the cap stay
-    uncapped when nothing is configured; the per-request LiveKit dial — which
-    nothing predates, and which is otherwise unbounded — gets `auto`."""
+class TestExplicitAutoFallback:
+    """Embedding callers can explicitly opt into an automatic fallback cap."""
 
-    def test_a_new_path_is_capped_while_the_old_ones_are_not(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    def test_auto_fallback_requires_explicit_opt_in(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.delenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", raising=False)
         # 0.25 vCPU: audio_eou at 6.0/cpu floors to 1, so the minimum applies.
         _write_cgroup_v2(monkeypatch, tmp_path, "25000 100000\n")
@@ -198,9 +196,7 @@ class TestDefaultAuto:
         assert capacity.acquire_session_slot(default_auto=True)
         assert capacity.acquire_session_slot(default_auto=True)
         assert not capacity.acquire_session_slot(default_auto=True)
-        # Same counter, so the box really is at two — but a transport that was
-        # never capped still admits, which is what keeps this backwards
-        # compatible.
+        # Callers that leave the fallback off still admit on the same counter.
         assert capacity.acquire_session_slot()
         assert capacity.active_sessions() == 3
 
@@ -211,7 +207,7 @@ class TestDefaultAuto:
         assert capacity.acquire_session_slot(default_auto=True)
         assert not capacity.acquire_session_slot(default_auto=True)
 
-    def test_an_explicit_zero_still_uncaps_the_new_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    def test_an_explicit_zero_overrides_auto_fallback(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         """`0` is how someone says "I know, and I want it uncapped" — it has to
         beat the default, or there is no way to turn the ceiling off."""
         _write_cgroup_v2(monkeypatch, tmp_path, "100000 100000\n")
@@ -219,6 +215,20 @@ class TestDefaultAuto:
         assert capacity.max_concurrent_sessions(default_auto=True) == 0
         for _ in range(50):
             assert capacity.acquire_session_slot(default_auto=True)
+
+
+def test_boot_log_reports_livekit_uncapped_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TIMBAL_VOICE_MAX_CONCURRENT_SESSIONS", raising=False)
+    monkeypatch.setattr(capacity, "_auto_limit", lambda: 2)
+    logged = {}
+
+    def record(event, **fields):
+        logged.update(fields)
+
+    monkeypatch.setattr(capacity, "logger", SimpleNamespace(info=record))
+    capacity.log_capacity()
+    assert logged["livekit_dial_limit"] == "uncapped"
+    assert logged["auto"] == 2
 
 
 class TestProfiles:
