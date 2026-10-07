@@ -20,6 +20,9 @@ PROMPT = "Reply with exactly one word: ok"
 
 LIVE_MODELS = [
     pytest.param(
+        "anthropic/claude-haiku-5-5", "ANTHROPIC_API_KEY", None, id="anthropic-claude-haiku-5-5",
+    ),
+    pytest.param(
         "anthropic/claude-sonnet-5-5", "ANTHROPIC_API_KEY", None, id="anthropic-claude-sonnet-5-5",
     ),
     pytest.param(

@@ -3,7 +3,7 @@ title: "Overview"
 description: "Specs, pricing, and capabilities for every supported model"
 ---
 
-Model specifications, availability, and pricing reviewed October 3, 2026. **Price** means USD per 1M text tokens (input / output) at the provider's Standard short-context tier, preferring published post-promotion rates. Where only promotional rates are published, those rates are retained and explicitly labeled. Long-context thresholds vary by model: OpenAI &gt;272K, Google Pro &gt;200K, xAI ≥200K, and selected BytePlus models &gt;128K input tokens. These models reprice the whole request; Timbal reports distinct `<unit>_long_context` usage keys — see the [OpenAI page](/models/openai#how-long-context-and-cache-pricing-is-tracked).
+Model specifications, availability, and pricing reviewed October 3, 2026, with Haiku 5.5 and Sonnet 5.5 cache pricing updated October 7, 2026. **Price** means USD per 1M text tokens (input / output) at the provider's Standard short-context tier, preferring published post-promotion rates. Where only promotional rates are published, those rates are retained and explicitly labeled. Long-context thresholds vary by model: Anthropic Haiku 5.5 &gt;100K, OpenAI &gt;272K, Google Pro &gt;200K, xAI ≥200K, and selected BytePlus models &gt;128K input tokens. These models reprice the whole request; Timbal reports distinct `<unit>_long_context` usage keys — see the [OpenAI page](/models/openai#how-long-context-and-cache-pricing-is-tracked).
 
 Dedicated deployments, restricted access, unknown prices, conflicting sources, and future retirement dates are noted on each provider page. Unknown prices are not free. Audio, image generation, tool calls, cache storage, regional premiums, and time-dependent pricing need separate billing. Model capabilities do not imply every provider-native endpoint is available through `Agent`.
 
@@ -11,7 +11,7 @@ Dedicated deployments, restricted access, unknown prices, conflicting sources, a
 
 <CardGroup cols={3}>
   <Card title="Anthropic" icon="https://timbalusercontent.com/assets/claude_favicon.svg" href="/models/anthropic">
-    Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku
+    Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5
   </Card>
   <Card title="BytePlus" icon="https://timbalusercontent.com/assets/byteplus_favicon.svg" href="/models/byteplus">
     Dola Seed 2.1, Seed 2.0, DeepSeek, and GLM

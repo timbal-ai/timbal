@@ -23,6 +23,7 @@
 #     output_price: 75.0
 #     cached_input_price: 2.0
 #     cache_write_price: 25.0
+#     cache_write_1h_price: 40.0  Anthropic 1h writes also use the full-request tier.
 #     inclusive: true      Optional; use `>= threshold` instead of the default `> threshold`.
 #   service_tiers:         Multipliers for provider-reported processing tiers.
 #     flex: 0.5             Collectors append `_flex` / `_fast` / `_ultrafast` to priced token units.
@@ -112,15 +113,16 @@ models:
   provider: anthropic
   display_name: Claude Sonnet 5.5
   description: Anthropic's latest Sonnet, balancing speed and intelligence for coding, agents, and professional work.
-    Supersedes Sonnet 5 at the same token prices.
+    Supersedes Sonnet 5 at the same input/output prices and half the cache-read price.
   notes: 'Adaptive thinking is on by default; effort defaults to high. Use thinking.type=between_tools at high effort
     or below to turn off up-front thinking. Disabled/budgeted thinking, forced tool_choice any/tool, and non-default
     sampling parameters are rejected. 128K max output. Cache writes cost $2.50/$4 per 1M tokens (5m/1h); cache reads
-    cost $0.20. No long-context surcharge or fast mode. Batch input/output is $1/$5; cache rates are also halved.
+    cost $0.10 (halved October 7, 2026). No long-context surcharge or fast mode. Batch input/output is $1/$5;
+    cache rates are also halved.
     Prices are global; US-only inference adds 10% to all token rates.'
   input_price: 2.0
   output_price: 10.0
-  cached_input_price: 0.2
+  cached_input_price: 0.1
   cache_write_price: 2.5
   cache_write_1h_price: 4.0
   context_window: 1000000
@@ -196,10 +198,35 @@ models:
   notes: 'Deprecated September 30, 2026; retires November 30, 2026. Migrate to claude-sonnet-5-5.'
   context_window: 200000
   capabilities: [vision, tools, reasoning]
+- id: anthropic/claude-haiku-5-5
+  provider: anthropic
+  display_name: Claude Haiku 5.5
+  description: Anthropic's fastest model for high-volume, latency-sensitive classification, extraction, routing, and subagent
+    tasks. Supersedes Haiku 4.5 with a 1M context window and adaptive thinking.
+  notes: 'Released October 7, 2026. Adaptive thinking is on by default; effort defaults to medium. 128K max output.
+    Omit non-default temperature, top_p, and top_k. Prompts up to 100K tokens cost $0.10/$0.50 per 1M input/output;
+    above 100K the full request costs $0.50/$2.50. Cache read/5m write/1h write rates are $0.01/$0.125/$0.20,
+    or $0.05/$0.625/$1 above 100K. Uses the newer tokenizer; recount token budgets when migrating from Haiku 4.5.
+    Verified against https://platform.claude.com/docs/en/models/haiku-5-5/overview and Anthropic API pricing.'
+  input_price: 0.1
+  output_price: 0.5
+  cached_input_price: 0.01
+  cache_write_price: 0.125
+  cache_write_1h_price: 0.2
+  long_context:
+    threshold: 100000
+    input_price: 0.5
+    output_price: 2.5
+    cached_input_price: 0.05
+    cache_write_price: 0.625
+    cache_write_1h_price: 1.0
+  context_window: 1000000
+  capabilities: [vision, tools, reasoning]
 - id: anthropic/claude-haiku-4-5
   provider: anthropic
   display_name: Claude Haiku 4.5
-  description: Fastest Claude model, designed for office document processing and high-volume business analysis.
+  description: Previous Haiku generation for office document processing and high-volume business analysis. Superseded by
+    Haiku 5.5.
   input_price: 1.0
   output_price: 5.0
   cached_input_price: 0.1

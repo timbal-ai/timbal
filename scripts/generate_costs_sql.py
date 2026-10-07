@@ -105,31 +105,34 @@ def main(*, output_path: Path | None = None, provider_filter: str | None = None)
             if inp is None or out is None:
                 lines.append(f"-- Skipped unknown Anthropic pricing: {mid}")
                 continue
-            cache_read = m.get("cached_input_price")
-            cache_write = m.get("cache_write_price")
-            token_rates = {
-                "input_tokens": inp,
-                "output_tokens": out,
-                "cache_read_input_tokens": cache_read,
+            metrics = {
+                "input_tokens": "input_price",
+                "output_tokens": "output_price",
+                "cache_read_input_tokens": "cached_input_price",
                 # Legacy aggregate fallback assumes 5m; mixed/1h TTL requires the breakdown.
-                "cache_creation_input_tokens": cache_write,
-                "ephemeral_5m_input_tokens": cache_write,
-                "ephemeral_1h_input_tokens": m.get("cache_write_1h_price"),
+                "cache_creation_input_tokens": "cache_write_price",
+                "ephemeral_5m_input_tokens": "cache_write_price",
+                "ephemeral_1h_input_tokens": "cache_write_1h_price",
             }
+            contexts = [("", m)]
+            if m.get("long_context"):
+                contexts.append(("_long_context", m["long_context"]))
             tiers = {"": 1.0}
             if "fast" in m.get("service_tiers", {}):
                 tiers["_fast"] = m["service_tiers"]["fast"]
-            for suffix, multiplier in tiers.items():
-                for unit, rate in token_rates.items():
-                    if rate is None:
-                        continue
-                    append_cost_row(
-                        **row_kw,
-                        usage_key=unit + suffix,
-                        rate=rate * multiplier / 1_000_000,
-                        extra_desc=("Assumes 5m TTL when breakdown is unavailable"
-                                    if unit == "cache_creation_input_tokens" else "Anthropic published rate"),
-                    )
+            for context_suffix, prices in contexts:
+                for tier_suffix, multiplier in tiers.items():
+                    for unit, field in metrics.items():
+                        rate = prices.get(field)
+                        if rate is None:
+                            continue
+                        append_cost_row(
+                            **row_kw,
+                            usage_key=unit + context_suffix + tier_suffix,
+                            rate=rate * multiplier / 1_000_000,
+                            extra_desc=("Assumes 5m TTL when breakdown is unavailable"
+                                        if unit == "cache_creation_input_tokens" else "Anthropic published rate"),
+                        )
             for unit, rate in {"web_fetch_requests": 0.0, "web_search_requests": 0.01}.items():
                 append_cost_row(**row_kw, usage_key=unit, rate=rate, extra_desc="Anthropic published per-call fee")
         else:

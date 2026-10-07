@@ -1,18 +1,18 @@
 ---
 title: "Anthropic"
-description: "Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku models with specs, pricing, and capabilities"
+description: "Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 models with specs, pricing, and capabilities"
 ---
 
 <Note>Source: [Anthropic model docs](https://platform.claude.com/docs/en/about-claude/models/overview) · [Release notes](https://platform.claude.com/docs/en/release-notes/overview) · [Pricing](https://platform.claude.com/docs/en/about-claude/pricing)</Note>
 
 ### How cache and fast-mode pricing is tracked
 
-Claude 4.6 and later models bill the full 1M window at standard rates. For global streaming requests, Timbal's collector emits one unit per disjoint token bucket. Multipliers below are relative to the model's input rate unless specified otherwise:
+Claude 4.6 and later models bill the full 1M window at standard rates, except Haiku 5.5: prompts over 100,000 tokens use a higher rate for the full request. For global streaming requests, Timbal's collector emits one unit per disjoint token bucket. Multipliers below are relative to the model's input rate unless specified otherwise:
 
 | Anthropic `usage` field | Usage key on `OutputEvent.usage` | Rate |
 | --- | --- | --- |
 | `input_tokens` | `input_tokens` | 1x |
-| `cache_read_input_tokens` | `cache_read_input_tokens` | 0.1x (0.05x on Opus 5.5; 0.025x on Fable 5.1) |
+| `cache_read_input_tokens` | `cache_read_input_tokens` | 0.1x (0.05x on Opus 5.5 and Sonnet 5.5; 0.025x on Fable 5.1) |
 | `cache_creation.ephemeral_5m_input_tokens` | `ephemeral_5m_input_tokens` | 1.25x |
 | `cache_creation.ephemeral_1h_input_tokens` | `ephemeral_1h_input_tokens` | 2x |
 | `cache_creation_input_tokens` (only when no valid per-TTL breakdown is reported) | `cache_creation_input_tokens` | 1.25x fallback; assumes 5m TTL |
@@ -20,6 +20,8 @@ Claude 4.6 and later models bill the full 1M window at standard rates. For globa
 | `server_tool_use.*_requests` | e.g. `web_search_requests` | per call |
 
 `output_tokens_details.thinking_tokens` is a subset of `output_tokens` and is **not** emitted as a separate unit (it would be billed twice). On Opus 5.5 / Opus 5 / Opus 4.8, `usage.speed == "fast"` ([fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), 2x) suffixes every token unit with `_fast`, e.g. `anthropic/claude-opus-5-5:output_tokens_fast`; pass `model_params={"extra_body": {"speed": "fast"}, "extra_headers": {"anthropic-beta": "fast-mode-2026-02-01"}}` to opt in. If a stream is interrupted before the final `message_delta`, the prompt-side units are still recorded from `message_start` (Anthropic charges them regardless); output is left unbilled.
+
+On Haiku 5.5, the tier threshold uses `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. Exactly 100,000 prompt tokens still use the lower rates. Above that boundary, every token unit receives `_long_context`, including output and both cache-write durations, e.g. `anthropic/claude-haiku-5-5:ephemeral_1h_input_tokens_long_context`. The per-TTL write breakdown is already included in `cache_creation_input_tokens` and is not counted twice. Per-call tool fees keep their original units. The same tier selection applies to prompt usage from interrupted streams.
 
 Web search costs &#36;0.01 per search plus token charges; web fetch has no additional per-call fee. Code execution is free alongside the current web search/fetch tools; otherwise Anthropic bills execution time, with 1,550 free hours per organization per month, then &#36;0.05 per container-hour and a five-minute minimum. A `code_execution_requests` count alone is insufficient to calculate that charge.
 
@@ -84,11 +86,11 @@ The catalog stores global standard input, output, cache-read, and both cache-wri
 
   `anthropic/claude-sonnet-5-5`
 
-  Latest Sonnet for coding, agents, and professional work. Supersedes Sonnet 5 at the same token prices.
+  Latest Sonnet for coding, agents, and professional work. Supersedes Sonnet 5 at the same input/output prices and half the cache-read price.
 
-  - &#36;2 / &#36;10 per 1M tokens (input / output); cache reads &#36;0.20; 5m / 1h cache writes &#36;2.50 / &#36;4
-  - Provider Batch API input / output &#36;1 / &#36;5; cache reads &#36;0.10; 5m / 1h writes &#36;1.25 / &#36;2
-  - US-only inference adds 10% to all token rates: standard input / output &#36;2.20 / &#36;11; cache reads &#36;0.22; 5m / 1h writes &#36;2.75 / &#36;4.40
+  - &#36;2 / &#36;10 per 1M tokens (input / output); cache reads &#36;0.10; 5m / 1h cache writes &#36;2.50 / &#36;4
+  - Provider Batch API input / output &#36;1 / &#36;5; cache reads &#36;0.05; 5m / 1h writes &#36;1.25 / &#36;2
+  - US-only inference adds 10% to all token rates: standard input / output &#36;2.20 / &#36;11; cache reads &#36;0.11; 5m / 1h writes &#36;2.75 / &#36;4.40
   - No long-context surcharge; fast mode is not available
   - <Icon icon="window-maximize" size={14} /> 1M context at standard rates
   - <Icon icon="right-from-bracket" size={14} /> 128K max output (300K with the provider's Batch API beta)
@@ -162,12 +164,35 @@ The catalog stores global standard input, output, cache-read, and both cache-wri
   - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2025
   </Card>
 
+  <Card title="claude-haiku-5-5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `anthropic/claude-haiku-5-5`
+
+  Latest and fastest Haiku for high-volume classification, extraction, routing, and subagent tasks.
+
+  - Prompts up to 100K: &#36;0.10 / &#36;0.50 per 1M tokens (input / output); cache reads &#36;0.01; 5m / 1h cache writes &#36;0.125 / &#36;0.20
+  - Prompts over 100K: input / output &#36;0.50 / &#36;2.50; cache reads &#36;0.05; 5m / 1h cache writes &#36;0.625 / &#36;1 (full request)
+  - <Icon icon="window-maximize" size={14} /> 1M context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output (300K with the provider's Batch API beta)
+  - <Icon icon="keyboard" size={14} /> Text, Image input; Text output
+  - <Icon icon="brain" size={14} /> Adaptive thinking on by default; default effort `medium`
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2026; released October 7, 2026
+  - <Icon icon="triangle-exclamation" size={14} /> Omit non-default `temperature`, `top_p`, and `top_k`; recount token budgets when migrating from Haiku 4.5
+  </Card>
+</CardGroup>
+
+---
+
+## Legacy
+
+<CardGroup cols={2}>
   <Card title="claude-haiku-4-5">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
   `anthropic/claude-haiku-4-5`
 
-  The fastest Claude model with near-frontier intelligence for office files, strategy planning, and business analysis.
+  Previous Haiku generation for office files, strategy planning, and business analysis. Superseded by Haiku 5.5.
 
   - &#36;1 / &#36;5
   - <Icon icon="window-maximize" size={14} /> 200K context
@@ -177,13 +202,6 @@ The catalog stores global standard input, output, cache-read, and both cache-wri
   - <Icon icon="globe" size={14} /> Web search
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Feb 2025
   </Card>
-</CardGroup>
-
----
-
-## Legacy
-
-<CardGroup cols={2}>
   <Card title="claude-fable-5">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> Speed
 
@@ -246,6 +264,27 @@ The catalog stores global standard input, output, cache-read, and both cache-wri
   </Card>
 </CardGroup>
 
+## Using Haiku 5.5
+
+Set `ANTHROPIC_API_KEY` and select the full model ID:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="classifier",
+    model="anthropic/claude-haiku-5-5",
+    max_tokens=4096,
+    model_params={"output_config": {"effort": "medium"}},
+)
+```
+
+Adaptive thinking is on by default, and thinking tokens count toward `max_tokens`. Timbal collects text and thinking blocks separately. Omit non-default sampling parameters. Haiku 5.5 uses the newer tokenizer, which produces approximately 30% more tokens for the same text than Haiku 4.5; recount prompts and budgets before migrating. Replay stored thinking blocks through the account that produced them or a linked account.
+
+Automatic prompt caching is enabled by Timbal. The 100K pricing threshold includes uncached input, cache reads, and cache writes; output uses the rate selected by the prompt length. `scripts/generate_costs_sql.py` emits both standard and `_long_context` token rates, including 5m and 1h cache writes. Apply the generated SQL when updating a billing database; changing the catalog alone does not update stored rates.
+
+Haiku 5.5 specs and pricing verified October 7, 2026 against the [model specifications](https://platform.claude.com/docs/en/models/haiku-5-5/overview), [migration guide](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide), and [API pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
 ## Using Sonnet 5.5
 
 Set `ANTHROPIC_API_KEY` and select the full model ID:
@@ -267,7 +306,7 @@ With adaptive thinking, progress text between tool calls arrives in thinking blo
 
 Automatic prompt caching is enabled by Timbal; Sonnet 5.5 requires at least 512 cacheable tokens. All prices above are USD per 1M tokens except per-call/time-based tool fees. The 50% Batch API discount and 10% US-only inference premium stack across token categories. Partner cloud pricing and negotiated discounts may differ.
 
-See the [Sonnet 5.5 specifications](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) and [migration notes](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5). Anthropic catalog token and cache prices verified October 3, 2026 against [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing).
+See the [Sonnet 5.5 specifications](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) and [migration notes](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5). Sonnet 5.5 cache reads were halved on October 7, 2026; standard reads now cost &#36;0.10 per 1M tokens (&#36;0.05 with Batch, &#36;0.11 with US-only inference). Anthropic catalog token and cache prices verified October 7, 2026 against [Anthropic's price list](https://platform.claude.com/docs/en/about-claude/pricing).
 
 ## Using Opus 5.5
 

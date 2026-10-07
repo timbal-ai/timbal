@@ -9,6 +9,7 @@ from timbal.state import set_run_context
 from timbal.state.context import RunContext
 
 NEW_MODEL_IDS = [
+    "anthropic/claude-haiku-5-5",
     "anthropic/claude-sonnet-5-5",
     "anthropic/claude-opus-5-5",
     "xai/grok-4.7",
@@ -208,3 +209,38 @@ class TestMoonshotRouterDispatch:
         assert captured_kwargs.get("model") == api_name
         assert captured_kwargs.get("max_completion_tokens") == 16
         assert captured_kwargs.get("reasoning_effort") == "max"
+
+
+class TestHaiku55RouterDispatch:
+    @pytest.mark.asyncio
+    async def test_haiku_55_uses_messages_with_effort_and_automatic_caching(self):
+        from anthropic.types import RawMessageStopEvent
+        from timbal.core.llm import _llm_router
+
+        _make_run_context()
+        captured = {}
+
+        async def response_stream():
+            yield RawMessageStopEvent(type="message_stop")
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            return response_stream()
+
+        client = MagicMock()
+        client.messages.create = fake_create
+        with patch("timbal.core.llm.clients._get_client", return_value=client):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
+                async for _ in _llm_router(
+                    model="anthropic/claude-haiku-5-5",
+                    max_tokens=4096,
+                    provider_params={"output_config": {"effort": "medium"}},
+                ):
+                    pass
+
+        assert captured["model"] == "claude-haiku-5-5"
+        assert captured["max_tokens"] == 4096
+        assert captured["cache_control"] == {"type": "ephemeral"}
+        assert captured["output_config"] == {"effort": "medium"}
+        assert "temperature" not in captured
+        assert get_context_window("anthropic/claude-haiku-5-5") == 1_000_000

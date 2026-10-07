@@ -171,7 +171,7 @@ def _offline_audit(models: list[dict]) -> list[str]:
     return errors
 
 
-_PRICE_FIELDS = ("input_price", "output_price", "cached_input_price", "cache_write_price")
+_PRICE_FIELDS = ("input_price", "output_price", "cached_input_price", "cache_write_price", "cache_write_1h_price")
 
 
 def _check_pricing_fields(m: dict) -> list[str]:
@@ -179,7 +179,7 @@ def _check_pricing_fields(m: dict) -> list[str]:
     errors: list[str] = []
     mid = m["id"]
 
-    for field in (*_PRICE_FIELDS, "cache_write_1h_price"):
+    for field in _PRICE_FIELDS:
         value = m.get(field)
         if value is not None and (not isinstance(value, (int, float)) or value < 0):
             errors.append(f"{field} must be a non-negative number on {mid}: {value!r}")
@@ -222,6 +222,8 @@ def _check_pricing_fields(m: dict) -> list[str]:
         errors.append(f"long_context.cache_write_price is required on {mid} because cache_write_price is set")
     if m.get("cached_input_price") is not None and long_context.get("cached_input_price") is None:
         errors.append(f"long_context.cached_input_price is required on {mid} because cached_input_price is set")
+    if m.get("cache_write_1h_price") is not None and long_context.get("cache_write_1h_price") is None:
+        errors.append(f"long_context.cache_write_1h_price is required on {mid} because cache_write_1h_price is set")
     for field in _PRICE_FIELDS:
         value = long_context.get(field)
         if value is not None and (not isinstance(value, (int, float)) or value < 0):

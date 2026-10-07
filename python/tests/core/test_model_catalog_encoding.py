@@ -76,3 +76,23 @@ def test_cost_generation_preserves_utf8(monkeypatch, tmp_path):
     dest = tmp_path / "costs.sql"
     generate.main(output_path=dest)
     assert "“模型”" in dest.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("price,expected", [
+    (1.0, None),
+    (None, "required"),
+    (-1.0, "non-negative"),
+    (0.1, "below base"),
+])
+def test_audit_checks_long_context_one_hour_cache_write_price(monkeypatch, price, expected):
+    audit = _script("audit_models", monkeypatch)
+    model = {
+        "id": "anthropic/test", "context_window": 1_000_000, "cache_write_1h_price": 0.2,
+        "long_context": {"threshold": 100_000, "input_price": 0.5, "output_price": 2.5,
+                         "cache_write_1h_price": price},
+    }
+    errors = audit._check_pricing_fields(model)
+    if expected is None:
+        assert errors == []
+    else:
+        assert any("cache_write_1h_price" in error and expected in error for error in errors)

@@ -150,6 +150,7 @@ Model = Literal[
     "anthropic/claude-opus-4-5",
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-sonnet-4-5",
+    "anthropic/claude-haiku-5-5",
     "anthropic/claude-haiku-4-5",
     "openai/gpt-6-astra",
     "openai/gpt-6.1-sol",
