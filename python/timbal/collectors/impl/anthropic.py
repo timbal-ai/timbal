@@ -48,7 +48,7 @@ from anthropic.types.beta import (
     BetaWebSearchToolResultBlock,
 )
 
-from ...core.models import service_tier_usage_suffix
+from ...core.models import LONG_CONTEXT_USAGE_SUFFIX, service_tier_usage_suffix, uses_long_context_pricing
 from ...state import get_billing_id, get_run_context
 from ...types.content.custom import CustomContent
 from ...types.content.text import TextContent
@@ -306,6 +306,9 @@ class AnthropicCollector(BaseCollector):
         - ``output_tokens_details.thinking_tokens`` is a *subset* of ``output_tokens``
           (already billed at the output rate) and is therefore not emitted.
         - ``server_tool_use.*_requests`` are per-call fees, emitted as-is.
+        - Prompts over a catalog long-context threshold suffix every token unit
+          with ``_long_context`` (Haiku 5.5: >100K across all three input buckets).
+          Per-call tool fees stay unsuffixed.
         - ``usage.speed == "fast"`` (Opus fast mode, 2x) suffixes every token unit with
           ``_fast`` when the catalog prices that tier for the model.
 
@@ -327,18 +330,25 @@ class AnthropicCollector(BaseCollector):
         if not billing_id:
             return
 
+        # Anthropic splits the prompt into disjoint uncached/read/write buckets.
+        # All three count toward the long-context threshold; the TTL breakdown is
+        # a subset of cache_creation_input_tokens and must not be added again.
+        input_tokens = _first_usage_int("input_tokens", delta_usage, start_usage)
+        cache_read_tokens = _first_usage_int("cache_read_input_tokens", delta_usage, start_usage)
+        cache_creation_total = _first_usage_int("cache_creation_input_tokens", delta_usage, start_usage)
+        prompt_tokens = input_tokens + cache_read_tokens + cache_creation_total
+        context = LONG_CONTEXT_USAGE_SUFFIX if uses_long_context_pricing(billing_id, prompt_tokens) else ""
         speed = getattr(start_usage, "speed", None) if start_usage is not None else None
-        tier = service_tier_usage_suffix(billing_id, "fast") if speed == "fast" else ""
+        tier = context + (service_tier_usage_suffix(billing_id, "fast") if speed == "fast" else "")
 
         def _emit(unit: str, value: int, *, suffix: str = tier) -> None:
             if value > 0:
                 run_context.update_usage(f"{billing_id}:{unit}{suffix}", value)
 
         # Request side: the delta repeats these; fall back to message_start when it does not.
-        _emit("input_tokens", _first_usage_int("input_tokens", delta_usage, start_usage))
-        _emit("cache_read_input_tokens", _first_usage_int("cache_read_input_tokens", delta_usage, start_usage))
+        _emit("input_tokens", input_tokens)
+        _emit("cache_read_input_tokens", cache_read_tokens)
 
-        cache_creation_total = _first_usage_int("cache_creation_input_tokens", delta_usage, start_usage)
         breakdown = getattr(start_usage, "cache_creation", None) if start_usage is not None else None
         ephemeral_5m = _first_usage_int("ephemeral_5m_input_tokens", breakdown)
         ephemeral_1h = _first_usage_int("ephemeral_1h_input_tokens", breakdown)

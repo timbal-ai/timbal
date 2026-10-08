@@ -55,6 +55,7 @@ class TestGetLongContextThreshold:
     @pytest.mark.parametrize(
         "model_id,expected",
         [
+            ("anthropic/claude-haiku-5-5", 100_000),
             ("openai/gpt-6-astra", 272_000),
             ("openai/gpt-6.1-sol", 272_000),
             ("openai/gpt-6-sol", 272_000),
@@ -77,6 +78,8 @@ class TestGetLongContextThreshold:
         assert get_long_context_threshold("fake/nonexistent-model-xyz") is None
 
     def test_provider_specific_boundary_semantics(self):
+        assert uses_long_context_pricing("anthropic/claude-haiku-5-5", 100_000) is False
+        assert uses_long_context_pricing("anthropic/claude-haiku-5-5", 100_001) is True
         assert uses_long_context_pricing("openai/gpt-6-astra", 272_000) is False
         assert uses_long_context_pricing("openai/gpt-6-astra", 272_001) is True
         assert uses_long_context_pricing("xai/grok-4.6", 199_999) is False

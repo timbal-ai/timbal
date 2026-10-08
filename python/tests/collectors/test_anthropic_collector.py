@@ -556,11 +556,11 @@ class TestAnthropicCollectorUsageAccounting:
 
         rates = {
             "input_tokens": "0.000002", "output_tokens": "0.000010",
-            "cache_read_input_tokens": "0.0000002", "ephemeral_5m_input_tokens": "0.0000025",
+            "cache_read_input_tokens": "0.0000001", "ephemeral_5m_input_tokens": "0.0000025",
             "ephemeral_1h_input_tokens": "0.000004", "web_search_requests": "0.01", "web_fetch_requests": "0",
         }
         cost = sum(count * Decimal(rates[key.split(":", 1)[1]]) for key, count in usage.items())
-        assert cost == Decimal("0.0234")
+        assert cost == Decimal("0.0233")
 
     def test_one_hour_cache_write_bills_at_its_own_unit(self):
         """1h writes are 2x input (vs 1.25x for 5m); the aggregate unit would under-bill them."""
@@ -716,4 +716,81 @@ class TestAnthropicCollectorUsageAccounting:
         assert usage == {
             "anthropic/claude-sonnet-5:input_tokens": 40,
             "anthropic/claude-sonnet-5:output_tokens": 12,
+        }
+
+    @pytest.mark.parametrize("prompt_tokens", [99_999, 100_000, 100_001])
+    @pytest.mark.parametrize("bucket", ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"])
+    @pytest.mark.parametrize("interrupted", [False, True])
+    def test_haiku_55_threshold_counts_all_prompt_buckets(self, prompt_tokens, bucket, interrupted):
+        # All buckets remain non-zero; each can contribute enough to cross the
+        # boundary. The TTL breakdown must not be added to the total a second time.
+        start = {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 10,
+            "cache_creation_input_tokens": 10,
+            "output_tokens": 1,
+        }
+        start[bucket] = prompt_tokens - 20
+        writes = start["cache_creation_input_tokens"]
+        start["cache_creation"] = {
+            "ephemeral_5m_input_tokens": writes - 5,
+            "ephemeral_1h_input_tokens": 5,
+        }
+        delta = None if interrupted else {
+            "output_tokens": 50,
+            "server_tool_use": {"web_search_requests": 1, "web_fetch_requests": 0},
+        }
+        model = "anthropic/claude-haiku-5-5"
+        usage = self._run(start, delta, billing_id=model)
+        suffix = "_long_context" if prompt_tokens > 100_000 else ""
+        expected = {
+            f"{model}:input_tokens{suffix}": start["input_tokens"],
+            f"{model}:cache_read_input_tokens{suffix}": start["cache_read_input_tokens"],
+            f"{model}:ephemeral_5m_input_tokens{suffix}": writes - 5,
+            f"{model}:ephemeral_1h_input_tokens{suffix}": 5,
+        }
+        if not interrupted:
+            expected[f"{model}:output_tokens{suffix}"] = 50
+            expected[f"{model}:web_search_requests"] = 1
+        assert usage == expected
+
+    def test_haiku_55_long_context_aggregate_cache_fallback(self):
+        model = "anthropic/claude-haiku-5-5"
+        usage = self._run(
+            {"input_tokens": 1, "cache_creation_input_tokens": 100_000,
+             "cache_read_input_tokens": 0, "output_tokens": 1},
+            {"output_tokens": 5},
+            billing_id=model,
+        )
+        assert usage == {
+            f"{model}:input_tokens_long_context": 1,
+            f"{model}:cache_creation_input_tokens_long_context": 100_000,
+            f"{model}:output_tokens_long_context": 5,
+        }
+
+    def test_haiku_55_tier_uses_final_prompt_totals(self):
+        model = "anthropic/claude-haiku-5-5"
+        usage = self._run(
+            {"input_tokens": 100_000, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0, "output_tokens": 1},
+            {"input_tokens": 100_001, "output_tokens": 5},
+            billing_id=model,
+        )
+        assert usage == {
+            f"{model}:input_tokens_long_context": 100_001,
+            f"{model}:output_tokens_long_context": 5,
+        }
+
+    @pytest.mark.parametrize("model", ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"])
+    def test_full_window_models_keep_standard_units(self, model):
+        usage = self._run(
+            {"input_tokens": 1, "cache_read_input_tokens": 500_000,
+             "cache_creation_input_tokens": 0, "output_tokens": 1},
+            {"output_tokens": 5},
+            billing_id=model,
+        )
+        assert usage == {
+            f"{model}:input_tokens": 1,
+            f"{model}:cache_read_input_tokens": 500_000,
+            f"{model}:output_tokens": 5,
         }
