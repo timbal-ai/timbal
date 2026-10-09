@@ -134,6 +134,23 @@ def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
     return pages
 
 
+# Custom document properties are metadata, never cell values. Some writers emit entries
+# openpyxl rejects (a property with no name), and that fails the whole workbook.
+_XLSX_CUSTOM_PROPS = "docProps/custom.xml"
+
+
+def _without_custom_props(data: bytes) -> bytes:
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            if item.filename != _XLSX_CUSTOM_PROPS:
+                dst.writestr(item, src.read(item.filename))
+    return out.getvalue()
+
+
 def _extract_xlsx_content(xlsx: File) -> str:
     import csv
 
@@ -145,13 +162,23 @@ def _extract_xlsx_content(xlsx: File) -> str:
             "Install it with: pip install 'timbal[documents]'"
         ) from e
 
-    wb = load_workbook(io.BytesIO(xlsx.read()), read_only=True, data_only=True)
-    ws = wb.active or wb.worksheets[0]
-    output = io.StringIO()
-    writer = csv.writer(output)
-    for row in ws.iter_rows(values_only=True):
-        writer.writerow(["" if v is None else str(v) for v in row])
-    return output.getvalue()
+    data = xlsx.read()
+    try:
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        wb = load_workbook(io.BytesIO(_without_custom_props(data)), read_only=True, data_only=True)
+
+    def sheet_csv(ws: Any) -> str:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        for row in ws.iter_rows(values_only=True):
+            writer.writerow(["" if v is None else str(v) for v in row])
+        return output.getvalue()
+
+    sheets = wb.worksheets
+    if len(sheets) == 1:
+        return sheet_csv(sheets[0])
+    return "\n".join(f"## Sheet: {ws.title}\n{sheet_csv(ws)}" for ws in sheets)
 
 
 def _extract_docx_content(docx: File) -> str:
@@ -181,6 +208,26 @@ def _extract_docx_content(docx: File) -> str:
             text_content.append("\n".join(table_content))
     text_content = "\n".join(text_content)
     return text_content
+
+
+def _attachment_text(extract: Any, file: File, kind: str) -> str:
+    """The extracted text of a document attachment, or a FILE ERROR note for the model when it cannot be read."""
+    try:
+        return extract(file)
+    except ImportError:
+        raise
+    except Exception as e:
+        _get_logger().warning(
+            "attachment_extraction_error",
+            kind=kind,
+            error=str(e),
+            file=str(file),
+            description="Attachment could not be read, returning error message to LLM",
+        )
+        return (
+            f"[FILE ERROR: The {kind} could not be read. The file may be corrupted or use features "
+            f"the reader does not support. Original error: {e}]"
+        )
 
 
 def _extract_email_body(raw_email_content: str) -> str:
@@ -326,7 +373,7 @@ class FileContent(BaseContent):
         if self.file.__source_extension__ == ".xlsx":
             openai_responses_input = {
                 "type": "input_text",
-                "text": _extract_xlsx_content(self.file),
+                "text": _attachment_text(_extract_xlsx_content, self.file, "spreadsheet"),
             }
             self._cached_openai_responses_input = openai_responses_input
             return openai_responses_input
@@ -335,7 +382,7 @@ class FileContent(BaseContent):
             raise NotImplementedError("TODO - Parse EML files into openai responses api.")
 
         elif self.file.__source_extension__ == ".docx":
-            content = _extract_docx_content(self.file)
+            content = _attachment_text(_extract_docx_content, self.file, "Word document")
             openai_responses_input = {
                 "type": "input_text",
                 "text": content,
@@ -448,13 +495,13 @@ class FileContent(BaseContent):
         if self.file.__source_extension__ == ".xlsx":
             openai_input = {
                 "type": "text",
-                "text": _extract_xlsx_content(self.file),
+                "text": _attachment_text(_extract_xlsx_content, self.file, "spreadsheet"),
             }
             self._cached_openai_chat_completions_input = openai_input
             return openai_input
 
         elif self.file.__source_extension__ == ".docx":
-            content = _extract_docx_content(self.file)
+            content = _attachment_text(_extract_docx_content, self.file, "Word document")
             openai_input = {
                 "type": "text",
                 "text": content,
@@ -645,13 +692,13 @@ class FileContent(BaseContent):
         if self.file.__source_extension__ == ".xlsx":
             anthropic_input = {
                 "type": "text",
-                "text": _extract_xlsx_content(self.file),
+                "text": _attachment_text(_extract_xlsx_content, self.file, "spreadsheet"),
             }
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
 
         elif self.file.__source_extension__ == ".docx":
-            content = _extract_docx_content(self.file)
+            content = _attachment_text(_extract_docx_content, self.file, "Word document")
             anthropic_input = {
                 "type": "text",
                 "text": content,
