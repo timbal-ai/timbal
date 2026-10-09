@@ -2,6 +2,7 @@ import contextlib
 import json
 import sys
 
+from ..platform._http_session import platform_http_session
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec
 
@@ -26,13 +27,14 @@ async def run_test(
     output_event = None
     protocol_stdout = sys.stdout
 
-    with contextlib.redirect_stdout(sys.stderr):
-        runnable = import_spec.load()
-        async for event in runnable(**params):
-            if stream:
-                print(json.dumps(event.model_dump()), file=protocol_stdout, flush=True)
-            elif event.type == "OUTPUT":
-                output_event = event
+    async with platform_http_session():
+        with contextlib.redirect_stdout(sys.stderr):
+            runnable = import_spec.load()
+            async for event in runnable(**params):
+                if stream:
+                    print(json.dumps(event.model_dump()), file=protocol_stdout, flush=True)
+                elif event.type == "OUTPUT":
+                    output_event = event
 
     if not stream and output_event is not None:
         print(json.dumps(output_event.model_dump()), file=protocol_stdout)

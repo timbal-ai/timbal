@@ -9,6 +9,7 @@ import structlog
 
 from ..errors import PlatformError
 from ..state import get_or_create_run_context
+from ._http_session import request_client
 
 logger = structlog.get_logger("timbal.platform.utils")
 
@@ -207,12 +208,13 @@ async def _request(
 
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with request_client(timeout) as client:
                 res = await client.request(
                     method,
                     url,
                     headers=headers,
                     params=params,
+                    timeout=timeout,
                     **payload_kwargs,
                 )
                 res.raise_for_status()

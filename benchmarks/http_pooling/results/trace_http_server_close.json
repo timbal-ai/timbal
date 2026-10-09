@@ -1,0 +1,103 @@
+{
+  "python": "3.12.8 (main, Jan 14 2025, 23:36:58) [Clang 19.1.6 ]",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "httpx": "0.28.1",
+  "synthetic_connection_delay_ms": 0.0,
+  "server_keepalive": false,
+  "samples": [
+    {
+      "mode": "fresh",
+      "ms": 9.39270801609382,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "pooled",
+      "ms": 8.313583966810256,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "pooled",
+      "ms": 8.26166698243469,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "fresh",
+      "ms": 11.362250021193177,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "fresh",
+      "ms": 7.904124970082194,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "pooled",
+      "ms": 8.620624954346567,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "pooled",
+      "ms": 9.064166981261224,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "fresh",
+      "ms": 8.140125020872802,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "fresh",
+      "ms": 8.892084006220102,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    },
+    {
+      "mode": "pooled",
+      "ms": 8.142916951328516,
+      "connections": 2,
+      "writes": 2,
+      "final_state_saved": true
+    }
+  ],
+  "summary": {
+    "fresh": {
+      "median_ms": 8.892084006220102,
+      "min_ms": 7.904124970082194,
+      "max_ms": 11.362250021193177,
+      "connections_per_run": [
+        2
+      ],
+      "writes_per_run": [
+        2
+      ]
+    },
+    "pooled": {
+      "median_ms": 8.313583966810256,
+      "min_ms": 8.142916951328516,
+      "max_ms": 9.064166981261224,
+      "connections_per_run": [
+        2
+      ],
+      "writes_per_run": [
+        2
+      ]
+    }
+  }
+}

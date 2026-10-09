@@ -349,8 +349,11 @@ class JobStore:
             del self._jobs[job_id]
 
     async def _run(self, runnable, params, job: Job):
+        from ..platform._http_session import platform_http_session
+
         try:
-            async for event in runnable(**params):
-                job.append(event)
+            async with platform_http_session():
+                async for event in runnable(**params):
+                    job.append(event)
         finally:
             job.finish()
