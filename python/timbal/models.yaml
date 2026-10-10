@@ -1748,6 +1748,15 @@ models:
   output_price: null
   context_window: 500000
   capabilities: [vision, tools]
+- id: timbal/auto-balanced
+  provider: timbal
+  display_name: Auto (balanced, alias)
+  description: Alias of timbal/auto — the balanced profile, same routes and fallbacks.
+  notes: 'Same model as timbal/auto, listed so the alias carries the same context window (compaction and attachment bounding) and catalogue entry.'
+  input_price: null
+  output_price: null
+  context_window: 500000
+  capabilities: [vision, tools]
 - id: timbal/auto-cost
   provider: timbal
   display_name: Auto (cost)

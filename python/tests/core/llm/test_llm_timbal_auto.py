@@ -251,8 +251,7 @@ class TestRouterDispatch:
             async for _ in _llm_router(model=model_id, messages=messages):
                 pass
         assert client.chat.completions.create.call_args.kwargs["model"] == model_id.split("/", 1)[1]
-        if model_id != "timbal/auto-balanced":  # alias is accepted by the proxy but not listed
-            assert model_id in Model.__args__
+        assert model_id in Model.__args__
 
 
 class TestMemoryCompaction:
@@ -261,7 +260,12 @@ class TestMemoryCompaction:
 
     @pytest.mark.parametrize(
         ("model_id", "window"),
-        [("timbal/auto", 500_000), ("timbal/auto-cost", 500_000), ("timbal/auto-intelligence", 1_000_000)],
+        [
+            ("timbal/auto", 500_000),
+            ("timbal/auto-balanced", 500_000),
+            ("timbal/auto-cost", 500_000),
+            ("timbal/auto-intelligence", 1_000_000),
+        ],
     )
     def test_context_window_is_known(self, model_id, window):
         from timbal.core.models import get_context_window
