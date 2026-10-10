@@ -73,7 +73,7 @@ def _resolve_client(
     Returns:
         (client, resolved_base_url) — base_url may have been updated for platform proxies.
     """
-    if not api_key:
+    if not api_key and not config.platform_only:
         api_key = os.getenv(config.env_key)
     if not api_key:
         if (
@@ -88,6 +88,11 @@ def _resolve_client(
                 f"/proxies/{config.proxy_name}{config.proxy_suffix}"
             )
     if not api_key:
+        if config.platform_only:
+            raise APIKeyNotFoundError(
+                f"'{provider}/…' models are served by the Timbal platform; run with a platform "
+                "subject (TIMBAL_API_KEY + a deployed app) or pass base_url/api_key explicitly."
+            )
         raise APIKeyNotFoundError(f"{config.env_key} not found.")
 
     # Lazy SDK import: after the first call this is a sys.modules lookup (~1µs).

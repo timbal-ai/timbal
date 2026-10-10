@@ -1739,3 +1739,39 @@ models:
   cached_input_price: 0.16
   context_window: 262144
   capabilities: [vision, tools, reasoning, video]
+- id: timbal/auto
+  provider: timbal
+  display_name: Auto (balanced)
+  description: The Timbal platform picks the model and reasoning effort per turn from the conversation and the attachments on the latest user message. Balanced profile routes fast → Claude Haiku 5.5 (low), medium → Claude Sonnet 5.5 (high), extended → Claude Opus 5.5 (max), with cross-vendor fallbacks (GPT-6 Luna / Gemini 3.5 Flash-Lite, Grok 4.7 / GPT-6.1 Sol, GPT-6 Astra) and specialist routes (long-text digests → GPT-6 Luna; transcribing or summarizing recordings → Gemini 3.5 Flash-Lite; other audio/video input → Gemini 3.8 Flash; 3D/CAD and hard math → GPT-6 Astra).
+  notes: 'Served through the platform chat-completions proxy; requires a platform subject (deployed app, or TIMBAL_API_KEY with an app) and no vendor key. Billed at the served model''s own rates plus a routing fee of about $0.0001 per turn. Attachments on the last user message are declared to the platform automatically. Alias: timbal/auto-balanced. context_window is the smallest window among the models this profile can route to (Grok 4.7, 500K; all others are 1M or more), so memory compaction and attachment bounding stay safe whichever model serves the turn.'
+  input_price: null
+  output_price: null
+  context_window: 500000
+  capabilities: [vision, tools]
+- id: timbal/auto-balanced
+  provider: timbal
+  display_name: Auto (balanced, alias)
+  description: Alias of timbal/auto — the balanced profile, same routes and fallbacks.
+  notes: 'Same model as timbal/auto, listed so the alias carries the same context window (compaction and attachment bounding) and catalogue entry.'
+  input_price: null
+  output_price: null
+  context_window: 500000
+  capabilities: [vision, tools]
+- id: timbal/auto-cost
+  provider: timbal
+  display_name: Auto (cost)
+  description: Cost profile — Claude Haiku 5.5 (low) for fast, Claude Sonnet 5.5 for medium (high) and extended (xhigh); Grok 4.7 as fallback; long-text digests → GPT-6 Luna and recording transcripts/summaries → Gemini 3.5 Flash-Lite as in balanced; Astra specialists off.
+  notes: 'Served through the platform chat-completions proxy; requires a platform subject and no vendor key. Billed at the served model''s own rates plus a routing fee per turn. context_window is the smallest window among the models this profile can route to (Grok 4.7, 500K; all others are 1M or more), so memory compaction and attachment bounding stay safe whichever model serves the turn.'
+  input_price: null
+  output_price: null
+  context_window: 500000
+  capabilities: [vision, tools]
+- id: timbal/auto-intelligence
+  provider: timbal
+  display_name: Auto (intelligence)
+  description: Intelligence profile — Claude Opus 5.5 at every tier with effort rising medium → high → max; Claude Fable 5.1 then GPT-6 Astra as fallbacks at the top; specialists on. Every turn, including small talk, goes to a frontier model.
+  notes: 'Served through the platform chat-completions proxy; requires a platform subject and no vendor key. Billed at the served model''s own rates plus a routing fee per turn. context_window is the smallest window among the models this profile can route to (Claude 5.x at 1M; GPT-6 Astra and Gemini 3.8 Flash are larger), so memory compaction and attachment bounding stay safe whichever model serves the turn.'
+  input_price: null
+  output_price: null
+  context_window: 1000000
+  capabilities: [vision, tools]

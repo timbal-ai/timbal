@@ -45,6 +45,7 @@ from openai.types.responses import (
 )
 from uuid_extensions import uuid7
 
+from ...core.llm.auto import record_served_model
 from ...core.models import (
     LONG_CONTEXT_USAGE_SUFFIX,
     has_cache_write_pricing,
@@ -232,6 +233,9 @@ class ChatCompletionCollector(BaseCollector):
     @override
     def process(self, event: ChatCompletionEvent) -> Any:
         """Processes OpenAI streaming events."""
+        # ``timbal/auto``: the platform routed this call; the chunk's `model`
+        # is the one that served it. Relabel usage + span once (no-op otherwise).
+        record_served_model(getattr(event, "model", None))
         # Stash usage for deferred processing in result().
         # Some providers (e.g. Gemini) send cumulative usage on every chunk,
         # not just the final one. By always overwriting _pending_usage and
