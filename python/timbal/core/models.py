@@ -280,4 +280,7 @@ Model = Literal[
     "moonshot/kimi-k2.7-code",
     "moonshot/kimi-k2.7-code-highspeed",
     "moonshot/kimi-k2.6",
+    "timbal/auto",
+    "timbal/auto-cost",
+    "timbal/auto-intelligence",
 ]

@@ -37,6 +37,9 @@ Dedicated deployments, restricted access, unknown prices, conflicting sources, a
   <Card title="SambaNova" icon="https://timbalusercontent.com/assets/sambanova_favicon.svg" href="/models/sambanova">
     High-throughput inference on custom RDU hardware
   </Card>
+  <Card title="Timbal Auto" icon="shuffle" href="/models/timbal">
+    Platform model routing per turn: `timbal/auto`, `timbal/auto-cost`, `timbal/auto-intelligence`
+  </Card>
   <Card title="TogetherAI" icon="https://timbalusercontent.com/assets/together_favicon.svg" href="/models/togetherai">
     Open-source models via TogetherAI
   </Card>
@@ -47,6 +50,10 @@ Dedicated deployments, restricted access, unknown prices, conflicting sources, a
     MiMo V2.5 and V2.5 Pro
   </Card>
 </CardGroup>
+
+## Automatic routing: `timbal/auto`
+
+Set `model="timbal/auto"` (or `timbal/auto-cost`, `timbal/auto-intelligence`) and the Timbal platform picks the model and reasoning effort for each turn, with cross-vendor fallbacks. See [Timbal Auto](/models/timbal).
 
 ## Scoring
 
