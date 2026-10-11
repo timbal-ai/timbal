@@ -54,11 +54,24 @@ class _ProviderConfig:
     Otherwise thinking is omitted from outbound chat-completions messages (Vercel/LiteLLM default).
     """
 
+    platform_only: bool = False
+    """If True, never read a vendor API key from the environment: the model is served by the
+    Timbal platform proxy (explicit ``api_key``/``base_url`` on the Agent still win)."""
+
 
 _PROVIDERS: dict[str, _ProviderConfig] = {
     "openai": _ProviderConfig(
         env_key="OPENAI_API_KEY",
         proxy_name="openai-responses" if TIMBAL_OPENAI_API == "responses" else "openai-completions",
+    ),
+    # ``timbal/auto``: the platform picks the model per turn on the
+    # chat-completions proxy — chat completions on purpose, it is the only
+    # request shape the proxy can send to any provider. No vendor key exists
+    # for it; without a platform subject the resolver raises.
+    "timbal": _ProviderConfig(
+        env_key="TIMBAL_API_KEY",
+        proxy_name="openai-completions",
+        platform_only=True,
     ),
     "anthropic": _ProviderConfig(
         env_key="ANTHROPIC_API_KEY",

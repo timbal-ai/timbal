@@ -672,6 +672,7 @@
               "models/moonshot",
               "models/openai",
               "models/sambanova",
+              "models/timbal",
               "models/togetherai",
               "models/xai",
               "models/xiaomi"

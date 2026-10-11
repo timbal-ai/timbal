@@ -1,0 +1,73 @@
+---
+title: "Timbal Auto"
+description: "Let the platform pick the model for each turn"
+---
+
+<Note>`timbal/auto*` models are served by the Timbal platform: there is no vendor key for them, and they need a platform subject (a deployed app, or `TIMBAL_API_KEY` with an app).</Note>
+
+Set `model="timbal/auto"` and the Timbal platform picks the model and reasoning effort for each turn, from the conversation and the attachments on the latest user message: a quick language turn, tool or retrieval work, or long reasoning each land on a different tier. Nothing else changes: no configuration and no new API. Routing adds roughly 250 ms once per turn and a routing fee of about &#36;0.0001 per turn next to the served model's own usage.
+
+```python
+from timbal import Agent
+
+agent = Agent(name="assistant", model="timbal/auto", system_prompt="...", tools=[...])
+```
+
+## Models
+
+<CardGroup cols={3}>
+  <Card title="auto">
+  `timbal/auto`
+
+  Balanced. Alias: `timbal/auto-balanced`.
+
+  - Claude Haiku 5.5, Sonnet 5.5 and Opus 5.5 by tier
+  - GPT-6 Luna for long-text digests
+  - <Icon icon="window-maximize" size={14} /> 500K context
+  </Card>
+
+  <Card title="auto-cost">
+  `timbal/auto-cost`
+
+  Haiku 5.5 for fast turns, Sonnet 5.5 for the rest, GPT-6 Luna for long-text digests; Astra specialists off.
+
+  - <Icon icon="window-maximize" size={14} /> 500K context
+  </Card>
+
+  <Card title="auto-intelligence">
+  `timbal/auto-intelligence`
+
+  Opus 5.5 at every tier, with effort rising by tier; specialists on.
+
+  - <Icon icon="window-maximize" size={14} /> 1M context
+  </Card>
+</CardGroup>
+
+## Tiers and fallbacks
+
+The three models share the same router and differ in which models, and at which reasoning effort, fill the tiers. Each tier carries ordered fallbacks: if a model answers 429/5xx before streaming, is unreachable, or is disabled by the organization's model policies, the request moves to the next one, cross-vendor where possible.
+
+| Model | fast | medium | extended |
+|---|---|---|---|
+| `timbal/auto` | Haiku 5.5 · low → GPT-6 Luna → Gemini 3.5 Flash-Lite | Sonnet 5.5 · high → Grok 4.7 → GPT-6.1 Sol | Opus 5.5 · max → GPT-6 Astra |
+| `timbal/auto-cost` | Haiku 5.5 · low → GPT-6 Luna → Gemini 3.5 Flash-Lite | Sonnet 5.5 · high → Grok 4.7 | Sonnet 5.5 · xhigh → Grok 4.7 |
+| `timbal/auto-intelligence` | Opus 5.5 · medium → Sonnet 5.5 → GPT-6 Astra | Opus 5.5 · high → GPT-6 Astra | Opus 5.5 · max → Fable 5.1 → GPT-6 Astra |
+
+Fast turns with a prompt above about 100K tokens go to GPT-6 Luna first, because Haiku 5.5 bills those at 5× its base rate.
+
+In `timbal/auto` and `timbal/auto-cost`, two kinds of turn skip the medium tier:
+
+- **Long-text digests**: summarizing, extracting from, translating or answering questions about more than about 30K tokens the user provided (pasted text or attached pages) go to GPT-6 Luna · medium → Haiku 5.5 → Gemini 3.5 Flash-Lite instead of Sonnet 5.5. Analysis of the same text, or building a file from it, stays on the tiers above.
+- **Recordings**: transcribing or summarizing an audio or video attachment goes to Gemini 3.5 Flash-Lite → Gemini 3.8 Flash.
+
+Other audio or video work goes to Gemini 3.8 Flash → Gemini 3.5 Flash-Lite in every model; only Google takes audio and video natively, so those fallbacks stay on Google. 3D or CAD as code and hard math or science go to GPT-6 Astra (`timbal/auto` and `timbal/auto-intelligence` only). A request that already sets `reasoning_effort` keeps it on every model, mapped to the nearest level that model accepts. `timbal/auto-intelligence` sends every turn, small talk included, to a frontier model; that is the point of the profile.
+
+Why these models: on GDPval-AA (documents, spreadsheets and slides judged by professionals) Opus 5.5 and Sonnet 5.5 lead, Haiku 5.5 outscores GPT-6 Astra, and effort level moves scores more than model choice. Astra leads 3D-as-code, CAD and frontier math; Grok 4.7 is the best-calibrated non-Anthropic model for deliverables. GPT-6 Luna keeps its base price up to 272K tokens and is close to Opus 5.5 on long-context reasoning, which makes it the cheap reader for long documents. Gemini 3.5 Flash-Lite is the cheapest model with native audio and video input and the third vendor behind the fast tier. The maps are platform configuration and are re-checked against public leaderboards monthly.
+
+## How it behaves in the SDK
+
+- **Endpoint**: always the platform chat-completions proxy, whatever `TIMBAL_OPENAI_API` is set to, because that is the only request shape the proxy can re-target across providers.
+- **Attachments**: the SDK names the latest turn's attachments in `metadata.timbal_attachments`; the platform removes `timbal_*` keys before the request reaches a provider.
+- **One model per turn**: the model is chosen once per turn, so every call of an agent's tool loop uses the same model.
+- **Usage and traces**: recorded under the model that served the turn (for example `anthropic/claude-haiku-5-5`), not `timbal/auto`.
+- **Context window**: each entry declares the smallest window among the models it can route to, so memory compaction and attachment bounding stay safe whichever model serves.

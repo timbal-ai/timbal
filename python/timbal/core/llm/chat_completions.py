@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...types.message import Message
 from ...utils import transform_schema
+from .auto import AUTO_PROVIDER, auto_metadata
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -94,6 +95,16 @@ def prepare_chat_completions_request(
     chat_completions_kwargs.update(provider_params)
     if extra_tools:
         chat_completions_kwargs["tools"] = [*chat_completions_kwargs.get("tools", []), *extra_tools]
+
+    # ``timbal/auto``: the attachments on the latest user turn ride on
+    # ``metadata.timbal_attachments`` (standard chat-completions field), since
+    # documents go upstream as text. The platform removes ``timbal_*`` keys;
+    # other ``metadata`` is forwarded.
+    if provider == AUTO_PROVIDER:
+        routing = auto_metadata(messages)
+        if routing:
+            existing = chat_completions_kwargs.get("metadata")
+            chat_completions_kwargs["metadata"] = {**(existing if isinstance(existing, dict) else {}), **routing}
 
     async def _create_stream():
         res = await client.chat.completions.create(extra_headers=request_headers, **chat_completions_kwargs)
