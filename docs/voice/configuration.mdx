@@ -11,8 +11,8 @@ Set `Agent(voice_config=...)` to configure sessions created by the server. Use a
 
 Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech model IDs, separate from the `provider/model` IDs used by `Agent.model`.
 
+- **`deepgram`** or **`deepgram-flux`** (default): defaults to `flux-general-multi`; requires `DEEPGRAM_API_KEY`. Flux reports native end-of-turn events, so the session uses `provider` turn detection. When `DEEPGRAM_API_KEY` is unset, each session falls back to `elevenlabs`.
 - **`elevenlabs`**: defaults to `scribe_v2_realtime`; requires `ELEVENLABS_API_KEY`.
-- **`deepgram`** or **`deepgram-flux`**: defaults to `flux-general-multi`; requires `DEEPGRAM_API_KEY`. Flux reports native end-of-turn events.
 - **`deepgram-nova`**: defaults to `nova-3`; requires `DEEPGRAM_API_KEY`. Select Nova explicitly or supply a `nova-*` model.
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
 - **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD.
@@ -23,7 +23,7 @@ Set `language` to a provider-supported language hint or omit it for automatic de
 
 Set `tts_provider`, `tts_model`, and `voice` for the output provider:
 
-- **`elevenlabs`**: defaults to `eleven_flash_v2_5`; requires `ELEVENLABS_API_KEY` and an accessible ElevenLabs voice ID. Supports incremental text through one streaming context per reply.
+- **`elevenlabs`** (default): defaults to `eleven_v4_turbo`; requires `ELEVENLABS_API_KEY` and an accessible ElevenLabs voice ID. Supports incremental text through one streaming context per reply. Set `tts_model` to `eleven_flash_v2_5` for the previous default.
 - **`deepgram`**: defaults to `aura-2-thalia-en`; requires `DEEPGRAM_API_KEY`. The full Aura model ID identifies the voice and language.
 - **`fishaudio`**: defaults to `s2.1-pro`; requires `FISH_API_KEY`. Use a Fish reference voice ID for `voice` when selecting a reference voice.
 - **`munsit`**: defaults to `faseeh-v1-preview`; requires `MUNSIT_API_KEY`. The fallback voice is `MUNSIT_VOICE_ID` or `ar-uae-male-1`.

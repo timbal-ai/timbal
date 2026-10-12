@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -99,9 +100,15 @@ class TestVoiceWarmupIntended:
 class TestVoiceOnnxWarmupIntended:
     """Flux / provider EOU must not pull Smart Turn + Namo + Silero at boot."""
 
-    def test_flux_skips_onnx(self) -> None:
+    def test_flux_skips_onnx(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
         cfg = VoiceConfig(stt_provider="deepgram", stt_model="flux-general-multi")
         assert voice_routes.voice_onnx_warmup_intended(cfg) is False
+
+    def test_flux_without_key_loads_onnx(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sessions fall back to Scribe + the local detector, so boot warms it."""
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        assert voice_routes.voice_onnx_warmup_intended(VoiceConfig()) is True
 
     def test_elevenlabs_loads_onnx(self) -> None:
         cfg = VoiceConfig(
@@ -111,8 +118,9 @@ class TestVoiceOnnxWarmupIntended:
         )
         assert voice_routes.voice_onnx_warmup_intended(cfg) is True
 
-    def test_flux_with_explicit_local_still_skips(self) -> None:
+    def test_flux_with_explicit_local_still_skips(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Session setup overrides local → provider for Flux; warmup must match.
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
         cfg = VoiceConfig(
             stt_provider="deepgram",
             stt_model="flux-general-multi",
@@ -141,9 +149,11 @@ class TestVoiceOnnxWarmupIntended:
 class TestDefaultVoiceConfigFromEnv:
     def test_defaults_when_unset(self) -> None:
         cfg = voice_routes.default_voice_config_from_env()
-        assert cfg.stt_provider == "elevenlabs"
-        assert cfg.stt_model == "scribe_v2_realtime"
-        assert cfg.tts_model == "eleven_flash_v2_5"
+        assert cfg.stt_provider == "deepgram"
+        assert cfg.stt_model == "flux-general-multi"
+        assert cfg.turn_detector is None  # → "provider" on Flux
+        assert cfg.tts_provider == "elevenlabs"
+        assert cfg.tts_model == "eleven_v4_turbo"
         assert cfg.voice == DEFAULT_VOICE_ID
         assert cfg.language is None  # provider auto-detect
         assert cfg.sample_rate == 16_000
@@ -187,7 +197,7 @@ class TestMergeVoiceConfig:
         merged = voice_routes.merge_voice_config(R())
         assert merged.voice == "v1"
         assert merged.language == "pt"
-        assert merged.stt_model == "scribe_v2_realtime"
+        assert merged.stt_model == "flux-general-multi"
 
     def test_callable_voice_config(self) -> None:
         class R:
@@ -205,7 +215,7 @@ class TestMergeVoiceConfig:
         merged = voice_routes.merge_voice_config(R())
         assert merged.voice == "typed_v"
         assert merged.language == "de"
-        assert merged.stt_model == "scribe_v2_realtime"
+        assert merged.stt_model == "flux-general-multi"
 
     def test_stt_extra_deep_merge(self) -> None:
         class R:
@@ -449,6 +459,35 @@ class TestClientExtrasAllowlist:
         assert "tts_host" not in session.audio_output.extra
         assert session.audio_output.extra["dialect"] == "emirati"
         assert session.audio_output.extra["speed"] == 1.1
+
+
+class TestDefaultPipeline:
+    """Deepgram Flux with provider turn detection, ElevenLabs v4 turbo speech."""
+
+    @staticmethod
+    def _session(defaults: VoiceConfig) -> tuple[Any, dict[str, Any]]:
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+
+        agent = Agent(name="voice_test", model=TestModel(responses=["hi"]), tools=[])
+        return voice_routes.build_voice_session(agent, defaults, {})
+
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, meta = self._session(VoiceConfig())
+        assert meta["stt_provider"] == "deepgram-flux"
+        assert meta["stt_model"] == "flux-general-multi"
+        assert meta["turn_detector"] == "ProviderTurnDetector"
+        assert meta["tts_provider"] == "elevenlabs"
+        assert session.audio_output.model == "eleven_v4_turbo"
+
+    def test_without_deepgram_key_falls_back_to_scribe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Deepgram reads its key only at connect: every session would fail there."""
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        session, meta = self._session(VoiceConfig(turn_detector="heuristic"))
+        assert meta["stt_provider"] == "elevenlabs"
+        assert meta["stt_model"] is None  # the Flux id never reaches the Scribe wire
+        assert session.audio_output.model == "eleven_v4_turbo"
 
 
 class TestLifespanVoiceState:

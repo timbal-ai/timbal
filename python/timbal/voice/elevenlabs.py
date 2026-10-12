@@ -60,7 +60,7 @@ STT_FATAL_MESSAGE_TYPES = frozenset(
 )
 
 _DEFAULT_STT_MODEL = "scribe_v2_realtime"
-_DEFAULT_TTS_MODEL = "eleven_flash_v2_5"
+_DEFAULT_TTS_MODEL = "eleven_v4_turbo"
 
 
 def _resolve_api_key(explicit: str | SecretStr | None) -> str:
