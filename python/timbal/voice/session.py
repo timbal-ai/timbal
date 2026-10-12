@@ -3777,8 +3777,9 @@ def _flush_segment(text: str, *, first_segment: bool, audio_playing: bool = Fals
         last = _last_sentence_boundary_end(text)
         return text[:last] if last is not None else text
 
-    if _UNFINISHED_LINK_OR_URL.search(text):
-        return None
+    # Only the unfinished link or URL waits; what precedes it flushes as usual.
+    if unfinished := _UNFINISHED_LINK_OR_URL.search(text):
+        return _flush_segment(text[: unfinished.start()], first_segment=first_segment, audio_playing=audio_playing)
 
     # While audio is still playing, keep buffering — no need to rush.
     if audio_playing:

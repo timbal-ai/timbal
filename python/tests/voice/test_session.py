@@ -845,6 +845,25 @@ class TestFlushInsideLinks:
     def test_split_link_or_url_is_stripped(self, deltas: list[str], spoken: list[str]) -> None:
         assert self._spoken(deltas) == spoken
 
+    @pytest.mark.parametrize(
+        "text, flushed",
+        [
+            ("Sure. The source is https://ine.es/x.htm.", "Sure. "),
+            ("Claro. Te paso el enlace: https://ine.es/salarios", "Claro. Te paso el enlace: "),
+            ("Sure. See [the report](https://ine.", "Sure. "),
+        ],
+    )
+    def test_text_before_a_link_or_url_is_not_held(self, text: str, flushed: str) -> None:
+        """A provider sending the whole reply as one ``Text`` block must not
+        have its opening sentence held back by a URL at the end."""
+        assert _flush_segment(text, first_segment=True) == flushed
+
+    def test_held_url_still_respects_playing_audio(self) -> None:
+        assert _flush_segment("Sure. The source is https://ine.es/x.htm.", first_segment=False, audio_playing=True) is None
+
+    def test_whole_reply_in_one_block_with_url(self) -> None:
+        assert self._spoken(["Sure. The source is https://ine.es/x.htm."]) == ["Sure. ", "The source is ."]
+
     def test_delivery_tag_still_flushes(self) -> None:
         assert _flush_segment("[warm] Sure.", first_segment=True) == "[warm] Sure."
 
