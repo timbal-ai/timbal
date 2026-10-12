@@ -34,7 +34,7 @@ from timbal.voice import (
 )
 from timbal.voice.metrics import TurnMetricsEvent
 from timbal.voice.playback import PlaybackTracker
-from timbal.voice.session import _strip_markdown
+from timbal.voice.session import _flush_segment, _strip_markdown
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,
@@ -796,6 +796,148 @@ class TestStripMarkdown:
     def test_plain_text_unchanged(self) -> None:
         plain = "Hello, how are you doing today?"
         assert _strip_markdown(plain) == plain
+
+    def test_link_said_as_its_words(self) -> None:
+        assert _strip_markdown("See [the INE report](https://ine.es/a.b?x=1) for more.") == (
+            "See the INE report for more."
+        )
+
+    def test_bare_url_not_said(self) -> None:
+        assert "http" not in _strip_markdown("Source: https://ine.es/daco/salarios.htm today")
+        assert _strip_markdown("It is here (https://example.com/x).").strip() == "It is here ."
+
+    def test_inline_code_said_as_text(self) -> None:
+        assert _strip_markdown("Open `report.pdf` now") == "Open report.pdf now"
+
+    def test_delivery_tags_kept(self) -> None:
+        assert _strip_markdown("[warm] Sure, [short pause] here it is.") == "[warm] Sure, [short pause] here it is."
+
+    def test_url_keeps_the_sentence_end(self) -> None:
+        assert _strip_markdown("The source is https://ine.es/x.htm. It says 3%.") == "The source is . It says 3%."
+        assert _strip_markdown("Go to https://example.com/a, then call.") == "Go to , then call."
+
+
+class TestFlushInsideLinks:
+    """Stripping runs per TTS segment, so no segment may end inside a link or URL."""
+
+    @staticmethod
+    def _spoken(deltas: list[str]) -> list[str]:
+        buffer, scheduled, segments = "", "", []
+        for delta in deltas:
+            buffer += delta
+            flush = _flush_segment(buffer, first_segment=not scheduled)
+            if flush is not None:
+                segments.append(flush)
+                scheduled += flush
+                buffer = buffer[len(flush) :]
+        if buffer:
+            segments.append(buffer)
+        return [_strip_markdown(s) for s in segments]
+
+    @pytest.mark.parametrize(
+        "deltas, spoken",
+        [
+            (["See [the report](https://ine.", "es/a.b?x=1) for more."], ["See the report for more."]),
+            (["Mira [el informe](https:", "//ine.es/x.htm) para más."], ["Mira el informe para más."]),
+            (["Go to https://example.", "com/path now."], ["Go to  now."]),
+        ],
+    )
+    def test_split_link_or_url_is_stripped(self, deltas: list[str], spoken: list[str]) -> None:
+        assert self._spoken(deltas) == spoken
+
+    @pytest.mark.parametrize(
+        "text, flushed",
+        [
+            ("Sure. The source is https://ine.es/x.htm.", "Sure. "),
+            ("Claro. Te paso el enlace: https://ine.es/salarios", "Claro. Te paso el enlace: "),
+            ("Sure. See [the report](https://ine.", "Sure. "),
+        ],
+    )
+    def test_text_before_a_link_or_url_is_not_held(self, text: str, flushed: str) -> None:
+        """A provider sending the whole reply as one ``Text`` block must not
+        have its opening sentence held back by a URL at the end."""
+        assert _flush_segment(text, first_segment=True) == flushed
+
+    @pytest.mark.parametrize(
+        "text, first_segment, flushed",
+        [
+            (
+                "See [the report by Dr. Smith on salaries of the whole workforce in 2025 and beyond](https://ine.",
+                True,
+                None,
+            ),
+            ("See [report by Dr. Smith](https://x.com) and more", True, None),
+            ("Done. See [report by Dr. Smith](https://x.com) and more", True, "Done. "),
+            ("And the summary is in [the U.S. report](https://x.com) for you", False, None),
+            (
+                "And the summary is in [the U.S. report](https://x.com). More to come",
+                False,
+                "And the summary is in [the U.S. report](https://x.com). ",
+            ),
+        ],
+    )
+    def test_no_split_inside_a_link_label(self, text: str, first_segment: bool, flushed: str | None) -> None:
+        assert _flush_segment(text, first_segment=first_segment) == flushed
+
+    def test_long_link_label_split_across_deltas(self) -> None:
+        label = "the report by Dr. Smith on salaries of the whole workforce in 2025"
+        assert self._spoken([f"See [{label}](https://ine.", "es/x.htm) today."]) == [f"See {label} today."]
+
+    def test_held_url_still_respects_playing_audio(self) -> None:
+        assert _flush_segment("Sure. The source is https://ine.es/x.htm.", first_segment=False, audio_playing=True) is None
+
+    def test_whole_reply_in_one_block_with_url(self) -> None:
+        assert self._spoken(["Sure. The source is https://ine.es/x.htm."]) == ["Sure. ", "The source is ."]
+
+    def test_delivery_tag_still_flushes(self) -> None:
+        assert _flush_segment("[warm] Sure.", first_segment=True) == "[warm] Sure."
+
+    def test_stray_bracket_does_not_hold_the_reply(self) -> None:
+        text = "Press [ to open the menu. Then pick the second option from the list, and confirm it."
+        assert _flush_segment("Press [ to open the menu.", first_segment=True) is None
+        assert _flush_segment(text, first_segment=True) is not None
+
+    def test_hard_cap_still_flushes(self) -> None:
+        text = "x" * 200 + " https://example."
+        assert _flush_segment(text, first_segment=False) is not None
+
+
+class TestNestedAgentText:
+    """An agent called as a tool streams its text through the turn; only the
+    session agent's own reply is spoken."""
+
+    async def test_tool_agent_text_is_not_spoken(self) -> None:
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+
+        drafter = Agent(
+            name="drafter",
+            description="Drafts a document.",
+            model=TestModel(responses=["SECRET DRAFT: <html><body>lots of markup</body></html>"]),
+        )
+        agent = Agent(
+            name="test_voice",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="c1", name="drafter", input={"prompt": "draft it"})],
+                        stop_reason="tool_use",
+                    ),
+                    "Your document is ready.",
+                ]
+            ),
+            tools=[drafter],
+        )
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=tts, turn_detector="heuristic")
+        await session._run_turn("write me a document")
+
+        spoken = " ".join(tts.synthesized_texts)
+        assert "SECRET" not in spoken
+        assert "Your document is ready." in spoken
+        replies = [e.text for e in session.transcript if e.role == "assistant"]
+        assert replies == ["Your document is ready."]
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,32 @@ agent.voice_config["filler"] = {
 }
 ```
 
+## Before the first tool call
+
+A reasoning model can think for several seconds before it says or calls anything, and a tool-call filler cannot cover that. `think_delay_secs` arms the filler when the turn starts: if nothing has been said and no tool has been called that long after the user finished, the first filler is spoken anyway. A tool call before then still gets its filler after `delay_secs`, whichever comes first. A tool called after that filler gets one of its own, `delay_secs` after the later of the call and the filler, even without `repeat_secs`; `max_per_turn: 1` turns that off.
+
+Pair it with `phrases`, ready-made lines for the first filler of a turn. They are spoken with no LLM round trip, so the line lands on time; follow-ups are still generated from the request, so they can say what the assistant is working on. Key them by the call's language, with `"*"` for any other:
+
+```python
+agent.voice_config["filler"] = {
+    "enabled": True,
+    "model": "google/gemini-2.5-flash-lite",
+    "think_delay_secs": 1.5,
+    "phrases": {
+        "en": ["Mm, let me see.", "One second.", "Let me check."],
+        "es": ["Mmm, déjame ver.", "Un segundo.", "Vale, lo miro."],
+    },
+    "repeat_secs": 6.0,
+    "max_per_turn": 4,
+}
+```
+
+The line said on the previous turn is avoided when there is another to choose. A language with no entry falls back to a generated first line. Regions are dropped on both sides, so an `"es-ES"` key serves a call configured as `"es"` and the other way round.
+
+The language is the session's configured `language`, not one the speech-to-text provider detects. With `language` unset (auto-detect), only the `"*"` lines are used, so set it per call when callers speak different languages.
+
+Only the session agent's own reply is spoken. An agent it calls as a tool streams its text through the same run, and that text — working notes, a document being drafted — is never read aloud.
+
 Repeats are bounded and stop being useful once the answer arrives or the turn is interrupted. Test with representative tool latency; repeated acknowledgements can distract from the actual answer. Fillers consume LLM and TTS usage and appear in transcripts as fillers. First-audio latency can measure a filler instead of the useful answer; see [Events and usage](/voice/observability).
 
 Set `agent.voice_config["filler"] = {"enabled": False}` to explicitly disable an inherited filler. Empty objects mean unset, rather than disabling a server default.
