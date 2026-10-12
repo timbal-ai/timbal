@@ -1843,10 +1843,11 @@ class VoiceSession:
                     await self._agent_system_prompt(), greeting_heard
                 )
             agen = self.agent(**agent_kwargs)
-            if self.filler is not None and self.filler.enabled and self.filler.think_delay_secs is not None:
-                # Armed now rather than at the first tool call: a model that
-                # thinks for seconds before calling anything is dead air too.
-                self._turn_filler_task = asyncio.create_task(self._filler_flow())
+            # Armed at turn start rather than at the first tool call: a model
+            # that thinks for seconds before calling anything is dead air too.
+            arm_think_filler = (
+                self.filler is not None and self.filler.enabled and self.filler.think_delay_secs is not None
+            )
             # Timed ``__anext__`` so a hung LLM/tool cannot stall forever. The
             # for-body is unchanged; only the pull is deadline-aware.
             while True:
@@ -1861,6 +1862,15 @@ class VoiceSession:
                         **_trace_debug_fields(),
                     )
                     break
+
+                if arm_think_filler:
+                    # Not before the run's first event: the flow task copies this
+                    # task's context, which holds the previous turn's finished
+                    # RunContext until the run starts. A filler generated from it
+                    # chains to that run as a continuation, and filler TTS usage
+                    # lands on it. The deadline still counts from turn start.
+                    arm_think_filler = False
+                    self._turn_filler_task = asyncio.create_task(self._filler_flow())
 
                 turn_phase = "awaiting_agent_event"
                 if self._cancel_turn.is_set():
