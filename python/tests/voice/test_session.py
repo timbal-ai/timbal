@@ -858,6 +858,31 @@ class TestFlushInsideLinks:
         have its opening sentence held back by a URL at the end."""
         assert _flush_segment(text, first_segment=True) == flushed
 
+    @pytest.mark.parametrize(
+        "text, first_segment, flushed",
+        [
+            (
+                "See [the report by Dr. Smith on salaries of the whole workforce in 2025 and beyond](https://ine.",
+                True,
+                None,
+            ),
+            ("See [report by Dr. Smith](https://x.com) and more", True, None),
+            ("Done. See [report by Dr. Smith](https://x.com) and more", True, "Done. "),
+            ("And the summary is in [the U.S. report](https://x.com) for you", False, None),
+            (
+                "And the summary is in [the U.S. report](https://x.com). More to come",
+                False,
+                "And the summary is in [the U.S. report](https://x.com). ",
+            ),
+        ],
+    )
+    def test_no_split_inside_a_link_label(self, text: str, first_segment: bool, flushed: str | None) -> None:
+        assert _flush_segment(text, first_segment=first_segment) == flushed
+
+    def test_long_link_label_split_across_deltas(self) -> None:
+        label = "the report by Dr. Smith on salaries of the whole workforce in 2025"
+        assert self._spoken([f"See [{label}](https://ine.", "es/x.htm) today."]) == [f"See {label} today."]
+
     def test_held_url_still_respects_playing_audio(self) -> None:
         assert _flush_segment("Sure. The source is https://ine.es/x.htm.", first_segment=False, audio_playing=True) is None
 

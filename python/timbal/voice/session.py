@@ -141,8 +141,9 @@ _BARE_URL = re.compile(r"\(?\bhttps?://[^\s)]*[^\s).,;:!?…]\)?")
 _MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
 # Stripping runs per TTS segment, so a segment must not end inside a link or a
 # URL: ``https:`` and ``ine.`` end in clause characters and would flush mid-way.
-# The label is bounded so a stray ``[`` cannot hold the reply back.
-_UNFINISHED_LINK_OR_URL = re.compile(r"(?:\[[^\[\]\n]{0,60}(?:\]\([^)\s]*)?|\bhttps?:/{0,2}[^\s)]*)$")
+# Once ``](`` has streamed it is a link, however long its label; before that the
+# label is bounded, so a stray ``[`` cannot hold the reply back.
+_UNFINISHED_LINK_OR_URL = re.compile(r"(?:\[[^\[\]\n]*\]\([^)\s]*|\[[^\[\]\n]{0,60}|\bhttps?:/{0,2}[^\s)]*)$")
 
 
 def _strip_markdown(text: str) -> str:
@@ -3741,12 +3742,18 @@ def _dont_greet_again_prompt(system_prompt: str | None, greeting: str) -> str:
     return f"{system_prompt}\n\n{note}" if system_prompt else note
 
 
+def _sentence_boundary_ends(text: str) -> list[int]:
+    """Indexes in *text* right after each ``SENTENCE_BOUNDARY`` match outside a
+    markdown link: ``[report by Dr. Smith](…)`` split at ``Dr.`` leaves raw
+    markdown on both sides, which ``_strip_markdown`` cannot rejoin."""
+    links = [m.span() for m in _MD_LINK.finditer(text)]
+    return [m.end() for m in SENTENCE_BOUNDARY.finditer(text) if not any(s < m.start() < e for s, e in links)]
+
+
 def _last_sentence_boundary_end(text: str) -> int | None:
-    """Index in *text* right after the last ``SENTENCE_BOUNDARY`` match, or ``None``."""
-    end = None
-    for m in SENTENCE_BOUNDARY.finditer(text):
-        end = m.end()
-    return end
+    """Index in *text* right after the last ``SENTENCE_BOUNDARY`` match outside a link, or ``None``."""
+    ends = _sentence_boundary_ends(text)
+    return ends[-1] if ends else None
 
 
 def _flush_segment(text: str, *, first_segment: bool, audio_playing: bool = False) -> str | None:
@@ -3771,9 +3778,9 @@ def _flush_segment(text: str, *, first_segment: bool, audio_playing: bool = Fals
     # Hard cap — always flush at MAX to avoid unbounded buffering.
     if len(text) >= MAX_TTS_BUFFER_CHARS:
         if first_segment:
-            for m in SENTENCE_BOUNDARY.finditer(text):
-                if m.end() >= FIRST_SEGMENT_MIN_CHARS:
-                    return text[: m.end()]
+            for end in _sentence_boundary_ends(text):
+                if end >= FIRST_SEGMENT_MIN_CHARS:
+                    return text[:end]
         last = _last_sentence_boundary_end(text)
         return text[:last] if last is not None else text
 
@@ -3792,9 +3799,9 @@ def _flush_segment(text: str, *, first_segment: bool, audio_playing: bool = Fals
     lo = FIRST_SEGMENT_MIN_CHARS if first_segment else MIN_FLUSH_CHARS
     if len(text) >= lo:
         if first_segment:
-            for m in SENTENCE_BOUNDARY.finditer(text):
-                if m.end() >= lo:
-                    return text[: m.end()]
+            for end in _sentence_boundary_ends(text):
+                if end >= lo:
+                    return text[:end]
         else:
             last = _last_sentence_boundary_end(text)
             if last is not None:
