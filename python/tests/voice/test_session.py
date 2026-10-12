@@ -802,9 +802,11 @@ class TestStripMarkdown:
             "See the INE report for more."
         )
 
-    def test_bare_url_not_said(self) -> None:
-        assert "http" not in _strip_markdown("Source: https://ine.es/daco/salarios.htm today")
-        assert _strip_markdown("It is here (https://example.com/x).").strip() == "It is here ."
+    def test_bare_url_said_as_its_domain(self) -> None:
+        """Dropped whole, a URL left "The source is." — a sentence with no end."""
+        assert _strip_markdown("Source: https://ine.es/daco/salarios.htm today") == "Source: ine.es today"
+        assert _strip_markdown("It is here (https://www.example.com/x?a=1).") == "It is here example.com."
+        assert _strip_markdown("See http://localhost:8080/admin now") == "See localhost now"
 
     def test_inline_code_said_as_text(self) -> None:
         assert _strip_markdown("Open `report.pdf` now") == "Open report.pdf now"
@@ -813,8 +815,8 @@ class TestStripMarkdown:
         assert _strip_markdown("[warm] Sure, [short pause] here it is.") == "[warm] Sure, [short pause] here it is."
 
     def test_url_keeps_the_sentence_end(self) -> None:
-        assert _strip_markdown("The source is https://ine.es/x.htm. It says 3%.") == "The source is . It says 3%."
-        assert _strip_markdown("Go to https://example.com/a, then call.") == "Go to , then call."
+        assert _strip_markdown("The source is https://ine.es/x.htm. It says 3%.") == "The source is ine.es. It says 3%."
+        assert _strip_markdown("Go to https://example.com/a, then call.") == "Go to example.com, then call."
 
 
 class TestFlushInsideLinks:
@@ -839,7 +841,7 @@ class TestFlushInsideLinks:
         [
             (["See [the report](https://ine.", "es/a.b?x=1) for more."], ["See the report for more."]),
             (["Mira [el informe](https:", "//ine.es/x.htm) para más."], ["Mira el informe para más."]),
-            (["Go to https://example.", "com/path now."], ["Go to  now."]),
+            (["Go to https://example.", "com/path now."], ["Go to example.com now."]),
         ],
     )
     def test_split_link_or_url_is_stripped(self, deltas: list[str], spoken: list[str]) -> None:
@@ -887,7 +889,7 @@ class TestFlushInsideLinks:
         assert _flush_segment("Sure. The source is https://ine.es/x.htm.", first_segment=False, audio_playing=True) is None
 
     def test_whole_reply_in_one_block_with_url(self) -> None:
-        assert self._spoken(["Sure. The source is https://ine.es/x.htm."]) == ["Sure. ", "The source is ."]
+        assert self._spoken(["Sure. The source is https://ine.es/x.htm."]) == ["Sure. ", "The source is ine.es."]
 
     def test_delivery_tag_still_flushes(self) -> None:
         assert _flush_segment("[warm] Sure.", first_segment=True) == "[warm] Sure."

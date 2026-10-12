@@ -25,6 +25,7 @@ import time
 import unicodedata
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import structlog
 from uuid_extensions import uuid7
@@ -132,9 +133,9 @@ _MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 _MD_HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _MD_NUMBERED_LIST = re.compile(r"^\d+\.\s+", re.MULTILINE)
 _MD_BULLET = re.compile(r"^[-*]\s+", re.MULTILINE)
-# A link is said as its words; a bare URL is not said at all ("h t t p s colon
-# slash slash…" is never what the caller wants). ``[warm]``-style delivery tags
-# have no ``(…)`` after them and are left alone.
+# A link is said as its words; a bare URL as its domain ("h t t p s colon slash
+# slash…" is never what the caller wants, and dropping it whole leaves "The source
+# is."). ``[warm]``-style delivery tags have no ``(…)`` after them and are left alone.
 _MD_LINK = re.compile(r"\[([^\[\]\n]+)\]\([^)\s]+\)")
 # Trailing punctuation belongs to the sentence, not the URL.
 _BARE_URL = re.compile(r"\(?\bhttps?://[^\s)]*[^\s).,;:!?…]\)?")
@@ -146,13 +147,21 @@ _MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _UNFINISHED_LINK_OR_URL = re.compile(r"(?:\[[^\[\]\n]*\]\([^)\s]*|\[[^\[\]\n]{0,60}|\bhttps?:/{0,2}[^\s)]*)$")
 
 
+def _url_domain(match: re.Match[str]) -> str:
+    try:
+        host = urlsplit(match.group(0).strip("()")).hostname or ""
+    except ValueError:
+        return ""
+    return host.removeprefix("www.")
+
+
 def _strip_markdown(text: str) -> str:
     text = _MD_BOLD.sub(r"\1", text)
     text = _MD_HEADER.sub("", text)
     text = _MD_NUMBERED_LIST.sub("", text)
     text = _MD_BULLET.sub("", text)
     text = _MD_LINK.sub(r"\1", text)
-    text = _BARE_URL.sub("", text)
+    text = _BARE_URL.sub(_url_domain, text)
     text = _MD_INLINE_CODE.sub(r"\1", text)
     return text
 
