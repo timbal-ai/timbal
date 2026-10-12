@@ -175,7 +175,16 @@ async def test_dialogue_flushes_each_finished_clause(tts_factory):
     the next sentence, holding a reply's first audio for as long as the model paused."""
     p, ws, _ = await tts_factory()
     stream = p.open_stream()
-    for text in ("Done. ", "I sent it", " to you: ", "the report", "\n", "¿Algo más?"):
+    for text in (
+        "Done. ",
+        "I sent it",
+        " to you: ",
+        "the report",
+        "\n",
+        "First item\n",
+        "Second item \n ",
+        "¿Algo más?",
+    ):
         await stream.feed(text)
     await stream.end()
     fed = [(m["inputs"][0]["text"], m.get("flush", False)) for m in ws.sent if "inputs" in m]
@@ -184,6 +193,8 @@ async def test_dialogue_flushes_each_finished_clause(tts_factory):
         ("I sent it", False),
         (" to you: ", True),
         ("the report", False),
+        ("First item\n", True),
+        ("Second item \n ", True),
         ("¿Algo más?", True),
     ]
 

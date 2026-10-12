@@ -638,7 +638,9 @@ class _ElevenLabsTTSStream(TTSStream):
         )
         # Without this a reply's first sentence waits for the next one: a model
         # that pauses after "Done." held its first audio for the whole pause.
-        flush = self._tts._dialogue and text.rstrip()[-1:] in _DIALOGUE_FLUSH_END_CHARS
+        # Spaces and tabs only: a segment the session cut at a bare newline (a
+        # list item, a paragraph) ends a clause too.
+        flush = self._tts._dialogue and text.rstrip(" \t")[-1:] in _DIALOGUE_FLUSH_END_CHARS
         await self._tts._send_text(self._ctx_id, text, flush=flush)
 
     async def end(self) -> None:
