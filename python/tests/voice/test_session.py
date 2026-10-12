@@ -797,6 +797,59 @@ class TestStripMarkdown:
         plain = "Hello, how are you doing today?"
         assert _strip_markdown(plain) == plain
 
+    def test_link_said_as_its_words(self) -> None:
+        assert _strip_markdown("See [the INE report](https://ine.es/a.b?x=1) for more.") == (
+            "See the INE report for more."
+        )
+
+    def test_bare_url_not_said(self) -> None:
+        assert "http" not in _strip_markdown("Source: https://ine.es/daco/salarios.htm today")
+        assert _strip_markdown("It is here (https://example.com/x).").strip() == "It is here ."
+
+    def test_inline_code_said_as_text(self) -> None:
+        assert _strip_markdown("Open `report.pdf` now") == "Open report.pdf now"
+
+    def test_delivery_tags_kept(self) -> None:
+        assert _strip_markdown("[warm] Sure, [short pause] here it is.") == "[warm] Sure, [short pause] here it is."
+
+
+class TestNestedAgentText:
+    """An agent called as a tool streams its text through the turn; only the
+    session agent's own reply is spoken."""
+
+    async def test_tool_agent_text_is_not_spoken(self) -> None:
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+
+        drafter = Agent(
+            name="drafter",
+            description="Drafts a document.",
+            model=TestModel(responses=["SECRET DRAFT: <html><body>lots of markup</body></html>"]),
+        )
+        agent = Agent(
+            name="test_voice",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="c1", name="drafter", input={"prompt": "draft it"})],
+                        stop_reason="tool_use",
+                    ),
+                    "Your document is ready.",
+                ]
+            ),
+            tools=[drafter],
+        )
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(script=[]), tts=tts, turn_detector="heuristic")
+        await session._run_turn("write me a document")
+
+        spoken = " ".join(tts.synthesized_texts)
+        assert "SECRET" not in spoken
+        assert "Your document is ready." in spoken
+        replies = [e.text for e in session.transcript if e.role == "assistant"]
+        assert replies == ["Your document is ready."]
+
 
 # ---------------------------------------------------------------------------
 # Tests: multi-turn conversation (DelayedMockSTT)

@@ -297,9 +297,9 @@ class TestMergeVoiceConfig:
 
     def test_invalid_filler_key_fails_fast(self) -> None:
         class R:
-            voice_config = {"filler": {"phrases": ["nope"]}}
+            voice_config = {"filler": {"phrase_list": ["nope"]}}
 
-        with pytest.raises(ValidationError, match="phrases"):
+        with pytest.raises(ValidationError, match="phrase_list"):
             voice_routes.merge_voice_config(R())
 
 

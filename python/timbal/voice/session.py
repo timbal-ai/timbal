@@ -19,6 +19,7 @@ TTS is scheduled on a chained background task so the agent stream can drain
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import time
 import unicodedata
@@ -130,6 +131,12 @@ _MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
 _MD_HEADER = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _MD_NUMBERED_LIST = re.compile(r"^\d+\.\s+", re.MULTILINE)
 _MD_BULLET = re.compile(r"^[-*]\s+", re.MULTILINE)
+# A link is said as its words; a bare URL is not said at all ("h t t p s colon
+# slash slash…" is never what the caller wants). ``[warm]``-style delivery tags
+# have no ``(…)`` after them and are left alone.
+_MD_LINK = re.compile(r"\[([^\[\]\n]+)\]\([^)\s]+\)")
+_BARE_URL = re.compile(r"\(?\bhttps?://[^\s)]+\)?")
+_MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
 
 
 def _strip_markdown(text: str) -> str:
@@ -137,6 +144,9 @@ def _strip_markdown(text: str) -> str:
     text = _MD_HEADER.sub("", text)
     text = _MD_NUMBERED_LIST.sub("", text)
     text = _MD_BULLET.sub("", text)
+    text = _MD_LINK.sub(r"\1", text)
+    text = _BARE_URL.sub("", text)
+    text = _MD_INLINE_CODE.sub(r"\1", text)
     return text
 
 
@@ -313,6 +323,13 @@ class VoiceSession:
         # Segments/bytes as of the last filler — "spoken since then" checks.
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
+        # The turn's first tool call (when, and the latest tool's name): the
+        # flow armed at turn start (``think_delay_secs``) waits on it too.
+        self._turn_tool_seen = asyncio.Event()
+        self._turn_tool_seen_at: float | None = None
+        self._turn_tool_name: str | None = None
+        # The ready-made line said last turn, so the next turn picks another.
+        self._last_filler_phrase: str | None = None
 
         # Agent-speaks-first opener (see GreetingConfig). Spoken from run() at
         # t=0 instead of from a turn, so it lives entirely outside the turn
@@ -1771,6 +1788,10 @@ class VoiceSession:
         self._turn_filler_text = ""
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
+        self._turn_tool_seen = asyncio.Event()
+        self._turn_tool_seen_at = None
+        self._turn_tool_name = None
+        own_llm_path = self._own_llm_path()
         agen = None
         # Where we were when cancel / finally ran (loop_exit is only set on break/else/exception;
         # CancelledError inside ``await _speak`` left the old code stuck at "not_started").
@@ -1815,6 +1836,10 @@ class VoiceSession:
                     await self._agent_system_prompt(), greeting_heard
                 )
             agen = self.agent(**agent_kwargs)
+            if self.filler is not None and self.filler.enabled and self.filler.think_delay_secs is not None:
+                # Armed now rather than at the first tool call: a model that
+                # thinks for seconds before calling anything is dead air too.
+                self._turn_filler_task = asyncio.create_task(self._filler_flow())
             # Timed ``__anext__`` so a hung LLM/tool cannot stall forever. The
             # for-body is unchanged; only the pull is deadline-aware.
             while True:
@@ -1887,6 +1912,17 @@ class VoiceSession:
                     )
                     continue
 
+                if (
+                    isinstance(event, DeltaEvent)
+                    and isinstance(event.item, TextDelta | Text)
+                    and own_llm_path is not None
+                    and event.path != own_llm_path
+                ):
+                    # An agent called as a tool streams its own text through
+                    # this generator: its working notes, a document it drafts.
+                    # That is not the reply, and none of it is read aloud.
+                    continue
+
                 if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta | Text):
                     # Google (and others) often emit a full ``Text`` block first, then ``TextDelta`` tails.
                     chunk = event.item.text if isinstance(event.item, Text) else event.item.text_delta
@@ -1934,8 +1970,11 @@ class VoiceSession:
 
                 elif isinstance(event, OutputEvent):
                     # Outer Agent OUTPUT mirrors the LLM message; handling both would
-                    # double-run reconcile / optional suffix TTS.
-                    if not str(event.path).endswith(".llm"):
+                    # double-run reconcile / optional suffix TTS. A nested agent's
+                    # LLM output is skipped for the reason its deltas are.
+                    if not str(event.path).endswith(".llm") or (
+                        own_llm_path is not None and event.path != own_llm_path
+                    ):
                         logger.debug(
                             "turn_skip_non_llm_output_event",
                             event_path=event.path,
@@ -2248,16 +2287,68 @@ class VoiceSession:
             return f"{self._turn_filler_text} {spoken}".strip()
         return spoken
 
+    def _own_llm_path(self) -> str | None:
+        """Path of the session agent's own LLM events — the only text that is spoken.
+
+        ``None`` for a duck-typed agent with no path: then every LLM's text is
+        spoken, as before agents called as tools were told apart.
+        """
+        path = getattr(self.agent, "_path", None)
+        return f"{path}.llm" if isinstance(path, str) and path else None
+
     def _maybe_schedule_filler(self, tool_name: str) -> None:
-        """Kick off the filler flow for this turn's first tool call.
+        """Note a tool call, and kick off the filler flow if the turn has none yet.
 
         At most one flow per turn — later tool calls (same or subsequent LLM
-        iterations) reuse the guard. The flow itself decides whether anything
-        is actually spoken.
+        iterations) reuse the guard, and a flow armed at turn start
+        (``think_delay_secs``) learns of the call through ``_turn_tool_seen``.
+        The flow itself decides whether anything is actually spoken.
         """
+        self._turn_tool_name = tool_name
+        if self._turn_tool_seen_at is None:
+            self._turn_tool_seen_at = time.monotonic()
+            self._turn_tool_seen.set()
         if self.filler is None or not self.filler.enabled or self._turn_filler_task is not None:
             return
-        self._turn_filler_task = asyncio.create_task(self._filler_flow(tool_name))
+        self._turn_filler_task = asyncio.create_task(self._filler_flow())
+
+    async def _until_first_filler_due(self) -> None:
+        """Return once the turn's first filler is due.
+
+        That is ``delay_secs`` after the first tool call or ``think_delay_secs``
+        after the turn began, whichever comes first.
+        """
+        think = self.filler.think_delay_secs
+        while True:
+            due: list[float] = []
+            if think is not None:
+                due.append(self._turn_started_at + think)
+            if self._turn_tool_seen_at is not None:
+                due.append(self._turn_tool_seen_at + self.filler.delay_secs)
+            wait = max(0.0, min(due) - time.monotonic()) if due else None
+            if self._turn_tool_seen_at is not None or wait == 0.0:
+                if wait:
+                    await asyncio.sleep(wait)
+                return
+            try:
+                await asyncio.wait_for(self._turn_tool_seen.wait(), timeout=wait)
+            except TimeoutError:
+                return
+
+    def _instant_filler_phrase(self) -> str | None:
+        """A ready-made line from ``FillerConfig.phrases`` for the call's language, or None."""
+        phrases = self.filler.phrases if self.filler is not None else None
+        if isinstance(phrases, dict):
+            language = (self.audio_input.language or "").strip().lower().replace("_", "-").split("-")[0]
+            options = phrases.get(language) or phrases.get("*")
+        else:
+            options = phrases
+        if not options:
+            return None
+        fresh = [p for p in options if p != self._last_filler_phrase] or options
+        phrase = random.choice(fresh)
+        self._last_filler_phrase = phrase
+        return phrase
 
     def _filler_ok_to_speak(self) -> bool:
         """The turn is still live and nothing has been spoken since the last
@@ -2276,32 +2367,41 @@ class VoiceSession:
             and self._turn_audio_bytes == self._turn_filler_audio_baseline
         )
 
-    async def _filler_flow(self, tool_name: str) -> None:
-        """Speak the first filler after the grace delay; optionally repeat.
+    async def _filler_flow(self) -> None:
+        """Speak the first filler once it is due; optionally repeat.
 
-        The first generation overlaps the delay (latency-critical). Follow-ups
-        (``repeat_secs``) fire only on continued silence and generate on
-        demand — no speculative LLM call per window.
+        The first line is a ready-made one when ``phrases`` has one for the
+        call's language. Otherwise it is generated, and a generation triggered
+        by a tool call overlaps the grace delay (latency-critical); one armed
+        at turn start waits until it is due rather than spend an LLM call on
+        every turn. Follow-ups (``repeat_secs``) fire only on continued silence
+        and generate on demand — no speculative LLM call per window.
         """
         spoken: list[str] = []
         try:
-            gen = asyncio.create_task(self._generate_filler(tool_name, spoken))
+            phrase = self._instant_filler_phrase()
+            gen: asyncio.Task[str | None] | None = None
+            if phrase is None and self._turn_tool_seen_at is not None:
+                gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
             try:
-                await asyncio.sleep(self.filler.delay_secs)
+                await self._until_first_filler_due()
                 if not self._filler_ok_to_speak():
                     return
-                async with asyncio.timeout(self.filler.timeout_secs):
-                    phrase = await asyncio.shield(gen)
+                if phrase is None:
+                    if gen is None:
+                        gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
+                    async with asyncio.timeout(self.filler.timeout_secs):
+                        phrase = await asyncio.shield(gen)
             except TimeoutError:
-                logger.debug("filler_generation_timeout", tool=tool_name, **_trace_debug_fields())
+                logger.debug("filler_generation_timeout", tool=self._turn_tool_name, **_trace_debug_fields())
                 return
             finally:
-                if not gen.done():
+                if gen is not None and not gen.done():
                     gen.cancel()
             # Re-check: the reply may have started streaming while we generated.
             if not phrase or not self._filler_ok_to_speak():
                 return
-            await self._speak_filler(phrase, tool_name)
+            await self._speak_filler(phrase, self._turn_tool_name or "")
             spoken.append(phrase)
 
             while self.filler.repeat_secs is not None and len(spoken) < self.filler.max_per_turn:
@@ -2310,20 +2410,20 @@ class VoiceSession:
                     return
                 try:
                     async with asyncio.timeout(self.filler.timeout_secs):
-                        phrase = await self._generate_filler(tool_name, spoken)
+                        phrase = await self._generate_filler(self._turn_tool_name, spoken)
                 except TimeoutError:
-                    logger.debug("filler_generation_timeout", tool=tool_name, **_trace_debug_fields())
+                    logger.debug("filler_generation_timeout", tool=self._turn_tool_name, **_trace_debug_fields())
                     return
                 if not phrase or not self._filler_ok_to_speak():
                     return
-                await self._speak_filler(phrase, tool_name)
+                await self._speak_filler(phrase, self._turn_tool_name or "")
                 spoken.append(phrase)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             # Dead air is the status quo — a broken filler must never surface
             # to the caller as an error.
-            logger.warning("filler_failed", error=str(e), tool=tool_name, **_trace_debug_fields())
+            logger.warning("filler_failed", error=str(e), tool=self._turn_tool_name, **_trace_debug_fields())
 
     async def _speak_filler(self, phrase: str, tool_name: str) -> None:
         """Synthesize one filler phrase as a dedicated task on the TTS chain.
@@ -2363,11 +2463,12 @@ class VoiceSession:
         self._transcript.append(TranscriptEntry(role="assistant", text=phrase, filler=True))
         await self._emit(FillerSpoken(text=phrase))
 
-    async def _generate_filler(self, tool_name: str, previous: list[str] | None = None) -> str | None:
+    async def _generate_filler(self, tool_name: str | None, previous: list[str] | None = None) -> str | None:
         """One-shot LLM completion for the phrase.
 
         Runs as its own root run (Runnable creates a fresh RunContext when it
         sees a live sibling context), so it never nests into the turn's trace.
+        ``tool_name`` is None while the model is still thinking, before any call.
         """
         if self._filler_agent is None:
             self._filler_agent = Agent(
@@ -2377,10 +2478,12 @@ class VoiceSession:
                 max_tokens=64,
                 tracing_provider=None,
             )
-        prompt = (
-            f"The user just said: {self._active_turn_user_text!r}\n"
-            f"You are now running the {tool_name!r} tool to handle it. Say your filler phrase."
+        doing = (
+            f"You are now running the {tool_name!r} tool to handle it."
+            if tool_name
+            else "You are working out how to handle it."
         )
+        prompt = f"The user just said: {self._active_turn_user_text!r}\n{doing} Say your filler phrase."
         if previous:
             said = "; ".join(repr(p) for p in previous)
             prompt += (

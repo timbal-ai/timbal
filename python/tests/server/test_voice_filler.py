@@ -75,7 +75,7 @@ class TestFillerConfig:
 
     def test_unknown_key_fails(self) -> None:
         with pytest.raises(ValidationError):
-            FillerConfig(phrases=["hi"])
+            FillerConfig(phrase_list=["hi"])
 
     def test_negative_delay_fails(self) -> None:
         with pytest.raises(ValidationError):
@@ -298,6 +298,131 @@ class TestFillerRepeat:
         assert "still" in prompts[1]
 
 
+class _SlowStartModel(TestModel):
+    """A model that thinks before its first token — the silence a tool filler never covered."""
+
+    def __init__(self, think_secs: float, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.think_secs = think_secs
+
+    async def stream(self, messages: list, **kwargs):
+        await asyncio.sleep(self.think_secs)
+        async for chunk in super().stream(messages, **kwargs):
+            yield chunk
+
+
+def _thinking_session(*, think_secs: float, filler: dict, responses: list | None = None) -> VoiceSession:
+    agent = Agent(
+        name="voice_test",
+        model=_SlowStartModel(think_secs, responses=responses or ["The answer is 42."]),
+        tools=[],
+    )
+    return VoiceSession(agent, _make_stt_class()(), _make_tts_class()(), turn_detector="heuristic", filler=filler)
+
+
+class TestThinkingFiller:
+    """``think_delay_secs``: cover the model's own silence before any tool call."""
+
+    def test_defaults_off(self) -> None:
+        cfg = FillerConfig()
+        assert cfg.think_delay_secs is None
+        assert cfg.phrases is None
+
+    async def test_filler_while_model_thinks(self) -> None:
+        session = _thinking_session(think_secs=0.4, filler=_default_filler(think_delay_secs=0.05))
+        await session._run_turn("what is the answer?")
+
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+        replies = [e.text for e in session.transcript if e.role == "assistant" and not e.filler]
+        assert replies == ["The answer is 42."]
+
+    async def test_generator_told_no_tool_yet(self) -> None:
+        prompts: list[str] = []
+
+        def handler(messages):
+            prompts.append(messages[-1].collect_text())
+            return PHRASE
+
+        session = _thinking_session(
+            think_secs=0.4, filler={"model": TestModel(handler=handler), "think_delay_secs": 0.05}
+        )
+        await session._run_turn("what is the answer?")
+        assert prompts and "working out how to handle it" in prompts[0]
+        assert "None" not in prompts[0]
+
+    async def test_quick_reply_inside_think_delay_no_filler(self) -> None:
+        session = _thinking_session(think_secs=0.0, filler=_default_filler(think_delay_secs=5.0))
+        await session._run_turn("hi")
+
+        assert not any(e.filler for e in session.transcript)
+        assert session._turn_filler_task is not None
+        assert session._turn_filler_task.done()
+
+    async def test_unset_think_delay_waits_for_a_tool(self) -> None:
+        session = _thinking_session(think_secs=0.3, filler=_default_filler())
+        await session._run_turn("what is the answer?")
+
+        assert session._turn_filler_task is None
+        assert not any(e.filler for e in session.transcript)
+
+    async def test_tool_call_before_think_delay_uses_tool_delay(self) -> None:
+        session = _make_session(tool_sleep=0.4, filler=_default_filler(think_delay_secs=30.0, delay_secs=0.0))
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+
+
+class TestReadyMadePhrases:
+    """``phrases``: the first filler with no LLM round trip."""
+
+    async def test_first_filler_is_ready_made_without_generation(self) -> None:
+        def _boom(messages):
+            raise AssertionError("the first filler must not be generated")
+
+        session = _make_session(
+            filler={"model": TestModel(handler=_boom), "delay_secs": 0.0, "phrases": ["Mm, let me see."]}
+        )
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == ["Mm, let me see."]
+
+    async def test_follow_ups_are_generated(self) -> None:
+        session = _make_session(
+            tool_sleep=1.0,
+            filler={
+                "model": TestModel(responses=["Still looking into the salaries."]),
+                "delay_secs": 0.0,
+                "repeat_secs": 0.08,
+                "max_per_turn": 2,
+                "phrases": ["Mm, let me see."],
+            },
+        )
+        await session._run_turn("compare salaries and housing")
+        assert [e.text for e in session.transcript if e.filler] == [
+            "Mm, let me see.",
+            "Still looking into the salaries.",
+        ]
+
+    def test_language_keyed_phrases(self) -> None:
+        session = _make_session(filler={"phrases": {"es": ["Mmm, déjame ver."], "*": ["One second."]}})
+        session.audio_input.language = "es-ES"
+        assert session._instant_filler_phrase() == "Mmm, déjame ver."
+        session.audio_input.language = "ca"
+        assert session._instant_filler_phrase() == "One second."
+
+    def test_language_without_entry_falls_back_to_generation(self) -> None:
+        session = _make_session(filler={"phrases": {"es": ["Mmm, déjame ver."]}})
+        session.audio_input.language = "en"
+        assert session._instant_filler_phrase() is None
+
+    def test_last_turns_phrase_is_avoided(self) -> None:
+        session = _make_session(filler={"phrases": ["A.", "B."]})
+        said = [session._instant_filler_phrase() for _ in range(6)]
+        assert all(a != b for a, b in zip(said, said[1:], strict=False))
+
+    def test_blank_phrases_dropped(self) -> None:
+        assert FillerConfig(phrases=["  ", ""]).phrases is None
+        assert FillerConfig(phrases={"ES": [" Un segundo. ", ""], "en": [" "]}).phrases == {"es": ["Un segundo."]}
+
+
 class TestFillerInternals:
     def test_once_per_turn_guard(self) -> None:
         session = _make_session(filler=_default_filler(delay_secs=60.0))
@@ -448,7 +573,7 @@ class TestClientFillerOverrides:
 
     def test_invalid_client_filler_keeps_server_config(self) -> None:
         base = VoiceConfig(filler={"delay_secs": 0.5})
-        out = voice_routes.merge_client_voice_overrides(base, {"filler": {"phrases": ["nope"]}})
+        out = voice_routes.merge_client_voice_overrides(base, {"filler": {"phrase_list": ["nope"]}})
         assert out.filler.delay_secs == 0.5
         assert out.filler.enabled is True
 

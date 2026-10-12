@@ -47,7 +47,9 @@ class FillerConfig(BaseModel):
 
     Generation starts the moment a tool call is detected; the phrase is only
     spoken if the tool is still running after ``delay_secs`` and nothing else
-    has been said this turn.
+    has been said this turn. ``think_delay_secs`` extends the same cover to the
+    silence before the model has said or called anything, and ``phrases``
+    makes the first filler instant instead of an LLM round trip.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -69,6 +71,38 @@ class FillerConfig(BaseModel):
     follow-up ("still on it…"). ``None`` → one filler per turn, max."""
     max_per_turn: int = Field(default=3, ge=1)
     """Hard cap on fillers per turn (first one included) when repeating."""
+    think_delay_secs: float | None = Field(default=None, ge=0.0)
+    """Cover the model's own silence, not only a tool's. Set → when this long
+    after the turn began nothing has been said and no tool has been called
+    (a reasoning model thinking, a slow first token), the first filler is
+    spoken anyway. A tool call before then still gets its filler after
+    ``delay_secs``, whichever comes first. ``None`` → fillers start only with
+    a tool call."""
+    phrases: list[str] | dict[str, list[str]] | None = None
+    """Ready-made lines for the *first* filler of a turn ("Mm, let me see."),
+    spoken with no LLM round trip, so it can land within ``delay_secs``
+    exactly. A dict is keyed by the call's language (``"es"``, ``"en"`` —
+    ``AudioInputConfig.language``, region dropped) with ``"*"`` serving any
+    other; a language with no entry falls back to generation. Follow-ups are
+    always generated, with the request in hand, so they can say what the
+    assistant is working on. The line said on the previous turn is avoided
+    when there is another to choose."""
+
+    @field_validator("phrases")
+    @classmethod
+    def _drop_blank_phrases(
+        cls, v: list[str] | dict[str, list[str]] | None
+    ) -> list[str] | dict[str, list[str]] | None:
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            kept = {
+                k.strip().lower(): [p.strip() for p in lines if p.strip()]
+                for k, lines in v.items()
+                if k.strip()
+            }
+            return {k: lines for k, lines in kept.items() if lines} or None
+        return [p.strip() for p in v if p.strip()] or None
 
 
 DEFAULT_GREETING_SYSTEM_PROMPT = (

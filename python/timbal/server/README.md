@@ -361,7 +361,7 @@ agent.voice_config = {
 }
 ```
 
-Or via env: `TIMBAL_VOICE_FILLER=1` (defaults), `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, `TIMBAL_VOICE_FILLER_REPEAT_SECS`. Default is off.
+Or via env: `TIMBAL_VOICE_FILLER=1` (defaults), `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, `TIMBAL_VOICE_FILLER_REPEAT_SECS`, `TIMBAL_VOICE_FILLER_THINK_DELAY_SECS`. Default is off.
 
 Empty optional behavior objects (`filler`, `greeting`, `outbound_greeting`,
 `user_idle`, `ambient`, `recording`) mean **no override**, just like omitting
