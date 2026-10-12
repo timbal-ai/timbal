@@ -2376,15 +2376,27 @@ class VoiceSession:
         The first line is a ready-made one when ``phrases`` has one for the
         call's language. Otherwise it is generated, and a generation triggered
         by a tool call overlaps the grace delay (latency-critical); one armed
-        at turn start waits until it is due rather than spend an LLM call on
-        every turn. Follow-ups (``repeat_secs``) fire only on continued silence
-        and generate on demand — no speculative LLM call per window.
+        at turn start waits for a tool call or its thinking deadline rather
+        than spend an LLM call on every turn. Follow-ups (``repeat_secs``) fire
+        only on continued silence and generate on demand — no speculative
+        LLM call per window.
         """
         spoken: list[str] = []
         try:
             phrase = self._instant_filler_phrase()
             ready_made = phrase is not None
             gen: asyncio.Task[str | None] | None = None
+            if phrase is None and self._turn_tool_seen_at is None and self.filler.think_delay_secs is not None:
+                # A tool arriving during the thinking wait should start
+                # generation immediately, overlapping the remaining grace
+                # period. The speech deadline below still gates playback.
+                wait = max(0.0, self._turn_started_at + self.filler.think_delay_secs - time.monotonic())
+                try:
+                    await asyncio.wait_for(self._turn_tool_seen.wait(), timeout=wait)
+                except TimeoutError:
+                    pass
+                if not self._filler_ok_to_speak():
+                    return
             if phrase is None and self._turn_tool_seen_at is not None:
                 gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
             try:

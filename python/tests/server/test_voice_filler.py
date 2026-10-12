@@ -8,6 +8,7 @@ integration tests go through the ``/voice/ws`` WebSocket like a real client.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -355,6 +356,7 @@ class TestThinkingFiller:
         await session._run_turn("hi")
 
         assert not any(e.filler for e in session.transcript)
+        assert session._filler_agent is None
         assert session._turn_filler_task is not None
         assert session._turn_filler_task.done()
 
@@ -369,6 +371,41 @@ class TestThinkingFiller:
         session = _make_session(tool_sleep=0.4, filler=_default_filler(think_delay_secs=30.0, delay_secs=0.0))
         await session._run_turn("what is the answer?")
         assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+
+    @pytest.mark.parametrize("think_delay, tool_delay", [(120.0, 60.0), (60.0, 120.0)])
+    async def test_tool_starts_generation_before_filler_is_due(self, monkeypatch, think_delay, tool_delay) -> None:
+        session = _make_session(filler=_default_filler(think_delay_secs=think_delay, delay_secs=tool_delay))
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        tools: list[str | None] = []
+
+        async def generate(tool_name, previous):
+            tools.append(tool_name)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(session, "_generate_filler", generate)
+        session._turn_started_at = time.monotonic()
+        flow = asyncio.create_task(session._filler_flow())
+        session._turn_filler_task = flow
+        try:
+            # Let the flow arm before the first tool call, without generating
+            # speculatively while the model is still thinking.
+            await asyncio.sleep(0)
+            assert not started.is_set()
+            session._maybe_schedule_filler("lookup")
+            # Both speech deadlines are far away; generation must start now.
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert tools == ["lookup"]
+            assert not any(e.filler for e in session.transcript)
+        finally:
+            flow.cancel()
+            await asyncio.gather(flow, return_exceptions=True)
+
+        await asyncio.wait_for(cancelled.wait(), timeout=1.0)
 
 
 class TestReadyMadePhrases:
