@@ -45,6 +45,9 @@ _DEFAULT_TTS_INACTIVITY_TIMEOUT = 180
 _TTS_KEEPALIVE_INTERVAL_SEC = 55.0
 # Dialogue contexts expire after 20 seconds without a client message.
 _DIALOGUE_KEEPALIVE_INTERVAL_SEC = 10.0
+# The dialogue endpoint has no ``auto_mode``: fed text waits for more text unless
+# flushed. A feed ending here is a finished clause, so it is flushed to stand in.
+_DIALOGUE_FLUSH_END_CHARS = frozenset(".!?;:\n…。！？؟؛")
 
 STT_FATAL_MESSAGE_TYPES = frozenset(
     {
@@ -633,7 +636,10 @@ class _ElevenLabsTTSStream(TTSStream):
             text_chars=len(text),
             text_preview=text[:120],
         )
-        await self._tts._send_text(self._ctx_id, text)
+        # Without this a reply's first sentence waits for the next one: a model
+        # that pauses after "Done." held its first audio for the whole pause.
+        flush = self._tts._dialogue and text.rstrip()[-1:] in _DIALOGUE_FLUSH_END_CHARS
+        await self._tts._send_text(self._ctx_id, text, flush=flush)
 
     async def end(self) -> None:
         if self._ended or self._aborted:
