@@ -2336,7 +2336,12 @@ class VoiceSession:
                 return
 
     def _instant_filler_phrase(self) -> str | None:
-        """A ready-made line from ``FillerConfig.phrases`` for the call's language, or None."""
+        """A ready-made line from ``FillerConfig.phrases`` for the call's language, or None.
+
+        Only a choice: the flow records it as the last line said when it
+        speaks it, so a line picked for a turn whose reply came first does not
+        push the next turn off it.
+        """
         phrases = self.filler.phrases if self.filler is not None else None
         if isinstance(phrases, dict):
             language = (self.audio_input.language or "").strip().lower().replace("_", "-").split("-")[0]
@@ -2346,9 +2351,7 @@ class VoiceSession:
         if not options:
             return None
         fresh = [p for p in options if p != self._last_filler_phrase] or options
-        phrase = random.choice(fresh)
-        self._last_filler_phrase = phrase
-        return phrase
+        return random.choice(fresh)
 
     def _filler_ok_to_speak(self) -> bool:
         """The turn is still live and nothing has been spoken since the last
@@ -2380,6 +2383,7 @@ class VoiceSession:
         spoken: list[str] = []
         try:
             phrase = self._instant_filler_phrase()
+            ready_made = phrase is not None
             gen: asyncio.Task[str | None] | None = None
             if phrase is None and self._turn_tool_seen_at is not None:
                 gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
@@ -2401,6 +2405,8 @@ class VoiceSession:
             # Re-check: the reply may have started streaming while we generated.
             if not phrase or not self._filler_ok_to_speak():
                 return
+            if ready_made:
+                self._last_filler_phrase = phrase
             await self._speak_filler(phrase, self._turn_tool_name or "")
             spoken.append(phrase)
 

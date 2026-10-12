@@ -413,10 +413,31 @@ class TestReadyMadePhrases:
         session.audio_input.language = "en"
         assert session._instant_filler_phrase() is None
 
-    def test_last_turns_phrase_is_avoided(self) -> None:
-        session = _make_session(filler={"phrases": ["A.", "B."]})
-        said = [session._instant_filler_phrase() for _ in range(6)]
+    async def test_last_spoken_phrase_is_avoided(self) -> None:
+        session = _thinking_session(
+            think_secs=0.3, filler={"phrases": ["A.", "B."], "think_delay_secs": 0.0}
+        )
+        said: list[str] = []
+        for _ in range(4):
+            await session._run_turn("what is the answer?")
+            said.append(session._last_filler_phrase)
         assert all(a != b for a, b in zip(said, said[1:], strict=False))
+        assert [e.text for e in session.transcript if e.filler] == said
+
+    async def test_unspoken_phrase_is_not_counted(self) -> None:
+        """A line picked for a turn whose reply came first was never said, so
+        it does not push the next turn off it."""
+        session = _thinking_session(
+            think_secs=0.0, filler={"phrases": ["A.", "B."], "think_delay_secs": 5.0}
+        )
+        await session._run_turn("hi")
+        assert not any(e.filler for e in session.transcript)
+        assert session._last_filler_phrase is None
+
+    def test_choosing_a_phrase_records_nothing(self) -> None:
+        session = _make_session(filler={"phrases": ["A.", "B."]})
+        session._instant_filler_phrase()
+        assert session._last_filler_phrase is None
 
     def test_blank_phrases_dropped(self) -> None:
         assert FillerConfig(phrases=["  ", ""]).phrases is None
