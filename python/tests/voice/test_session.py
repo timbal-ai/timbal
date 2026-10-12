@@ -34,7 +34,7 @@ from timbal.voice import (
 )
 from timbal.voice.metrics import TurnMetricsEvent
 from timbal.voice.playback import PlaybackTracker
-from timbal.voice.session import _strip_markdown
+from timbal.voice.session import _flush_segment, _strip_markdown
 from timbal.voice.turn_detection import (
     CommitAction,
     CommitDecision,
@@ -811,6 +811,51 @@ class TestStripMarkdown:
 
     def test_delivery_tags_kept(self) -> None:
         assert _strip_markdown("[warm] Sure, [short pause] here it is.") == "[warm] Sure, [short pause] here it is."
+
+    def test_url_keeps_the_sentence_end(self) -> None:
+        assert _strip_markdown("The source is https://ine.es/x.htm. It says 3%.") == "The source is . It says 3%."
+        assert _strip_markdown("Go to https://example.com/a, then call.") == "Go to , then call."
+
+
+class TestFlushInsideLinks:
+    """Stripping runs per TTS segment, so no segment may end inside a link or URL."""
+
+    @staticmethod
+    def _spoken(deltas: list[str]) -> list[str]:
+        buffer, scheduled, segments = "", "", []
+        for delta in deltas:
+            buffer += delta
+            flush = _flush_segment(buffer, first_segment=not scheduled)
+            if flush is not None:
+                segments.append(flush)
+                scheduled += flush
+                buffer = buffer[len(flush) :]
+        if buffer:
+            segments.append(buffer)
+        return [_strip_markdown(s) for s in segments]
+
+    @pytest.mark.parametrize(
+        "deltas, spoken",
+        [
+            (["See [the report](https://ine.", "es/a.b?x=1) for more."], ["See the report for more."]),
+            (["Mira [el informe](https:", "//ine.es/x.htm) para más."], ["Mira el informe para más."]),
+            (["Go to https://example.", "com/path now."], ["Go to  now."]),
+        ],
+    )
+    def test_split_link_or_url_is_stripped(self, deltas: list[str], spoken: list[str]) -> None:
+        assert self._spoken(deltas) == spoken
+
+    def test_delivery_tag_still_flushes(self) -> None:
+        assert _flush_segment("[warm] Sure.", first_segment=True) == "[warm] Sure."
+
+    def test_stray_bracket_does_not_hold_the_reply(self) -> None:
+        text = "Press [ to open the menu. Then pick the second option from the list, and confirm it."
+        assert _flush_segment("Press [ to open the menu.", first_segment=True) is None
+        assert _flush_segment(text, first_segment=True) is not None
+
+    def test_hard_cap_still_flushes(self) -> None:
+        text = "x" * 200 + " https://example."
+        assert _flush_segment(text, first_segment=False) is not None
 
 
 class TestNestedAgentText:

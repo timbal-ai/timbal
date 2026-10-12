@@ -42,6 +42,11 @@ DEFAULT_FILLER_SYSTEM_PROMPT = (
 )
 
 
+def language_key(code: str | None) -> str:
+    """``"es-ES"`` / ``"es_es"`` / ``" ES "`` → ``"es"``; ``None`` → ``""``."""
+    return (code or "").strip().lower().replace("_", "-").split("-")[0]
+
+
 class FillerConfig(BaseModel):
     """Spoken tool-call filler: a short LLM-generated phrase masks tool dead air.
 
@@ -68,39 +73,41 @@ class FillerConfig(BaseModel):
     repeat_secs: float | None = Field(default=None, gt=0.0)
     """Re-arm on prolonged silence: if the turn is still running and nothing
     has been spoken for this long since the previous filler, say a short
-    follow-up ("still on it…"). ``None`` → one filler per turn, max."""
+    follow-up ("still on it…"). ``None`` → one filler per turn, except that a
+    tool called after a ``think_delay_secs`` filler gets one of its own."""
     max_per_turn: int = Field(default=3, ge=1)
-    """Hard cap on fillers per turn (first one included) when repeating."""
+    """Hard cap on fillers per turn (first one included)."""
     think_delay_secs: float | None = Field(default=None, ge=0.0)
     """Cover the model's own silence, not only a tool's. Set → when this long
     after the turn began nothing has been said and no tool has been called
     (a reasoning model thinking, a slow first token), the first filler is
     spoken anyway. A tool call before then still gets its filler after
-    ``delay_secs``, whichever comes first. ``None`` → fillers start only with
-    a tool call."""
+    ``delay_secs``, whichever comes first. A tool called after that filler
+    gets its own, ``delay_secs`` after the later of the call and the filler,
+    even with ``repeat_secs`` unset. ``None`` → fillers start only with a
+    tool call."""
     phrases: list[str] | dict[str, list[str]] | None = None
     """Ready-made lines for the *first* filler of a turn ("Mm, let me see."),
     spoken with no LLM round trip, so it can land within ``delay_secs``
-    exactly. A dict is keyed by the call's language (``"es"``, ``"en"`` —
-    ``AudioInputConfig.language``, region dropped) with ``"*"`` serving any
-    other; a language with no entry falls back to generation. Follow-ups are
-    always generated, with the request in hand, so they can say what the
-    assistant is working on. The line said on the previous turn is avoided
-    when there is another to choose."""
+    exactly. A dict is keyed by the call's language (``"es"``, ``"en"``;
+    region dropped on both sides, so ``"es-ES"`` is ``"es"``) with ``"*"``
+    serving any other; a language with no entry falls back to generation.
+    The language is ``AudioInputConfig.language`` as configured, not one the
+    STT detects: with it unset (auto-detect) only ``"*"`` is ever used.
+    Follow-ups are always generated, with the request in hand, so they can
+    say what the assistant is working on. The line said on the previous turn
+    is avoided when there is another to choose."""
 
     @field_validator("phrases")
     @classmethod
-    def _drop_blank_phrases(
-        cls, v: list[str] | dict[str, list[str]] | None
-    ) -> list[str] | dict[str, list[str]] | None:
+    def _drop_blank_phrases(cls, v: list[str] | dict[str, list[str]] | None) -> list[str] | dict[str, list[str]] | None:
         if v is None:
             return None
         if isinstance(v, dict):
-            kept = {
-                k.strip().lower(): [p.strip() for p in lines if p.strip()]
-                for k, lines in v.items()
-                if k.strip()
-            }
+            kept: dict[str, list[str]] = {}
+            for k, lines in v.items():
+                if key := language_key(k):
+                    kept.setdefault(key, []).extend(p.strip() for p in lines if p.strip())
             return {k: lines for k, lines in kept.items() if lines} or None
         return [p.strip() for p in v if p.strip()] or None
 

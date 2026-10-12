@@ -44,6 +44,7 @@ from .config import (
     GreetingConfig,
     UserIdleConfig,
     coerce_greeting,
+    language_key,
     omit_empty_voice_blocks,
 )
 from .events import (
@@ -135,8 +136,13 @@ _MD_BULLET = re.compile(r"^[-*]\s+", re.MULTILINE)
 # slash slash…" is never what the caller wants). ``[warm]``-style delivery tags
 # have no ``(…)`` after them and are left alone.
 _MD_LINK = re.compile(r"\[([^\[\]\n]+)\]\([^)\s]+\)")
-_BARE_URL = re.compile(r"\(?\bhttps?://[^\s)]+\)?")
+# Trailing punctuation belongs to the sentence, not the URL.
+_BARE_URL = re.compile(r"\(?\bhttps?://[^\s)]*[^\s).,;:!?…]\)?")
 _MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+# Stripping runs per TTS segment, so a segment must not end inside a link or a
+# URL: ``https:`` and ``ine.`` end in clause characters and would flush mid-way.
+# The label is bounded so a stray ``[`` cannot hold the reply back.
+_UNFINISHED_LINK_OR_URL = re.compile(r"(?:\[[^\[\]\n]{0,60}(?:\]\([^)\s]*)?|\bhttps?:/{0,2}[^\s)]*)$")
 
 
 def _strip_markdown(text: str) -> str:
@@ -1870,8 +1876,11 @@ class VoiceSession:
                     # Dead air while a tool runs — surface it so the playground
                     # doesn't look hung (live: get_datetime slept 3–5s with no UI).
                     await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
-                    # Earliest tool-call signal for streaming providers.
-                    self._maybe_schedule_filler(event.item.name)
+                    # Earliest tool-call signal for streaming providers. An agent
+                    # called as a tool reports its own tools here too; those are
+                    # not what the caller asked for, so fillers never name them.
+                    if own_llm_path is None or event.path == own_llm_path:
+                        self._maybe_schedule_filler(event.item.name)
                     continue
 
                 # The run parked waiting for a value or a decision. Nothing else on
@@ -2344,8 +2353,7 @@ class VoiceSession:
         """
         phrases = self.filler.phrases if self.filler is not None else None
         if isinstance(phrases, dict):
-            language = (self.audio_input.language or "").strip().lower().replace("_", "-").split("-")[0]
-            options = phrases.get(language) or phrases.get("*")
+            options = phrases.get(language_key(self.audio_input.language)) or phrases.get("*")
         else:
             options = phrases
         if not options:
@@ -2419,8 +2427,13 @@ class VoiceSession:
                 return
             if ready_made:
                 self._last_filler_phrase = phrase
+            covered_tool = self._turn_tool_seen_at is not None
             await self._speak_filler(phrase, self._turn_tool_name or "")
             spoken.append(phrase)
+
+            if not covered_tool and self.filler.repeat_secs is None and len(spoken) < self.filler.max_per_turn:
+                await self._tool_filler_after_think(spoken)
+                return
 
             while self.filler.repeat_secs is not None and len(spoken) < self.filler.max_per_turn:
                 await asyncio.sleep(self.filler.repeat_secs)
@@ -2442,6 +2455,38 @@ class VoiceSession:
             # Dead air is the status quo — a broken filler must never surface
             # to the caller as an error.
             logger.warning("filler_failed", error=str(e), tool=self._turn_tool_name, **_trace_debug_fields())
+
+    async def _tool_filler_after_think(self, spoken: list[str]) -> None:
+        """The filler for a tool called after a ``think_delay_secs`` filler went out.
+
+        Without repeats the think filler would be the turn's only one, and a
+        slow tool after it would run in silence. Due ``delay_secs`` after the
+        later of the call and the think filler, so a tool called while that
+        filler plays does not get a second line straight after it. Generation
+        overlaps the wait, as it does for a tool's first filler.
+        """
+        spoke_at = time.monotonic()
+        await self._turn_tool_seen.wait()
+        if not self._filler_ok_to_speak():
+            return
+        gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
+        try:
+            due = max(self._turn_tool_seen_at or 0.0, spoke_at) + self.filler.delay_secs
+            await asyncio.sleep(max(0.0, due - time.monotonic()))
+            if not self._filler_ok_to_speak():
+                return
+            async with asyncio.timeout(self.filler.timeout_secs):
+                phrase = await asyncio.shield(gen)
+        except TimeoutError:
+            logger.debug("filler_generation_timeout", tool=self._turn_tool_name, **_trace_debug_fields())
+            return
+        finally:
+            if not gen.done():
+                gen.cancel()
+        if not phrase or not self._filler_ok_to_speak():
+            return
+        await self._speak_filler(phrase, self._turn_tool_name or "")
+        spoken.append(phrase)
 
     async def _speak_filler(self, phrase: str, tool_name: str) -> None:
         """Synthesize one filler phrase as a dedicated task on the TTS chain.
@@ -3731,6 +3776,9 @@ def _flush_segment(text: str, *, first_segment: bool, audio_playing: bool = Fals
                     return text[: m.end()]
         last = _last_sentence_boundary_end(text)
         return text[:last] if last is not None else text
+
+    if _UNFINISHED_LINK_OR_URL.search(text):
+        return None
 
     # While audio is still playing, keep buffering — no need to rush.
     if audio_playing:

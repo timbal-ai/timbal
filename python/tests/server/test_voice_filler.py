@@ -312,13 +312,35 @@ class _SlowStartModel(TestModel):
             yield chunk
 
 
-def _thinking_session(*, think_secs: float, filler: dict, responses: list | None = None) -> VoiceSession:
+def _thinking_session(
+    *, think_secs: float, filler: dict, responses: list | None = None, tool_sleep: float | None = None
+) -> VoiceSession:
+    async def lookup(q: str) -> str:
+        await asyncio.sleep(tool_sleep or 0.0)
+        return "42"
+
     agent = Agent(
         name="voice_test",
         model=_SlowStartModel(think_secs, responses=responses or ["The answer is 42."]),
-        tools=[],
+        tools=[lookup] if tool_sleep is not None else [],
     )
     return VoiceSession(agent, _make_stt_class()(), _make_tts_class()(), turn_detector="heuristic", filler=filler)
+
+
+class _ScriptedAgent:
+    """Duck-typed agent replaying a fixed event stream."""
+
+    _path = "voice_test"
+
+    def __init__(self, events: list) -> None:
+        self.events = events
+
+    def __call__(self, **_kwargs: object):
+        return self._gen()
+
+    async def _gen(self):
+        for event in self.events:
+            yield event
 
 
 class TestThinkingFiller:
@@ -372,6 +394,49 @@ class TestThinkingFiller:
         await session._run_turn("what is the answer?")
         assert [e.text for e in session.transcript if e.filler] == [PHRASE]
 
+    async def test_tool_after_think_filler_gets_its_own(self) -> None:
+        """Without repeats, the think filler must not leave a slow tool after it in silence."""
+        prompts: list[str] = []
+
+        def handler(messages):
+            prompts.append(messages[-1].collect_text())
+            return f"Filler {len(prompts)}."
+
+        session = _thinking_session(
+            think_secs=0.3,
+            tool_sleep=0.6,
+            filler={"model": TestModel(handler=handler), "delay_secs": 0.0, "think_delay_secs": 0.05},
+            responses=[_tool_call_message(), "The answer is 42."],
+        )
+        await session._run_turn("what is the answer?")
+
+        assert [e.text for e in session.transcript if e.filler] == ["Filler 1.", "Filler 2."]
+        assert "working out how to handle it" in prompts[0]
+        assert "'lookup'" in prompts[1]
+        assert "Filler 1." in prompts[1]
+        replies = [e.text for e in session.transcript if e.role == "assistant" and not e.filler]
+        assert replies == ["The answer is 42."]
+
+    async def test_fast_tool_after_think_filler_gets_none(self) -> None:
+        session = _thinking_session(
+            think_secs=0.3,
+            tool_sleep=0.0,
+            filler=_default_filler(think_delay_secs=0.05, delay_secs=5.0),
+            responses=[_tool_call_message(), "The answer is 42."],
+        )
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+
+    async def test_tool_after_think_filler_respects_max_per_turn(self) -> None:
+        session = _thinking_session(
+            think_secs=0.3,
+            tool_sleep=0.6,
+            filler=_default_filler(think_delay_secs=0.05, max_per_turn=1),
+            responses=[_tool_call_message(), "The answer is 42."],
+        )
+        await session._run_turn("what is the answer?")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+
     @pytest.mark.parametrize("think_delay, tool_delay", [(120.0, 60.0), (60.0, 120.0)])
     async def test_tool_starts_generation_before_filler_is_due(self, monkeypatch, think_delay, tool_delay) -> None:
         session = _make_session(filler=_default_filler(think_delay_secs=think_delay, delay_secs=tool_delay))
@@ -393,8 +458,9 @@ class TestThinkingFiller:
         session._turn_filler_task = flow
         try:
             # Let the flow arm before the first tool call, without generating
-            # speculatively while the model is still thinking.
-            await asyncio.sleep(0)
+            # speculatively while the model is still thinking. More than one
+            # tick: a speculative generation task would need its own to start.
+            await asyncio.sleep(0.05)
             assert not started.is_set()
             session._maybe_schedule_filler("lookup")
             # Both speech deadlines are far away; generation must start now.
@@ -443,6 +509,23 @@ class TestReadyMadePhrases:
         session.audio_input.language = "es-ES"
         assert session._instant_filler_phrase() == "Mmm, déjame ver."
         session.audio_input.language = "ca"
+        assert session._instant_filler_phrase() == "One second."
+
+    def test_region_keys_match_the_language(self) -> None:
+        session = _make_session(filler={"phrases": {"es-ES": ["Un segundo."], "en_GB": ["One moment."]}})
+        assert session.filler.phrases == {"es": ["Un segundo."], "en": ["One moment."]}
+        session.audio_input.language = "es"
+        assert session._instant_filler_phrase() == "Un segundo."
+        session.audio_input.language = "en-US"
+        assert session._instant_filler_phrase() == "One moment."
+
+    def test_keys_for_one_language_are_merged(self) -> None:
+        cfg = FillerConfig(phrases={"es": ["Un segundo."], "es-MX": ["Ahorita."], "*": ["One second."]})
+        assert cfg.phrases == {"es": ["Un segundo.", "Ahorita."], "*": ["One second."]}
+
+    def test_auto_detect_uses_only_the_wildcard(self) -> None:
+        session = _make_session(filler={"phrases": {"es": ["Un segundo."], "*": ["One second."]}})
+        assert session.audio_input.language is None
         assert session._instant_filler_phrase() == "One second."
 
     def test_language_without_entry_falls_back_to_generation(self) -> None:
@@ -500,6 +583,28 @@ class TestFillerInternals:
         session = _make_session()
         session._maybe_schedule_filler("lookup")
         assert session._turn_filler_task is None
+
+    async def test_nested_agent_tools_do_not_name_the_filler(self) -> None:
+        from timbal.types.events.delta import DeltaEvent, ToolUse
+
+        def tool_use(path: str, name: str) -> DeltaEvent:
+            return DeltaEvent(run_id="r", path=path, call_id=name, item=ToolUse(id=name, name=name))
+
+        agent = _ScriptedAgent(
+            [
+                tool_use("voice_test.llm", "document_builder"),
+                tool_use("voice_test.document_builder.llm", "render_html"),
+            ]
+        )
+        session = VoiceSession(
+            agent,  # type: ignore[arg-type]
+            _make_stt_class()(),
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            filler=_default_filler(delay_secs=60.0),
+        )
+        await session._run_turn("write me a document")
+        assert session._turn_tool_name == "document_builder"
 
     async def test_filler_segment_records_empty_text(self) -> None:
         """Barge-in accounting: filler bytes count, filler words don't."""
