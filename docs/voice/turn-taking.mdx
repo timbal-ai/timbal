@@ -20,7 +20,7 @@ Greetings have their own `interruptible` setting, which defaults to false; see [
 
 ## How the boundary is chosen
 
-Voice activity detection (VAD) identifies speech and silence. End-of-utterance detection decides whether a pause ends a thought. The server uses local audio detection when its dependencies are installed, otherwise lexical detection. The local path combines Smart Turn audio scoring, Namo text scoring, and Silero VAD endpointing.
+Voice activity detection (VAD) identifies speech and silence. End-of-utterance detection decides whether a pause ends a thought. With Deepgram Flux, the default transcription provider, Flux makes that decision. With other providers, the server uses local audio detection when its dependencies are installed, otherwise lexical detection. The local path combines Smart Turn audio scoring, Namo text scoring, and Silero VAD endpointing.
 
 Inspect `session_started` for the resolved detector and endpointing settings. A requested mode can be changed by the server: STT adapters with native utterance boundaries, currently Flux and Munsit, use `provider` mode and disable local VAD endpointing.
 

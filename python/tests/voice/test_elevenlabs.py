@@ -158,7 +158,7 @@ async def test_dialogue_stream_registers_once_and_routes_audio(tts_factory, mode
     assert ws.sent == [
         {"context_id": "ctx_1", "voices": ["test-voice"]},
         {"context_id": "ctx_1", "inputs": [{"text": "Hello ", "voice_id": "test-voice"}]},
-        {"context_id": "ctx_1", "inputs": [{"text": "world.", "voice_id": "test-voice"}]},
+        {"context_id": "ctx_1", "inputs": [{"text": "world.", "voice_id": "test-voice"}], "flush": True},
         {"context_id": "ctx_1", "flush": True},
         {"context_id": "ctx_1", "close_context": True},
     ]
@@ -168,6 +168,35 @@ async def test_dialogue_stream_registers_once_and_routes_audio(tts_factory, mode
     ws.incoming.put_nowait({"context_id": "ctx_1", "is_final": True})
     assert await _collect(stream) == b"\x01\x02\x03\x04"
     assert not p._audio_queues
+
+
+async def test_dialogue_flushes_each_finished_clause(tts_factory):
+    """The dialogue endpoint has no ``auto_mode``: an unflushed "Done." waited for
+    the next sentence, holding a reply's first audio for as long as the model paused."""
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    for text in (
+        "Done. ",
+        "I sent it",
+        " to you: ",
+        "the report",
+        "\n",
+        "First item\n",
+        "Second item \n ",
+        "¿Algo más?",
+    ):
+        await stream.feed(text)
+    await stream.end()
+    fed = [(m["inputs"][0]["text"], m.get("flush", False)) for m in ws.sent if "inputs" in m]
+    assert fed == [
+        ("Done. ", True),
+        ("I sent it", False),
+        (" to you: ", True),
+        ("the report", False),
+        ("First item\n", True),
+        ("Second item \n ", True),
+        ("¿Algo más?", True),
+    ]
 
 
 @pytest.mark.parametrize("model", ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"])

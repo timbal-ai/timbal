@@ -694,6 +694,22 @@ def voice_warmup_intended(runnable: Any) -> bool:
     )
 
 
+def _resolve_configured_stt(provider: str, model: str | None) -> Any:
+    """``resolve_stt``, refusing Deepgram without ``DEEPGRAM_API_KEY`` (``ValueError``).
+
+    Deepgram reads its key only at connect. Flux is the default, so a deployment
+    with only ElevenLabs credentials would fail every session there instead of
+    falling back to Scribe. Callers check per session rather than once at boot:
+    restored serverless boxes receive their env after the server starts.
+    """
+    from ..voice.deepgram import resolve_stt, stt_provider_id
+
+    stt = resolve_stt(provider, model=model)
+    if stt_provider_id(stt).startswith("deepgram") and not os.environ.get("DEEPGRAM_API_KEY"):
+        raise ValueError("DEEPGRAM_API_KEY is not set")
+    return stt
+
+
 def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:
     """Whether boot should pre-load Smart Turn / Namo / Silero.
 
@@ -706,11 +722,10 @@ def voice_onnx_warmup_intended(voice_config: VoiceConfig) -> bool:
     default detector, importing onnxruntime/transformers. Call it off the
     event loop (``warmup_voice_stack`` runs it in the import executor).
     """
-    from ..voice.deepgram import resolve_stt
     from ..voice.turn_detection import LocalAudioTurnDetector
 
     try:
-        stt = resolve_stt(voice_config.stt_provider, model=voice_config.stt_model)
+        stt = _resolve_configured_stt(voice_config.stt_provider, voice_config.stt_model)
     except ValueError:
         stt = None
     spec = select_turn_detector_spec(
@@ -978,7 +993,7 @@ def build_voice_session(
     stt_provider = merged.stt_provider
     stt_model_requested = merged.stt_model
     try:
-        stt = resolve_stt(stt_provider, model=stt_model_requested)
+        stt = _resolve_configured_stt(stt_provider, stt_model_requested)
     except ValueError as e:
         logger.warning(
             "voice_ws_bad_stt_provider",

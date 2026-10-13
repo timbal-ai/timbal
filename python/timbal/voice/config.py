@@ -360,9 +360,12 @@ class VoiceConfig(BaseModel):
         # in model_fields_set (which would disable the outbound fallback).
         return omit_empty_voice_blocks(value) if isinstance(value, dict) else value
 
-    stt_provider: str = "elevenlabs"
-    """Also supports Deepgram, Munsit, and OpenAI (``OPENAI_API_KEY``)."""
-    stt_model: str = "scribe_v2_realtime"
+    stt_provider: str = "deepgram"
+    """Deepgram Flux (``DEEPGRAM_API_KEY``), which owns end-of-turn detection.
+    Without that key a session falls back to ElevenLabs Scribe. Also supports
+    ElevenLabs, Deepgram Nova, Munsit, and OpenAI (``OPENAI_API_KEY``)."""
+    stt_model: str = "flux-general-multi"
+    """Another provider's model id is ignored (that provider's default is used)."""
     tts_provider: str = "elevenlabs"
     """``"elevenlabs"``, ``"munsit"`` (Arabic; requires ``MUNSIT_API_KEY``), or
     ``"fishaudio"`` (requires ``FISH_API_KEY``), or ``"deepgram"``
@@ -370,7 +373,7 @@ class VoiceConfig(BaseModel):
     ``tts_model`` to a full voice model id, e.g. ``aura-2-thalia-en``.
     ``"openai"`` uses ``OPENAI_API_KEY`` and defaults to ``gpt-4o-mini-tts``.
     OpenAI STT/TTS require ``timbal[voice]`` for rates other than 24 kHz."""
-    tts_model: str = "eleven_flash_v2_5"
+    tts_model: str = "eleven_v4_turbo"
     voice: str = DEFAULT_VOICE_ID
     language: str | None = None
     """None → provider auto-detect."""
@@ -380,11 +383,13 @@ class VoiceConfig(BaseModel):
     tts_extra: dict[str, Any] = Field(default_factory=lambda: {"auto_mode": True})
     turn_detector: Any = None
     """Mode name, ``TurnDetector`` instance, or zero-arg factory.
-    ``None`` (unset) resolves to ``"local"`` — Smart Turn + Namo + Silero VAD
-    endpointing — when ``timbal[voice]`` is installed, and degrades to
-    ``"lexical"`` without it (an explicit ``"local"`` pin would skip that
-    degradation and behave holdless). Clients may only send mode names
-    (see ``select_turn_detector_spec``)."""
+    ``None`` (unset) resolves to ``"provider"`` on an STT with native
+    end-of-turn (Deepgram Flux, the default; Munsit). On any other STT it
+    resolves to ``"local"`` — Smart Turn + Namo + Silero VAD endpointing —
+    when ``timbal[voice]`` is installed, and degrades to ``"lexical"`` without
+    it (an explicit ``"local"`` pin would skip that degradation and behave
+    holdless). Clients may only send mode names (see
+    ``select_turn_detector_spec``)."""
     vad_endpointing: bool | None = None
     """None → auto: on when the turn detector exposes an audio EOU model."""
     model: str | None = None

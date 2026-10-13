@@ -5,6 +5,9 @@ from __future__ import annotations
 # Env vars that affect voice server behavior: ``default_voice_config_from_env``
 # / ``merge_voice_config``, the single-session lifetime, and RTC ICE.
 VOICE_ENV_KEYS = (
+    # Flux is the default STT: with its key in a developer's .env, sessions under
+    # test would leave the mocked ElevenLabs STT for a live Deepgram socket.
+    "DEEPGRAM_API_KEY",
     "TIMBAL_STT_PROVIDER",
     "TIMBAL_STT_MODEL",
     "TIMBAL_TTS_MODEL",

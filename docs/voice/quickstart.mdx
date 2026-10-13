@@ -25,11 +25,12 @@ Create a `.env` beside `agent.py`:
 
 ```bash .env
 OPENAI_API_KEY=your_openai_key
+DEEPGRAM_API_KEY=your_deepgram_key
 ELEVENLABS_API_KEY=your_elevenlabs_key
 ELEVENLABS_VOICE_ID=your_accessible_voice_id
 ```
 
-The example uses OpenAI for the text agent and ElevenLabs for transcription and speech. Choose a voice accessible to your ElevenLabs account. Credentials remain on the server.
+The example uses OpenAI for the text agent, Deepgram for transcription, and ElevenLabs for speech. Without `DEEPGRAM_API_KEY`, the server transcribes with ElevenLabs instead. Choose a voice accessible to your ElevenLabs account. Credentials remain on the server.
 
 ## Create the agent
 
@@ -48,7 +49,7 @@ agent = Agent(
 )
 ```
 
-`voice_config` configures the server's speech session. The defaults are ElevenLabs `scribe_v2_realtime` for transcription and `eleven_flash_v2_5` for speech. It can be a dict, a `VoiceConfig`, or a callable returning configuration. Unknown keys fail validation at server startup.
+`voice_config` configures the server's speech session. The defaults are Deepgram Flux (`flux-general-multi`) for transcription and for deciding when your turn ends, and ElevenLabs `eleven_v4_turbo` for speech. It can be a dict, a `VoiceConfig`, or a callable returning configuration. Unknown keys fail validation at server startup.
 
 ## Start and speak
 

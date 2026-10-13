@@ -18,6 +18,7 @@ from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.server import voice as voice_routes
 from timbal.server.http import create_app
+from timbal.state import get_run_context
 from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import FillerConfig, VoiceConfig, VoiceSession
@@ -358,6 +359,25 @@ class TestThinkingFiller:
         assert [e.text for e in session.transcript if e.filler] == [PHRASE]
         replies = [e.text for e in session.transcript if e.role == "assistant" and not e.filler]
         assert replies == ["The answer is 42."]
+
+    async def test_think_filler_runs_in_this_turns_run(self, monkeypatch) -> None:
+        """Armed before the run started, the flow saw the previous turn's RunContext:
+        its generated filler chained to that run ("Parent trace not found" per filler)."""
+        session = _thinking_session(think_secs=0.4, filler=_default_filler(think_delay_secs=0.05))
+        generate = session._generate_filler
+        seen: list[str | None] = []
+
+        async def spy(tool_name, previous=None):
+            ctx = get_run_context()
+            seen.append(ctx.id if ctx is not None else None)
+            return await generate(tool_name, previous)
+
+        monkeypatch.setattr(session, "_generate_filler", spy)
+        for prompt in ("first question", "second question"):
+            seen.clear()
+            await session._run_turn(prompt)
+            assert seen == [session._last_run_context.id]
+            assert [e.text for e in session.transcript if e.filler][-1] == PHRASE
 
     async def test_generator_told_no_tool_yet(self) -> None:
         prompts: list[str] = []
