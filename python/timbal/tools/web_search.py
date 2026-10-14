@@ -1,10 +1,13 @@
 """
 WebSearch — unified web-search tool.
 
-When ``provider`` is *not* set (the default), WebSearch behaves as a
-specification-only tool: it emits native search schemas for Anthropic
-(``web_search_20250305``) and OpenAI/xAI Responses API (``{"type":
-"web_search"}``), but is **not executable**.  This is the original behaviour.
+When ``provider`` is *not* set (the default), WebSearch emits native search
+schemas for Anthropic (``web_search_20250305``) and OpenAI/xAI Responses API
+(``{"type": "web_search"}``); the model provider runs those searches. Chat
+Completions has no native search, so there (``timbal/auto``, Gemini, Groq, …)
+it is a function tool that searches through the Timbal platform's tool proxy
+(platform-funded Firecrawl), which needs a platform subject (a deployed app,
+or ``TIMBAL_API_KEY`` with an app).
 
 When ``provider`` is set to ``"tavily"``, ``"scraperapi"``, ``"cala"``,
 ``"firecrawl"``, or ``"google"``,
@@ -35,7 +38,9 @@ except ImportError:
 from pydantic import Field, SecretStr, computed_field
 
 from ..core.tool import Tool
+from ..errors import ToolProxyUnavailable
 from ..platform.integrations import Integration
+from ..platform.tool_proxy import execute_tool_proxy
 from ..tools.cala import _normalize_base_url as _normalize_cala_base_url
 from ..tools.cala import _post_cala as _cala_post
 from ..tools.cala import _search_request_body as _cala_search_request_body
@@ -313,6 +318,57 @@ def _make_google_handler(
     return web_search
 
 
+_PLATFORM_SEARCH_TOOL = "firecrawl_search"
+
+
+def _make_platform_handler(
+    *,
+    allowed_domains=None,
+    blocked_domains=None,
+    user_location=None,
+    fixed_max_results=None,
+):
+    """Return an async handler that searches through the Timbal platform's tool proxy.
+
+    Native-mode WebSearch on Chat Completions providers: those APIs have no native
+    search, so the model calls this function and the platform runs its funded
+    Firecrawl search. Domain filters become ``site:`` operators in the query.
+    """
+    fixed_country = user_location.get("country") if isinstance(user_location, dict) else None
+
+    async def web_search(
+        query: str = Field(..., description="Search query"),
+        limit: int = Field(5, description="Number of results to return (max 20)"),
+        tbs: str | None = Field(
+            None,
+            description='Time filter: "qdr:h" (hour), "qdr:d" (day), "qdr:w" (week), "qdr:m" (month), "qdr:y" (year)',
+        ),
+    ) -> dict:
+        terms = [query]
+        if allowed_domains:
+            terms.append(" OR ".join(f"site:{d}" for d in allowed_domains))
+        terms.extend(f"-site:{d}" for d in blocked_domains or [])
+        payload: dict[str, Any] = {
+            "query": " ".join(terms),
+            "limit": fixed_max_results if fixed_max_results is not None else limit,
+        }
+        if tbs:
+            payload["tbs"] = tbs
+        if fixed_country:
+            payload["country"] = fixed_country
+
+        try:
+            return await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
+        except ToolProxyUnavailable as e:
+            raise ToolProxyUnavailable(
+                "WebSearch() searches natively only on Anthropic, OpenAI and xAI models; on other models "
+                "it searches through the Timbal platform, which needs a platform subject (a deployed app, "
+                "or TIMBAL_API_KEY with an app). Without one, use WebSearch(provider=...) with your own key."
+            ) from e
+
+    return web_search
+
+
 # ---------------------------------------------------------------------------
 # WebSearch tool
 # ---------------------------------------------------------------------------
@@ -322,7 +378,7 @@ class WebSearch(Tool):
     """See module docstring for native vs provider-backed behaviour and credential order."""
 
     name: str = "web_search"
-    description: str | None = None
+    description: str | None = "Search the web for current information."
 
     # --- provider selection ---
     provider: Literal["tavily", "scraperapi", "cala", "firecrawl", "google"] | None = None
@@ -341,10 +397,6 @@ class WebSearch(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         provider = kwargs.get("provider")
-
-        # Default description when a provider is set (LLMs need it for function-calling).
-        if provider is not None and "description" not in kwargs:
-            kwargs["description"] = "Search the web for information."
 
         # Default to a provider-scoped name so multiple `WebSearch(provider=...)`
         # instances can coexist in the same Agent without colliding. Native mode
@@ -388,11 +440,12 @@ class WebSearch(Tool):
                     fixed_max_results=kwargs.get("max_results"),
                 )
             else:
-
-                def _unreachable():
-                    raise NotImplementedError("This is a specification-only tool")
-
-                kwargs["handler"] = _unreachable
+                kwargs["handler"] = _make_platform_handler(
+                    allowed_domains=kwargs.get("allowed_domains"),
+                    blocked_domains=kwargs.get("blocked_domains"),
+                    user_location=kwargs.get("user_location"),
+                    fixed_max_results=kwargs.get("max_results"),
+                )
 
         super().__init__(**kwargs)
 
@@ -454,17 +507,15 @@ class WebSearch(Tool):
     @computed_field(repr=False)
     @cached_property
     def openai_chat_completions_schema(self) -> dict[str, Any]:
-        """See base class."""
-        if self.provider is not None:
-            return {
-                "type": "function",
-                "function": {
-                    "name": self.name,
-                    "description": self.description or "",
-                    "parameters": self.format_params_model_schema(),
-                },
-            }
-        raise ValueError("WebSearch is not compatible with OpenAI's chat completions API.")
+        """See base class. Always a function: in native mode the platform handler runs it."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description or "",
+                "parameters": self.format_params_model_schema(),
+            },
+        }
 
     @override
     @computed_field

@@ -222,10 +222,53 @@ def test_websearch_native_mode_anthropic_schema_has_no_function_shape():
     assert "input_schema" not in schema
 
 
-def test_websearch_native_mode_openai_chat_completions_schema_raises():
-    tool = WebSearch()
-    with pytest.raises(ValueError, match="not compatible"):
-        _ = tool.openai_chat_completions_schema
+def test_websearch_native_mode_openai_chat_completions_schema_is_function_shape():
+    schema = WebSearch().openai_chat_completions_schema
+    assert schema["type"] == "function"
+    assert schema["function"]["name"] == "web_search"
+    assert schema["function"]["description"]
+    assert schema["function"]["parameters"]["required"] == ["query"]
+
+
+def test_websearch_catalog_description_is_the_class_default():
+    """Tool catalogs read the class field default, not an instance."""
+    assert WebSearch.model_fields["description"].default
+    assert WebSearch(provider="tavily", api_key=SecretStr("k")).description == WebSearch().description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["timbal", "google", "groq"])
+async def test_native_websearch_on_chat_completions_sends_a_function_tool(provider):
+    """`timbal/auto` (and every Chat Completions provider) used to fail the whole turn here."""
+    from timbal.core.llm.chat_completions import prepare_chat_completions_request
+    from timbal.core.llm.registry import _PROVIDERS
+
+    async def _no_chunks():
+        return
+        yield
+
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=_no_chunks())
+    create_stream, _ = prepare_chat_completions_request(
+        provider=provider,
+        config=_PROVIDERS[provider],
+        client=client,
+        model_name="auto",
+        request_headers={},
+        system_prompt=None,
+        messages=[],
+        tools=[WebSearch()],
+        max_tokens=None,
+        temperature=None,
+        output_model=None,
+        provider_params={},
+    )
+    async for _ in create_stream():
+        pass
+
+    (tool,) = client.chat.completions.create.await_args.kwargs["tools"]
+    assert tool["type"] == "function"
+    assert tool["function"]["name"] == "web_search"
 
 
 def test_websearch_provider_mode_anthropic_schema_is_function_shape():
@@ -452,3 +495,51 @@ async def test_two_provider_web_searches_coexist_in_one_agent(monkeypatch):
     client.get.assert_awaited_once()
     assert client.post.await_args.kwargs["json"]["query"] == "from tavily"
     assert client.get.await_args.kwargs["params"]["q"] == "from google"
+
+
+# ---------------------------------------------------------------------------
+# Native mode on Chat Completions: the platform's funded search runs the call.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_native_web_search_runs_through_platform_proxy():
+    proxy = AsyncMock(return_value={"data": {"web": []}})
+    model = TestModel(responses=[
+        _tool_use_response("web_search", {"query": "timbal"}),
+        "done.",
+    ])
+    agent = Agent(name="t", model=model, tools=[WebSearch()])
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        result = await agent(prompt="search please").collect()
+
+    assert result.status.code == "success"
+    proxy.assert_awaited_once_with("firecrawl_search", {"query": "timbal", "limit": 5})
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_maps_native_options_onto_platform_search():
+    proxy = AsyncMock(return_value={})
+    tool = WebSearch(
+        allowed_domains=["a.com", "b.com"],
+        blocked_domains=["c.com"],
+        user_location={"type": "approximate", "country": "DE"},
+        max_results=3,
+    )
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        await tool.handler(query="espresso", limit=10, tbs="qdr:w")
+
+    proxy.assert_awaited_once_with(
+        "firecrawl_search",
+        {"query": "espresso site:a.com OR site:b.com -site:c.com", "limit": 3, "tbs": "qdr:w", "country": "DE"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_without_platform_says_what_to_do():
+    from timbal.errors import ToolProxyUnavailable
+
+    proxy = AsyncMock(side_effect=ToolProxyUnavailable("no subject"))
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        with pytest.raises(ToolProxyUnavailable, match=r"WebSearch\(provider=\.\.\.\)"):
+            await WebSearch().handler(query="x", limit=5, tbs=None)
