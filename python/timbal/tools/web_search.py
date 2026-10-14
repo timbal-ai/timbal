@@ -7,7 +7,9 @@ schemas for Anthropic (``web_search_20250305``) and OpenAI/xAI Responses API
 Completions has no native search, so there (``timbal/auto``, Gemini, Groq, …)
 it is a function tool that searches through the Timbal platform's tool proxy
 (platform-funded Firecrawl), which needs a platform subject (a deployed app,
-or ``TIMBAL_API_KEY`` with an app).
+or ``TIMBAL_API_KEY`` with an app). The same platform fallback is used for
+domain-filtered searches on OpenAI's ``gpt-4.1-mini`` and ``gpt-4o-mini``
+(including dated snapshots), whose native search rejects domain filters.
 
 When ``provider`` is set to ``"tavily"``, ``"scraperapi"``, ``"cala"``,
 ``"firecrawl"``, or ``"google"``,
@@ -366,8 +368,8 @@ def _make_platform_handler(
             result = await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
         except ToolProxyUnavailable as e:
             raise ToolProxyUnavailable(
-                "WebSearch() searches natively only on Anthropic, OpenAI and xAI models; on other models "
-                "it searches through the Timbal platform, which needs a platform subject (a deployed app, "
+                "WebSearch() needs the Timbal platform for Chat Completions models and for domain-filtered "
+                "searches on OpenAI's gpt-4.1-mini and gpt-4o-mini. This needs a platform subject (a deployed app, "
                 "or TIMBAL_API_KEY with an app). Without one, use WebSearch(provider=...) with your own key."
             ) from e
         if allowed or blocked:

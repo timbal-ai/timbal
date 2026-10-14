@@ -23,6 +23,22 @@ _ENCRYPTED_REASONING_MODEL_RE = re.compile(r"^(?:o\d|gpt-5|gpt-6|codex)", re.IGN
 REASONING_ENCRYPTED_CONTENT_INCLUDE = "reasoning.encrypted_content"
 
 
+def _responses_tool_schema(tool: "Runnable", model_name: str) -> dict[str, Any]:
+    schema = tool.openai_responses_schema
+    # These mini models support native search but reject its domain filters.
+    # Use WebSearch's executable platform handler to retain the restrictions.
+    if (
+        schema.get("type") == "web_search"
+        and schema.get("filters")
+        and re.fullmatch(r"gpt-(?:4\.1|4o)-mini(?:-\d{4}-\d{2}-\d{2})?", model_name)
+    ):
+        from ...tools.web_search import WebSearch
+
+        if isinstance(tool, WebSearch):
+            return {"type": "function", **tool.openai_chat_completions_schema["function"]}
+    return schema
+
+
 def normalize_responses_params(provider_params: dict[str, Any]) -> dict[str, Any]:
     """Translate the Chat Completions effort alias without losing user intent.
 
@@ -103,7 +119,7 @@ def prepare_responses_request(
     responses_kwargs["input"] = input_items
 
     if tools:
-        responses_tools = [tool.openai_responses_schema for tool in tools]
+        responses_tools = [_responses_tool_schema(tool, model_name) for tool in tools]
         if responses_tools:
             responses_kwargs["tools"] = responses_tools
             responses_kwargs["parallel_tool_calls"] = True

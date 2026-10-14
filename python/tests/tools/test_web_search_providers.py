@@ -237,6 +237,63 @@ def test_websearch_catalog_description_is_the_class_default():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name,options,expected_type",
+    [
+        ("gpt-4.1-mini", {"allowed_domains": ["python.org"]}, "function"),
+        ("gpt-4.1-mini-2025-04-14", {"blocked_domains": ["python.org"]}, "function"),
+        ("gpt-4o-mini", {"blocked_domains": ["python.org"]}, "function"),
+        ("gpt-4o-mini-2024-07-18", {"allowed_domains": ["python.org"]}, "function"),
+        ("gpt-4.1-mini", {}, "web_search"),
+        ("gpt-4o-mini", {}, "web_search"),
+        ("gpt-4.1", {"allowed_domains": ["python.org"]}, "web_search"),
+        ("gpt-4o", {"allowed_domains": ["python.org"]}, "web_search"),
+        ("gpt-5-mini", {"allowed_domains": ["python.org"]}, "web_search"),
+        ("grok-4.3", {"allowed_domains": ["python.org"]}, "web_search"),
+        ("gpt-4.1-mini", {"provider": "tavily", "api_key": SecretStr("k")}, "function"),
+    ],
+)
+async def test_responses_search_uses_platform_only_for_unsupported_native_filters(model_name, options, expected_type):
+    from copy import deepcopy
+
+    from timbal.core.llm.responses import prepare_responses_request
+
+    async def empty_stream():
+        if False:
+            yield
+
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=empty_stream())
+    tool = WebSearch(**options)
+    native_schema = deepcopy(tool.openai_responses_schema)
+    create_stream, _ = prepare_responses_request(
+        client=client,
+        model_name=model_name,
+        request_headers={},
+        system_prompt=None,
+        messages=[],
+        tools=[tool],
+        max_tokens=None,
+        temperature=None,
+        output_model=None,
+        provider_params={},
+    )
+    async for _ in create_stream():
+        pass
+
+    schema = client.responses.create.await_args.kwargs["tools"][0]
+    assert schema["type"] == expected_type
+    if expected_type == "function":
+        assert schema["name"] == tool.name
+        assert schema["parameters"]["required"] == ["query"]
+        assert "filters" not in schema
+    else:
+        assert schema == native_schema
+    # A tool can be reused across models; do not mutate its cached native schema.
+    assert tool.openai_responses_schema == native_schema
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["timbal", "google", "groq"])
 async def test_native_websearch_on_chat_completions_sends_a_function_tool(provider):
     """`timbal/auto` (and every Chat Completions provider) used to fail the whole turn here."""
