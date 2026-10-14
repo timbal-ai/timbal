@@ -78,7 +78,7 @@ async def test_firecrawl_search_tool_sends_v2_location_fields():
 
     with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
         tool = FirecrawlSearch(api_key=SecretStr("k"))
-        await tool.handler(query="x", location="Germany", country="DE")
+        await tool(query="x", location="Germany", country="DE").collect()
 
     body = mock_client.post.await_args.kwargs["json"]
     assert body["location"] == "Germany"
@@ -546,10 +546,15 @@ async def test_native_web_search_enforces_domains_on_results():
         "https://c.com/5",
     ]
     proxy = AsyncMock(return_value={"success": True, "data": {"web": [{"url": u} for u in urls], "news": []}})
-    tool = WebSearch(allowed_domains=["a.com", "B.com"], blocked_domains=["x.a.com"])
+    tool = WebSearch(allowed_domains=["a.com", "B.com"], blocked_domains=["x.a.com", "c.com"])
     with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
         out = await tool.handler(query="q", limit=5, tbs=None)
 
+    # One list per request: the allowlist, with the carve-out inside it excluded upstream.
+    sent = proxy.await_args[0][1]
+    assert sent["query"] == "q -site:x.a.com"
+    assert sent["include_domains"] == ["a.com", "b.com"]
+    assert "exclude_domains" not in sent
     assert [r["url"] for r in out["data"]["web"]] == ["https://a.com/1", "https://news.b.com/2"]
     assert out["data"]["news"] == []
     assert out["success"] is True
@@ -568,15 +573,28 @@ async def test_native_web_search_blocklist_only_sends_exclude_domains():
 
 
 @pytest.mark.asyncio
-async def test_firecrawl_search_sends_domain_filters():
-    mock_client = _mock_post_client({"data": {"web": []}})
+async def test_firecrawl_search_sends_one_domain_list():
+    web = [{"url": "https://a.com/1"}, {"url": "https://x.a.com/2"}, {"url": "https://c.com/3"}]
+    mock_client = _mock_post_client({"data": {"web": web}})
+    tool = FirecrawlSearch(api_key=SecretStr("k"))
     with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
-        await FirecrawlSearch(api_key=SecretStr("k")).handler(
-            query="q", include_domains=["a.com"], exclude_domains=None
-        )
+        out = await tool(query="q", include_domains=["a.com"], exclude_domains=["x.a.com", "c.com"]).collect()
+
     body = mock_client.post.await_args.kwargs["json"]
     assert body["includeDomains"] == ["a.com"]
     assert "excludeDomains" not in body
+    assert body["query"] == "q -site:x.a.com"
+    assert out.output["data"]["web"] == [{"url": "https://a.com/1"}]
+
+    mock_client = _mock_post_client({"data": {"web": web}})
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        out = await tool(query="q", exclude_domains=["c.com"]).collect()
+
+    body = mock_client.post.await_args.kwargs["json"]
+    assert body["excludeDomains"] == ["c.com"]
+    assert "includeDomains" not in body
+    assert body["query"] == "q"
+    assert [r["url"] for r in out.output["data"]["web"]] == ["https://a.com/1", "https://x.a.com/2"]
 
 
 @pytest.mark.asyncio

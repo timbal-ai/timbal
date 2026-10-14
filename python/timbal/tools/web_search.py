@@ -28,7 +28,6 @@ returned per request; pass ``start`` to paginate for more.
 import os
 from functools import cached_property
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -46,6 +45,7 @@ from ..tools.cala import _normalize_base_url as _normalize_cala_base_url
 from ..tools.cala import _post_cala as _cala_post
 from ..tools.cala import _search_request_body as _cala_search_request_body
 from ..tools.firecrawl import _BASE_URL as _FIRECRAWL_BASE_URL
+from ..tools.firecrawl import _domain_scope, _filter_by_domain
 from ..tools.scraperapi import _STRUCTURED_URL as _SCRAPERAPI_STRUCTURED_URL
 from ..tools.tavily import _BASE_URL as _TAVILY_BASE_URL
 from ._creds import resolve_api_key
@@ -322,32 +322,6 @@ def _make_google_handler(
 _PLATFORM_SEARCH_TOOL = "firecrawl_search"
 
 
-def _host_in(url: Any, domains: list[str]) -> bool:
-    """Whether ``url``'s host is one of ``domains`` or a subdomain of one."""
-    host = (urlparse(url).hostname or "") if isinstance(url, str) else ""
-    return any(host == d or host.endswith(f".{d}") for d in domains)
-
-
-def _filter_by_domain(result: Any, allowed: list[str], blocked: list[str]) -> Any:
-    """Drop results outside ``allowed`` or inside ``blocked`` from a Firecrawl search response.
-
-    Firecrawl enforces ``includeDomains``/``excludeDomains`` itself, but only one of
-    the two per request, and a platform on an older tool version ignores both.
-    """
-
-    def keep(item: Any) -> bool:
-        url = item.get("url") if isinstance(item, dict) else None
-        return (not allowed or _host_in(url, allowed)) and not _host_in(url, blocked)
-
-    data = result.get("data") if isinstance(result, dict) else None
-    if isinstance(data, list):
-        return {**result, "data": [item for item in data if keep(item)]}
-    if isinstance(data, dict):
-        groups = {k: [item for item in v if keep(item)] if isinstance(v, list) else v for k, v in data.items()}
-        return {**result, "data": groups}
-    return result
-
-
 def _make_platform_handler(
     *,
     allowed_domains=None,
@@ -374,20 +348,19 @@ def _make_platform_handler(
             description='Time filter: "qdr:h" (hour), "qdr:d" (day), "qdr:w" (week), "qdr:m" (month), "qdr:y" (year)',
         ),
     ) -> dict:
+        scoped_query, include, exclude = _domain_scope(query, allowed, blocked)
         payload: dict[str, Any] = {
-            "query": query,
+            "query": scoped_query,
             "limit": fixed_max_results if fixed_max_results is not None else limit,
         }
         if tbs:
             payload["tbs"] = tbs
         if fixed_country:
             payload["country"] = fixed_country
-        # Firecrawl takes one of the two lists per request; an allowlist is the
-        # stronger restriction, and the blocklist is still applied below.
-        if allowed:
-            payload["include_domains"] = allowed
-        elif blocked:
-            payload["exclude_domains"] = blocked
+        if include:
+            payload["include_domains"] = include
+        if exclude:
+            payload["exclude_domains"] = exclude
 
         try:
             result = await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
