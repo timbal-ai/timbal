@@ -573,6 +573,46 @@ async def test_native_web_search_blocklist_only_sends_exclude_domains():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize(
+    "options,expected",
+    [
+        ({"allowed_domains": ["a.com"]}, ["https://a.com/1", "https://x.a.com/2"]),
+        ({"blocked_domains": ["a.com"]}, ["https://other.com/3"]),
+        ({"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]}, ["https://a.com/1"]),
+    ],
+)
+async def test_native_web_search_filters_live_proxy_envelope(grouped, options, expected):
+    """The deployed proxy returns output.data, not a top-level data field."""
+    from copy import deepcopy
+
+    rows = [{"url": url} for url in ["https://a.com/1", "https://x.a.com/2", "https://other.com/3"]]
+    payload = {
+        "tool": "firecrawl_search",
+        "provider": "firecrawl",
+        "version": "2.7.36",
+        "output": {
+            "success": True,
+            "data": {"web": rows, "news": rows, "images": rows} if grouped else rows,
+        },
+    }
+    original = deepcopy(payload)
+    with patch("timbal.tools.web_search.execute_tool_proxy", AsyncMock(return_value=payload)):
+        result = await WebSearch(**options)(query="q").collect()
+
+    assert result.status.code == "success"
+    out = result.output
+    assert {k: v for k, v in out.items() if k != "output"} == {
+        k: v for k, v in original.items() if k != "output"
+    }
+    assert out["output"]["success"] is True
+    data = out["output"]["data"]
+    for group in data.values() if grouped else [data]:
+        assert [row["url"] for row in group] == expected
+    assert payload == original
+
+
+@pytest.mark.asyncio
 async def test_firecrawl_search_sends_one_domain_list():
     web = [{"url": "https://a.com/1"}, {"url": "https://x.a.com/2"}, {"url": "https://c.com/3"}]
     mock_client = _mock_post_client({"data": {"web": web}})
