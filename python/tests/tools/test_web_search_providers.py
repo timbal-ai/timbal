@@ -531,8 +531,52 @@ async def test_native_web_search_maps_native_options_onto_platform_search():
 
     proxy.assert_awaited_once_with(
         "firecrawl_search",
-        {"query": "espresso site:a.com OR site:b.com -site:c.com", "limit": 3, "tbs": "qdr:w", "country": "DE"},
+        {"query": "espresso", "limit": 3, "tbs": "qdr:w", "country": "DE", "include_domains": ["a.com", "b.com"]},
     )
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_enforces_domains_on_results():
+    """Firecrawl takes one list per request and older platforms drop both: results are filtered here too."""
+    urls = [
+        "https://a.com/1",
+        "https://news.b.com/2",
+        "https://x.a.com/3",
+        "https://nota.com/4",
+        "https://c.com/5",
+    ]
+    proxy = AsyncMock(return_value={"success": True, "data": {"web": [{"url": u} for u in urls], "news": []}})
+    tool = WebSearch(allowed_domains=["a.com", "B.com"], blocked_domains=["x.a.com"])
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        out = await tool.handler(query="q", limit=5, tbs=None)
+
+    assert [r["url"] for r in out["data"]["web"]] == ["https://a.com/1", "https://news.b.com/2"]
+    assert out["data"]["news"] == []
+    assert out["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_blocklist_only_sends_exclude_domains():
+    proxy = AsyncMock(return_value={"data": [{"url": "https://spam.com/x"}, {"url": "https://ok.com/y"}]})
+    tool = WebSearch(blocked_domains=["spam.com"])
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        out = await tool.handler(query="q", limit=5, tbs=None)
+
+    assert proxy.await_args[0][1]["exclude_domains"] == ["spam.com"]
+    assert "include_domains" not in proxy.await_args[0][1]
+    assert out["data"] == [{"url": "https://ok.com/y"}]
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_search_sends_domain_filters():
+    mock_client = _mock_post_client({"data": {"web": []}})
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        await FirecrawlSearch(api_key=SecretStr("k")).handler(
+            query="q", include_domains=["a.com"], exclude_domains=None
+        )
+    body = mock_client.post.await_args.kwargs["json"]
+    assert body["includeDomains"] == ["a.com"]
+    assert "excludeDomains" not in body
 
 
 @pytest.mark.asyncio

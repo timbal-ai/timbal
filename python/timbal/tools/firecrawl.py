@@ -154,6 +154,13 @@ class FirecrawlSearch(Tool):
             ),
             location: str | None = Field(None, description="Geo-targeted location (e.g. 'Germany', 'San Francisco')"),
             country: str | None = Field(None, description="ISO 3166-1 alpha-2 country code for localized results (e.g. 'US', 'DE')"),
+            include_domains: list[str] | None = Field(
+                None,
+                description="Only return results from these hostnames (e.g. 'example.com'). Mutually exclusive with exclude_domains.",
+            ),
+            exclude_domains: list[str] | None = Field(
+                None, description="Leave results from these hostnames out. Mutually exclusive with include_domains."
+            ),
             ignore_invalid_urls: bool = Field(False, description="Exclude invalid URLs from search results"),
             scrape_formats: list[str] | None = Field(
                 None,
@@ -187,6 +194,10 @@ class FirecrawlSearch(Tool):
             }
             if categories:
                 payload["categories"] = categories
+            if include_domains:
+                payload["includeDomains"] = include_domains
+            if exclude_domains:
+                payload["excludeDomains"] = exclude_domains
             if tbs:
                 payload["tbs"] = tbs
             if location:

@@ -28,6 +28,7 @@ returned per request; pass ``start`` to paginate for more.
 import os
 from functools import cached_property
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -321,6 +322,32 @@ def _make_google_handler(
 _PLATFORM_SEARCH_TOOL = "firecrawl_search"
 
 
+def _host_in(url: Any, domains: list[str]) -> bool:
+    """Whether ``url``'s host is one of ``domains`` or a subdomain of one."""
+    host = (urlparse(url).hostname or "") if isinstance(url, str) else ""
+    return any(host == d or host.endswith(f".{d}") for d in domains)
+
+
+def _filter_by_domain(result: Any, allowed: list[str], blocked: list[str]) -> Any:
+    """Drop results outside ``allowed`` or inside ``blocked`` from a Firecrawl search response.
+
+    Firecrawl enforces ``includeDomains``/``excludeDomains`` itself, but only one of
+    the two per request, and a platform on an older tool version ignores both.
+    """
+
+    def keep(item: Any) -> bool:
+        url = item.get("url") if isinstance(item, dict) else None
+        return (not allowed or _host_in(url, allowed)) and not _host_in(url, blocked)
+
+    data = result.get("data") if isinstance(result, dict) else None
+    if isinstance(data, list):
+        return {**result, "data": [item for item in data if keep(item)]}
+    if isinstance(data, dict):
+        groups = {k: [item for item in v if keep(item)] if isinstance(v, list) else v for k, v in data.items()}
+        return {**result, "data": groups}
+    return result
+
+
 def _make_platform_handler(
     *,
     allowed_domains=None,
@@ -332,9 +359,12 @@ def _make_platform_handler(
 
     Native-mode WebSearch on Chat Completions providers: those APIs have no native
     search, so the model calls this function and the platform runs its funded
-    Firecrawl search. Domain filters become ``site:`` operators in the query.
+    Firecrawl search. Domain filters go to Firecrawl as ``include_domains`` /
+    ``exclude_domains`` and are enforced again on the returned results.
     """
     fixed_country = user_location.get("country") if isinstance(user_location, dict) else None
+    allowed = [d.strip().lower() for d in allowed_domains or [] if d.strip()]
+    blocked = [d.strip().lower() for d in blocked_domains or [] if d.strip()]
 
     async def web_search(
         query: str = Field(..., description="Search query"),
@@ -344,27 +374,32 @@ def _make_platform_handler(
             description='Time filter: "qdr:h" (hour), "qdr:d" (day), "qdr:w" (week), "qdr:m" (month), "qdr:y" (year)',
         ),
     ) -> dict:
-        terms = [query]
-        if allowed_domains:
-            terms.append(" OR ".join(f"site:{d}" for d in allowed_domains))
-        terms.extend(f"-site:{d}" for d in blocked_domains or [])
         payload: dict[str, Any] = {
-            "query": " ".join(terms),
+            "query": query,
             "limit": fixed_max_results if fixed_max_results is not None else limit,
         }
         if tbs:
             payload["tbs"] = tbs
         if fixed_country:
             payload["country"] = fixed_country
+        # Firecrawl takes one of the two lists per request; an allowlist is the
+        # stronger restriction, and the blocklist is still applied below.
+        if allowed:
+            payload["include_domains"] = allowed
+        elif blocked:
+            payload["exclude_domains"] = blocked
 
         try:
-            return await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
+            result = await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
         except ToolProxyUnavailable as e:
             raise ToolProxyUnavailable(
                 "WebSearch() searches natively only on Anthropic, OpenAI and xAI models; on other models "
                 "it searches through the Timbal platform, which needs a platform subject (a deployed app, "
                 "or TIMBAL_API_KEY with an app). Without one, use WebSearch(provider=...) with your own key."
             ) from e
+        if allowed or blocked:
+            return _filter_by_domain(result, allowed, blocked)
+        return result
 
     return web_search
 
