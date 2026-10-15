@@ -27,6 +27,7 @@ async def test_legacy_effort_reaches_responses_in_native_shape(model_name):
     params = {"reasoning_effort": "low", "reasoning": {"summary": "auto"}}
     original = copy.deepcopy(params)
     stream, _ = prepare_responses_request(
+        provider="xai" if model_name.startswith("grok") else "openai",
         client=SimpleNamespace(responses=SimpleNamespace(create=create)),
         model_name=model_name, request_headers={}, system_prompt=None,
         messages=[], tools=None, max_tokens=2048, temperature=None,

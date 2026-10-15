@@ -36,11 +36,6 @@ def _filter_by_domain(result: Any, include: list[str], exclude: list[str]) -> An
     the upstream engine, and a platform on an older tool version drops the domain lists.
     """
 
-    # The platform tool proxy wraps the provider response in an output envelope.
-    # Keep its metadata while applying the same filter as a direct Firecrawl call.
-    if isinstance(result, dict) and isinstance(result.get("output"), dict):
-        return {**result, "output": _filter_by_domain(result["output"], include, exclude)}
-
     def keep(item: Any) -> bool:
         url = item.get("url") if isinstance(item, dict) else None
         host = (urlparse(url).hostname or "") if isinstance(url, str) else ""

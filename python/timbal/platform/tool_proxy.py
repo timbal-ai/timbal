@@ -64,7 +64,8 @@ async def execute_tool_proxy(tool_name: str, params: dict[str, Any]) -> Any:
     """Execute a tool via the platform proxy (no credentials in the client runtime).
 
     POST ``/orgs/{org_id}/proxies/v1/tools/{tool_name}`` with handler params as JSON body.
-    Returns the tool handler result JSON as-is (no response wrapping).
+    Returns the platform's response JSON unchanged: the handler's result sits under
+    ``output``, next to ``tool``, ``provider`` and ``version``.
     """
     run_context = get_or_create_run_context()
     platform_config = run_context.platform_config

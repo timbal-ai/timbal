@@ -7,9 +7,10 @@ schemas for Anthropic (``web_search_20250305``) and OpenAI/xAI Responses API
 Completions has no native search, so there (``timbal/auto``, Gemini, Groq, …)
 it is a function tool that searches through the Timbal platform's tool proxy
 (platform-funded Firecrawl), which needs a platform subject (a deployed app,
-or ``TIMBAL_API_KEY`` with an app). The same platform fallback is used for
-domain-filtered searches on OpenAI's ``gpt-4.1-mini`` and ``gpt-4o-mini``
-(including dated snapshots), whose native search rejects domain filters.
+or ``TIMBAL_API_KEY`` with an app). The same platform fallback runs when the
+native tool can't apply the domain filters (OpenAI's ``gpt-4.1-mini`` and
+``gpt-4o-mini``; xAI with both lists or more than 5 domains); see
+``openai_responses_schema_for``.
 
 When ``provider`` is set to ``"tavily"``, ``"scraperapi"``, ``"cala"``,
 ``"firecrawl"``, or ``"google"``,
@@ -28,6 +29,7 @@ returned per request; pass ``start`` to paginate for more.
 """
 
 import os
+import re
 from functools import cached_property
 from typing import Annotated, Any, Literal
 
@@ -323,6 +325,24 @@ def _make_google_handler(
 
 _PLATFORM_SEARCH_TOOL = "firecrawl_search"
 
+# Native search rejects these filter shapes with a 400: the OpenAI minis take no
+# `filters` at all, OpenAI caps each list at 100 domains, and xAI caps a list at
+# 5 and never accepts both lists in one request.
+_OPENAI_MODELS_WITHOUT_FILTERS = re.compile(r"gpt-(?:4\.1|4o)-mini(?:-\d{4}-\d{2}-\d{2})?")
+_OPENAI_MAX_FILTER_DOMAINS = 100
+_XAI_MAX_FILTER_DOMAINS = 5
+
+
+def _native_filters_supported(provider: str, model_name: str, filters: dict[str, list[str]]) -> bool:
+    """Whether the provider's native web search accepts these domain filters."""
+    if provider == "openai":
+        return not _OPENAI_MODELS_WITHOUT_FILTERS.fullmatch(model_name) and all(
+            len(v) <= _OPENAI_MAX_FILTER_DOMAINS for v in filters.values()
+        )
+    if provider == "xai":
+        return len(filters) == 1 and all(len(v) <= _XAI_MAX_FILTER_DOMAINS for v in filters.values())
+    return True
+
 
 def _make_platform_handler(
     *,
@@ -365,13 +385,15 @@ def _make_platform_handler(
             payload["exclude_domains"] = exclude
 
         try:
-            result = await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
+            response = await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
         except ToolProxyUnavailable as e:
             raise ToolProxyUnavailable(
-                "WebSearch() needs the Timbal platform for Chat Completions models and for domain-filtered "
-                "searches on OpenAI's gpt-4.1-mini and gpt-4o-mini. This needs a platform subject (a deployed app, "
+                "WebSearch() needs the Timbal platform when the model can't search natively (Chat Completions) "
+                "or can't apply the domain filters natively. This needs a platform subject (a deployed app, "
                 "or TIMBAL_API_KEY with an app). Without one, use WebSearch(provider=...) with your own key."
             ) from e
+        # The proxy wraps the tool's result as {"tool", "provider", "version", "output"}.
+        result = response["output"] if isinstance(response, dict) and "output" in response else response
         if allowed or blocked:
             return _filter_by_domain(result, allowed, blocked)
         return result
@@ -511,6 +533,24 @@ class WebSearch(Tool):
             schema["user_location"] = self.user_location
         if self.enable_image_understanding:
             schema["enable_image_understanding"] = True
+        return schema
+
+    def openai_responses_schema_for(self, provider: str, model_name: str) -> dict[str, Any]:
+        """The Responses schema for this provider and model.
+
+        OpenAI names the blocklist ``blocked_domains`` and xAI ``excluded_domains``.
+        Where the native tool can't apply the domain filters, the platform search
+        function runs instead, so the restriction still holds.
+        """
+        schema = self.openai_responses_schema
+        filters = schema.get("filters") if self.provider is None else None
+        if not filters:
+            return schema
+        if not _native_filters_supported(provider, model_name, filters):
+            return {"type": "function", **self.openai_chat_completions_schema["function"]}
+        if provider == "openai" and "excluded_domains" in filters:
+            rest = {k: v for k, v in filters.items() if k != "excluded_domains"}
+            return {**schema, "filters": {**rest, "blocked_domains": filters["excluded_domains"]}}
         return schema
 
     @override

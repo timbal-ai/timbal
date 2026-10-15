@@ -236,24 +236,39 @@ def test_websearch_catalog_description_is_the_class_default():
     assert WebSearch(provider="tavily", api_key=SecretStr("k")).description == WebSearch().description
 
 
+_MANY = [f"d{i}.com" for i in range(101)]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "model_name,options,expected_type",
+    "provider,model_name,options,expected",
     [
-        ("gpt-4.1-mini", {"allowed_domains": ["python.org"]}, "function"),
-        ("gpt-4.1-mini-2025-04-14", {"blocked_domains": ["python.org"]}, "function"),
-        ("gpt-4o-mini", {"blocked_domains": ["python.org"]}, "function"),
-        ("gpt-4o-mini-2024-07-18", {"allowed_domains": ["python.org"]}, "function"),
-        ("gpt-4.1-mini", {}, "web_search"),
-        ("gpt-4o-mini", {}, "web_search"),
-        ("gpt-4.1", {"allowed_domains": ["python.org"]}, "web_search"),
-        ("gpt-4o", {"allowed_domains": ["python.org"]}, "web_search"),
-        ("gpt-5-mini", {"allowed_domains": ["python.org"]}, "web_search"),
-        ("grok-4.3", {"allowed_domains": ["python.org"]}, "web_search"),
-        ("gpt-4.1-mini", {"provider": "tavily", "api_key": SecretStr("k")}, "function"),
+        # OpenAI minis reject any `filters`.
+        ("openai", "gpt-4.1-mini", {"allowed_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4.1-mini-2025-04-14", {"blocked_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4o-mini", {"blocked_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4o-mini-2024-07-18", {"allowed_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4.1-mini", {}, None),
+        ("openai", "gpt-4o-mini", {}, None),
+        # OpenAI names the blocklist `blocked_domains` and accepts both lists, up to 100 each.
+        ("openai", "gpt-4.1", {"allowed_domains": ["python.org"]}, {"allowed_domains": ["python.org"]}),
+        ("openai", "gpt-4o", {"blocked_domains": ["python.org"]}, {"blocked_domains": ["python.org"]}),
+        (
+            "openai",
+            "gpt-5-mini",
+            {"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]},
+            {"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]},
+        ),
+        ("openai", "gpt-4.1", {"allowed_domains": _MANY}, "function"),
+        # xAI names it `excluded_domains`, takes one list, up to 5 domains.
+        ("xai", "grok-4.3", {"allowed_domains": ["python.org"]}, {"allowed_domains": ["python.org"]}),
+        ("xai", "grok-4.3", {"blocked_domains": ["python.org"]}, {"excluded_domains": ["python.org"]}),
+        ("xai", "grok-4.3", {"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]}, "function"),
+        ("xai", "grok-4.3", {"blocked_domains": _MANY[:6]}, "function"),
+        ("openai", "gpt-4.1-mini", {"provider": "tavily", "api_key": SecretStr("k")}, "function"),
     ],
 )
-async def test_responses_search_uses_platform_only_for_unsupported_native_filters(model_name, options, expected_type):
+async def test_responses_search_fits_native_filters_or_falls_back(provider, model_name, options, expected):
     from copy import deepcopy
 
     from timbal.core.llm.responses import prepare_responses_request
@@ -267,6 +282,7 @@ async def test_responses_search_uses_platform_only_for_unsupported_native_filter
     tool = WebSearch(**options)
     native_schema = deepcopy(tool.openai_responses_schema)
     create_stream, _ = prepare_responses_request(
+        provider=provider,
         client=client,
         model_name=model_name,
         request_headers={},
@@ -282,13 +298,14 @@ async def test_responses_search_uses_platform_only_for_unsupported_native_filter
         pass
 
     schema = client.responses.create.await_args.kwargs["tools"][0]
-    assert schema["type"] == expected_type
-    if expected_type == "function":
+    if expected == "function":
+        assert schema["type"] == "function"
         assert schema["name"] == tool.name
         assert schema["parameters"]["required"] == ["query"]
         assert "filters" not in schema
     else:
-        assert schema == native_schema
+        assert schema["type"] == "web_search"
+        assert schema.get("filters") == expected
     # A tool can be reused across models; do not mutate its cached native schema.
     assert tool.openai_responses_schema == native_schema
 
@@ -640,7 +657,7 @@ async def test_native_web_search_blocklist_only_sends_exclude_domains():
     ],
 )
 async def test_native_web_search_filters_live_proxy_envelope(grouped, options, expected):
-    """The deployed proxy returns output.data, not a top-level data field."""
+    """The deployed proxy wraps the result as output.data; the model gets the unwrapped, filtered body."""
     from copy import deepcopy
 
     rows = [{"url": url} for url in ["https://a.com/1", "https://x.a.com/2", "https://other.com/3"]]
@@ -659,14 +676,20 @@ async def test_native_web_search_filters_live_proxy_envelope(grouped, options, e
 
     assert result.status.code == "success"
     out = result.output
-    assert {k: v for k, v in out.items() if k != "output"} == {
-        k: v for k, v in original.items() if k != "output"
-    }
-    assert out["output"]["success"] is True
-    data = out["output"]["data"]
+    assert set(out) == {"success", "data"}
+    assert out["success"] is True
+    data = out["data"]
     for group in data.values() if grouped else [data]:
         assert [row["url"] for row in group] == expected
     assert payload == original
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_unwraps_the_proxy_envelope_without_filters():
+    envelope = {"tool": "firecrawl_search", "provider": "firecrawl", "version": "x", "output": {"data": []}}
+    with patch("timbal.tools.web_search.execute_tool_proxy", AsyncMock(return_value=envelope)):
+        result = await WebSearch()(query="q").collect()
+    assert result.output == {"data": []}
 
 
 @pytest.mark.asyncio
