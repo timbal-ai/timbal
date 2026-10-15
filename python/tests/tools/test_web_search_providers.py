@@ -78,7 +78,7 @@ async def test_firecrawl_search_tool_sends_v2_location_fields():
 
     with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
         tool = FirecrawlSearch(api_key=SecretStr("k"))
-        await tool.handler(query="x", location="Germany", country="DE")
+        await tool(query="x", location="Germany", country="DE").collect()
 
     body = mock_client.post.await_args.kwargs["json"]
     assert body["location"] == "Germany"
@@ -222,10 +222,127 @@ def test_websearch_native_mode_anthropic_schema_has_no_function_shape():
     assert "input_schema" not in schema
 
 
-def test_websearch_native_mode_openai_chat_completions_schema_raises():
-    tool = WebSearch()
-    with pytest.raises(ValueError, match="not compatible"):
-        _ = tool.openai_chat_completions_schema
+def test_websearch_native_mode_openai_chat_completions_schema_is_function_shape():
+    schema = WebSearch().openai_chat_completions_schema
+    assert schema["type"] == "function"
+    assert schema["function"]["name"] == "web_search"
+    assert schema["function"]["description"]
+    assert schema["function"]["parameters"]["required"] == ["query"]
+
+
+def test_websearch_catalog_description_is_the_class_default():
+    """Tool catalogs read the class field default, not an instance."""
+    assert WebSearch.model_fields["description"].default
+    assert WebSearch(provider="tavily", api_key=SecretStr("k")).description == WebSearch().description
+
+
+_MANY = [f"d{i}.com" for i in range(101)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider,model_name,options,expected",
+    [
+        # OpenAI minis reject any `filters`.
+        ("openai", "gpt-4.1-mini", {"allowed_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4.1-mini-2025-04-14", {"blocked_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4o-mini", {"blocked_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4o-mini-2024-07-18", {"allowed_domains": ["python.org"]}, "function"),
+        ("openai", "gpt-4.1-mini", {}, None),
+        ("openai", "gpt-4o-mini", {}, None),
+        # OpenAI names the blocklist `blocked_domains` and accepts both lists, up to 100 each.
+        ("openai", "gpt-4.1", {"allowed_domains": ["python.org"]}, {"allowed_domains": ["python.org"]}),
+        ("openai", "gpt-4o", {"blocked_domains": ["python.org"]}, {"blocked_domains": ["python.org"]}),
+        (
+            "openai",
+            "gpt-5-mini",
+            {"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]},
+            {"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]},
+        ),
+        ("openai", "gpt-4.1", {"allowed_domains": _MANY}, "function"),
+        # xAI names it `excluded_domains`, takes one list, up to 5 domains.
+        ("xai", "grok-4.3", {"allowed_domains": ["python.org"]}, {"allowed_domains": ["python.org"]}),
+        ("xai", "grok-4.3", {"blocked_domains": ["python.org"]}, {"excluded_domains": ["python.org"]}),
+        ("xai", "grok-4.3", {"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]}, "function"),
+        ("xai", "grok-4.3", {"blocked_domains": _MANY[:6]}, "function"),
+        ("openai", "gpt-4.1-mini", {"provider": "tavily", "api_key": SecretStr("k")}, "function"),
+    ],
+)
+async def test_responses_search_fits_native_filters_or_falls_back(provider, model_name, options, expected):
+    from copy import deepcopy
+
+    from timbal.core.llm.responses import prepare_responses_request
+
+    async def empty_stream():
+        if False:
+            yield
+
+    client = MagicMock()
+    client.responses.create = AsyncMock(return_value=empty_stream())
+    tool = WebSearch(**options)
+    native_schema = deepcopy(tool.openai_responses_schema)
+    create_stream, _ = prepare_responses_request(
+        provider=provider,
+        client=client,
+        model_name=model_name,
+        request_headers={},
+        system_prompt=None,
+        messages=[],
+        tools=[tool],
+        max_tokens=None,
+        temperature=None,
+        output_model=None,
+        provider_params={},
+    )
+    async for _ in create_stream():
+        pass
+
+    schema = client.responses.create.await_args.kwargs["tools"][0]
+    if expected == "function":
+        assert schema["type"] == "function"
+        assert schema["name"] == tool.name
+        assert schema["parameters"]["required"] == ["query"]
+        assert "filters" not in schema
+    else:
+        assert schema["type"] == "web_search"
+        assert schema.get("filters") == expected
+    # A tool can be reused across models; do not mutate its cached native schema.
+    assert tool.openai_responses_schema == native_schema
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["timbal", "google", "groq"])
+async def test_native_websearch_on_chat_completions_sends_a_function_tool(provider):
+    """`timbal/auto` (and every Chat Completions provider) used to fail the whole turn here."""
+    from timbal.core.llm.chat_completions import prepare_chat_completions_request
+    from timbal.core.llm.registry import _PROVIDERS
+
+    async def _no_chunks():
+        return
+        yield
+
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=_no_chunks())
+    create_stream, _ = prepare_chat_completions_request(
+        provider=provider,
+        config=_PROVIDERS[provider],
+        client=client,
+        model_name="auto",
+        request_headers={},
+        system_prompt=None,
+        messages=[],
+        tools=[WebSearch()],
+        max_tokens=None,
+        temperature=None,
+        output_model=None,
+        provider_params={},
+    )
+    async for _ in create_stream():
+        pass
+
+    (tool,) = client.chat.completions.create.await_args.kwargs["tools"]
+    assert tool["type"] == "function"
+    assert tool["function"]["name"] == "web_search"
 
 
 def test_websearch_provider_mode_anthropic_schema_is_function_shape():
@@ -452,3 +569,159 @@ async def test_two_provider_web_searches_coexist_in_one_agent(monkeypatch):
     client.get.assert_awaited_once()
     assert client.post.await_args.kwargs["json"]["query"] == "from tavily"
     assert client.get.await_args.kwargs["params"]["q"] == "from google"
+
+
+# ---------------------------------------------------------------------------
+# Native mode on Chat Completions: the platform's funded search runs the call.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_native_web_search_runs_through_platform_proxy():
+    proxy = AsyncMock(return_value={"data": {"web": []}})
+    model = TestModel(responses=[
+        _tool_use_response("web_search", {"query": "timbal"}),
+        "done.",
+    ])
+    agent = Agent(name="t", model=model, tools=[WebSearch()])
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        result = await agent(prompt="search please").collect()
+
+    assert result.status.code == "success"
+    proxy.assert_awaited_once_with("firecrawl_search", {"query": "timbal", "limit": 5})
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_maps_native_options_onto_platform_search():
+    proxy = AsyncMock(return_value={})
+    tool = WebSearch(
+        allowed_domains=["a.com", "b.com"],
+        blocked_domains=["c.com"],
+        user_location={"type": "approximate", "country": "DE"},
+        max_results=3,
+    )
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        await tool.handler(query="espresso", limit=10, tbs="qdr:w")
+
+    proxy.assert_awaited_once_with(
+        "firecrawl_search",
+        {"query": "espresso", "limit": 3, "tbs": "qdr:w", "country": "DE", "include_domains": ["a.com", "b.com"]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_enforces_domains_on_results():
+    """Firecrawl takes one list per request and older platforms drop both: results are filtered here too."""
+    urls = [
+        "https://a.com/1",
+        "https://news.b.com/2",
+        "https://x.a.com/3",
+        "https://nota.com/4",
+        "https://c.com/5",
+    ]
+    proxy = AsyncMock(return_value={"success": True, "data": {"web": [{"url": u} for u in urls], "news": []}})
+    tool = WebSearch(allowed_domains=["a.com", "B.com"], blocked_domains=["x.a.com", "c.com"])
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        out = await tool.handler(query="q", limit=5, tbs=None)
+
+    # One list per request: the allowlist, with the carve-out inside it excluded upstream.
+    sent = proxy.await_args[0][1]
+    assert sent["query"] == "q -site:x.a.com"
+    assert sent["include_domains"] == ["a.com", "b.com"]
+    assert "exclude_domains" not in sent
+    assert [r["url"] for r in out["data"]["web"]] == ["https://a.com/1", "https://news.b.com/2"]
+    assert out["data"]["news"] == []
+    assert out["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_blocklist_only_sends_exclude_domains():
+    proxy = AsyncMock(return_value={"data": [{"url": "https://spam.com/x"}, {"url": "https://ok.com/y"}]})
+    tool = WebSearch(blocked_domains=["spam.com"])
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        out = await tool.handler(query="q", limit=5, tbs=None)
+
+    assert proxy.await_args[0][1]["exclude_domains"] == ["spam.com"]
+    assert "include_domains" not in proxy.await_args[0][1]
+    assert out["data"] == [{"url": "https://ok.com/y"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize(
+    "options,expected",
+    [
+        ({"allowed_domains": ["a.com"]}, ["https://a.com/1", "https://x.a.com/2"]),
+        ({"blocked_domains": ["a.com"]}, ["https://other.com/3"]),
+        ({"allowed_domains": ["a.com"], "blocked_domains": ["x.a.com"]}, ["https://a.com/1"]),
+    ],
+)
+async def test_native_web_search_filters_live_proxy_envelope(grouped, options, expected):
+    """The deployed proxy wraps the result as output.data; the model gets the unwrapped, filtered body."""
+    from copy import deepcopy
+
+    rows = [{"url": url} for url in ["https://a.com/1", "https://x.a.com/2", "https://other.com/3"]]
+    payload = {
+        "tool": "firecrawl_search",
+        "provider": "firecrawl",
+        "version": "2.7.36",
+        "output": {
+            "success": True,
+            "data": {"web": rows, "news": rows, "images": rows} if grouped else rows,
+        },
+    }
+    original = deepcopy(payload)
+    with patch("timbal.tools.web_search.execute_tool_proxy", AsyncMock(return_value=payload)):
+        result = await WebSearch(**options)(query="q").collect()
+
+    assert result.status.code == "success"
+    out = result.output
+    assert set(out) == {"success", "data"}
+    assert out["success"] is True
+    data = out["data"]
+    for group in data.values() if grouped else [data]:
+        assert [row["url"] for row in group] == expected
+    assert payload == original
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_unwraps_the_proxy_envelope_without_filters():
+    envelope = {"tool": "firecrawl_search", "provider": "firecrawl", "version": "x", "output": {"data": []}}
+    with patch("timbal.tools.web_search.execute_tool_proxy", AsyncMock(return_value=envelope)):
+        result = await WebSearch()(query="q").collect()
+    assert result.output == {"data": []}
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_search_sends_one_domain_list():
+    web = [{"url": "https://a.com/1"}, {"url": "https://x.a.com/2"}, {"url": "https://c.com/3"}]
+    mock_client = _mock_post_client({"data": {"web": web}})
+    tool = FirecrawlSearch(api_key=SecretStr("k"))
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        out = await tool(query="q", include_domains=["a.com"], exclude_domains=["x.a.com", "c.com"]).collect()
+
+    body = mock_client.post.await_args.kwargs["json"]
+    assert body["includeDomains"] == ["a.com"]
+    assert "excludeDomains" not in body
+    assert body["query"] == "q -site:x.a.com"
+    assert out.output["data"]["web"] == [{"url": "https://a.com/1"}]
+
+    mock_client = _mock_post_client({"data": {"web": web}})
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        out = await tool(query="q", exclude_domains=["c.com"]).collect()
+
+    body = mock_client.post.await_args.kwargs["json"]
+    assert body["excludeDomains"] == ["c.com"]
+    assert "includeDomains" not in body
+    assert body["query"] == "q"
+    assert [r["url"] for r in out.output["data"]["web"]] == ["https://a.com/1", "https://x.a.com/2"]
+
+
+@pytest.mark.asyncio
+async def test_native_web_search_without_platform_says_what_to_do():
+    from timbal.errors import ToolProxyUnavailable
+
+    proxy = AsyncMock(side_effect=ToolProxyUnavailable("no subject"))
+    with patch("timbal.tools.web_search.execute_tool_proxy", proxy):
+        with pytest.raises(ToolProxyUnavailable, match=r"WebSearch\(provider=\.\.\.\)"):
+            await WebSearch().handler(query="x", limit=5, tbs=None)

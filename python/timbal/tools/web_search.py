@@ -1,10 +1,16 @@
 """
 WebSearch — unified web-search tool.
 
-When ``provider`` is *not* set (the default), WebSearch behaves as a
-specification-only tool: it emits native search schemas for Anthropic
-(``web_search_20250305``) and OpenAI/xAI Responses API (``{"type":
-"web_search"}``), but is **not executable**.  This is the original behaviour.
+When ``provider`` is *not* set (the default), WebSearch emits native search
+schemas for Anthropic (``web_search_20250305``) and OpenAI/xAI Responses API
+(``{"type": "web_search"}``); the model provider runs those searches. Chat
+Completions has no native search, so there (``timbal/auto``, Gemini, Groq, …)
+it is a function tool that searches through the Timbal platform's tool proxy
+(platform-funded Firecrawl), which needs a platform subject (a deployed app,
+or ``TIMBAL_API_KEY`` with an app). The same platform fallback runs when the
+native tool can't apply the domain filters (OpenAI's ``gpt-4.1-mini`` and
+``gpt-4o-mini``; xAI with both lists or more than 5 domains); see
+``openai_responses_schema_for``.
 
 When ``provider`` is set to ``"tavily"``, ``"scraperapi"``, ``"cala"``,
 ``"firecrawl"``, or ``"google"``,
@@ -23,6 +29,7 @@ returned per request; pass ``start`` to paginate for more.
 """
 
 import os
+import re
 from functools import cached_property
 from typing import Annotated, Any, Literal
 
@@ -35,11 +42,14 @@ except ImportError:
 from pydantic import Field, SecretStr, computed_field
 
 from ..core.tool import Tool
+from ..errors import ToolProxyUnavailable
 from ..platform.integrations import Integration
+from ..platform.tool_proxy import execute_tool_proxy
 from ..tools.cala import _normalize_base_url as _normalize_cala_base_url
 from ..tools.cala import _post_cala as _cala_post
 from ..tools.cala import _search_request_body as _cala_search_request_body
 from ..tools.firecrawl import _BASE_URL as _FIRECRAWL_BASE_URL
+from ..tools.firecrawl import _domain_scope, _filter_by_domain
 from ..tools.scraperapi import _STRUCTURED_URL as _SCRAPERAPI_STRUCTURED_URL
 from ..tools.tavily import _BASE_URL as _TAVILY_BASE_URL
 from ._creds import resolve_api_key
@@ -313,6 +323,84 @@ def _make_google_handler(
     return web_search
 
 
+_PLATFORM_SEARCH_TOOL = "firecrawl_search"
+
+# Native search rejects these filter shapes with a 400: the OpenAI minis take no
+# `filters` at all, OpenAI caps each list at 100 domains, and xAI caps a list at
+# 5 and never accepts both lists in one request.
+_OPENAI_MODELS_WITHOUT_FILTERS = re.compile(r"gpt-(?:4\.1|4o)-mini(?:-\d{4}-\d{2}-\d{2})?")
+_OPENAI_MAX_FILTER_DOMAINS = 100
+_XAI_MAX_FILTER_DOMAINS = 5
+
+
+def _native_filters_supported(provider: str, model_name: str, filters: dict[str, list[str]]) -> bool:
+    """Whether the provider's native web search accepts these domain filters."""
+    if provider == "openai":
+        return not _OPENAI_MODELS_WITHOUT_FILTERS.fullmatch(model_name) and all(
+            len(v) <= _OPENAI_MAX_FILTER_DOMAINS for v in filters.values()
+        )
+    if provider == "xai":
+        return len(filters) == 1 and all(len(v) <= _XAI_MAX_FILTER_DOMAINS for v in filters.values())
+    return True
+
+
+def _make_platform_handler(
+    *,
+    allowed_domains=None,
+    blocked_domains=None,
+    user_location=None,
+    fixed_max_results=None,
+):
+    """Return an async handler that searches through the Timbal platform's tool proxy.
+
+    Native-mode WebSearch on Chat Completions providers: those APIs have no native
+    search, so the model calls this function and the platform runs its funded
+    Firecrawl search. Domain filters go to Firecrawl as ``include_domains`` /
+    ``exclude_domains`` and are enforced again on the returned results.
+    """
+    fixed_country = user_location.get("country") if isinstance(user_location, dict) else None
+    allowed = [d.strip().lower() for d in allowed_domains or [] if d.strip()]
+    blocked = [d.strip().lower() for d in blocked_domains or [] if d.strip()]
+
+    async def web_search(
+        query: str = Field(..., description="Search query"),
+        limit: int = Field(5, description="Number of results to return (max 20)"),
+        tbs: str | None = Field(
+            None,
+            description='Time filter: "qdr:h" (hour), "qdr:d" (day), "qdr:w" (week), "qdr:m" (month), "qdr:y" (year)',
+        ),
+    ) -> dict:
+        scoped_query, include, exclude = _domain_scope(query, allowed, blocked)
+        payload: dict[str, Any] = {
+            "query": scoped_query,
+            "limit": fixed_max_results if fixed_max_results is not None else limit,
+        }
+        if tbs:
+            payload["tbs"] = tbs
+        if fixed_country:
+            payload["country"] = fixed_country
+        if include:
+            payload["include_domains"] = include
+        if exclude:
+            payload["exclude_domains"] = exclude
+
+        try:
+            response = await execute_tool_proxy(_PLATFORM_SEARCH_TOOL, payload)
+        except ToolProxyUnavailable as e:
+            raise ToolProxyUnavailable(
+                "WebSearch() needs the Timbal platform when the model can't search natively (Chat Completions) "
+                "or can't apply the domain filters natively. This needs a platform subject (a deployed app, "
+                "or TIMBAL_API_KEY with an app). Without one, use WebSearch(provider=...) with your own key."
+            ) from e
+        # The proxy wraps the tool's result as {"tool", "provider", "version", "output"}.
+        result = response["output"] if isinstance(response, dict) and "output" in response else response
+        if allowed or blocked:
+            return _filter_by_domain(result, allowed, blocked)
+        return result
+
+    return web_search
+
+
 # ---------------------------------------------------------------------------
 # WebSearch tool
 # ---------------------------------------------------------------------------
@@ -322,7 +410,7 @@ class WebSearch(Tool):
     """See module docstring for native vs provider-backed behaviour and credential order."""
 
     name: str = "web_search"
-    description: str | None = None
+    description: str | None = "Search the web for current information."
 
     # --- provider selection ---
     provider: Literal["tavily", "scraperapi", "cala", "firecrawl", "google"] | None = None
@@ -341,10 +429,6 @@ class WebSearch(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         provider = kwargs.get("provider")
-
-        # Default description when a provider is set (LLMs need it for function-calling).
-        if provider is not None and "description" not in kwargs:
-            kwargs["description"] = "Search the web for information."
 
         # Default to a provider-scoped name so multiple `WebSearch(provider=...)`
         # instances can coexist in the same Agent without colliding. Native mode
@@ -388,11 +472,12 @@ class WebSearch(Tool):
                     fixed_max_results=kwargs.get("max_results"),
                 )
             else:
-
-                def _unreachable():
-                    raise NotImplementedError("This is a specification-only tool")
-
-                kwargs["handler"] = _unreachable
+                kwargs["handler"] = _make_platform_handler(
+                    allowed_domains=kwargs.get("allowed_domains"),
+                    blocked_domains=kwargs.get("blocked_domains"),
+                    user_location=kwargs.get("user_location"),
+                    fixed_max_results=kwargs.get("max_results"),
+                )
 
         super().__init__(**kwargs)
 
@@ -450,21 +535,37 @@ class WebSearch(Tool):
             schema["enable_image_understanding"] = True
         return schema
 
+    def openai_responses_schema_for(self, provider: str, model_name: str) -> dict[str, Any]:
+        """The Responses schema for this provider and model.
+
+        OpenAI names the blocklist ``blocked_domains`` and xAI ``excluded_domains``.
+        Where the native tool can't apply the domain filters, the platform search
+        function runs instead, so the restriction still holds.
+        """
+        schema = self.openai_responses_schema
+        filters = schema.get("filters") if self.provider is None else None
+        if not filters:
+            return schema
+        if not _native_filters_supported(provider, model_name, filters):
+            return {"type": "function", **self.openai_chat_completions_schema["function"]}
+        if provider == "openai" and "excluded_domains" in filters:
+            rest = {k: v for k, v in filters.items() if k != "excluded_domains"}
+            return {**schema, "filters": {**rest, "blocked_domains": filters["excluded_domains"]}}
+        return schema
+
     @override
     @computed_field(repr=False)
     @cached_property
     def openai_chat_completions_schema(self) -> dict[str, Any]:
-        """See base class."""
-        if self.provider is not None:
-            return {
-                "type": "function",
-                "function": {
-                    "name": self.name,
-                    "description": self.description or "",
-                    "parameters": self.format_params_model_schema(),
-                },
-            }
-        raise ValueError("WebSearch is not compatible with OpenAI's chat completions API.")
+        """See base class. Always a function: in native mode the platform handler runs it."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description or "",
+                "parameters": self.format_params_model_schema(),
+            },
+        }
 
     @override
     @computed_field

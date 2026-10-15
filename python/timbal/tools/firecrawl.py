@@ -1,4 +1,5 @@
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr
 
@@ -7,6 +8,46 @@ from ..platform.integrations import Integration
 from ._creds import resolve_api_key
 
 _BASE_URL = "https://api.firecrawl.dev/v2"
+
+
+def _within(host: str, domains: list[str]) -> bool:
+    """Whether ``host`` is one of ``domains`` or a subdomain of one."""
+    return any(host == d or host.endswith(f".{d}") for d in domains)
+
+
+def _domain_scope(query: str, include: list[str], exclude: list[str]) -> tuple[str, list[str] | None, list[str] | None]:
+    """Fit an allowlist and a blocklist into one Firecrawl search request.
+
+    Firecrawl takes ``includeDomains`` or ``excludeDomains``, never both. With both,
+    the allowlist goes as ``includeDomains`` and only the exclusions inside it still
+    matter; those ride in the query as ``-site:`` terms. Returns ``(query, include,
+    exclude)`` with at most one list set.
+    """
+    if not include:
+        return query, None, exclude or None
+    carve_outs = [d for d in exclude if _within(d, include)]
+    return " ".join([query, *(f"-site:{d}" for d in carve_outs)]), include, None
+
+
+def _filter_by_domain(result: Any, include: list[str], exclude: list[str]) -> Any:
+    """Drop results outside ``include`` or inside ``exclude`` from a Firecrawl search response.
+
+    Backstop for what the request could not enforce: ``-site:`` terms are a hint to
+    the upstream engine, and a platform on an older tool version drops the domain lists.
+    """
+
+    def keep(item: Any) -> bool:
+        url = item.get("url") if isinstance(item, dict) else None
+        host = (urlparse(url).hostname or "") if isinstance(url, str) else ""
+        return (not include or _within(host, include)) and not _within(host, exclude)
+
+    data = result.get("data") if isinstance(result, dict) else None
+    if isinstance(data, list):
+        return {**result, "data": [item for item in data if keep(item)]}
+    if isinstance(data, dict):
+        groups = {k: [item for item in v if keep(item)] if isinstance(v, list) else v for k, v in data.items()}
+        return {**result, "data": groups}
+    return result
 
 
 class FirecrawlScrape(Tool):
@@ -154,6 +195,14 @@ class FirecrawlSearch(Tool):
             ),
             location: str | None = Field(None, description="Geo-targeted location (e.g. 'Germany', 'San Francisco')"),
             country: str | None = Field(None, description="ISO 3166-1 alpha-2 country code for localized results (e.g. 'US', 'DE')"),
+            include_domains: list[str] | None = Field(
+                None, description="Only return results from these hostnames and their subdomains (e.g. 'example.com')."
+            ),
+            exclude_domains: list[str] | None = Field(
+                None,
+                description="Leave results from these hostnames and their subdomains out. "
+                "Combines with include_domains to carve subdomains out of an allowed site.",
+            ),
             ignore_invalid_urls: bool = Field(False, description="Exclude invalid URLs from search results"),
             scrape_formats: list[str] | None = Field(
                 None,
@@ -178,8 +227,11 @@ class FirecrawlSearch(Tool):
             )
             import httpx
 
+            include = [d.strip().lower() for d in include_domains or [] if d.strip()]
+            exclude = [d.strip().lower() for d in exclude_domains or [] if d.strip()]
+            scoped_query, include_field, exclude_field = _domain_scope(query, include, exclude)
             payload: dict[str, Any] = {
-                "query": query,
+                "query": scoped_query,
                 "limit": limit,
                 "sources": sources,
                 "timeout": timeout,
@@ -187,6 +239,10 @@ class FirecrawlSearch(Tool):
             }
             if categories:
                 payload["categories"] = categories
+            if include_field:
+                payload["includeDomains"] = include_field
+            if exclude_field:
+                payload["excludeDomains"] = exclude_field
             if tbs:
                 payload["tbs"] = tbs
             if location:
@@ -212,6 +268,8 @@ class FirecrawlSearch(Tool):
                     timeout=httpx.Timeout(90.0, read=None),
                 )
                 response.raise_for_status()
+                if include or exclude:
+                    return _filter_by_domain(response.json(), include, exclude)
                 return response.json()
 
         super().__init__(handler=_firecrawl_search, **kwargs)

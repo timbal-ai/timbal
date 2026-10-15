@@ -113,7 +113,9 @@ Timbal provides built-in tools for common use cases. These tools are ready to us
 
 `WebSearch` enables agents to search the web. 
 
-With no `provider`, `WebSearch()` defines native search for Anthropic and OpenAI/xAI Responses. The model provider executes it; native search is unavailable through Chat Completions. With `provider="tavily"`, `"scraperapi"`, `"cala"`, `"firecrawl"`, or `"google"`, it becomes an executable function tool usable with any tool-capable model. Configure the selected search service's credentials separately.
+With no `provider`, `WebSearch()` defines native search for Anthropic and OpenAI/xAI Responses, and the model provider executes it. Chat Completions has no native search, so on those models (`timbal/auto`, Gemini, Groq, …) the agent searches through the Timbal platform instead; that needs a platform subject (a deployed app, or `TIMBAL_API_KEY` with an app). Domain filters are applied to the results there too. With `provider="tavily"`, `"scraperapi"`, `"cala"`, `"firecrawl"`, or `"google"`, it becomes an executable function tool usable with any tool-capable model. Configure the selected search service's credentials separately.
+
+Native search also falls back to the platform when the model can't apply the domain filters: OpenAI's `gpt-4.1-mini` and `gpt-4o-mini` (including dated snapshots) take none, OpenAI takes up to 100 domains per list, and xAI takes up to 5 and only one of `allowed_domains` / `blocked_domains`. That fallback also needs a platform subject; unfiltered searches stay native. To search without platform credentials, select an executable provider with your own key.
 
 ```python
 from timbal import Agent

@@ -23,6 +23,13 @@ _ENCRYPTED_REASONING_MODEL_RE = re.compile(r"^(?:o\d|gpt-5|gpt-6|codex)", re.IGN
 REASONING_ENCRYPTED_CONTENT_INCLUDE = "reasoning.encrypted_content"
 
 
+def _responses_tool_schema(tool: "Runnable", provider: str, model_name: str) -> dict[str, Any]:
+    """A tool's Responses schema; tools whose native shape varies by provider or model resolve it themselves."""
+    if getattr(type(tool), "openai_responses_schema_for", None) is not None:
+        return tool.openai_responses_schema_for(provider, model_name)
+    return tool.openai_responses_schema
+
+
 def normalize_responses_params(provider_params: dict[str, Any]) -> dict[str, Any]:
     """Translate the Chat Completions effort alias without losing user intent.
 
@@ -57,6 +64,7 @@ def supports_encrypted_reasoning(model_name: str) -> bool:
 
 def prepare_responses_request(
     *,
+    provider: str,
     client: Any,
     model_name: str,
     request_headers: dict[str, str],
@@ -103,7 +111,7 @@ def prepare_responses_request(
     responses_kwargs["input"] = input_items
 
     if tools:
-        responses_tools = [tool.openai_responses_schema for tool in tools]
+        responses_tools = [_responses_tool_schema(tool, provider, model_name) for tool in tools]
         if responses_tools:
             responses_kwargs["tools"] = responses_tools
             responses_kwargs["parallel_tool_calls"] = True

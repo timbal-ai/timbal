@@ -1,4 +1,4 @@
-"""Tests for WebSearch and XSearch specification-only tools."""
+"""Tests for WebSearch and XSearch native (model-provider) search schemas."""
 
 import pytest
 from timbal.tools import WebSearch, XSearch
@@ -48,10 +48,10 @@ class TestWebSearchSchema:
         assert schema["allowed_domains"] == ["example.com"]
         assert schema["blocked_domains"] == ["spam.com"]
 
-    def test_chat_completions_raises(self):
-        ws = WebSearch()
-        with pytest.raises(ValueError, match="not compatible"):
-            _ = ws.openai_chat_completions_schema
+    def test_chat_completions_is_platform_function(self):
+        schema = WebSearch().openai_chat_completions_schema
+        assert schema["type"] == "function"
+        assert schema["function"]["name"] == "web_search"
 
 
 class TestXSearchSchema:

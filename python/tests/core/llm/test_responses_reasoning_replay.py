@@ -87,6 +87,7 @@ class TestSupportsEncryptedReasoning:
 def _prepare(model_name: str, provider_params: dict | None = None, messages: list[Message] | None = None):
     client = MagicMock()
     _, _ = prepare_responses_request(
+        provider="xai" if model_name.startswith("grok") else "openai",
         client=client,
         model_name=model_name,
         request_headers={},
@@ -114,6 +115,7 @@ async def _kwargs_sent(
     client = MagicMock()
     client.responses.create = fake_create
     create_stream, _ = prepare_responses_request(
+        provider="xai" if model_name.startswith("grok") else "openai",
         client=client,
         model_name=model_name,
         request_headers={},
