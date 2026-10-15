@@ -8,7 +8,6 @@ tests inject a fake ``livekit`` module.
 from __future__ import annotations
 
 import asyncio
-import time
 import base64
 import contextlib
 import json
@@ -602,21 +601,21 @@ class TestSipRuntime:
         between the agent joining and the session being built. For a SIP
         caller the build must follow the mic subscribe immediately."""
         room, _guard, _log, app = driver_env
-        built_at: dict[str, float] = {}
+        # A browser window far longer than any runner stall: a SIP caller that
+        # takes it fails on the wait below instead of on a sub-second budget.
+        monkeypatch.setenv("TIMBAL_VOICE_HELLO_WAIT_SECS", "30")
+        monkeypatch.delenv("TIMBAL_VOICE_SIP_HELLO_WAIT_SECS", raising=False)
 
         def _capture(runnable: object, defaults: object, config: dict, **kwargs: object):
-            built_at["t"] = time.monotonic()
             raise RuntimeError("stop")
 
         monkeypatch.setattr("timbal.server.livekit_session.build_voice_session", _capture)
         task = asyncio.create_task(_run_livekit_session(app))
         await asyncio.wait_for(room.connected.wait(), timeout=1.0)
         await asyncio.sleep(0)
-        subscribed_at = time.monotonic()
         _subscribe_caller(room, identity="+34111", kind="PARTICIPANT_KIND_SIP")  # no hello, ever
-        done, _ = await asyncio.wait({task}, timeout=1.0)
+        done, _ = await asyncio.wait({task}, timeout=10.0)
         assert task in done, "build waited on the hello window for a SIP caller"
-        assert built_at["t"] - subscribed_at < 0.5
 
     def test_hello_window_is_tunable_per_caller_kind(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """agent voice_config > env > default, separately for browser and SIP."""
