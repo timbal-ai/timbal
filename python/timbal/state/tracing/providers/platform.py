@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import hashlib
+import json
+import time
+from collections import OrderedDict
+from typing import TYPE_CHECKING, ClassVar
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -35,9 +39,43 @@ class PlatformTracingProvider(TracingProvider):
     When ``platform_config`` is not set, credentials are resolved from the
     run context and, as a last resort, from environment variables
     (``TIMBAL_API_KEY``, ``TIMBAL_ORG_ID``, ``TIMBAL_APP_ID``).
+
+    The traces this process stored most recently are read back from memory:
+    a voice call starts each turn from the one before it, in the same process,
+    a moment after storing it, and would otherwise fetch it over the network
+    twice (memory and session data) before the model is called.
     """
 
     platform_config: PlatformConfig | None = None
+
+    _recent: ClassVar[OrderedDict[str, tuple[float, str]]] = OrderedDict()
+    _recent_max: ClassVar[int] = 16
+    # Another process may write the same run later (an approval resumed
+    # elsewhere); past this, the platform's copy is the one to trust.
+    _recent_ttl_s: ClassVar[float] = 300.0
+
+    @staticmethod
+    def _recent_key(platform_config: PlatformConfig, subject_path: str, run_id: str) -> str:
+        """A run is read back only by the credentials, org and app that stored it,
+        so memory never answers a request the platform would have refused."""
+        token = hashlib.sha256(platform_config.auth.token.get_secret_value().encode()).hexdigest()
+        return f"{platform_config.host}/orgs/{platform_config.subject.org_id}/{subject_path}/runs/{run_id}#{token}"
+
+    @classmethod
+    def _remember(cls, key: str, trace: list) -> None:
+        recent = PlatformTracingProvider._recent
+        recent[key] = (time.monotonic(), json.dumps(trace))
+        recent.move_to_end(key)
+        while len(recent) > cls._recent_max:
+            recent.popitem(last=False)
+
+    @classmethod
+    def _recall(cls, key: str) -> Trace | None:
+        entry = PlatformTracingProvider._recent.get(key)
+        if entry is None or time.monotonic() - entry[0] > cls._recent_ttl_s:
+            return None
+        # Parsed afresh each time, so a reader can never change what the next one sees.
+        return Trace(json.loads(entry[1]))
 
     @classmethod
     def _resolve_config(cls, run_context: "RunContext"):
@@ -78,6 +116,9 @@ class PlatformTracingProvider(TracingProvider):
             subject_path = f"apps/{subject.app_id}"
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
+        recalled = cls._recall(cls._recent_key(platform_config, subject_path, run_context.parent_id))
+        if recalled is not None:
+            return recalled
         res = await _request(
             method="GET",
             path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
@@ -114,3 +155,4 @@ class PlatformTracingProvider(TracingProvider):
             json=payload,
         )
         res.raise_for_status()
+        cls._remember(cls._recent_key(platform_config, subject_path, run_context.id), payload["trace"])
