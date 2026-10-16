@@ -344,8 +344,9 @@ class VoiceSession:
         self._turn_tool_seen = asyncio.Event()
         self._turn_tool_seen_at: float | None = None
         self._turn_tool_name: str | None = None
-        # The ready-made line said last turn, so the next turn picks another.
-        self._last_filler_phrase: str | None = None
+        # The ready-made lines said this call, each once, by when it was last
+        # said (oldest first), so the next turn picks one said long ago.
+        self._filler_phrases_said: list[str] = []
 
         # Agent-speaks-first opener (see GreetingConfig). Spoken from run() at
         # t=0 instead of from a turn, so it lives entirely outside the turn
@@ -2364,22 +2365,32 @@ class VoiceSession:
             except TimeoutError:
                 return
 
+    def _filler_phrase_options(self) -> list[str]:
+        phrases = self.filler.phrases if self.filler is not None else None
+        if isinstance(phrases, dict):
+            return phrases.get(language_key(self.audio_input.language)) or phrases.get("*") or []
+        return phrases or []
+
     def _instant_filler_phrase(self) -> str | None:
         """A ready-made line from ``FillerConfig.phrases`` for the call's language, or None.
 
-        Only a choice: the flow records it as the last line said when it
-        speaks it, so a line picked for a turn whose reply came first does not
-        push the next turn off it.
+        One not said yet this call, else one from the half said longest ago:
+        every line is heard before any repeats, and none comes back within
+        half the list. Only a choice: the flow records it when it speaks it, so
+        a line picked for a turn whose reply came first does not push it back.
         """
-        phrases = self.filler.phrases if self.filler is not None else None
-        if isinstance(phrases, dict):
-            options = phrases.get(language_key(self.audio_input.language)) or phrases.get("*")
-        else:
-            options = phrases
+        options = self._filler_phrase_options()
         if not options:
             return None
-        fresh = [p for p in options if p != self._last_filler_phrase] or options
-        return random.choice(fresh)
+        said = self._filler_phrases_said
+        unsaid = [p for p in options if p not in said]
+        if unsaid:
+            return random.choice(unsaid)
+        oldest_first = sorted(options, key=said.index)
+        return random.choice(oldest_first[: max(1, len(oldest_first) // 2)])
+
+    def _record_filler_phrase(self, phrase: str) -> None:
+        self._filler_phrases_said = [p for p in self._filler_phrases_said if p != phrase] + [phrase]
 
     def _filler_ok_to_speak(self) -> bool:
         """The turn is still live and nothing has been spoken since the last
@@ -2446,7 +2457,7 @@ class VoiceSession:
             if not phrase or not self._filler_ok_to_speak():
                 return
             if ready_made:
-                self._last_filler_phrase = phrase
+                self._record_filler_phrase(phrase)
             covered_tool = self._turn_tool_seen_at is not None
             await self._speak_filler(phrase, self._turn_tool_name or "")
             spoken.append(phrase)
