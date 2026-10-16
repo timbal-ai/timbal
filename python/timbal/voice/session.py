@@ -502,6 +502,8 @@ class VoiceSession:
         self._current_turn_task: asyncio.Task | None = None
         self._is_speaking = False
         self._closed = False
+        # ``end_call()``: waits for the goodbye to be heard, then closes.
+        self._end_call_task: asyncio.Task[None] | None = None
         #: STT/TTS connections opened (``prepare()``), so ``run()`` skips them.
         self._prepared = False
         self._held_user_text: str | None = None
@@ -793,6 +795,42 @@ class VoiceSession:
         if policy != "now" or not await self._deliver_event_notes(interrupt=True):
             self._ensure_notify_watch()
         return await asyncio.shield(note.delivered)
+
+    def end_call(self) -> None:
+        """Hang up once what the agent is saying has been heard.
+
+        For an agent that ends the call itself, from a tool it calls with its
+        goodbye: the turn that asked finishes, its audio plays out, and the
+        session closes as when the caller hangs up. The caller saying anything
+        new first keeps the call up. Calling it again changes nothing.
+        """
+        if self._closed or self._end_call_task is not None:
+            return
+        logger.info("end_call_requested")
+        self._end_call_task = asyncio.create_task(self._end_call_when_heard(self._last_commit_at))
+
+    async def _end_call_when_heard(self, commit_at: float) -> None:
+        give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
+        try:
+            while not self._closed:
+                await asyncio.sleep(0.1)
+                if self._last_commit_at > commit_at:
+                    logger.info("end_call_cancelled", reason="caller_spoke")
+                    return
+                turn = self._current_turn_task
+                busy = (turn is not None and not turn.done()) or self._is_speaking or self.playback.is_playing
+                if busy and time.monotonic() < give_up_at:
+                    continue
+                # The tracker estimates playback; the last words may still be on the wire.
+                await asyncio.sleep(self.END_CALL_TAIL_SECS)
+                if self._last_commit_at > commit_at:
+                    logger.info("end_call_cancelled", reason="caller_spoke")
+                    return
+                logger.info("end_call_hangup", timed_out=busy)
+                await self.close()
+                return
+        finally:
+            self._end_call_task = None
 
     async def prepare(self) -> None:
         """Open the STT and TTS connections ahead of :meth:`run`.
@@ -1928,6 +1966,9 @@ class VoiceSession:
     # leaves stranded (echo it refused) would otherwise hold notes all call.
     NOTIFY_STRANDED_PARTIAL_SECS = 5.0
     NOTIFY_POLL_SECS = 0.05
+    # ``end_call()`` hangs up anyway after this, should the goodbye never finish.
+    END_CALL_MAX_WAIT_SECS = 20.0
+    END_CALL_TAIL_SECS = 0.4
 
     def _spawn_turn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Start a turn task from the session's own context (see ``_session_context``)."""
