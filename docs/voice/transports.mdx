@@ -110,3 +110,19 @@ The routes answer and bridge calls. Placing an outbound call requires your carri
 Voice sessions forward `agent_approval` and `agent_interaction` events when the agent pauses. Render the request and resume through `POST /stream` with the event's `run_id` as `parent_id` and the decision in `resume`. Speaking into the microphone is not an approval resolution. See [Client integration](/human-in-the-loop/client-integration).
 
 An `agent_text_done` event also carries the agent `run_id`, allowing an authorized application to continue that conversation through the text endpoint. Identity and prior-run continuation require host-controlled authorization; they are separate from speech tuning in the hello.
+
+## Reporting events
+
+On WebRTC and LiveKit, the client can tell the agent that something happened — a background task finished — so it speaks up without waiting for the caller. Send this on the data channel (LiveKit: the room data channel, from the caller's participant):
+
+```json
+{"type": "notify", "text": "Task 'report' finished: sales are up 4%.", "key": "task:report", "policy": "when_idle"}
+```
+
+`key` and `policy` are optional. `when_idle` (the default) waits for a quiet line; `now` interrupts. The server answers once the note is placed:
+
+```json
+{"type": "notify_ack", "key": "task:report", "own_turn": true}
+```
+
+`own_turn` is `false` when the note did not get a turn of its own: the line stayed busy for 30 seconds and it was added to the caller's next turn instead, a newer note with the same `key` replaced it, or the call ended. The note is never shown as the caller's words. Server-side code calls `VoiceSession.notify` directly; see [Using tools](/voice/tools#report-back-when-slow-work-finishes).
