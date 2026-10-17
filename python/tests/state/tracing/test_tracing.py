@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -726,7 +727,7 @@ class TestPlatformTracingProvider:
         with patch("timbal.platform.utils._request", new=mock_request):
             await PlatformTracingProvider._store(run_context)
 
-        json_payload = mock_request.call_args.kwargs.get("json", {})
+        json_payload = json.loads(mock_request.call_args.kwargs["content"])
         assert json_payload.get("rev") == "feat/runs-rev"
 
     @pytest.mark.asyncio
@@ -740,5 +741,5 @@ class TestPlatformTracingProvider:
         with patch("timbal.platform.utils._request", new=mock_request):
             await PlatformTracingProvider._store(run_context)
 
-        json_payload = mock_request.call_args.kwargs.get("json", {})
+        json_payload = json.loads(mock_request.call_args.kwargs["content"])
         assert "rev" not in json_payload

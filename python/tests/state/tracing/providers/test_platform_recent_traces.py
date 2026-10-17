@@ -1,12 +1,14 @@
 """PlatformTracingProvider reads back what this process just stored, without the network."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
-from timbal.state.tracing.providers.platform import PlatformTracingProvider
+from timbal.state.tracing.providers.platform import PlatformTracingProvider, _parse_cache_limits
 
 CONFIG = PlatformConfig(
     host="api.example.test",
@@ -22,6 +24,10 @@ RECORD = {
     "t0": 0,
     "memory": [{"role": "user", "content": [{"type": "text", "text": "hola"}]}],
 }
+
+
+def _body(**extra) -> bytes:
+    return json.dumps({"parent_id": None, "trace": [{**RECORD, **extra}]}).encode()
 
 
 def _ok(json_body=None):
@@ -41,20 +47,16 @@ def _context(run_id: str | None = None, parent_id: str | None = None, config: Pl
 
 
 @pytest.fixture(autouse=True)
-def _forget(monkeypatch):
+def _default_settings(monkeypatch):
     monkeypatch.delenv("TIMBAL_TRACE_CACHE_MAX_ENTRIES", raising=False)
     monkeypatch.delenv("TIMBAL_TRACE_CACHE_TTL_SECS", raising=False)
-    PlatformTracingProvider._recent.clear()
-    yield
-    PlatformTracingProvider._recent.clear()
+    _parse_cache_limits.cache_clear()
 
 
 @pytest.fixture
 def clock(monkeypatch):
     now = [100.0]
-    monkeypatch.setattr(
-        "timbal.state.tracing.providers.platform.time", SimpleNamespace(monotonic=lambda: now[0])
-    )
+    monkeypatch.setattr("timbal.state.tracing.providers.platform.time", SimpleNamespace(monotonic=lambda: now[0]))
     return now
 
 
@@ -139,7 +141,7 @@ async def test_an_old_or_unknown_run_comes_from_the_platform(clock):
 def test_keeps_only_the_most_recent(monkeypatch):
     monkeypatch.setenv("TIMBAL_TRACE_CACHE_MAX_ENTRIES", "2")
     for run_id in ("a", "b", "c"):
-        Provider._remember(run_id, [dict(RECORD)])
+        Provider._remember(run_id, _body())
 
     assert list(PlatformTracingProvider._recent) == ["b", "c"]
 
@@ -147,15 +149,15 @@ def test_keeps_only_the_most_recent(monkeypatch):
 @pytest.mark.parametrize("operation", ["hit", "miss", "write"])
 def test_cache_activity_removes_all_expired_entries(monkeypatch, clock, operation):
     monkeypatch.setenv("TIMBAL_TRACE_CACHE_TTL_SECS", "6.5")
-    Provider._remember("a", [dict(RECORD)])
+    Provider._remember("a", _body())
     clock[0] += 4
-    Provider._remember("b", [dict(RECORD)])
+    Provider._remember("b", _body())
     clock[0] += 4
-    Provider._remember("c", [dict(RECORD)])
+    Provider._remember("c", _body())
     clock[0] = 110.5  # a and b expired; c is still fresh.
 
     if operation == "write":
-        Provider._remember("d", [dict(RECORD)])
+        Provider._remember("d", _body())
     else:
         result = Provider._recall("c" if operation == "hit" else "missing")
         assert (result is not None) == (operation == "hit")
@@ -166,10 +168,10 @@ def test_cache_activity_removes_all_expired_entries(monkeypatch, clock, operatio
 def test_resaving_a_run_replaces_its_snapshot_and_refreshes_expiry(monkeypatch, clock):
     monkeypatch.setenv("TIMBAL_TRACE_CACHE_MAX_ENTRIES", "2")
     monkeypatch.setenv("TIMBAL_TRACE_CACHE_TTL_SECS", "10")
-    Provider._remember("a", [dict(RECORD)])
-    Provider._remember("b", [dict(RECORD)])
+    Provider._remember("a", _body())
+    Provider._remember("b", _body())
     clock[0] += 6
-    Provider._remember("a", [{**RECORD, "metadata": {"updated": True}}])
+    Provider._remember("a", _body(metadata={"updated": True}))
     assert list(PlatformTracingProvider._recent) == ["b", "a"]
 
     clock[0] += 4
@@ -195,7 +197,7 @@ async def test_zero_disables_cache_but_keeps_platform_reads_and_writes(monkeypat
 
 def test_lowering_capacity_applies_on_reads(monkeypatch):
     for key in ("a", "b", "c"):
-        Provider._remember(key, [dict(RECORD)])
+        Provider._remember(key, _body())
     monkeypatch.setenv("TIMBAL_TRACE_CACHE_MAX_ENTRIES", "1")
     assert Provider._recall("a") is None
     assert list(PlatformTracingProvider._recent) == ["c"]
@@ -215,11 +217,80 @@ def test_lowering_capacity_applies_on_reads(monkeypatch):
 )
 def test_invalid_settings_fall_back_to_bounded_defaults(monkeypatch, clock, setting, value):
     monkeypatch.setenv(setting, value)
-    for i in range(17):
-        Provider._remember(str(i), [dict(RECORD)])
-    assert list(PlatformTracingProvider._recent) == [str(i) for i in range(1, 17)]
+    capacity = PlatformTracingProvider._recent_max
+    for i in range(capacity + 1):
+        Provider._remember(str(i), _body())
+    assert list(PlatformTracingProvider._recent) == [str(i) for i in range(1, capacity + 1)]
     clock[0] += 299
-    assert Provider._recall("16") is not None
+    assert Provider._recall(str(capacity)) is not None
     clock[0] += 1
-    assert Provider._recall("16") is None
+    assert Provider._recall(str(capacity)) is None
     assert not PlatformTracingProvider._recent
+
+
+def test_an_invalid_setting_warns_once(monkeypatch):
+    monkeypatch.setenv("TIMBAL_TRACE_CACHE_TTL_SECS", "5m")
+    with capture_logs() as logs:
+        for i in range(5):
+            Provider._remember(str(i), _body())
+            Provider._recall(str(i))
+
+    assert [log["event"] for log in logs] == ["invalid_trace_cache_ttl"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_resave_stops_serving_the_older_snapshot():
+    await _store("run-1", AsyncMock(return_value=_ok()))
+    failing = _ok()
+    failing.raise_for_status = MagicMock(side_effect=RuntimeError("timed out after the write landed"))
+    with pytest.raises(RuntimeError):
+        await _store("run-1", AsyncMock(return_value=failing))
+
+    request = AsyncMock(return_value=_ok({"trace": [dict(RECORD)]}))
+    with patch("timbal.platform.utils._request", request):
+        await Provider.get(_context(parent_id="run-1"))
+
+    request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_cache_holds_what_was_sent_not_what_the_run_appended_since():
+    stored = _context(run_id="run-1")
+    stored._trace["c1"] = dict(RECORD)
+    stored._trace["c1"]._memory_dump = [dict(RECORD["memory"][0])]
+
+    async def request(**_):
+        stored._trace["c1"]._memory_dump.append({"role": "assistant", "content": []})
+        return _ok()
+
+    with patch("timbal.platform.utils._request", request):
+        await Provider._store(stored)
+        trace = await Provider.get(_context(parent_id="run-1"))
+
+    assert len(trace["c1"].memory) == 1
+
+
+def test_an_oversized_snapshot_is_not_kept_and_drops_the_older_one(monkeypatch):
+    Provider._remember("a", _body())
+    Provider._remember("b", _body())
+    monkeypatch.setattr(PlatformTracingProvider, "_recent_max_bytes", len(_body()) * 2)
+
+    Provider._remember("a", _body(metadata={"padding": "x" * len(_body()) * 2}))
+
+    assert list(PlatformTracingProvider._recent) == ["b"]
+
+
+def test_the_byte_budget_evicts_the_oldest(monkeypatch):
+    monkeypatch.setattr(PlatformTracingProvider, "_recent_max_bytes", len(_body()) * 2)
+    for key in ("a", "b", "c"):
+        Provider._remember(key, _body())
+
+    assert list(PlatformTracingProvider._recent) == ["b", "c"]
+
+
+def test_interleaved_conversations_keep_their_previous_turn():
+    conversations = 64
+    for conv in range(conversations):
+        Provider._remember(f"{conv}-turn-1", _body())
+
+    assert all(Provider._recall(f"{conv}-turn-1") is not None for conv in range(conversations))

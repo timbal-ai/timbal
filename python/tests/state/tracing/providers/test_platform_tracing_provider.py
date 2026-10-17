@@ -50,6 +50,8 @@ class TestPlatformTracingProviderIntegration:
         self._saved_env = os.environ.copy()
         os.environ.clear()
         _load_env()
+        # Reads must come from the platform, not the trace this process just stored.
+        os.environ["TIMBAL_TRACE_CACHE_MAX_ENTRIES"] = "0"
         # Reset the config_loader module-level cache so it re-reads env vars.
         import timbal.state.config_loader as _cl
         _cl._cached_default_config = None

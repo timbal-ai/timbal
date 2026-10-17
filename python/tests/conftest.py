@@ -66,16 +66,19 @@ def clear_background_task_stores():
 
 @pytest.fixture(autouse=True)
 def clear_in_memory_tracing_storage():
-    """Clear InMemoryTracingProvider storage between tests.
+    """Clear InMemoryTracingProvider storage and the platform provider's recent-trace cache between tests.
 
-    The storage is a class-level dict that otherwise grows unbounded across
-    the full test suite.
+    Both are class-level dicts: the storage otherwise grows unbounded across the
+    full test suite, and a trace one test stored would answer another test's get().
     """
     from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
+    from timbal.state.tracing.providers.platform import PlatformTracingProvider
 
     InMemoryTracingProvider._storage.clear()
+    PlatformTracingProvider._recent.clear()
     yield
     InMemoryTracingProvider._storage.clear()
+    PlatformTracingProvider._recent.clear()
 
 
 def assert_has_output_event(output: OutputEvent):

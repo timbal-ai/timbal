@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -24,6 +25,31 @@ if TYPE_CHECKING:
     from ...context import RunContext
 
 logger = structlog.get_logger(__name__)
+
+
+@functools.lru_cache(maxsize=16)
+def _parse_cache_limits(
+    raw_capacity: str | None, raw_ttl: str | None, default_capacity: int, default_ttl: float
+) -> tuple[int, float]:
+    """Memoized per raw value, so an invalid setting warns once instead of on every store."""
+    capacity, ttl = default_capacity, default_ttl
+    if raw_capacity is not None:
+        try:
+            capacity = int(raw_capacity)
+            if capacity < 0:
+                raise ValueError
+        except ValueError:
+            logger.warning("invalid_trace_cache_capacity", value=raw_capacity, default=default_capacity)
+            capacity = default_capacity
+    if raw_ttl is not None:
+        try:
+            ttl = float(raw_ttl)
+            if not math.isfinite(ttl) or ttl < 0:
+                raise ValueError
+        except ValueError:
+            logger.warning("invalid_trace_cache_ttl", value=raw_ttl, default=default_ttl)
+            ttl = default_ttl
+    return capacity, ttl
 
 
 class PlatformTracingProvider(TracingProvider):
@@ -51,16 +77,20 @@ class PlatformTracingProvider(TracingProvider):
     a moment after storing it, and would otherwise fetch it over the network
     twice (memory and session data) before the model is called.
 
-    ``TIMBAL_TRACE_CACHE_MAX_ENTRIES`` (default 16) and
+    ``TIMBAL_TRACE_CACHE_MAX_ENTRIES`` (default 256) and
     ``TIMBAL_TRACE_CACHE_TTL_SECS`` (default 300) control this process-wide
-    cache. Either set to zero disables caching. Expired entries are removed
-    on cache reads and writes; there is no background cleanup task.
+    cache. Either set to zero disables caching. The cache also holds at most
+    64 MiB of serialized traces. Expired entries are removed on cache reads
+    and writes; there is no background cleanup task.
     """
 
     platform_config: PlatformConfig | None = None
 
-    _recent: ClassVar[OrderedDict[str, tuple[float, str]]] = OrderedDict()
-    _recent_max: ClassVar[int] = 16
+    # run key -> (monotonic time of the last successful save, the exact PATCH body sent)
+    _recent: ClassVar[OrderedDict[str, tuple[float, bytes]]] = OrderedDict()
+    # One entry per live conversation: concurrent calls sharing a process must not evict each other between turns.
+    _recent_max: ClassVar[int] = 256
+    _recent_max_bytes: ClassVar[int] = 64 * 1024 * 1024
     # Another process may write the same run later (an approval resumed
     # elsewhere); past this, the platform's copy is the one to trust.
     _recent_ttl_s: ClassVar[float] = 300.0
@@ -75,45 +105,40 @@ class PlatformTracingProvider(TracingProvider):
     @classmethod
     def _recent_limits(cls) -> tuple[int, float]:
         """Read process settings; invalid values fall back to the defaults."""
-        try:
-            capacity = int(os.environ.get("TIMBAL_TRACE_CACHE_MAX_ENTRIES", str(cls._recent_max)))
-            if capacity < 0:
-                raise ValueError
-        except ValueError:
-            logger.warning("invalid_trace_cache_capacity", default=cls._recent_max)
-            capacity = cls._recent_max
-        try:
-            ttl = float(os.environ.get("TIMBAL_TRACE_CACHE_TTL_SECS", str(cls._recent_ttl_s)))
-            if not math.isfinite(ttl) or ttl < 0:
-                raise ValueError
-        except ValueError:
-            logger.warning("invalid_trace_cache_ttl", default=cls._recent_ttl_s)
-            ttl = cls._recent_ttl_s
-        return capacity, ttl
+        return _parse_cache_limits(
+            os.environ.get("TIMBAL_TRACE_CACHE_MAX_ENTRIES"),
+            os.environ.get("TIMBAL_TRACE_CACHE_TTL_SECS"),
+            cls._recent_max,
+            cls._recent_ttl_s,
+        )
 
-    @staticmethod
-    def _prune_recent(now: float, capacity: int, ttl: float) -> None:
+    @classmethod
+    def _prune_recent(cls, now: float, capacity: int, ttl: float) -> None:
         recent = PlatformTracingProvider._recent
+        size = sum(len(body) for _, body in recent.values())
         # Entries are ordered by their last successful save, oldest first.
         # Purge expired entries even when the requested key is absent.
         while recent:
-            saved_at = next(iter(recent.values()))[0]
-            if len(recent) <= capacity and now - saved_at < ttl:
+            saved_at, body = next(iter(recent.values()))
+            if len(recent) <= capacity and size <= cls._recent_max_bytes and now - saved_at < ttl:
                 break
             recent.popitem(last=False)
+            size -= len(body)
 
     @classmethod
-    def _remember(cls, key: str, trace: list) -> None:
+    def _remember(cls, key: str, body: bytes) -> None:
         capacity, ttl = cls._recent_limits()
         now = time.monotonic()
-        cls._prune_recent(now, capacity, ttl)
-        if capacity == 0 or ttl == 0:
-            return
         recent = PlatformTracingProvider._recent
-        recent[key] = (now, json.dumps(trace))
-        recent.move_to_end(key)
-        while len(recent) > capacity:
-            recent.popitem(last=False)
+        # Popped even when the new body is not kept: the platform now holds a newer snapshot than ours.
+        recent.pop(key, None)
+        if capacity and ttl and len(body) <= cls._recent_max_bytes:
+            recent[key] = (now, body)
+        cls._prune_recent(now, capacity, ttl)
+
+    @staticmethod
+    def _forget(key: str) -> None:
+        PlatformTracingProvider._recent.pop(key, None)
 
     @classmethod
     def _recall(cls, key: str) -> Trace | None:
@@ -123,7 +148,7 @@ class PlatformTracingProvider(TracingProvider):
         if entry is None:
             return None
         # Parsed afresh each time, so a reader can never change what the next one sees.
-        return Trace(json.loads(entry[1]))
+        return Trace(json.loads(entry[1])["trace"])
 
     @classmethod
     def _resolve_config(cls, run_context: RunContext):
@@ -196,11 +221,20 @@ class PlatformTracingProvider(TracingProvider):
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
         if subject.rev is not None:
             payload["rev"] = subject.rev
-        res = await _request(
-            method="PATCH",
-            path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
-            headers={"Prefer": "return=minimal"},  # RFC 7240
-            json=payload,
-        )
-        res.raise_for_status()
-        cls._remember(cls._recent_key(platform_config, subject_path, run_context.id), payload["trace"])
+        # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
+        # while the PATCH is in flight. Same encoding httpx applies to json=.
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+        key = cls._recent_key(platform_config, subject_path, run_context.id)
+        try:
+            res = await _request(
+                method="PATCH",
+                path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
+                headers={"Prefer": "return=minimal", "Content-Type": "application/json"},  # RFC 7240
+                content=body,
+            )
+            res.raise_for_status()
+        except BaseException:
+            # The write may have landed anyway (timeout after commit): never keep serving the older snapshot.
+            cls._forget(key)
+            raise
+        cls._remember(key, body)
