@@ -90,6 +90,25 @@ def _force_relay() -> bool:
     return True
 
 
+async def _drain_data_channel(pc: Any, channel: Any, *, timeout: float = 1.5) -> None:
+    """Wait until what was sent on ``channel`` has been acknowledged, up to ``timeout``.
+
+    aiortc closes SCTP with an ABORT, which drops whatever is still queued or
+    in flight, so closing straight after a session that ended on its own (its
+    ``end_call``, an idle hang-up) loses the last messages: the transcript and
+    ``session_ended``. A client that already left has no open channel to wait on.
+    """
+    sctp = getattr(pc, "sctp", None)
+    deadline = asyncio.get_running_loop().time() + timeout
+    while channel is not None and channel.readyState == "open":
+        pending = channel.bufferedAmount
+        for queue in ("_data_channel_queue", "_outbound_queue", "_sent_queue"):
+            pending += len(getattr(sctp, queue, None) or ())
+        if not pending or asyncio.get_running_loop().time() >= deadline:
+            return
+        await asyncio.sleep(0.02)
+
+
 def _ice_servers(*, relay_only: bool = False) -> list[Any]:
     from aiortc import RTCIceServer
 
@@ -381,6 +400,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
                 logger.error("voice_rtc_session_error", error=str(e), exc_info=True)
             finally:
                 downlink.stop()
+                with contextlib.suppress(Exception):
+                    await _drain_data_channel(pc, channel)
                 with contextlib.suppress(Exception):
                     await pc.close()
                 _pcs.discard(pc)
