@@ -560,9 +560,24 @@ class TestReadyMadePhrases:
         said: list[str] = []
         for _ in range(4):
             await session._run_turn("what is the answer?")
-            said.append(session._last_filler_phrase)
+            said.append(session._filler_phrases_said[-1])
         assert all(a != b for a, b in zip(said, said[1:], strict=False))
         assert [e.text for e in session.transcript if e.filler] == said
+
+    def test_every_phrase_is_heard_before_any_comes_back(self) -> None:
+        phrases = ["A.", "B.", "C.", "D.", "E.", "F."]
+        session = _make_session(filler={"phrases": phrases})
+        said: list[str] = []
+        for _ in range(5 * len(phrases)):
+            phrase = session._instant_filler_phrase()
+            assert phrase is not None
+            session._record_filler_phrase(phrase)
+            said.append(phrase)
+        assert sorted(said[: len(phrases)]) == phrases
+        gap = len(phrases) // 2 + 1
+        for start in range(len(said) - gap + 1):
+            window = said[start : start + gap]
+            assert len(set(window)) == gap, f"repeated within {gap}: {window}"
 
     async def test_unspoken_phrase_is_not_counted(self) -> None:
         """A line picked for a turn whose reply came first was never said, so
@@ -572,12 +587,12 @@ class TestReadyMadePhrases:
         )
         await session._run_turn("hi")
         assert not any(e.filler for e in session.transcript)
-        assert session._last_filler_phrase is None
+        assert session._filler_phrases_said == []
 
     def test_choosing_a_phrase_records_nothing(self) -> None:
         session = _make_session(filler={"phrases": ["A.", "B."]})
         session._instant_filler_phrase()
-        assert session._last_filler_phrase is None
+        assert session._filler_phrases_said == []
 
     def test_blank_phrases_dropped(self) -> None:
         assert FillerConfig(phrases=["  ", ""]).phrases is None
