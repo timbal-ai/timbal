@@ -89,10 +89,10 @@ LIVE_MODELS = [
         id="fireworks-qwen3p8-max",
     ),
     pytest.param(
-        "fireworks/accounts/fireworks/models/deepseek-v4-flash-0731",
+        "fireworks/accounts/fireworks/models/deepseek-v4p1-flash",
         "FIREWORKS_API_KEY",
         None,
-        id="fireworks-deepseek-v4-flash",
+        id="fireworks-deepseek-v4p1-flash",
     ),
 ]
 
@@ -107,6 +107,18 @@ def _skip_if_no_key(primary: str, fallback: str | None) -> None:
     if not _has_key(primary, fallback):
         hint = primary if not fallback else f"{primary} or {fallback}"
         pytest.skip(f"Frontier integration: set {hint} in the environment or .env")
+
+
+def test_live_models_are_served_serverless():
+    """Runs without keys: a catalog audit that retires a serverless model must also move it out of LIVE_MODELS,
+    since a dedicated-only model 404s for every account without its own deployment."""
+    from timbal.codegen.model_discovery import get_models
+
+    catalog = {m["id"]: m for m in get_models()}
+    for param in LIVE_MODELS:
+        model = param.values[0]
+        assert model in catalog, f"{model} is not in models.yaml"
+        assert not catalog[model].get("dedicated_only"), f"{model} is dedicated-only: {catalog[model].get('notes')}"
 
 
 @pytest.mark.integration
