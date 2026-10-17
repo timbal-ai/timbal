@@ -76,7 +76,7 @@ from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_result_offload import (
     LEGACY_READ_OFFLOADED_NAMES,
-    LocalOffloadStore,
+    PlatformOffloadStore,
     Spill,
     ToolResultLimit,
     apply_tool_result_limit,
@@ -542,7 +542,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if configured is None and not tool_spills:
                 # Only attachments spill: share the compactor's store, which read_offloaded reads.
                 configured = compactor_store
-            self._offload_store = configured or LocalOffloadStore()
+            self._offload_store = configured or PlatformOffloadStore()
 
         read_store = self._offload_store if self._offload_store is not None else compactor_store
         self._read_offloaded = None
