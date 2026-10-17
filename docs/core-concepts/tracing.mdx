@@ -65,3 +65,23 @@ All spans within a run share the same `run_id` (via `RunContext.id`), creating a
 Traces are stored in the RunContext - a central hub that manages all run data. You can access traces during execution, control storage behavior, and use this system to share data between different parts of your run.
 
 More on this in the [Context](./context) section.
+
+## Platform trace cache
+
+`PlatformTracingProvider` caches traces this process successfully saves, so a following agent or workflow run can load its parent's trace without another platform request. This also applies to voice turns. The cache holds up to 256 distinct runs and 64 MiB of serialized traces across the process by default; saving the same run again replaces its snapshot and refreshes its expiry. A failed save drops that run's cached snapshot, so the next read goes to the platform. When saves of the same run overlap, the most recently taken snapshot decides what is cached, whichever request finishes last, even if its cached copy has since been evicted.
+
+Configure the cache with environment variables:
+
+```bash
+export TIMBAL_TRACE_CACHE_MAX_ENTRIES=64
+export TIMBAL_TRACE_CACHE_TTL_SECS=60
+```
+
+- `TIMBAL_TRACE_CACHE_MAX_ENTRIES`: maximum number of cached runs, a non-negative integer. Default: `256`.
+- `TIMBAL_TRACE_CACHE_TTL_SECS`: seconds since the last successful save, a non-negative finite number. Default: `300`. Reading a trace does not extend its lifetime.
+
+Setting either value to `0` disables caching and clears existing entries on the next cache access. Invalid values produce one warning per distinct value and fall back to the corresponding default. Settings are read on each cache access.
+
+Cache reads and writes remove expired entries, including entries for other runs. Cleanup is lazy: an idle process retains entries until the next cache access. When either limit is exceeded, the least recently saved runs are evicted; a single trace larger than the byte limit is not cached. Eviction only removes the local copy; traces remain stored on the platform, and cache misses fetch them there. Traces fetched from the platform are not added to this cache.
+
+Entries are scoped by host, organization, app, token, and run ID, and each read returns an independent copy. Updates made by another process can remain invisible until the cached entry expires or is evicted; lower the TTL or disable caching when those updates must be visible immediately.
