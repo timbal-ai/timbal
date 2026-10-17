@@ -76,9 +76,11 @@ def clear_in_memory_tracing_storage():
 
     InMemoryTracingProvider._storage.clear()
     PlatformTracingProvider._recent.clear()
+    PlatformTracingProvider._saving.clear()
     yield
     InMemoryTracingProvider._storage.clear()
     PlatformTracingProvider._recent.clear()
+    PlatformTracingProvider._saving.clear()
 
 
 def assert_has_output_event(output: OutputEvent):

@@ -68,7 +68,7 @@ More on this in the [Context](./context) section.
 
 ## Platform trace cache
 
-`PlatformTracingProvider` caches traces this process successfully saves, so a following agent or workflow run can load its parent's trace without another platform request. This also applies to voice turns. The cache holds up to 256 distinct runs and 64 MiB of serialized traces across the process by default; saving the same run again replaces its snapshot and refreshes its expiry. A failed save drops that run's cached snapshot, so the next read goes to the platform. When saves of the same run overlap, the most recently taken snapshot decides what is cached, whichever request finishes last.
+`PlatformTracingProvider` caches traces this process successfully saves, so a following agent or workflow run can load its parent's trace without another platform request. This also applies to voice turns. The cache holds up to 256 distinct runs and 64 MiB of serialized traces across the process by default; saving the same run again replaces its snapshot and refreshes its expiry. A failed save drops that run's cached snapshot, so the next read goes to the platform. When saves of the same run overlap, the most recently taken snapshot decides what is cached, whichever request finishes last, even if its cached copy has since been evicted.
 
 Configure the cache with environment variables:
 

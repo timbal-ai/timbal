@@ -299,8 +299,11 @@ def test_the_byte_budget_evicts_the_oldest(monkeypatch):
     assert list(PlatformTracingProvider._recent) == ["b", "c"]
 
 
-async def _overlapping_saves(older_fails: bool, newer_fails: bool) -> tuple[list[str], Trace | None]:
-    """Save run-1 twice; the older snapshot's PATCH finishes after the newer one's. Returns the request methods."""
+async def _overlapping_saves(
+    older_fails: bool, newer_fails: bool, between=lambda: None
+) -> tuple[list[str], Trace | None]:
+    """Save run-1 twice; the older snapshot's PATCH finishes after the newer one's, and ``between`` runs
+    in the gap. Returns the request methods and what the next turn reads."""
     stored = _context(run_id="run-1")
     stored._trace["c1"] = dict(RECORD)
     older_sent, release_older = asyncio.Event(), asyncio.Event()
@@ -328,9 +331,11 @@ async def _overlapping_saves(older_fails: bool, newer_fails: bool) -> tuple[list
             await Provider._store(stored)
         except RuntimeError:
             pass
+        between()
         release_older.set()
         await asyncio.gather(older, return_exceptions=True)
         trace = await Provider.get(_context(parent_id="run-1"))
+    assert not PlatformTracingProvider._saving
     return methods, trace
 
 
@@ -353,6 +358,23 @@ async def test_an_older_save_failing_last_keeps_the_newer_one():
 @pytest.mark.asyncio
 async def test_an_older_save_succeeding_after_a_newer_one_failed_is_not_served():
     methods, _ = await _overlapping_saves(older_fails=False, newer_fails=True)
+
+    assert methods == ["PATCH", "PATCH", "GET"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_fails", [False, True], ids=["newer_saved", "newer_failed"])
+@pytest.mark.parametrize("eviction", ["capacity", "ttl"])
+async def test_evicting_the_newer_snapshot_does_not_let_an_older_save_in(monkeypatch, clock, eviction, newer_fails):
+    def evict():
+        if eviction == "capacity":
+            monkeypatch.setenv("TIMBAL_TRACE_CACHE_MAX_ENTRIES", "1")
+            _remember("another-run", _body())
+        else:
+            clock[0] += PlatformTracingProvider._recent_ttl_s
+            Provider._recall("another-run")
+
+    methods, _ = await _overlapping_saves(older_fails=False, newer_fails=newer_fails, between=evict)
 
     assert methods == ["PATCH", "PATCH", "GET"]
 
