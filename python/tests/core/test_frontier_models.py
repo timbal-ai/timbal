@@ -9,6 +9,7 @@ from timbal.state import set_run_context
 from timbal.state.context import RunContext
 
 NEW_MODEL_IDS = [
+    "google/gemini-4-argon",
     "anthropic/claude-haiku-5-5",
     "anthropic/claude-sonnet-5-5",
     "anthropic/claude-opus-5-5",
@@ -81,6 +82,51 @@ class TestFrontierModelRegistry:
 async def _empty_async_stream():
     return
     yield
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+async def test_argon_uses_google_chat_route(effort):
+    from pydantic import BaseModel
+    from timbal.core.llm import _llm_router
+    from timbal.core.llm.registry import _PROVIDERS
+    from timbal.types.content import TextContent
+    from timbal.types.message import Message
+
+    class Answer(BaseModel):
+        answer: str
+
+    captured = {}
+
+    async def stream():
+        yield {"choices": []}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return stream()
+
+    client = MagicMock()
+    client.chat.completions.create = fake_create
+    _make_run_context()
+    with patch("timbal.core.llm.clients._get_client", return_value=client) as get_client:
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            async for _ in _llm_router(
+                model="google/gemini-4-argon",
+                messages=[Message(role="user", content=[TextContent(text="Reply with ok")])],
+                max_tokens=32768,
+                output_model=Answer,
+                provider_params={"reasoning_effort": effort},
+            ):
+                pass
+
+    assert captured["model"] == "gemini-4-argon"
+    assert captured["max_completion_tokens"] == 32768
+    assert captured["reasoning_effort"] == effort
+    assert captured["response_format"]["type"] == "json_schema"
+    assert captured["stream"] is True
+    assert captured["stream_options"] == {"include_usage": True}
+    assert "temperature" not in captured
+    assert get_context_window("google/gemini-4-argon") == 1048576
+    assert _PROVIDERS["google"].default_base_url in str(get_client.call_args)
 
 
 class TestXaiRouterDispatch:

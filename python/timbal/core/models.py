@@ -209,6 +209,7 @@ Model = Literal[
     "togetherai/meta-models/Muse-Glimmer-30B",
     "togetherai/Qwen/Qwen3.5-9B",
     "togetherai/Qwen/Qwen3.8-2.4T-A95B",
+    "google/gemini-4-argon",
     "google/gemini-3.8-flash",
     "google/gemini-3.7-flash",
     "google/gemini-3.6-flash",
