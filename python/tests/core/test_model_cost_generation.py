@@ -25,12 +25,25 @@ def _rates(sql, model):
     return rows
 
 
+def test_argon_costs_use_post_promotion_standard_and_implicit_cache_rates(tmp_path):
+    dest = tmp_path / "costs.sql"
+    costs.main(output_path=dest, provider_filter="google")
+    rates = _rates(dest.read_text(encoding="utf-8"), "google/gemini-4-argon")
+    assert rates == pytest.approx({
+        "input_text_tokens": 4,
+        "output_text_tokens": 20,
+        "input_cached_tokens": 0.2,
+    })
+    # Google's 3.5 ID now redirects; historical prices must not become current charges.
+    assert _rates(dest.read_text(encoding="utf-8"), "google/gemini-3.5-flash") == {}
+
+
 def test_sol_61_costs_include_cache_and_combined_tiers(tmp_path):
     dest = tmp_path / "costs.sql"
     costs.main(output_path=dest, provider_filter="openai")
     rates = _rates(dest.read_text(encoding="utf-8"), "openai/gpt-6.1-sol")
     for context, expected in [("", [2, 10, 0.1, 2.5]), ("_long_context", [4, 15, 0.2, 5])]:
-        for tier, multiplier in [("", 1), ("_flex", 0.5), ("_fast", 2)]:
+        for tier, multiplier in [("", 1), ("_flex", 0.5), ("_fast", 2), ("_ultrafast", 6)]:
             for unit, price in zip(
                 ["input_text_tokens", "output_text_tokens", "input_cached_tokens", "input_cache_write_tokens"],
                 expected,
@@ -44,7 +57,8 @@ def test_sol_61_costs_include_cache_and_combined_tiers(tmp_path):
 def test_ultrafast_usage_units_and_prices(tmp_path):
     suffix = service_tier_usage_suffix("openai/gpt-6-astra", "ultrafast")
     assert suffix == "_ultrafast"
-    assert service_tier_usage_suffix("openai/gpt-6.1-sol", "ultrafast") == ""
+    assert service_tier_usage_suffix("openai/gpt-6.1-sol", "ultrafast") == "_ultrafast"
+    assert service_tier_usage_suffix("openai/gpt-6-luna", "ultrafast") == ""
     assert base_usage_metric("output_text_tokens_long_context_ultrafast") == "output_text_tokens"
     dest = tmp_path / "costs.sql"
     costs.main(output_path=dest, provider_filter="openai")

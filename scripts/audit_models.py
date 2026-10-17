@@ -26,6 +26,7 @@ import asyncio
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -352,12 +353,23 @@ def _classify_error(
     if status_code == 400 and any(m in lower for m in ("non-serverless", "dedicated endpoint", "model_not_available")):
         return Status.DEDICATED_ONLY if dedicated_only else Status.DEAD
 
+    if "endpoint_not_ready" in lower:
+        return Status.DEDICATED_ONLY if dedicated_only else Status.SKIPPED
+
     if status_code == 402:
+        return Status.SKIPPED
+
+    # Account and transient failures do not establish that a model was retired.
+    if status_code in (401, 403, 408, 429) or status_code >= 500:
         return Status.SKIPPED
 
     if status_code in (404, 410):
         if requires_activation:
             return Status.ACTIVATION_REQUIRED
+        # A catalog entry already marked dedicated-only is expected to fail
+        # on the serverless endpoint until a deployment is provisioned.
+        if dedicated_only and status_code == 404:
+            return Status.DEDICATED_ONLY
         return Status.DEAD
 
     if status_code == 200:
@@ -615,19 +627,6 @@ def _print_results(results: list[ModelResult]) -> None:
             print(f"  {r.model_id}{suffix}")
 
 
-def _is_expected_live_result(r: ModelResult, models_by_id: dict[str, dict]) -> bool:
-    m = models_by_id[r.model_id]
-    if r.status in (Status.OK, Status.IN_CATALOG, Status.ACTIVATION_REQUIRED):
-        return True
-    if r.status == Status.DEDICATED_ONLY and m.get("dedicated_only"):
-        return True
-    if r.status == Status.SKIPPED:
-        return True
-    if r.status == Status.NO_KEY:
-        return True
-    return False
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Audit models.yaml")
     parser.add_argument("--offline", action="store_true", help="Structural checks only (no network)")
@@ -685,21 +684,26 @@ def main() -> int:
             if args.strict:
                 exit_code = 1
 
-    keyed = [r for r in results if r.status != Status.NO_KEY]
-    if not keyed:
-        print("\nNo provider API keys set — live audit skipped (offline checks only).")
-    else:
-        okish = sum(1 for r in results if _is_expected_live_result(r, models_by_id))
-        print(f"\nLive summary: {okish}/{len(keyed)} models ok, skipped, or expected ({len(keyed)} with keys)")
-        if dead:
-            print(f"  {len(dead)} DEAD — review IDs or run with context above")
-        if unexpected_dedicated:
-            print(f"  {len(unexpected_dedicated)} DEDICATED_ONLY without dedicated_only flag in yaml")
+    _print_summary(results)
+    if unexpected_dedicated:
+        print(f"  {len(unexpected_dedicated)} DEDICATED_ONLY without dedicated_only flag in yaml")
 
     if args.strict and dead:
         exit_code = 1
 
     return exit_code
+
+
+def _print_summary(results: list[ModelResult]) -> None:
+    """Keep unverified entries separate from successful probes in audit output."""
+    counts = Counter(r.status for r in results)
+    print(f"\nLive summary ({len(results)} models): "
+          f"{counts[Status.OK]} OK, {counts[Status.IN_CATALOG]} IN_CATALOG, "
+          f"{counts[Status.ACTIVATION_REQUIRED]} ACTIVATION_REQUIRED, "
+          f"{counts[Status.DEDICATED_ONLY]} DEDICATED_ONLY, "
+          f"{counts[Status.DEAD]} DEAD, {counts[Status.SKIPPED]} SKIPPED, {counts[Status.NO_KEY]} NO_KEY")
+    if counts[Status.SKIPPED] or counts[Status.NO_KEY]:
+        print("  SKIPPED and NO_KEY entries are unverified, not confirmed available.")
 
 
 if __name__ == "__main__":

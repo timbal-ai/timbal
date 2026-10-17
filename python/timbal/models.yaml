@@ -268,6 +268,8 @@ models:
   notes: 'Verified 2026-10-03 against the model card and API pricing. Standard rates per 1M tokens are $2 input,
     $0.10 cache reads, $2.50 cache writes, and $10 output. Above 272K input tokens the full request costs
     $4/$15, cached $0.20, cache writes $5. Batch/Flex cost 50% of Standard; Fast costs 2x.
+    Ultrafast costs 6x across all token units, verified 2026-10-17 against
+    https://developers.openai.com/api/docs/guides/ultrafast-mode and API pricing.
     Reasoning accepts low, medium (default), high, xhigh, max; none/minimal are unsupported.
     Tool calling requires Responses; Chat Completions supports text without tools. 128K max output.
     Regional processing adds 10% where eligible; Fast is unavailable with EU data residency.'
@@ -284,6 +286,7 @@ models:
   service_tiers:
     flex: 0.5
     fast: 2.0
+    ultrafast: 6.0
   context_window: 1050000
   capabilities: [vision, tools, reasoning]
 - id: openai/gpt-6-sol
@@ -901,6 +904,22 @@ models:
   capabilities: [vision, tools, reasoning]
   notes: 'Cached-input pricing unresolved: serverless docs quote $0.50/1M, while pricing and model pages quote $0.25/1M. No
     cached rate is assigned until confirmed. https://docs.together.ai/docs/serverless/models and https://www.together.ai/models/qwen3-8-max'
+- id: google/gemini-4-argon
+  provider: google
+  display_name: Gemini 4 Argon
+  description: Google's generally available flagship reasoning model for complex coding, science, and multi-step agents.
+  notes: 'GA since 2026-10-13. Published post-promotion Standard input/output/cache-read rates are $4/$20/$0.20
+    per 1M tokens from 2026-12-01; introductory rates through 2026-11-30 are $2/$10/$0.10. Paid API only.
+    Unified input/output context is 1,048,576 tokens; synchronous output defaults to 65,536. Longer output requires
+    native long-decode continuation, not provided by the Agent chat route. Thinking low/medium/high (default medium).
+    Implicit caching only; explicit caching is unsupported. Sampling parameters are ignored.
+    Verified 2026-10-17: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+    and https://ai.google.dev/gemini-api/docs/pricing#gemini-4-argon'
+  input_price: 4.0
+  output_price: 20.0
+  cached_input_price: 0.2
+  context_window: 1048576
+  capabilities: [vision, audio, video, tools, reasoning]
 - id: google/gemini-3.8-flash
   provider: google
   display_name: Gemini 3.8 Flash
@@ -942,9 +961,13 @@ models:
   display_name: Gemini 3.5 Flash
   description: Frontier-level intelligence optimized for agentic workflows, multi-step tasks, and rapid coding loops at higher
     speed and lower cost than Gemini 3.1 Pro.
-  input_price: 1.5
-  output_price: 9.0
-  cached_input_price: 0.15
+  notes: 'Compatibility ID: Google now automatically routes requests to gemini-3.6-flash; no longer selectable in
+    AI Studio. Redirect billing rates are unverified, so token prices are null. Historical 3.5 input/output/cache
+    rates were $1.50/$9/$0.15 per 1M tokens. Prefer the
+    explicit 3.6 or 3.8 ID for new work. https://ai.google.dev/gemini-api/docs/deprecations'
+  input_price: null
+  output_price: null
+  cached_input_price: null
   context_window: 1048576
   capabilities: [vision, audio, video, tools, reasoning]
 - id: google/gemini-3.5-flash-lite
@@ -1034,7 +1057,8 @@ models:
   display_name: Gemini 2.5 Pro TTS
   description: Text-to-speech variant of Gemini 2.5 Pro for generating audio output from text input.
   notes: 'Native Gemini TTS API required; not supported by the Agent chat route. Output is audio at $20 per 1M audio
-    tokens, not a text output rate. 16,384 max output tokens. Legacy 2.5 access restrictions apply.'
+    tokens, not a text output rate. 16,384 max output tokens. Shuts down 2026-11-17; migrate to
+    gemini-3.8-flash-tts or gemini-3.8-flash-lite-tts. https://ai.google.dev/gemini-api/docs/deprecations'
   input_price: 1.0
   output_price: null
   context_window: 8192
@@ -1066,9 +1090,9 @@ models:
   provider: google
   display_name: Gemini 2.5 Flash Image
   description: Specialized model for image generation and editing from text and image prompts (~$0.039 per image output).
-  notes: 'Deprecated: pricing page announces shutdown 2026-10-02, but model index still lists it; do not use for new
-    work. Migrate to gemini-3.1-flash-image via GeminiImages tools. Output price is text only; image output is $30 per
-    1M image tokens. Native image generation API required.'
+  notes: 'The deprecations page now schedules shutdown for 2027-03-15, conflicting with the pricing page notice
+    of 2026-10-02. Prefer gemini-3.1-flash-lite-image for migration. Output price is text only; image output is $30 per
+    1M image tokens. Native image generation API required. https://ai.google.dev/gemini-api/docs/deprecations'
   input_price: 0.3
   output_price: 2.5
   context_window: 32768
@@ -1078,7 +1102,8 @@ models:
   display_name: Gemini 2.5 Flash TTS
   description: Text-to-speech variant of Gemini 2.5 Flash for audio generation at lower cost.
   notes: 'Native Gemini TTS API required; not supported by the Agent chat route. Output is audio at $10 per 1M audio
-    tokens, not a text output rate. 16,384 max output tokens. Legacy 2.5 access restrictions apply.'
+    tokens, not a text output rate. 16,384 max output tokens. Shuts down 2026-11-17; migrate to
+    gemini-3.8-flash-tts or gemini-3.8-flash-lite-tts. https://ai.google.dev/gemini-api/docs/deprecations'
   input_price: 0.5
   output_price: null
   context_window: 8192

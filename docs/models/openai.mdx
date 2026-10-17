@@ -87,7 +87,10 @@ agent = Agent(
 
 Use the Responses API (Timbal's default) for reasoning with tools. With `TIMBAL_OPENAI_API=chat_completions`, function calling on the older GPT-6 Sol and GPT-6 Luna requires `model_params={"reasoning_effort": "none"}`. GPT-6.1 Sol and Astra require Responses for tool calling.
 
-Astra also offers [Ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode) at **6x** Standard, including cache and long-context rates, using `model_params={"service_tier": "ultrafast"}`. Usage uses `_ultrafast` units.
+Astra and GPT-6.1 Sol offer [Ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode) at **6x** Standard, including cache and long-context rates, using `model_params={"service_tier": "ultrafast"}`. Usage uses `_ultrafast` units.
+Sol's Ultrafast input / output / cached input / cache writes cost **&#36;12 / &#36;60 / &#36;0.60 / &#36;15** per 1M tokens;
+above 272K input tokens they cost **&#36;24 / &#36;90 / &#36;1.20 / &#36;30** for the full request.
+Availability and [rates](https://developers.openai.com/api/docs/pricing) rechecked October 17, 2026.
 
 All GPT-6 prices shown are Standard rates. Batch and Flex cost half the applicable rates; Fast mode costs twice as much, including cache and long-context rates. Opt into Flex or Fast with `model_params={"service_tier": "flex"}` or `{"service_tier": "fast"}`; metering follows the tier reported by the provider. Regional processing adds 10% where eligible. GPT-6 Sol and Luna support EU data residency with Standard, Flex, and Batch; Fast is unavailable there. GPT-6.1 Sol also supports EU residency without Fast. Regional premiums are not included in the catalog token rates.
 

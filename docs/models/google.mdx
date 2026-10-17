@@ -4,26 +4,62 @@ description: "Gemini API availability, verified Standard pricing, and migration 
 ---
 
 <Note>
-Reviewed October 3, 2026 against Google's [model catalog](https://ai.google.dev/gemini-api/docs/models),
+Reviewed October 17, 2026 against Google's [model catalog](https://ai.google.dev/gemini-api/docs/models),
 [pricing](https://ai.google.dev/gemini-api/docs/pricing), [release notes](https://ai.google.dev/gemini-api/docs/changelog),
 and [deprecations](https://ai.google.dev/gemini-api/docs/deprecations).
-Prices below are USD per **1 million tokens**, paid **Standard** tier, using published post-promotion rates and excluding temporary introductory discounts.
+Unless explicitly labeled otherwise, prices below are USD per **1 million tokens**, paid **Standard** tier, using published post-promotion rates.
 Output rates include thinking tokens for reasoning models. Batch, Flex, Priority, free-tier allowances,
 cache storage, grounding, and media generation are separate charges or pricing plans.
 </Note>
 
-## Gemini 4 availability
+## Gemini 4 Argon
 
-Google [announced Gemini 4 Argon on September 30](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-argon/).
-Access is currently limited to trusted testers and Fairwind cyber defenders; the announcement describes broader paid API access as forthcoming.
-There is no public Gemini 4 model ID in the Gemini API catalog as of this review, so Timbal does not register a speculative ID.
-The announced post-promotion input / output price is &#36;4 / &#36;20. These are announced future rates, not a currently callable public API price.
+`google/gemini-4-argon`
+
+**Generally available since October 13, 2026**, through the paid Gemini API and AI Studio.
+Google lists `gemini-4-argon` as stable; it is no longer limited to the earlier trusted-tester release.
+See the [launch announcement](https://cloud.google.com/blog/products/ai-machine-learning/gemini-4-argon-available-on-google-cloud/).
+
+- Standard input / output / cached input: **&#36;2 / &#36;10 / &#36;0.10** through November 30, 2026;
+  **&#36;4 / &#36;20 / &#36;0.20** from December 1. The catalog and generated cost SQL use the latter, post-promotion rates.
+- Batch and Flex: **&#36;1 / &#36;5 / &#36;0.05**, then **&#36;2 / &#36;10 / &#36;0.10** on December 1.
+- Priority: **&#36;3.60 / &#36;18 / &#36;0.18**, then **&#36;7.20 / &#36;36 / &#36;0.36** on December 1.
+- Invite-only Contributor tier: same token rates as Batch/Flex, with data used to improve Google's products.
+- No free API tier. Output prices include thinking. Implicit caching only; no explicit cache creation or storage charge.
+- Search and Maps grounding each have a shared 5,000-query monthly allowance, then **&#36;14 per 1,000 queries**.
+  These native tool charges are separate from Timbal's text-token estimates.
+
+[Full pricing](https://ai.google.dev/gemini-api/docs/pricing#gemini-4-argon)
+
+The [model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon) give a **1,048,576-token unified input/output window**,
+with a default synchronous output limit of **65,536**. Text, image, audio, video, and PDF input are supported; output is text.
+Tools, structured output, and reasoning are supported. Thinking levels are `low`, `medium` (default), and `high`.
+
+Set `GEMINI_API_KEY` for direct access, or use an authorized Timbal platform configuration:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="argon",
+    model="google/gemini-4-argon",
+    max_tokens=32768,
+    model_params={"reasoning_effort": "medium"},
+)
+```
+
+Timbal uses Google's [OpenAI-compatible streaming chat API](https://ai.google.dev/gemini-api/docs/openai).
+The model's default reasoning level also applies when `model_params` is omitted. Google ignores sampling parameters
+such as `temperature` and `top_p` on Argon. Explicit caching is unsupported.
+Native long decode can use the remaining unified window, but requires background execution or continuation handling;
+Timbal's Agent chat route does not implement that continuation protocol. See the
+[migration guide](https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist).
 
 ## Gemini 3.8, 3.7, and 3.6 Flash
 
 <Note>
 All three use published post-promotion Standard input / output / cached-input rates of **&#36;1.50 / &#36;7.50 / &#36;0.15**, effective January 1, 2027.
-This timing is crosschecked in the [latest-model guide](https://ai.google.dev/gemini-api/docs/latest-model#pricing).
+This timing is published on the [pricing page](https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash).
 The catalog already uses these post-promotion rates; temporary introductory discounts are excluded.
 Post-promotion cache storage is an additional &#36;1 per million token-hours.
 Batch and Flex token rates are half Standard; Priority token rates are 1.8 times Standard. These are not the default catalog prices.
@@ -74,7 +110,7 @@ Batch and Flex token rates are half Standard; Priority token rates are 1.8 times
 </CardGroup>
 
 For Gemini 3.8 migration details, including removed sampling parameters and thinking configuration,
-see Google's [migration checklist](https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist).
+see Google's [Gemini 3.8 model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash).
 Timbal's Google Agent route uses the OpenAI-compatible chat API; model-level native capabilities do not imply every native tool or modality is exposed through that route.
 
 ## Other Gemini 3 models
@@ -83,10 +119,13 @@ Timbal's Google Agent route uses the OpenAI-compatible chat API; model-level nat
   <Card title="gemini-3.5-flash">
   `google/gemini-3.5-flash`
 
-  - Input / output: &#36;1.50 / &#36;9
-  - Cached input: &#36;0.15
+  - Current token pricing: unverified for this redirected ID
   - Input limit: 1,048,576 tokens; output limit: 65,536
   - Multimodal input, text output, tools, and thinking
+
+  Google now [routes this ID to `gemini-3.6-flash`](https://ai.google.dev/gemini-api/docs/deprecations).
+  It is no longer selectable in AI Studio; the API endpoint is not shutting down. Redirect billing rates are
+  unverified, so catalog prices are null and new cost SQL omits this ID. Use an explicit current Flash ID for new applications.
 
   [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash)
   </Card>
@@ -211,9 +250,9 @@ audio synthesis is not provided by the Google Agent chat route. Media rates must
   <Card title="gemini-2.5-flash-image — migrate">
   `google/gemini-2.5-flash-image`
 
-  Google's pricing page announces an October 2, 2026 shutdown, while its model index still lists this model.
-  Treat it as deprecated and migrate to stable `gemini-3.1-flash-image` (the GeminiImages default) or `gemini-3.1-flash-lite-image`.
-  The catalog keeps the legacy ID for compatibility, without claiming its endpoint remains available.
+  Google's [deprecation schedule](https://ai.google.dev/gemini-api/docs/deprecations) now lists **March 15, 2027**,
+  conflicting with the older October 2, 2026 notice still on the pricing page. The catalog retains this compatibility ID
+  and records the conflict. Google recommends `gemini-3.1-flash-lite-image` as its replacement.
 
   - Text/image input: &#36;0.30; text output: &#36;2.50
   - Image output: &#36;30 per million image tokens (about &#36;0.039 per image)
@@ -229,6 +268,7 @@ audio synthesis is not provided by the Google Agent chat route. Media rates must
   - Input limit: 8,192 tokens; output limit: 16,384
   - Native TTS only; no tools, thinking, or caching
   - Catalog text-output price is null because this model outputs audio
+  - Shuts down **November 17, 2026**; migrate to `gemini-3.8-flash-tts` or `gemini-3.8-flash-lite-tts`
 
   [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro-preview-tts)
   </Card>
@@ -240,6 +280,7 @@ audio synthesis is not provided by the Google Agent chat route. Media rates must
   - Input limit: 8,192 tokens; output limit: 16,384
   - Native TTS only; no tools, thinking, or caching
   - Catalog text-output price is null because this model outputs audio
+  - Shuts down **November 17, 2026**; migrate to `gemini-3.8-flash-tts` or `gemini-3.8-flash-lite-tts`
 
   [Model specifications](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-preview-tts)
   </Card>
@@ -249,7 +290,8 @@ The [current native model catalog](https://ai.google.dev/gemini-api/docs/models)
 `gemini-3.8-flash-lite-tts`, `gemini-3.8-live`, `gemini-3.8-live-extended-thinking`, `gemini-3.5-transcribe`,
 `gemini-3.5-transcribe-live`, `gemini-3.5-live-translate-preview`, `gemini-omni-1.1-flash`,
 and the stable image models `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`, and `gemini-3-pro-image`.
-Their native endpoints and output types require separate integrations; listing them here does not register them as Agent chat models.
+It now also includes `gemini-nano-banana-2.1`. Their native endpoints and output types require separate integrations;
+listing them here does not register them as Agent chat models.
 Use the [native pricing sections](https://ai.google.dev/gemini-api/docs/pricing) for their modality-specific rates.
 
 ## Cost accounting boundaries
