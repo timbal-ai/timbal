@@ -23,11 +23,14 @@ from timbal.server.livekit_session import (
     chunk_data_payloads,
     dial_from_body,
     dial_from_env,
+    MAX_NOTIFY_CHARS,
     is_config_hello,
     parse_interaction_answer,
+    parse_notify,
     is_livekit_dial,
     maybe_start_livekit_session,
     merge_client_config,
+    notify_ack,
     room_from_token,
     start_livekit_session,
 )
@@ -202,6 +205,34 @@ class TestInteractionAnswer:
                 "value": "A spreadsheet",
             }
         ) == ("i1", "A spreadsheet", None)
+
+
+class TestNotifyFrame:
+    def test_parse_defaults_to_when_idle_without_key(self) -> None:
+        assert parse_notify({"type": "notify", "text": "  Task finished.  "}) == ("Task finished.", None, "when_idle")
+
+    def test_parse_carries_key_and_policy(self) -> None:
+        frame = {"type": "notify", "text": "Task finished.", "key": " task:1 ", "policy": "now"}
+        assert parse_notify(frame) == ("Task finished.", "task:1", "now")
+
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            {"type": "interaction_answer", "text": "x"},
+            {"type": "notify"},
+            {"type": "notify", "text": "   "},
+            {"type": "notify", "text": 42},
+            {"type": "notify", "text": "x", "key": 7},
+            {"type": "notify", "text": "x", "policy": "later"},
+            {"type": "notify", "text": "x" * (MAX_NOTIFY_CHARS + 1)},
+        ],
+    )
+    def test_parse_rejects(self, frame: dict) -> None:
+        assert parse_notify(frame) is None
+
+    def test_ack_shape(self) -> None:
+        assert notify_ack("task:1", True) == {"type": "notify_ack", "key": "task:1", "own_turn": True}
+        assert notify_ack(None, False) == {"type": "notify_ack", "key": None, "own_turn": False}
 
 
 class _FakeParticipant:
@@ -1640,3 +1671,81 @@ class TestAbandonedSessionsAreReclaimed:
         assert caller_wait_secs() is None
         monkeypatch.setenv("TIMBAL_VOICE_ABANDON_SECS", "7")
         assert guardless_abandon_secs() == 7.0
+
+
+class TestNotifyFromTheRoom:
+    """``notify`` rides the data channel like ``interaction_answer``: same caller check, acked on ``timbal.events``."""
+
+    async def test_only_the_callers_note_reaches_the_session(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        room, _guard, _log, app = driver_env
+        published: list[tuple[dict, dict]] = []
+
+        async def capture(payload: bytes, **kwargs: object) -> None:
+            published.append((json.loads(payload), kwargs))
+
+        room.local_participant.publish_data = capture
+
+        class _Session:
+            recording_meta: dict | None = None
+            session_id = "s"
+            closed = False
+
+            def __init__(self) -> None:
+                self.notified: list[tuple[str, str | None, str]] = []
+                self.running = asyncio.Event()
+
+            async def notify(self, text: str, *, key: str | None = None, policy: str = "when_idle") -> bool:
+                self.notified.append((text, key, policy))
+                return True
+
+            async def close(self) -> None:
+                self.closed = True
+
+            async def run(self, _audio_in: object):
+                self.running.set()
+                await asyncio.Event().wait()
+                yield  # pragma: no cover - never reached
+
+        session = _Session()
+        monkeypatch.setattr(
+            "timbal.server.livekit_session.build_voice_session", lambda *_args, **_kwargs: (session, {})
+        )
+        fake_rtc = sys.modules["livekit"].rtc
+        monkeypatch.setattr(
+            fake_rtc, "LocalAudioTrack", SimpleNamespace(create_audio_track=lambda *_args: object()), raising=False
+        )
+        monkeypatch.setattr(fake_rtc, "TrackPublishOptions", lambda **_kwargs: _kwargs, raising=False)
+        monkeypatch.setattr(fake_rtc, "TrackSource", SimpleNamespace(SOURCE_MICROPHONE=1), raising=False)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _deliver_hello(room, {"sample_rate": 16000})
+        _subscribe_caller(room, identity="browser-1")
+        await asyncio.wait_for(session.running.wait(), timeout=2.0)
+
+        def _packet(identity: str, frame: dict) -> SimpleNamespace:
+            return SimpleNamespace(
+                data=json.dumps(frame).encode(),
+                topic="timbal.events",
+                participant=SimpleNamespace(identity=identity),
+            )
+
+        room.handlers["data_received"](_packet("someone-else", {"type": "notify", "text": "Wire the money."}))
+        room.handlers["data_received"](
+            _packet("browser-1", {"type": "notify", "text": "Task finished.", "key": "task:1", "policy": "now"})
+        )
+        for _ in range(50):
+            if any(p.get("type") == "notify_ack" for p, _kw in published):
+                break
+            await asyncio.sleep(0.02)
+
+        assert session.notified == [("Task finished.", "task:1", "now")]
+        [(ack, kwargs)] = [(p, kw) for p, kw in published if p.get("type") == "notify_ack"]
+        assert ack == {"type": "notify_ack", "key": "task:1", "own_turn": True}
+        assert kwargs["topic"] == "timbal.events"
+        assert kwargs["destination_identities"] == ["browser-1"]
+        await _stop(task)

@@ -55,4 +55,49 @@ Replace the mock with an async service call when the basic flow works. For actio
 
 A filler is an acknowledgement of waiting, not confirmation that an action succeeded. Give the final spoken confirmation only after the tool result supports it.
 
+## Report back when slow work finishes
+
+Work that takes minutes should not hold the turn. Start it, let the call continue, and have the agent speak up when it lands: `session.notify(text)` starts a turn from an event instead of from the caller. `current_voice_session()` returns the live session to the tool and to any task it starts:
+
+```python agent.py
+import asyncio
+
+from timbal import Agent
+from timbal.voice import current_voice_session
+
+_background: set[asyncio.Task] = set()
+
+
+async def _report_when_done(session, topic: str) -> None:
+    await asyncio.sleep(20)  # stands in for a job that finishes later
+    await session.notify(
+        f"The report on {topic} is ready: sales are up 4% this quarter. Tell the caller briefly.",
+        key=f"report:{topic}",
+    )
+
+
+async def start_report(topic: str) -> str:
+    """Start a sales report on a topic. It takes a while; the caller hears back when it is ready."""
+    session = current_voice_session()
+    if session is None:
+        return "Reports can only be started during a call."
+    task = asyncio.create_task(_report_when_done(session, topic))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return "Started. Tell the caller you will let them know when it is ready."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-4.1-mini",
+    system_prompt="You help callers with sales reports. Reply in one or two short spoken sentences.",
+    tools=[start_report],
+    voice_config={"language": "en"},
+)
+```
+
+The note reaches the model as a runtime message, never as something the caller said: it is not in the transcript or the captions, and it stays in memory for later turns. By default the agent waits for a quiet line — the caller not talking, its own audio finished — and never interrupts. If the line stays busy for 30 seconds (`max_wait_secs`), the note is added ahead of the caller's next turn instead. Notes waiting together are spoken in one turn, and a note with the same `key` replaces one that has not been delivered yet. `policy="now"` interrupts whatever is playing. The model may decide there is nothing worth saying; then the agent stays quiet, and no filler plays.
+
+A client can send the same note over the call's data channel; see [Voice transports](/voice/transports#reporting-events).
+
 Continue to [Thinking sounds](/voice/thinking-sounds).

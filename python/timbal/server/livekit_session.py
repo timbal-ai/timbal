@@ -81,7 +81,7 @@ import time
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 
@@ -532,6 +532,36 @@ def parse_interaction_answer(data: dict[str, Any]) -> tuple[str, str, str | None
     return interaction_id, value, run_id or None
 
 
+# A note is prompt text the caller's client writes: bounded like any input.
+MAX_NOTIFY_CHARS = 4_000
+
+
+def parse_notify(data: dict[str, Any]) -> tuple[str, str | None, Literal["when_idle", "now"]] | None:
+    """Client event the agent should speak up about (``notify``).
+
+    Returns ``(text, key, policy)`` for :meth:`VoiceSession.notify`, or
+    ``None`` when the frame is not this event, has no text or more than
+    ``MAX_NOTIFY_CHARS`` of it, a non-string ``key``, or an unknown ``policy``.
+    """
+    if data.get("type") != "notify":
+        return None
+    text = data.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_NOTIFY_CHARS:
+        return None
+    key = data.get("key")
+    if key is not None and not isinstance(key, str):
+        return None
+    policy = data.get("policy") or "when_idle"
+    if policy not in ("when_idle", "now"):
+        return None
+    return text.strip(), (key or "").strip() or None, policy
+
+
+def notify_ack(key: str | None, own_turn: bool) -> dict[str, Any]:
+    """Reply to a ``notify`` once the session has placed the note (see ``VoiceSession.notify``)."""
+    return {"type": "notify_ack", "key": key, "own_turn": own_turn}
+
+
 def merge_client_config(env_raw: str, hello: dict[str, Any] | None) -> dict[str, Any]:
     """Env JSON is the base; the data-message hello overlays it."""
     config: dict[str, Any] = {}
@@ -875,11 +905,9 @@ async def _run_livekit_session(
         parsed = parse_interaction_answer(data)
         if parsed is not None:
             interaction_id, value, run_id = parsed
-            if caller_identity:
-                ident = getattr(getattr(pkt, "participant", None), "identity", "") or ""
-                if ident and ident != caller_identity:
-                    logger.debug("voice_livekit_interaction_answer_ignored", reason="not_caller")
-                    return
+            if not _sent_by_caller(pkt):
+                logger.debug("voice_livekit_interaction_answer_ignored", reason="not_caller")
+                return
             if sess is None:
                 logger.info("voice_livekit_interaction_answer_dropped", reason="no_session")
                 return
@@ -898,6 +926,36 @@ async def _run_livekit_session(
                     )
 
             asyncio.create_task(_submit_tap(), name="voice-livekit-interaction-answer")
+            return
+        note = parse_notify(data)
+        if note is not None:
+            text, key, policy = note
+            if not _sent_by_caller(pkt):
+                logger.debug("voice_livekit_notify_ignored", reason="not_caller")
+                return
+            if sess is None:
+                logger.info("voice_livekit_notify_dropped", reason="no_session")
+                return
+
+            async def _notify() -> None:
+                try:
+                    own_turn = await sess.notify(text, key=key, policy=policy)
+                except Exception as e:  # noqa: BLE001 — a note must not kill the call
+                    logger.warning("voice_livekit_notify_failed", error=str(e))
+                    return
+                await send_q.put(notify_ack(key, own_turn))
+
+            asyncio.create_task(_notify(), name="voice-livekit-notify")
+
+    def _sent_by_caller(pkt: Any) -> bool:
+        """Once the caller is known, frames another participant sends are not theirs to act on.
+
+        A packet with no participant is the server's own (API ``SendData``).
+        """
+        if not caller_identity:
+            return True
+        ident = getattr(getattr(pkt, "participant", None), "identity", "") or ""
+        return not ident or ident == caller_identity
 
     def _on_sip_dtmf(dtmf: Any) -> None:
         digit = getattr(dtmf, "digit", "") or ""

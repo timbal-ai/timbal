@@ -85,8 +85,12 @@ async def _rtc_call(
     *,
     config: dict | None = None,
     timeout: float = 20.0,
+    send_on_start: list[dict] | None = None,
 ) -> tuple[list[dict], list[Any]]:
-    """Run one full call as the browser would; returns (messages, downlink frames)."""
+    """Run one full call as the browser would; returns (messages, downlink frames).
+
+    ``send_on_start`` frames go up the data channel once ``session_started`` arrives.
+    """
     pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[]))
     pc.addTrack(AudioStreamTrack())  # silent mic
     channel = pc.createDataChannel("events")
@@ -99,6 +103,9 @@ async def _rtc_call(
     def on_message(msg: Any) -> None:
         data = json.loads(msg)
         messages.append(data)
+        if data.get("type") == "session_started":
+            for frame in send_on_start or []:
+                channel.send(json.dumps(frame))
         if data.get("type") == "session_ended":
             ended.set()
 
@@ -165,6 +172,33 @@ class TestVoiceRtcRoundTrip:
         assert "audio" not in types
         # Media actually flowed: the downlink track delivered paced frames.
         assert len(frames) > 10
+
+    async def test_notify_frame_makes_the_agent_speak_first(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The caller's client says a background task landed; with nobody
+        talking the agent speaks up, and the note never shows as the caller's."""
+        _setup_env(monkeypatch, tmp_path, responses=["Your report is ready."])
+        monkeypatch.setattr("timbal.voice.elevenlabs.ElevenLabsRealtimeSTT", _make_delayed_stt_class([], end_after=3.0))
+        monkeypatch.setattr(
+            "timbal.voice.elevenlabs.ElevenLabsStreamTTS",
+            _make_tts_class(chunk=b"\x01\x02" * 800, num_chunks=2),
+        )
+
+        app = create_app()
+        with TestClient(app) as client:
+            messages, _frames = await _rtc_call(
+                client,
+                config={"turn_detector": "heuristic"},
+                send_on_start=[{"type": "notify", "text": "Task 'report' finished.", "key": "task:report"}],
+            )
+
+        types = [m["type"] for m in messages]
+        assert {"type": "notify_ack", "key": "task:report", "own_turn": True} in messages
+        assert [m["text"] for m in messages if m["type"] == "agent_text_done"] == ["Your report is ready."]
+        assert "transcript_committed" not in types
+        [transcript] = [m for m in messages if m["type"] == "session_transcript"]
+        assert [(e["role"], e["text"]) for e in transcript["entries"]] == [("assistant", "Your report is ready.")]
 
     async def test_error_before_handshake_still_reaches_the_client(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
