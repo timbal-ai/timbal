@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -86,8 +87,11 @@ class PlatformTracingProvider(TracingProvider):
 
     platform_config: PlatformConfig | None = None
 
-    # run key -> (monotonic time of the last successful save, the exact PATCH body sent)
-    _recent: ClassVar[OrderedDict[str, tuple[float, bytes]]] = OrderedDict()
+    # run key -> (monotonic time the save finished, snapshot number, the exact PATCH body sent or None)
+    _recent: ClassVar[OrderedDict[str, tuple[float, int, bytes | None]]] = OrderedDict()
+    # Numbers snapshots as they are taken: saves of one run overlap (parallel tools, background
+    # children) and their PATCHes can finish in any order.
+    _snapshots: ClassVar[itertools.count] = itertools.count()
     # One entry per live conversation: concurrent calls sharing a process must not evict each other between turns.
     _recent_max: ClassVar[int] = 256
     _recent_max_bytes: ClassVar[int] = 64 * 1024 * 1024
@@ -115,40 +119,40 @@ class PlatformTracingProvider(TracingProvider):
     @classmethod
     def _prune_recent(cls, now: float, capacity: int, ttl: float) -> None:
         recent = PlatformTracingProvider._recent
-        size = sum(len(body) for _, body in recent.values())
-        # Entries are ordered by their last successful save, oldest first.
+        size = sum(len(body) for _, _, body in recent.values() if body)
+        # Entries are ordered by when their save finished, oldest first.
         # Purge expired entries even when the requested key is absent.
         while recent:
-            saved_at, body = next(iter(recent.values()))
+            saved_at, _, body = next(iter(recent.values()))
             if len(recent) <= capacity and size <= cls._recent_max_bytes and now - saved_at < ttl:
                 break
             recent.popitem(last=False)
-            size -= len(body)
+            size -= len(body) if body else 0
 
     @classmethod
-    def _remember(cls, key: str, body: bytes) -> None:
+    def _remember(cls, key: str, snapshot: int, body: bytes | None) -> None:
+        """Settle a finished save of ``snapshot``; ``body`` is None when the save failed."""
         capacity, ttl = cls._recent_limits()
         now = time.monotonic()
         recent = PlatformTracingProvider._recent
-        # Popped even when the new body is not kept: the platform now holds a newer snapshot than ours.
-        recent.pop(key, None)
-        if capacity and ttl and len(body) <= cls._recent_max_bytes:
-            recent[key] = (now, body)
+        settled = recent.get(key)
+        if settled is None or settled[1] < snapshot:
+            recent.pop(key, None)
+            # A failed or oversized save still leaves its number: the platform may hold this snapshot now,
+            # so neither the older cached body nor an older save still in flight may answer reads.
+            kept = body if body is not None and len(body) <= cls._recent_max_bytes else None
+            recent[key] = (now, snapshot, kept)
         cls._prune_recent(now, capacity, ttl)
-
-    @staticmethod
-    def _forget(key: str) -> None:
-        PlatformTracingProvider._recent.pop(key, None)
 
     @classmethod
     def _recall(cls, key: str) -> Trace | None:
         capacity, ttl = cls._recent_limits()
         cls._prune_recent(time.monotonic(), capacity, ttl)
         entry = PlatformTracingProvider._recent.get(key)
-        if entry is None:
+        if entry is None or entry[2] is None:
             return None
         # Parsed afresh each time, so a reader can never change what the next one sees.
-        return Trace(json.loads(entry[1])["trace"])
+        return Trace(json.loads(entry[2])["trace"])
 
     @classmethod
     def _resolve_config(cls, run_context: RunContext):
@@ -224,6 +228,8 @@ class PlatformTracingProvider(TracingProvider):
         # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
         # while the PATCH is in flight. Same encoding httpx applies to json=.
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+        # Taken with no await since model_dump(), so numbers follow snapshot order.
+        snapshot = next(PlatformTracingProvider._snapshots)
         key = cls._recent_key(platform_config, subject_path, run_context.id)
         try:
             res = await _request(
@@ -235,6 +241,6 @@ class PlatformTracingProvider(TracingProvider):
             res.raise_for_status()
         except BaseException:
             # The write may have landed anyway (timeout after commit): never keep serving the older snapshot.
-            cls._forget(key)
+            cls._remember(key, snapshot, None)
             raise
-        cls._remember(key, body)
+        cls._remember(key, snapshot, body)
