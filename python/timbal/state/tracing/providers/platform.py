@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING, ClassVar
+
+import structlog
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -18,6 +22,8 @@ from .base import TracingProvider
 if TYPE_CHECKING:
     from ...config import PlatformConfig
     from ...context import RunContext
+
+logger = structlog.get_logger(__name__)
 
 
 class PlatformTracingProvider(TracingProvider):
@@ -44,6 +50,11 @@ class PlatformTracingProvider(TracingProvider):
     a voice call starts each turn from the one before it, in the same process,
     a moment after storing it, and would otherwise fetch it over the network
     twice (memory and session data) before the model is called.
+
+    ``TIMBAL_TRACE_CACHE_MAX_ENTRIES`` (default 16) and
+    ``TIMBAL_TRACE_CACHE_TTL_SECS`` (default 300) control this process-wide
+    cache. Either set to zero disables caching. Expired entries are removed
+    on cache reads and writes; there is no background cleanup task.
     """
 
     platform_config: PlatformConfig | None = None
@@ -62,23 +73,60 @@ class PlatformTracingProvider(TracingProvider):
         return f"{platform_config.host}/orgs/{platform_config.subject.org_id}/{subject_path}/runs/{run_id}#{token}"
 
     @classmethod
-    def _remember(cls, key: str, trace: list) -> None:
+    def _recent_limits(cls) -> tuple[int, float]:
+        """Read process settings; invalid values fall back to the defaults."""
+        try:
+            capacity = int(os.environ.get("TIMBAL_TRACE_CACHE_MAX_ENTRIES", str(cls._recent_max)))
+            if capacity < 0:
+                raise ValueError
+        except ValueError:
+            logger.warning("invalid_trace_cache_capacity", default=cls._recent_max)
+            capacity = cls._recent_max
+        try:
+            ttl = float(os.environ.get("TIMBAL_TRACE_CACHE_TTL_SECS", str(cls._recent_ttl_s)))
+            if not math.isfinite(ttl) or ttl < 0:
+                raise ValueError
+        except ValueError:
+            logger.warning("invalid_trace_cache_ttl", default=cls._recent_ttl_s)
+            ttl = cls._recent_ttl_s
+        return capacity, ttl
+
+    @staticmethod
+    def _prune_recent(now: float, capacity: int, ttl: float) -> None:
         recent = PlatformTracingProvider._recent
-        recent[key] = (time.monotonic(), json.dumps(trace))
+        # Entries are ordered by their last successful save, oldest first.
+        # Purge expired entries even when the requested key is absent.
+        while recent:
+            saved_at = next(iter(recent.values()))[0]
+            if len(recent) <= capacity and now - saved_at < ttl:
+                break
+            recent.popitem(last=False)
+
+    @classmethod
+    def _remember(cls, key: str, trace: list) -> None:
+        capacity, ttl = cls._recent_limits()
+        now = time.monotonic()
+        cls._prune_recent(now, capacity, ttl)
+        if capacity == 0 or ttl == 0:
+            return
+        recent = PlatformTracingProvider._recent
+        recent[key] = (now, json.dumps(trace))
         recent.move_to_end(key)
-        while len(recent) > cls._recent_max:
+        while len(recent) > capacity:
             recent.popitem(last=False)
 
     @classmethod
     def _recall(cls, key: str) -> Trace | None:
+        capacity, ttl = cls._recent_limits()
+        cls._prune_recent(time.monotonic(), capacity, ttl)
         entry = PlatformTracingProvider._recent.get(key)
-        if entry is None or time.monotonic() - entry[0] > cls._recent_ttl_s:
+        if entry is None:
             return None
         # Parsed afresh each time, so a reader can never change what the next one sees.
         return Trace(json.loads(entry[1]))
 
     @classmethod
-    def _resolve_config(cls, run_context: "RunContext"):
+    def _resolve_config(cls, run_context: RunContext):
         """Return platform_config, with the following priority:
 
         1. run_context.platform_config  — set by auto-detection or a previous call
@@ -103,7 +151,7 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     @override
-    async def get(cls, run_context: "RunContext") -> Trace | None:
+    async def get(cls, run_context: RunContext) -> Trace | None:
         """See base class."""
         from ....platform.utils import _request
 
@@ -132,7 +180,7 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     @override
-    async def _store(cls, run_context: "RunContext") -> None:
+    async def _store(cls, run_context: RunContext) -> None:
         """See base class."""
         from ....platform.utils import _request
 
