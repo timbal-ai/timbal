@@ -148,10 +148,11 @@ class TestKeyAgentInterruptions:
     @pytest.mark.parametrize("model,max_tokens", MODELS_TO_TEST)
     async def test_server_tool_interrupt_and_continue(self, model: str, max_tokens: int | None):
         """
-        Test interrupting an agent while a server-side tool (WebSearch) is running.
+        Test interrupting an agent while web search (WebSearch) is running.
 
-        WebSearch is only compatible with OpenAI Responses API and Anthropic.
-        For Google (Chat Completions), we expect a ValueError.
+        Anthropic and OpenAI Responses search natively (server-side tool). Chat Completions
+        providers such as Google have no native search, so WebSearch is a function tool that
+        searches through the Timbal platform's tool proxy (needs platform credentials).
         """
         agent_kwargs = {
             "name": f"websearch_agent_{model.replace('/', '_')}",
@@ -162,15 +163,6 @@ class TestKeyAgentInterruptions:
             agent_kwargs["max_tokens"] = max_tokens
 
         agent = Agent(**agent_kwargs)
-
-        # For Google (Chat Completions), WebSearch is not compatible - expect error
-        if "google" in model:
-            prompt1 = "Search the web for the latest news about artificial intelligence breakthroughs in 2026."
-            result = await agent(prompt=prompt1).collect()
-            assert result.status.code == "error", f"Expected 'error' status for Google, got '{result.status.code}'"
-            assert result.error is not None, "Expected error for Google with WebSearch"
-            assert "WebSearch is not compatible" in str(result.error), f"Expected WebSearch error, got {result.error}"
-            return
 
         prompt1 = "When does Real Madrid play next?"
 
