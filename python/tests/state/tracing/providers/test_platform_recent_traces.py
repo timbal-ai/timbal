@@ -89,6 +89,31 @@ async def test_the_next_turn_reads_the_previous_one_without_a_request():
 
 
 @pytest.mark.asyncio
+async def test_the_cache_returns_what_the_platform_stores():
+    """Including the run this one continued, and a turn interrupted before it assembled memory:
+    the cache answers as storage would, so continuing past that turn works the same either way."""
+    platform: dict[str, bytes] = {}
+
+    async def request(method, path, content=None, **_):
+        if method == "PATCH":
+            platform[path] = content
+            return _ok()
+        return _ok(json.loads(platform[path]))
+
+    interrupted = _context(run_id="run-2", parent_id="run-1")
+    interrupted._trace["c1"] = {k: v for k, v in RECORD.items() if k != "memory"}
+    with patch("timbal.platform.utils._request", request):
+        await Provider._store(interrupted)
+        cached = await Provider.get(_context(parent_id="run-2"))
+        PlatformTracingProvider._recent.clear()
+        stored = await Provider.get(_context(parent_id="run-2"))
+
+    assert cached.parent_id == stored.parent_id == "run-1"
+    assert [s.model_dump() for s in cached.values()] == [s.model_dump() for s in stored.values()]
+    assert cached["c1"].memory is None
+
+
+@pytest.mark.asyncio
 async def test_a_reader_cannot_change_what_the_next_reader_sees():
     await _store("run-1", AsyncMock(return_value=_ok()))
 

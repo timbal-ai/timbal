@@ -224,6 +224,11 @@ class TracingProvider(ABC):
         Should return the ``Trace`` from the parent run, or ``None`` if not
         found or if session chaining is not supported by this provider.
 
+        Set ``Trace.parent_id`` to the run the returned one continued from when
+        it is stored: an agent whose previous turn ended before it assembled its
+        memory continues from the turn before that one. Without it, that agent
+        starts over from the previous turn's prompt alone.
+
         Args:
             run_context: The current run context. Use ``run_context.parent_id``
                          to look up the parent run.

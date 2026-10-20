@@ -117,6 +117,20 @@ OnMaxIter = Literal["final_answer", "stop", "error"] | OnMaxIterHook
 # an approval gate (approval_required) or a suspend() call (input_required).
 _PAUSE_REASONS = frozenset({"approval_required", "input_required"})
 
+# Consecutive turns that stored no memory (see Agent._previous_memory) a turn reaches back through.
+_MAX_TURNS_WITHOUT_MEMORY = 8
+
+
+def _is_pause(status: Any) -> bool:
+    """Whether a turn ended paused for approval or input, so the next one resumes it."""
+    if isinstance(status, dict):
+        code, reason = status.get("code"), status.get("reason")
+    elif status is not None:
+        code, reason = status.code, status.reason
+    else:
+        return False
+    return code == "cancelled" and reason in _PAUSE_REASONS
+
 
 def _content_chars(c: TextContent | ToolUseContent | ToolResultContent) -> int:
     if isinstance(c, TextContent):
@@ -840,27 +854,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         current_span.metadata.setdefault("context_measurement", None)
         if current_span.memory:
             return
-        prompt = Message.validate(current_span.input.get("prompt", ""))
-        if prompt.role != "user":
-            prompt = Message(role="user", content=prompt.content)
-        current_span.memory = [prompt]
+        prompt = self._turn_prompt(current_span.input)
 
         # Subagents have isolated context
         if current_span.parent_call_id is not None:
+            current_span.memory = [prompt]
             return
 
         # User can override the message list
-        input_messages = current_span.input.get("messages", [])
-        if input_messages:
-            loaded: list[Message] = []
-            for raw in input_messages:
-                msg = Message.validate(raw).without_empty_text_blocks()
-                if msg is not None:
-                    loaded.append(msg)
+        loaded = self._turn_messages(current_span.input)
+        if loaded is not None:
             current_span.memory = loaded
             return
 
+        # Memory stays unset until it holds the previous turns: a turn cancelled while loading
+        # them must store no memory, which the next turn rebuilds (see _previous_memory), rather
+        # than its prompt alone, which the next turn would take for the whole conversation.
         if not run_context.parent_id:
+            current_span.memory = [prompt]
             return
         parent_trace = await run_context._get_parent_trace()
         if parent_trace is None:
@@ -869,33 +880,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 parent_id=run_context.parent_id,
                 run_id=run_context.id,
             )
+            current_span.memory = [prompt]
             return
 
-        self_spans = parent_trace.get_path(self._path)
-        if not self_spans:
+        previous_span = self._own_span(parent_trace)
+        if previous_span is None:
+            current_span.memory = [prompt]
             return
-        if len(self_spans) > 1:
-            logger.warning(
-                "Multiple spans found for agent path in parent trace; skipping memory resolution.",
-                path=self._path,
-                span_count=len(self_spans),
-            )
-            return
-
-        previous_span = self_spans[0]
-        prev_status = previous_span.status
-        if isinstance(prev_status, dict):
-            prev_code = prev_status.get("code")
-            prev_reason = prev_status.get("reason")
-        elif prev_status is not None:
-            prev_code = prev_status.code
-            prev_reason = prev_status.reason
-        else:
-            prev_code = None
-            prev_reason = None
-        if not isinstance(previous_span.memory, list):
-            return
-        memory = [Message.validate(m) for m in previous_span.memory]
+        memory, source = await self._previous_memory(run_context, parent_trace, previous_span)
 
         # On approval-required resume the gated tool_uses will be re-executed
         # by the agent loop (see _find_pending_tool_uses), so we must NOT
@@ -905,7 +897,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # On approval/suspend resume the gated/suspended tool_uses will be
         # re-executed by the agent loop (see _find_pending_tool_uses), so we must
         # NOT inject synthetic "tool failed" results for them.
-        is_resume = prev_code == "cancelled" and prev_reason in _PAUSE_REASONS
+        is_resume = _is_pause(previous_span.status)
         if not is_resume:
             self._synthesize_missing_tool_results(memory)
         # On resume we are continuing the paused turn, not opening a new user turn.
@@ -914,7 +906,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # (Anthropic rejects any user message in between). Since AgentParams forces a
         # prompt/messages to be passed, drop the re-injected prompt here — the
         # original prompt already lives in the loaded parent memory.
-        tail = [] if is_resume else current_span.memory
+        tail = [] if is_resume else [prompt]
         merged: list[Message] = []
         for msg in memory + tail:
             cleaned = msg.without_empty_text_blocks()
@@ -927,14 +919,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
-            previous_metadata = previous_span.metadata or {}
+            # A rebuilt turn never reached the model; the turn its messages came from did.
+            previous_metadata = (source.metadata or {}) if source is not None else {}
             measurement = previous_metadata.get("context_measurement")
-            if "context_measurement" not in previous_metadata and _has_context_token_usage(previous_span.usage):
+            if (
+                source is not None
+                and "context_measurement" not in previous_metadata
+                and _has_context_token_usage(source.usage)
+            ):
                 # Legacy traces have recorded usage but no reliable request boundary.
                 # Keep the run total as a conservative baseline and estimate all memory:
                 # file tokens must not disappear, nor may unmeasured tool results be skipped.
                 # The next measured LLM call replaces this deliberately high estimate.
-                measurement = {"usage": dict(previous_span.usage), "messages": 0}
+                measurement = {"usage": dict(source.usage), "messages": 0}
             if measurement is not None:
                 # Sanitizing above may drop a message the measurement covered.
                 covered = memory[: measurement["messages"]]
@@ -952,6 +949,91 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     **measurement,
                     "messages": max(0, measurement["messages"] - removed),
                 }
+
+    async def _previous_memory(self, run_context: Any, trace: Any, span: Any) -> tuple[list[Message], Any]:
+        """The messages the previous turn left, and the span they were read from.
+
+        A turn that ended before it assembled its memory (cancelled while resolving its system
+        prompt or loading the turn before it, say) stored none. It stands for what it would have
+        held: the turn before it, continued with its prompt by the same rules as
+        ``resolve_memory``. Such turns are followed back through ``Trace.parent_id``, at most
+        ``_MAX_TURNS_WITHOUT_MEMORY`` of them. The returned span is None when no stored memory
+        was reached: the conversation started there, or the chain could not be followed.
+        """
+        skipped: list[Any] = []
+        source = span
+        while source is not None and not isinstance(source.memory, list):
+            skipped.append(source)
+            if self._turn_messages(source.input) is not None:
+                # Called with explicit messages, its memory would have been exactly those.
+                source = None
+            elif not trace.parent_id:
+                source = None
+            elif len(skipped) > _MAX_TURNS_WITHOUT_MEMORY:
+                logger.warning(
+                    "Too many consecutive turns stored no memory; continuing from their prompts only.",
+                    path=self._path,
+                    run_id=run_context.id,
+                    turns=len(skipped),
+                )
+                source = None
+            else:
+                trace = await run_context._get_parent_trace(trace.parent_id)
+                source = self._own_span(trace) if trace is not None else None
+
+        memory = [Message.validate(m) for m in source.memory] if source is not None else []
+        status = source.status if source is not None else None
+        for turn in reversed(skipped):
+            override = self._turn_messages(turn.input)
+            if override is not None:
+                memory = override
+            elif not _is_pause(status):
+                self._synthesize_missing_tool_results(memory)
+                if isinstance(turn.input, dict):
+                    memory.append(self._turn_prompt(turn.input))
+            status = turn.status
+        if skipped:
+            logger.info(
+                "Previous turn stored no memory; rebuilt it from the turn before.",
+                path=self._path,
+                run_id=run_context.id,
+                turns_rebuilt=len(skipped),
+                found_stored_memory=source is not None,
+            )
+        return memory, source
+
+    def _own_span(self, trace: Any) -> Any:
+        """This agent's span in a stored run; None when it has none, or several."""
+        spans = trace.get_path(self._path)
+        if len(spans) > 1:
+            logger.warning(
+                "Multiple spans found for agent path in parent trace; skipping memory resolution.",
+                path=self._path,
+                span_count=len(spans),
+            )
+            return None
+        return spans[0] if spans else None
+
+    @staticmethod
+    def _turn_prompt(span_input: dict[str, Any]) -> Message:
+        """The user message a turn was called with."""
+        prompt = Message.validate(span_input.get("prompt", ""))
+        if prompt.role != "user":
+            prompt = Message(role="user", content=prompt.content)
+        return prompt
+
+    @staticmethod
+    def _turn_messages(span_input: Any) -> list[Message] | None:
+        """The ``messages`` a turn was called with in place of its history, or None."""
+        raw = span_input.get("messages") if isinstance(span_input, dict) else None
+        if not raw:
+            return None
+        loaded: list[Message] = []
+        for item in raw:
+            msg = Message.validate(item).without_empty_text_blocks()
+            if msg is not None:
+                loaded.append(msg)
+        return loaded
 
     def _inject_background_completions(self, current_span: Any) -> None:
         """Drain session completion inbox into memory at turn start (Claude-style).

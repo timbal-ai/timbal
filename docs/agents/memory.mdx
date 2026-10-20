@@ -63,6 +63,15 @@ second = await agent(parent_id=first.run_id, prompt="What's my name?").collect()
 Run IDs identify continuation points; the host must authorize access to the conversation before accepting a client-supplied `parent_id`. See [Tracing](/core-concepts/tracing) and [Context](/core-concepts/context) for storage and context behavior.
 </Tip>
 
+## Interrupted turns
+
+A turn can end early: a voice barge-in cancels it, a timeout expires, or it fails. The next turn continues from what that turn reached:
+
+- **Cut after the agent assembled its memory** (while the model was running, or mid-reply): the earlier turns, the interrupted prompt, and the part of the reply that was produced. Voice sessions trim that reply to what the caller actually heard.
+- **Cut before** (while resolving the system prompt or loading the previous turn): the turn stores no memory. The next turn rebuilds it from the turn before plus the interrupted prompt, so it sees the same conversation as if the turn had been cut a moment later. Up to 8 consecutive turns like that are followed back.
+
+This holds on every built-in provider, with or without the platform trace cache. Rebuilding relies on the provider returning the run a trace continued from (`Trace.parent_id`); a custom provider that does not set it continues from the interrupted prompt alone.
+
 ## Rewind
 
 Timbal supports conversation branching, allowing you to rewind to any previous point and explore alternative conversation paths.

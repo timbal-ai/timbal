@@ -161,7 +161,8 @@ class PlatformTracingProvider(TracingProvider):
         if entry is None:
             return None
         # Parsed afresh each time, so a reader can never change what the next one sees.
-        return Trace(json.loads(entry[1])["trace"])
+        stored = json.loads(entry[1])
+        return Trace(stored["trace"], parent_id=stored.get("parent_id"))
 
     @classmethod
     def _resolve_config(cls, run_context: RunContext):
@@ -214,7 +215,7 @@ class PlatformTracingProvider(TracingProvider):
         trace = res_json.get("trace")
         if not trace:
             return None
-        return Trace(trace)
+        return Trace(trace, parent_id=res_json.get("parent_id"))
 
     @classmethod
     @override

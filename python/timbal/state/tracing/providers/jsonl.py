@@ -157,7 +157,7 @@ class JsonlTracingProvider(TracingProvider):
                         continue
                     record = json.loads(line)
                     if record.get("run_id") == str(parent_id):
-                        return Trace(record["spans"])
+                        return Trace(record["spans"], parent_id=record.get("parent_id"))
         except (OSError, json.JSONDecodeError):
             return None
         return None
