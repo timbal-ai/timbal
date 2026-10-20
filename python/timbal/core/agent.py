@@ -66,7 +66,7 @@ from ..types.events import BaseEvent, DeltaEvent, OutputEvent
 from ..types.events.delta import TextDelta, ThinkingDelta
 from ..types.message import Message
 from ..types.run_status import RunStatus
-from ..utils import coerce_to_dict, dump
+from ..utils import coerce_to_dict, dump, invalidate_message_dump_caches
 from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
@@ -2132,6 +2132,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             for c in event.output.content:
                                 if isinstance(c, TextContent) and c.text:
                                     c.text = _runner.scrub_text(c.text, *_out_stages)
+                            invalidate_message_dump_caches(event.output)
                         # Thinking blocks are not part of the checked text — scrub them
                         # directly with the redact rails so reasoning never carries PII
                         # into memory (they were scrubbed/withheld on the wire already).
@@ -2139,6 +2140,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             for c in event.output.content:
                                 if isinstance(c, ThinkingContent) and c.thinking:
                                     c.thinking = _runner.scrub_text(c.thinking, *_out_stages)
+                            # The LLM span's output dump cached the unscrubbed blocks.
+                            invalidate_message_dump_caches(event.output)
 
                         # Add LLM response to conversation for next iteration
                         await _append_memory(event.output)

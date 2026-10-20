@@ -594,6 +594,8 @@ msg.to_openai_chat_completions_input()
 # Filter with msg.is_runtime() when painting human transcripts.
 ```
 
+`dump()` caches each Message's serialized form (validated against `len(content)`). Reassigning a field (`msg.content = [...]`) drops the cache; editing a content block in place (`block.text = ...`) does not — call `invalidate_message_dump_caches(msg)` before the next dump, or serializing providers store the pre-edit text. Serializing providers store a span's `_memory_dump`, not `span.memory`: rewrite memory in place → re-dump it before saving.
+
 ### File
 
 ```python
