@@ -1261,13 +1261,15 @@ class TestInterruptionTruncation:
         *,
         played_bytes: int,
         interrupt_after_done: bool,
+        tracing_provider: type | None = None,
     ) -> tuple[VoiceSession, list[VoiceSessionEvent]]:
         """One turn, then a barge-in commit with ``tracker`` reporting ``played_bytes`` heard."""
         # Handler-based model: TestModel(responses=...) picks by assistant-message
         # count in history, which the truncation itself changes (dropping the
         # unheard reply would replay response[0]). The handler advances per call.
         replies = iter([self.RESPONSE, "Second reply", "Third reply"])
-        agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[])
+        agent_kwargs = {} if tracing_provider is None else {"tracing_provider": tracing_provider}
+        agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[], **agent_kwargs)
         stt = DelayedMockSTT()
         chunk = b"\x00\x01" * 50  # 100 bytes per chunk
         tts = SlowMockTTS(delay=0.03, chunk=chunk, num_chunks=4) if not interrupt_after_done else MockTTS(chunk=chunk, num_chunks=4)
@@ -1338,6 +1340,32 @@ class TestInterruptionTruncation:
         first_reply_text = assistant_msgs[0].collect_text()
         assert first_reply_text != self.RESPONSE
         assert self.RESPONSE.startswith(first_reply_text)
+
+    @pytest.mark.parametrize(("interrupt_after_done", "played_bytes"), [(False, 50), (True, 200)])
+    async def test_serializing_provider_stores_the_heard_prefix(
+        self, tmp_path, interrupt_after_done: bool, played_bytes: int
+    ) -> None:
+        """JSONL and platform store the agent's memory dump, not its live messages: the truncation
+        must reach the dump, or the next turn resolves the full reply the caller never heard."""
+        from timbal.state.tracing.providers import JsonlTracingProvider
+        from timbal.types.message import Message
+
+        provider = JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+        session, _ = await self._run_barge_in_session(
+            FakePlaybackTracker(),
+            played_bytes=played_bytes,
+            interrupt_after_done=interrupt_after_done,
+            tracing_provider=provider,
+        )
+
+        second_turn = session._last_run_context
+        stored_first_turn = await provider.get(second_turn)
+        stored_root = next(s for s in stored_first_turn.values() if s.parent_call_id is None)
+        stored_reply = next(Message.validate(m) for m in stored_root.memory if m["role"] == "assistant")
+        resolved_reply = next(m for m in second_turn.root_span().memory if m.role == "assistant")
+        for reply in (stored_reply, resolved_reply):
+            assert reply.collect_text() != self.RESPONSE
+            assert self.RESPONSE.startswith(reply.collect_text())
 
     async def test_nothing_heard_drops_assistant_from_memory_and_transcript(self) -> None:
         tracker = FakePlaybackTracker()
