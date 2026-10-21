@@ -1261,13 +1261,15 @@ class TestInterruptionTruncation:
         *,
         played_bytes: int,
         interrupt_after_done: bool,
+        tracing_provider: type | None = None,
     ) -> tuple[VoiceSession, list[VoiceSessionEvent]]:
         """One turn, then a barge-in commit with ``tracker`` reporting ``played_bytes`` heard."""
         # Handler-based model: TestModel(responses=...) picks by assistant-message
         # count in history, which the truncation itself changes (dropping the
         # unheard reply would replay response[0]). The handler advances per call.
         replies = iter([self.RESPONSE, "Second reply", "Third reply"])
-        agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[])
+        agent_kwargs = {} if tracing_provider is None else {"tracing_provider": tracing_provider}
+        agent = Agent(name="t", model=TestModel(handler=lambda _messages: next(replies)), tools=[], **agent_kwargs)
         stt = DelayedMockSTT()
         chunk = b"\x00\x01" * 50  # 100 bytes per chunk
         tts = SlowMockTTS(delay=0.03, chunk=chunk, num_chunks=4) if not interrupt_after_done else MockTTS(chunk=chunk, num_chunks=4)
@@ -1338,6 +1340,61 @@ class TestInterruptionTruncation:
         first_reply_text = assistant_msgs[0].collect_text()
         assert first_reply_text != self.RESPONSE
         assert self.RESPONSE.startswith(first_reply_text)
+
+    async def _stored_barge_in(self, tmp_path, provider_kind: str, *, interrupt_after_done: bool, played_bytes: int):
+        """Run a barge-in; return the second turn's context, and the first turn's stored memory,
+        output and model call output as messages."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
+        from timbal.types.message import Message
+
+        if provider_kind == "jsonl":
+            provider = JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+        else:
+            provider = InMemoryTracingProvider
+        session, _ = await self._run_barge_in_session(
+            FakePlaybackTracker(),
+            played_bytes=played_bytes,
+            interrupt_after_done=interrupt_after_done,
+            tracing_provider=provider,
+        )
+        second_turn = session._last_run_context
+        stored = await provider.get(second_turn)
+        root = next(s for s in stored.values() if s.parent_call_id is None)
+        llm = next(s for s in stored.values() if s.path.endswith(".llm"))
+        memory = [Message.validate(m) for m in root.memory]
+        return second_turn, memory, Message.validate(root.output), Message.validate(llm.output)
+
+    @pytest.mark.parametrize("provider_kind", ["jsonl", "in_memory"])
+    @pytest.mark.parametrize(("interrupt_after_done", "played_bytes"), [(False, 50), (True, 200)])
+    async def test_stored_reply_is_the_heard_prefix(
+        self, tmp_path, provider_kind: str, interrupt_after_done: bool, played_bytes: int
+    ) -> None:
+        """JSONL and platform store the span's dumps, not its live objects: the truncation must
+        reach them, or the next turn resolves the full reply the caller never heard. The run's
+        output is the heard reply too; the model call's span keeps the full generation, which
+        the in-memory provider shows unless the truncation edited the message they share."""
+        second_turn, memory, output, llm_output = await self._stored_barge_in(
+            tmp_path, provider_kind, interrupt_after_done=interrupt_after_done, played_bytes=played_bytes
+        )
+
+        stored_reply = next(m for m in memory if m.role == "assistant")
+        resolved_reply = next(m for m in second_turn.root_span().memory if m.role == "assistant")
+        for reply in (stored_reply, resolved_reply, output):
+            assert reply.collect_text() != self.RESPONSE
+            assert self.RESPONSE.startswith(reply.collect_text())
+            assert reply.metadata["interrupted"] is True
+        assert llm_output.collect_text() == self.RESPONSE
+
+    @pytest.mark.parametrize("provider_kind", ["jsonl", "in_memory"])
+    async def test_nothing_heard_stores_an_empty_interrupted_output(self, tmp_path, provider_kind: str) -> None:
+        _, memory, output, llm_output = await self._stored_barge_in(
+            tmp_path, provider_kind, interrupt_after_done=False, played_bytes=0
+        )
+
+        assert [m.role for m in memory] == ["user"]
+        assert output.collect_text() == ""
+        assert output.metadata["interrupted"] is True
+        assert llm_output.collect_text() == self.RESPONSE
 
     async def test_nothing_heard_drops_assistant_from_memory_and_transcript(self) -> None:
         tracker = FakePlaybackTracker()
@@ -1615,12 +1672,15 @@ class TestInterruptionTruncation:
         assert self.RESPONSE.startswith(heard)
         assert assistant_entries[1].text == "Second reply"
 
-    async def test_continuation_with_heard_audio_merges_user_entry(self) -> None:
+    @pytest.mark.parametrize("provider_kind", ["in_memory", "jsonl"])
+    async def test_continuation_with_heard_audio_merges_user_entry(self, tmp_path, provider_kind: str) -> None:
         """Regression: on CONTINUE_TURN, interrupt() runs before the transcript
         merge, and the aborted fragment turn's truncation can append a heard
         assistant entry. The old merge only replaced the last entry when it was
         ``user``, so it appended a *second* user line and left the spurious
-        assistant fragment between them."""
+        assistant fragment between them. JSONL stores the memory dump, which the
+        cleanup must re-serialize, or the merged turn still sees the fragment."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
         from timbal.voice.turn_detection import (
             CommitAction,
             CommitDecision,
@@ -1657,7 +1717,12 @@ class TestInterruptionTruncation:
             seen_messages.append(list(messages))
             return next(replies)
 
-        agent = Agent(name="t", model=TestModel(handler=_handler), tools=[])
+        provider = (
+            JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+            if provider_kind == "jsonl"
+            else InMemoryTracingProvider
+        )
+        agent = Agent(name="t", model=TestModel(handler=_handler), tools=[], tracing_provider=provider)
         stt = DelayedMockSTT()
         tts = SlowMockTTS(delay=0.03, chunk=b"\x00\x01" * 50, num_chunks=4)
         session = VoiceSession(
@@ -1711,6 +1776,8 @@ class TestInterruptionTruncation:
         merged_input = seen_messages[-1]
         user_texts = [m.collect_text() for m in merged_input if m.role == "user"]
         assert user_texts.count(combined) == 1, user_texts
+        # Nor the fragment, nor its heard reply: the cleanup dropped both.
+        assert [(m.role, m.collect_text()) for m in merged_input] == [("user", combined)]
 
     async def test_align_continue_memory_drops_heard_assistant(self) -> None:
         """Unit: CONTINUE cleanup must pop assistant:heard AND the fragment user

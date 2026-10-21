@@ -1,11 +1,14 @@
 """Agent-loop guardrail integration: the four edges, verdicts, shadow mode, HITL escalation."""
 
+import json
+
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.core.tool import Tool
 from timbal.guardrails import DetectPII, GuardrailStage, Verdict, guardrail
-from timbal.types.content import TextContent, ToolUseContent
+from timbal.state.tracing.providers import JsonlTracingProvider
+from timbal.types.content import TextContent, ThinkingContent, ToolUseContent
 from timbal.types.events import ApprovalEvent, GuardrailEvent, OutputEvent
 from timbal.types.message import Message
 
@@ -455,6 +458,59 @@ class TestThinkingScrubbing:
         assert thinking_blocks, "expected the thinking block to survive"
         assert "123-45-6789" not in thinking_blocks[0].thinking
         assert "[REDACTED_SSN]" in thinking_blocks[0].thinking
+
+
+class TestRedactionPersists:
+    """What a redact rail rewrites is what the trace stores and what the next turn sends,
+    not only what this turn's model call saw. A serializing provider stores the memory dump,
+    which must not come from a message's dump cached before the rewrite."""
+
+    @staticmethod
+    def _stored_memory(path) -> str:
+        record = json.loads(path.read_text().splitlines()[0])
+        root = next(s for s in record["spans"] if s["parent_call_id"] is None)
+        return json.dumps(root["memory"])
+
+    @pytest.mark.asyncio
+    async def test_redacted_input_is_stored_and_sent_next_turn(self, tmp_path):
+        sent = []
+
+        def handler(messages):
+            sent.append(" | ".join(m.collect_text() for m in messages))
+            return "noted"
+
+        path = tmp_path / "traces.jsonl"
+        agent = Agent(
+            name="a",
+            model=TestModel(handler=handler),
+            tools=[],
+            guardrails=["pii:redact"],
+            tracing_provider=JsonlTracingProvider.configured(_path=path),
+        )
+        first = await agent(prompt="my ssn is 123-45-6789").collect()
+        await agent(prompt="what did I say?", parent_id=first.run_id).collect()
+
+        assert "123-45-6789" not in self._stored_memory(path)
+        assert sent[-1] == "my ssn is [REDACTED_SSN] | noted | what did I say?"
+
+    @pytest.mark.asyncio
+    async def test_redacted_reply_and_reasoning_are_stored_redacted(self, tmp_path):
+        reply = Message(
+            role="assistant",
+            content=[ThinkingContent(thinking="their ssn is 123-45-6789"), TextContent(text="ssn 123-45-6789")],
+        )
+        path = tmp_path / "traces.jsonl"
+        agent = Agent(
+            name="a",
+            model=TestModel(handler=lambda _messages: reply),
+            tools=[],
+            guardrails=["pii:redact"],
+            tracing_provider=JsonlTracingProvider.configured(_path=path),
+        )
+        result = await agent(prompt="what is my ssn?").collect()
+
+        assert "123-45-6789" not in result.output.collect_text()
+        assert "123-45-6789" not in self._stored_memory(path)
 
 
 class TestUxSurface:

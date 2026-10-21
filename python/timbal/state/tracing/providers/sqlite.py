@@ -97,27 +97,27 @@ class SqliteTracingProvider(TracingProvider):
         if parent_id is None:
             return None
 
-        def _query() -> str | None:
+        def _query() -> tuple[str, str | None] | None:
             conn = cls._connect()
             try:
                 row = conn.execute(
-                    "SELECT spans FROM runs WHERE run_id = ?",
+                    "SELECT spans, parent_id FROM runs WHERE run_id = ?",
                     (str(parent_id),),
                 ).fetchone()
             finally:
                 conn.close()
-            return row[0] if row else None
+            return (row[0], row[1]) if row else None
 
         try:
-            spans_json = await asyncio.to_thread(_query)
+            row = await asyncio.to_thread(_query)
         except (OSError, sqlite3.Error):
             return None
 
-        if spans_json is None:
+        if row is None:
             return None
 
         try:
-            return Trace(json.loads(spans_json))
+            return Trace(json.loads(row[0]), parent_id=row[1])
         except (json.JSONDecodeError, ValueError):
             return None
 

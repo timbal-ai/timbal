@@ -83,12 +83,20 @@ class Message:
         object.__setattr__(self, "_metadata", dict(metadata) if metadata else None)
         # Serialized-form cache (see timbal.utils.serialization). Long
         # conversations re-dump the same Message objects on every turn
-        # (span input dump, memory dump, LLM input dump); messages are
-        # immutable after construction except for in-place content appends
-        # (e.g. synthesized server tool results), so the cache is validated
-        # against len(content).
+        # (span input dump, memory dump, LLM input dump). In-place content
+        # appends (e.g. synthesized server tool results) are caught by
+        # validating the cache against len(content); replacing a field drops
+        # it (__setattr__); editing a content block in place needs
+        # invalidate_message_dump_caches().
         object.__setattr__(self, "_cached_dump", None)
         object.__setattr__(self, "_cached_dump_len", -1)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name not in ("_cached_dump", "_cached_dump_len"):
+            # Replaced content can keep len(content), which the length check alone would serve stale.
+            object.__setattr__(self, "_cached_dump", None)
+            object.__setattr__(self, "_cached_dump_len", -1)
 
     @property
     def metadata(self) -> MappingProxyType[str, Any] | dict[str, Any]:

@@ -358,7 +358,7 @@ provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
 agent = Agent(model="...", tracing_provider=provider)
 ```
 
-**Session chaining** — pass `parent_id` via `RunContext` to retrieve the parent run's trace in `get()`. Used for multi-turn memory across process restarts.
+**Session chaining** — pass `parent_id` via `RunContext` to retrieve the parent run's trace in `get()`. Used for multi-turn memory across process restarts. `get()` should return `Trace(spans, parent_id=<the run that one continued>)`: a turn cut before its agent assembled memory stores none, and the next turn rebuilds it from the turn before plus the cut prompt (`Agent._previous_memory`, up to 8 such turns back). Live spans (in-memory) and serialized ones must agree, so `span.memory` stays unset until resolution completes.
 
 ### Exporters
 
@@ -593,6 +593,8 @@ msg.to_openai_chat_completions_input()
 # metadata={"source": "runtime", "kind": "background_task_completed"}
 # Filter with msg.is_runtime() when painting human transcripts.
 ```
+
+`dump()` caches each Message's serialized form (validated against `len(content)`). Reassigning a field (`msg.content = [...]`) drops the cache; editing a content block in place (`block.text = ...`) does not — call `invalidate_message_dump_caches(msg)` before the next dump, or serializing providers store the pre-edit text. Serializing providers store a span's `_memory_dump`, not `span.memory`: rewrite memory in place → re-dump it before saving.
 
 ### File
 

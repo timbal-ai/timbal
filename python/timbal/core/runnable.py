@@ -2599,12 +2599,15 @@ class Runnable(ABC, BaseModel):
             output_event._input_dump = span._input_dump
             output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
             if handoff_start is None:
-                await run_context._save_trace()
+                if not await run_context._save_trace():
+                    # The failure was counted on the span after the event copied its usage.
+                    output_event.usage = dict(span.usage)
             else:
                 # The continuation must not mutate the shared span until the
                 # foreground placeholder has been snapshotted for tracing.
                 try:
-                    await run_context._save_trace()
+                    if not await run_context._save_trace():
+                        output_event.usage = dict(span.usage)
                 finally:
                     handoff_start.set()
                     if handoff_control is not None and handoff_result is not None:

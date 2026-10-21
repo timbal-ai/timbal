@@ -132,6 +132,21 @@ class _EmitSink:
         return (_emit_sink_unpickle, ())
 
 
+class _EarlierRunLookup:
+    """A RunContext as ``TracingProvider.get()`` sees it when loading a run further up the chain.
+
+    ``get()`` loads ``run_context.parent_id``; credentials and everything else come from the
+    real context.
+    """
+
+    def __init__(self, original: "RunContext", parent_id: str) -> None:
+        self._original = original
+        self.parent_id = parent_id
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
+
+
 class RunContext(BaseModel):
     """Runtime execution context shared across all components in a run.
 
@@ -354,15 +369,15 @@ class RunContext(BaseModel):
         )
         self._tracing_provider = InMemoryTracingProvider
 
-    async def _get_parent_trace(self) -> Trace | None:
-        """Load the trace data for the parent run.
+    async def _get_parent_trace(self, run_id: str | None = None) -> Trace | None:
+        """Load the trace data for the parent run, or for ``run_id`` further up the chain.
 
         INTERNAL METHOD: This method is intended for internal framework use.
         Use with caution as it involves async I/O operations and direct
         interaction with the tracing provider.
 
         Returns:
-            The parent run's tracing data, or None if this is a root run or the
+            The run's tracing data, or None if this is a root run or the
             provider could not produce it. Provider failures are deliberately
             not fatal: unlike the in-memory provider, the platform provider
             *raises* on a missing or unreachable run, and a dangling or flaky
@@ -370,26 +385,37 @@ class RunContext(BaseModel):
             path callers already take for ``None`` — not abort a run (or end a
             voice call) that can otherwise proceed.
         """
-        if self.parent_id and self._tracing_provider is not None:
+        parent_id = run_id or self.parent_id
+        if parent_id and self._tracing_provider is not None:
+            lookup = self if parent_id == self.parent_id else _EarlierRunLookup(self, parent_id)
             try:
-                return await self._tracing_provider.get(self)
+                return await self._tracing_provider.get(lookup)
             except Exception as e:
                 _get_logger().error(
                     "Parent trace fetch failed. Continuing without it...",
-                    parent_id=self.parent_id,
+                    parent_id=parent_id,
                     run_id=self.id,
                     error=str(e),
                 )
                 return None
         return None
 
-    async def _save_trace(self) -> None:
+    async def _save_trace(self) -> bool:
         """Save the trace data for the run.
 
         INTERNAL METHOD: This method is intended for internal framework use.
         It persists the current run's trace data using the configured
         tracing provider. Manual calls to this method may interfere with
         the framework's automatic tracing lifecycle.
+
+        A provider failure does not fail the run: the run already happened,
+        and failing it loses the reply along with the trace (a platform 403
+        for a parent run that was never stored, an outage past the retries).
+        It is logged and counted as ``tracing:save_failed`` in usage.
+        Cancellation still propagates.
+
+        Returns:
+            False when the provider failed to store this snapshot.
         """
         # Sync session data to root span before saving. Skip when the session
         # was never populated ({} from get_session()) and never synced before —
@@ -401,7 +427,18 @@ class RunContext(BaseModel):
             root.session = self._session_data
             root._session_dump = await dump(self._session_data)
         if self._tracing_provider is not None:
-            await self._tracing_provider.put(self)
+            try:
+                await self._tracing_provider.put(self)
+            except Exception as e:
+                _get_logger().error(
+                    "Trace save failed. The run continues, but this snapshot was not stored...",
+                    run_id=self.id,
+                    parent_id=self.parent_id,
+                    error=str(e),
+                )
+                self.update_usage("tracing:save_failed", 1)
+                return False
+        return True
 
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""

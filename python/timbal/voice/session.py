@@ -38,6 +38,7 @@ from ..types.content import TextContent, ToolUseContent
 from ..types.events import ApprovalEvent, InteractionEvent, OutputEvent
 from ..types.events.delta import DeltaEvent, Text, TextDelta, ToolUse
 from ..types.message import Message
+from ..utils import dump
 from .config import (
     DEFAULT_GREETING_SYSTEM_PROMPT,
     DEFAULT_USER_IDLE_SYSTEM_PROMPT,
@@ -828,14 +829,15 @@ class VoiceSession:
             # *pre*-truncation snapshot for serializing providers (jsonl/platform).
             # Live session/memory are mutated in place; without this re-save the
             # stored trace still shows the full unheard reply.
+            truncated = False
             try:
-                self._apply_interruption_truncation(ctx=self._last_run_context, replace_last=True)
+                truncated = self._apply_interruption_truncation(ctx=self._last_run_context, replace_last=True)
             except Exception as e:
                 logger.warning("turn_truncation_failed", error=str(e), exc_info=True)
             ctx = self._last_run_context
             if ctx is not None:
                 try:
-                    await asyncio.shield(ctx._save_trace())
+                    await asyncio.shield(self._save_turn_trace(ctx, rewritten=truncated))
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
@@ -2253,9 +2255,10 @@ class VoiceSession:
                 # appending would leave the full entry plus a duplicate heard-prefix
                 # entry (and ``interrupt()`` skips its own rewrite once
                 # ``_last_interruption_heard_text`` is set here).
+                truncated = False
                 if interrupted:
                     try:
-                        self._apply_interruption_truncation(
+                        truncated = self._apply_interruption_truncation(
                             ctx=get_run_context(),
                             replace_last=self._turn_finalized_ok,
                         )
@@ -2279,7 +2282,7 @@ class VoiceSession:
                     # one put() per span completion and keep the latest snapshot per
                     # run id, so an extra save is consistent with their contract.
                     try:
-                        await asyncio.shield(ctx._save_trace())
+                        await asyncio.shield(self._save_turn_trace(ctx, rewritten=truncated))
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
@@ -3487,35 +3490,42 @@ class VoiceSession:
         if root is None or not isinstance(root.memory, list) or len(root.memory) < 1:
             return
         last = root.memory[-1]
+        popped = False
         if getattr(last, "role", None) == "assistant":
             prev = root.memory[-2] if len(root.memory) >= 2 else None
             if prev is not None and getattr(prev, "role", None) == "user":
                 if (prev.collect_text() or "") == fragment_user_text:
                     root.memory.pop()
+                    popped = True
                     last = root.memory[-1] if root.memory else None
         if last is not None and getattr(last, "role", None) == "user":
             if (last.collect_text() or "") == fragment_user_text:
                 root.memory.pop()
+                popped = True
         try:
-            await asyncio.shield(ctx._save_trace())
+            await asyncio.shield(self._save_turn_trace(ctx, rewritten=popped))
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.debug("continue_memory_resave_failed", error=str(e))
 
-    def _apply_interruption_truncation(self, ctx: RunContext | None, *, replace_last: bool = False) -> None:
+    def _apply_interruption_truncation(self, ctx: RunContext | None, *, replace_last: bool = False) -> bool:
         """Align transcript and agent memory with what the user actually *heard*.
 
+        Returns whether the root span's reply was rewritten (see ``_save_turn_trace``).
+
         On barge-in the LLM has usually generated (and we may have synthesized)
-        more text than was played. The trace keeps the full generation for
-        observability, but:
+        more text than was played. The model call's span keeps the full
+        generation for observability, but:
 
         * the session transcript gets an assistant entry with the heard prefix
-          (previously interrupted turns recorded no assistant text at all), and
+          (previously interrupted turns recorded no assistant text at all),
         * the assistant message in the run's memory — what the next turn
-          resolves as conversation history — is truncated to the heard prefix,
+          resolves as conversation history — is replaced by the heard prefix,
           or dropped entirely if nothing was played. Without this the agent
-          "remembers saying" things that were never spoken.
+          "remembers saying" things that were never spoken, and
+        * the run's output becomes that heard reply too (empty when nothing was
+          played). Both carry ``metadata["interrupted"] = True``.
 
         Two call sites: the cancelled turn's ``finally`` (mid-generation
         barge-in, appends the heard prefix) and ``interrupt()`` when the turn
@@ -3551,28 +3561,54 @@ class VoiceSession:
             self._transcript.append(TranscriptEntry(role="assistant", text=heard_text))
 
         if ctx is None:
-            return
+            return False
         root = ctx.root_span()
         if root is None or not isinstance(root.memory, list) or not root.memory:
-            return
+            return False
         last = root.memory[-1]
         if getattr(last, "role", None) != "assistant":
-            return
+            return False
         # Only touch the message if it is this turn's reply — guard against
         # mangling an earlier assistant/tool_use message.
         last_text = last.collect_text()
         turn_text = self._turn_assistant_text
         if not last_text or not turn_text:
-            return
+            return False
         if not (last_text.startswith(turn_text) or turn_text.startswith(last_text)):
-            return
+            return False
         non_text_content = [c for c in last.content if not isinstance(c, TextContent)]
-        if heard_text:
-            last.content = [TextContent(text=heard_text), *non_text_content]
-        elif non_text_content:
-            last.content = non_text_content
+        heard_content = [TextContent(text=heard_text), *non_text_content] if heard_text else non_text_content
+        # A new message, not an edit: the model call's span holds ``last`` as its output.
+        heard_reply = Message(
+            role="assistant",
+            content=heard_content,
+            stop_reason=last.stop_reason,
+            metadata={**last.metadata, "interrupted": True},
+        )
+        if heard_content:
+            root.memory[-1] = heard_reply
         else:
             root.memory.pop()
+        output = root.output
+        if isinstance(output, Message) and (output is last or output.collect_text() == last_text):
+            root.output = heard_reply
+        return True
+
+    @staticmethod
+    async def _save_turn_trace(ctx: RunContext, *, rewritten: bool) -> None:
+        """Persist ``ctx``'s trace, re-serializing the root span's memory and output after the session
+        rewrote them (interruption truncation, CONTINUE cleanup).
+
+        Serializing providers (jsonl, platform) store the dumps the span keeps alongside its
+        messages and output, not the objects themselves.
+        """
+        if rewritten:
+            root = ctx.root_span()
+            if root is not None:
+                if isinstance(root.memory, list):
+                    root._memory_dump = await dump(root.memory)
+                root._output_dump = await dump(root.output)
+        await ctx._save_trace()
 
     # -- Internal: metrics ----------------------------------------------------
 

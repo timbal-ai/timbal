@@ -29,6 +29,8 @@ async for event in session.run(microphone_chunks):
 
 `session.transcript` contains committed user and assistant entries with timestamps. Fillers are marked `filler=True`. At session end, the server sends `session_transcript` followed by `session_ended`. Transcript text reflects interruption handling and may contain only the heard prefix of a cancelled assistant reply.
 
+The stored trace follows the same rule. For an interrupted turn, the agent run's output and the assistant message in its memory hold the heard prefix, marked `metadata["interrupted"] = True`; the output is empty and the memory message dropped when nothing was heard. The model call's span keeps the full generated reply, so you can compare what was said with what was heard.
+
 ## Latency
 
 `TurnMetricsEvent` reports millisecond durations and a `run_id` for joining a voice turn to the agent trace. Unobserved stages have `None`, not zero.

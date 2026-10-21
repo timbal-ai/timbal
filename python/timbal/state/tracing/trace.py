@@ -6,8 +6,10 @@ from .span import Span
 
 class Trace(UserDict):
     
-    def __init__(self, data: dict[str, Any] | list[dict[str, Any]] | None = None):
+    def __init__(self, data: dict[str, Any] | list[dict[str, Any]] | None = None, parent_id: str | None = None):
         self._root_call_id = None
+        # The run this one continued from, when the provider that loaded it records it.
+        self.parent_id = parent_id
 
         if data is None:
             super().__init__({})
