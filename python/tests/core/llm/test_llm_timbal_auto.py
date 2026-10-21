@@ -155,6 +155,17 @@ class TestChatCompletionsRequest:
             pass
         assert "metadata" not in client.chat.completions.create.call_args.kwargs
 
+    async def test_app_tags_ride_along_with_attachments(self, tmp_path):
+        """``metadata.timbal_tags`` set through ``model_params`` reaches the platform untouched."""
+        messages = [_user_with_files(tmp_path, "revisa esto", "nda.pdf")]
+        create_stream, client = self._kwargs_for("timbal", messages, {"metadata": {"timbal_tags": "vip,voice"}})
+        async for _ in create_stream():
+            pass
+        assert client.chat.completions.create.call_args.kwargs["metadata"] == {
+            "timbal_tags": "vip,voice",
+            "timbal_attachments": "nda.pdf",
+        }
+
     async def test_no_metadata_key_when_nothing_to_declare(self):
         messages = [Message(role="user", content=[TextContent(text="hola")])]
         create_stream, client = self._kwargs_for("timbal", messages)
@@ -253,6 +264,18 @@ class TestRouterDispatch:
         assert client.chat.completions.create.call_args.kwargs["model"] == model_id.split("/", 1)[1]
         assert model_id in Model.__args__
 
+    @pytest.mark.parametrize("model_id", ["timbal/auto:support-v2", "timbal/auto-cost:support-v2"])
+    async def test_named_routing_config_passes_through(self, model_id):
+        """``:<name>`` selects a routing configuration; the proxy parses it."""
+        set_run_context(RunContext(tracing_provider=None, platform_config=_platform_config()))
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(side_effect=lambda **_: _one_chunk_stream())
+        messages = [Message(role="user", content=[TextContent(text="hola")])]
+        with patch("timbal.core.llm.router._resolve_client", return_value=(client, "https://api.timbal.ai/orgs/org_42/proxies/openai-completions/v1")):
+            async for _ in _llm_router(model=model_id, messages=messages):
+                pass
+        assert client.chat.completions.create.call_args.kwargs["model"] == model_id.split("/", 1)[1]
+
 
 class TestMemoryCompaction:
     """``timbal/auto*`` needs a known context window: with an unknown one the Agent
@@ -265,12 +288,19 @@ class TestMemoryCompaction:
             ("timbal/auto-balanced", 500_000),
             ("timbal/auto-cost", 500_000),
             ("timbal/auto-intelligence", 1_000_000),
+            ("timbal/auto:support-v2", 500_000),
+            ("timbal/auto-intelligence:legal", 1_000_000),
         ],
     )
     def test_context_window_is_known(self, model_id, window):
         from timbal.core.models import get_context_window
 
         assert get_context_window(model_id) == window
+
+    def test_named_config_suffix_is_only_stripped_for_timbal(self):
+        from timbal.core.models import get_context_window
+
+        assert get_context_window("openai/gpt-6-luna:ft-abc") is None
 
     @staticmethod
     def _span(memory):

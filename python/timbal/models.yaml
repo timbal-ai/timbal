@@ -1795,7 +1795,7 @@ models:
   provider: timbal
   display_name: Auto (intelligence)
   description: Intelligence profile — Claude Opus 5.5 at every tier with effort rising medium → high → max; Claude Fable 5.1 then GPT-6 Astra as fallbacks at the top; specialists on. Every turn, including small talk, goes to a frontier model.
-  notes: 'Served through the platform chat-completions proxy; requires a platform subject and no vendor key. Billed at the served model''s own rates plus a routing fee per turn. context_window is the smallest window among the models this profile can route to (Claude 5.x at 1M; GPT-6 Astra and Gemini 3.8 Flash are larger), so memory compaction and attachment bounding stay safe whichever model serves the turn.'
+  notes: 'Served through the platform chat-completions proxy; requires a platform subject and no vendor key. Billed at the served model''s own rates plus a routing fee per turn. context_window is the smallest window among the models this profile can route to (Claude 5.x at 1M; GPT-6 Astra and Gemini 3.8 Flash are larger; Grok 4.7, at 500K, is a last-resort fallback only for prompts under about 450K tokens), so memory compaction and attachment bounding stay safe whichever model serves the turn.'
   input_price: null
   output_price: null
   context_window: 1000000

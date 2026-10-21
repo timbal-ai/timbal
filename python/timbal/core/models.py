@@ -48,6 +48,19 @@ def _load_models() -> dict[str, dict[str, Any]]:
     return {m["id"]: m for m in data.get("models", [])}
 
 
+def _catalog_entry(model_id: str) -> dict[str, Any] | None:
+    """Catalogue entry for ``model_id``.
+
+    ``timbal/auto*:<name>`` (a profile with a named routing configuration)
+    shares the profile's entry: same context window, same pricing metadata.
+    """
+    models = _load_models()
+    entry = models.get(model_id)
+    if entry is None and model_id.startswith("timbal/") and ":" in model_id:
+        entry = models.get(model_id.split(":", 1)[0])
+    return entry
+
+
 def get_context_window(model_id: str) -> int | None:
     """Get the context window size (in tokens) for a model.
 
@@ -57,8 +70,7 @@ def get_context_window(model_id: str) -> int | None:
     Returns:
         Context window in tokens, or None if unknown.
     """
-    models = _load_models()
-    model = models.get(model_id)
+    model = _catalog_entry(model_id)
     if model is None:
         return None
     return model.get("context_window")
@@ -76,8 +88,7 @@ def get_long_context_threshold(model_id: str) -> int | None:
     Returns:
         Threshold in input tokens, or None if the model has no long-context tier (or is unknown).
     """
-    models = _load_models()
-    model = models.get(model_id)
+    model = _catalog_entry(model_id)
     if model is None:
         return None
     long_context = model.get("long_context")
@@ -89,7 +100,7 @@ def get_long_context_threshold(model_id: str) -> int | None:
 
 def uses_long_context_pricing(model_id: str, input_tokens: int) -> bool:
     """Whether this prompt falls in the model's long-context pricing tier."""
-    model = _load_models().get(model_id)
+    model = _catalog_entry(model_id)
     if model is None:
         return False
     long_context = model.get("long_context")
@@ -108,7 +119,7 @@ def service_tier_usage_suffix(model_id: str, service_tier: str | None) -> str:
     if not service_tier:
         return ""
     tier = "fast" if service_tier == "priority" else service_tier
-    model = _load_models().get(model_id)
+    model = _catalog_entry(model_id)
     tiers = model.get("service_tiers") if model is not None else None
     if not isinstance(tiers, dict) or tier not in tiers:
         return ""
@@ -128,8 +139,7 @@ def has_cache_write_pricing(model_id: str) -> bool:
     True; otherwise those tokens stay in ``input_text_tokens`` (billed at the input rate)
     rather than landing in a unit no cost table can price.
     """
-    models = _load_models()
-    model = models.get(model_id)
+    model = _catalog_entry(model_id)
     if model is None:
         return False
     return model.get("cache_write_price") is not None
