@@ -14,7 +14,7 @@ Use the same server and browser playground:
 3. While the assistant speaks, ask a different question. Playback should stop and the next turn should respond to your new words.
 4. Repeat with a short acknowledgement such as "yes" and with a longer request.
 
-An interruption cancels the current reply and clears queued playback. Conversation memory is adjusted to the portion the caller is estimated or known to have heard. A cancelled tool may already have performed work; stopping speech does not undo external side effects.
+An interruption cancels the current reply and clears queued playback. Conversation memory is adjusted to the portion the caller is estimated or known to have heard, and that message is marked `metadata["interrupted"] = True` (metadata is not sent to model providers). A cancelled tool may already have performed work; stopping speech does not undo external side effects.
 
 Greetings have their own `interruptible` setting, which defaults to false; see [Greetings](/voice/greetings).
 

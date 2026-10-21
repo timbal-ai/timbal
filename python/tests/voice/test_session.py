@@ -1341,31 +1341,60 @@ class TestInterruptionTruncation:
         assert first_reply_text != self.RESPONSE
         assert self.RESPONSE.startswith(first_reply_text)
 
-    @pytest.mark.parametrize(("interrupt_after_done", "played_bytes"), [(False, 50), (True, 200)])
-    async def test_serializing_provider_stores_the_heard_prefix(
-        self, tmp_path, interrupt_after_done: bool, played_bytes: int
-    ) -> None:
-        """JSONL and platform store the agent's memory dump, not its live messages: the truncation
-        must reach the dump, or the next turn resolves the full reply the caller never heard."""
-        from timbal.state.tracing.providers import JsonlTracingProvider
+    async def _stored_barge_in(self, tmp_path, provider_kind: str, *, interrupt_after_done: bool, played_bytes: int):
+        """Run a barge-in; return the second turn's context, and the first turn's stored memory,
+        output and model call output as messages."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
         from timbal.types.message import Message
 
-        provider = JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+        if provider_kind == "jsonl":
+            provider = JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+        else:
+            provider = InMemoryTracingProvider
         session, _ = await self._run_barge_in_session(
             FakePlaybackTracker(),
             played_bytes=played_bytes,
             interrupt_after_done=interrupt_after_done,
             tracing_provider=provider,
         )
-
         second_turn = session._last_run_context
-        stored_first_turn = await provider.get(second_turn)
-        stored_root = next(s for s in stored_first_turn.values() if s.parent_call_id is None)
-        stored_reply = next(Message.validate(m) for m in stored_root.memory if m["role"] == "assistant")
+        stored = await provider.get(second_turn)
+        root = next(s for s in stored.values() if s.parent_call_id is None)
+        llm = next(s for s in stored.values() if s.path.endswith(".llm"))
+        memory = [Message.validate(m) for m in root.memory]
+        return second_turn, memory, Message.validate(root.output), Message.validate(llm.output)
+
+    @pytest.mark.parametrize("provider_kind", ["jsonl", "in_memory"])
+    @pytest.mark.parametrize(("interrupt_after_done", "played_bytes"), [(False, 50), (True, 200)])
+    async def test_stored_reply_is_the_heard_prefix(
+        self, tmp_path, provider_kind: str, interrupt_after_done: bool, played_bytes: int
+    ) -> None:
+        """JSONL and platform store the span's dumps, not its live objects: the truncation must
+        reach them, or the next turn resolves the full reply the caller never heard. The run's
+        output is the heard reply too; the model call's span keeps the full generation, which
+        the in-memory provider shows unless the truncation edited the message they share."""
+        second_turn, memory, output, llm_output = await self._stored_barge_in(
+            tmp_path, provider_kind, interrupt_after_done=interrupt_after_done, played_bytes=played_bytes
+        )
+
+        stored_reply = next(m for m in memory if m.role == "assistant")
         resolved_reply = next(m for m in second_turn.root_span().memory if m.role == "assistant")
-        for reply in (stored_reply, resolved_reply):
+        for reply in (stored_reply, resolved_reply, output):
             assert reply.collect_text() != self.RESPONSE
             assert self.RESPONSE.startswith(reply.collect_text())
+            assert reply.metadata["interrupted"] is True
+        assert llm_output.collect_text() == self.RESPONSE
+
+    @pytest.mark.parametrize("provider_kind", ["jsonl", "in_memory"])
+    async def test_nothing_heard_stores_an_empty_interrupted_output(self, tmp_path, provider_kind: str) -> None:
+        _, memory, output, llm_output = await self._stored_barge_in(
+            tmp_path, provider_kind, interrupt_after_done=False, played_bytes=0
+        )
+
+        assert [m.role for m in memory] == ["user"]
+        assert output.collect_text() == ""
+        assert output.metadata["interrupted"] is True
+        assert llm_output.collect_text() == self.RESPONSE
 
     async def test_nothing_heard_drops_assistant_from_memory_and_transcript(self) -> None:
         tracker = FakePlaybackTracker()

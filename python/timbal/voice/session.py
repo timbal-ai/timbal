@@ -836,7 +836,7 @@ class VoiceSession:
             ctx = self._last_run_context
             if ctx is not None:
                 try:
-                    await asyncio.shield(self._save_turn_trace(ctx, memory_rewritten=truncated))
+                    await asyncio.shield(self._save_turn_trace(ctx, truncated=truncated))
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
@@ -2281,7 +2281,7 @@ class VoiceSession:
                     # one put() per span completion and keep the latest snapshot per
                     # run id, so an extra save is consistent with their contract.
                     try:
-                        await asyncio.shield(self._save_turn_trace(ctx, memory_rewritten=truncated))
+                        await asyncio.shield(self._save_turn_trace(ctx, truncated=truncated))
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
@@ -3498,18 +3498,20 @@ class VoiceSession:
     def _apply_interruption_truncation(self, ctx: RunContext | None, *, replace_last: bool = False) -> bool:
         """Align transcript and agent memory with what the user actually *heard*.
 
-        Returns whether the root span's memory was rewritten (see ``_save_turn_trace``).
+        Returns whether the root span's reply was rewritten (see ``_save_turn_trace``).
 
         On barge-in the LLM has usually generated (and we may have synthesized)
-        more text than was played. The trace keeps the full generation for
-        observability, but:
+        more text than was played. The model call's span keeps the full
+        generation for observability, but:
 
         * the session transcript gets an assistant entry with the heard prefix
-          (previously interrupted turns recorded no assistant text at all), and
+          (previously interrupted turns recorded no assistant text at all),
         * the assistant message in the run's memory — what the next turn
-          resolves as conversation history — is truncated to the heard prefix,
+          resolves as conversation history — is replaced by the heard prefix,
           or dropped entirely if nothing was played. Without this the agent
-          "remembers saying" things that were never spoken.
+          "remembers saying" things that were never spoken, and
+        * the run's output becomes that heard reply too (empty when nothing was
+          played). Both carry ``metadata["interrupted"] = True``.
 
         Two call sites: the cancelled turn's ``finally`` (mid-generation
         barge-in, appends the heard prefix) and ``interrupt()`` when the turn
@@ -3561,25 +3563,36 @@ class VoiceSession:
         if not (last_text.startswith(turn_text) or turn_text.startswith(last_text)):
             return False
         non_text_content = [c for c in last.content if not isinstance(c, TextContent)]
-        if heard_text:
-            last.content = [TextContent(text=heard_text), *non_text_content]
-        elif non_text_content:
-            last.content = non_text_content
+        heard_content = [TextContent(text=heard_text), *non_text_content] if heard_text else non_text_content
+        # A new message, not an edit: the model call's span holds ``last`` as its output.
+        heard_reply = Message(
+            role="assistant",
+            content=heard_content,
+            stop_reason=last.stop_reason,
+            metadata={**last.metadata, "interrupted": True},
+        )
+        if heard_content:
+            root.memory[-1] = heard_reply
         else:
             root.memory.pop()
+        output = root.output
+        if isinstance(output, Message) and (output is last or output.collect_text() == last_text):
+            root.output = heard_reply
         return True
 
     @staticmethod
-    async def _save_turn_trace(ctx: RunContext, *, memory_rewritten: bool) -> None:
-        """Persist ``ctx``'s trace, re-serializing the root span's memory after an in-place rewrite.
+    async def _save_turn_trace(ctx: RunContext, *, truncated: bool) -> None:
+        """Persist ``ctx``'s trace, re-serializing the root span's memory and output after a truncation.
 
-        Serializing providers (jsonl, platform) store the memory dump the agent keeps in step
-        with its messages, not the messages themselves.
+        Serializing providers (jsonl, platform) store the dumps the span keeps alongside its
+        messages and output, not the objects themselves.
         """
-        if memory_rewritten:
+        if truncated:
             root = ctx.root_span()
-            if root is not None and isinstance(root.memory, list):
-                root._memory_dump = await dump(root.memory)
+            if root is not None:
+                if isinstance(root.memory, list):
+                    root._memory_dump = await dump(root.memory)
+                root._output_dump = await dump(root.output)
         await ctx._save_trace()
 
     # -- Internal: metrics ----------------------------------------------------
