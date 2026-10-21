@@ -258,7 +258,7 @@ application policy decides whether the completion is later presented in chat.
 ## Acceptance gates and rollout
 
 Phase 1's executable tests are in
-[`test_continuation.py`](../../python/tests/core/test_continuation.py). They cover
+`python/tests/core/test_continuation.py` in the repository. They cover
 multi-run chaining; in-memory and JSONL history; no historical edits; no extra
 human message; completion batching; completion during generation; acknowledgement;
 same-agent session isolation; owner conflicts before hooks; paused/failed runs;
