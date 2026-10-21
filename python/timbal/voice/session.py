@@ -836,7 +836,7 @@ class VoiceSession:
             ctx = self._last_run_context
             if ctx is not None:
                 try:
-                    await asyncio.shield(self._save_turn_trace(ctx, truncated=truncated))
+                    await asyncio.shield(self._save_turn_trace(ctx, rewritten=truncated))
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
@@ -2281,7 +2281,7 @@ class VoiceSession:
                     # one put() per span completion and keep the latest snapshot per
                     # run id, so an extra save is consistent with their contract.
                     try:
-                        await asyncio.shield(self._save_turn_trace(ctx, truncated=truncated))
+                        await asyncio.shield(self._save_turn_trace(ctx, rewritten=truncated))
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
@@ -3479,17 +3479,20 @@ class VoiceSession:
         if root is None or not isinstance(root.memory, list) or len(root.memory) < 1:
             return
         last = root.memory[-1]
+        popped = False
         if getattr(last, "role", None) == "assistant":
             prev = root.memory[-2] if len(root.memory) >= 2 else None
             if prev is not None and getattr(prev, "role", None) == "user":
                 if (prev.collect_text() or "") == fragment_user_text:
                     root.memory.pop()
+                    popped = True
                     last = root.memory[-1] if root.memory else None
         if last is not None and getattr(last, "role", None) == "user":
             if (last.collect_text() or "") == fragment_user_text:
                 root.memory.pop()
+                popped = True
         try:
-            await asyncio.shield(ctx._save_trace())
+            await asyncio.shield(self._save_turn_trace(ctx, rewritten=popped))
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -3581,13 +3584,14 @@ class VoiceSession:
         return True
 
     @staticmethod
-    async def _save_turn_trace(ctx: RunContext, *, truncated: bool) -> None:
-        """Persist ``ctx``'s trace, re-serializing the root span's memory and output after a truncation.
+    async def _save_turn_trace(ctx: RunContext, *, rewritten: bool) -> None:
+        """Persist ``ctx``'s trace, re-serializing the root span's memory and output after the session
+        rewrote them (interruption truncation, CONTINUE cleanup).
 
         Serializing providers (jsonl, platform) store the dumps the span keeps alongside its
         messages and output, not the objects themselves.
         """
-        if truncated:
+        if rewritten:
             root = ctx.root_span()
             if root is not None:
                 if isinstance(root.memory, list):

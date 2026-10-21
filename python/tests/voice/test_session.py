@@ -1672,12 +1672,15 @@ class TestInterruptionTruncation:
         assert self.RESPONSE.startswith(heard)
         assert assistant_entries[1].text == "Second reply"
 
-    async def test_continuation_with_heard_audio_merges_user_entry(self) -> None:
+    @pytest.mark.parametrize("provider_kind", ["in_memory", "jsonl"])
+    async def test_continuation_with_heard_audio_merges_user_entry(self, tmp_path, provider_kind: str) -> None:
         """Regression: on CONTINUE_TURN, interrupt() runs before the transcript
         merge, and the aborted fragment turn's truncation can append a heard
         assistant entry. The old merge only replaced the last entry when it was
         ``user``, so it appended a *second* user line and left the spurious
-        assistant fragment between them."""
+        assistant fragment between them. JSONL stores the memory dump, which the
+        cleanup must re-serialize, or the merged turn still sees the fragment."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider, JsonlTracingProvider
         from timbal.voice.turn_detection import (
             CommitAction,
             CommitDecision,
@@ -1714,7 +1717,12 @@ class TestInterruptionTruncation:
             seen_messages.append(list(messages))
             return next(replies)
 
-        agent = Agent(name="t", model=TestModel(handler=_handler), tools=[])
+        provider = (
+            JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+            if provider_kind == "jsonl"
+            else InMemoryTracingProvider
+        )
+        agent = Agent(name="t", model=TestModel(handler=_handler), tools=[], tracing_provider=provider)
         stt = DelayedMockSTT()
         tts = SlowMockTTS(delay=0.03, chunk=b"\x00\x01" * 50, num_chunks=4)
         session = VoiceSession(
@@ -1768,6 +1776,8 @@ class TestInterruptionTruncation:
         merged_input = seen_messages[-1]
         user_texts = [m.collect_text() for m in merged_input if m.role == "user"]
         assert user_texts.count(combined) == 1, user_texts
+        # Nor the fragment, nor its heard reply: the cleanup dropped both.
+        assert [(m.role, m.collect_text()) for m in merged_input] == [("user", combined)]
 
     async def test_align_continue_memory_drops_heard_assistant(self) -> None:
         """Unit: CONTINUE cleanup must pop assistant:heard AND the fragment user
