@@ -404,6 +404,69 @@ async def test_evicting_the_newer_snapshot_does_not_let_an_older_save_in(monkeyp
     assert methods == ["PATCH", "PATCH", "GET"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache", ["on", "off"])
+async def test_a_read_waits_for_the_parents_save_in_flight(monkeypatch, cache):
+    """The next turn can start while the previous one's shielded save is still on the wire; asking the
+    platform then would get a 404 or an older snapshot."""
+    if cache == "off":
+        monkeypatch.setenv("TIMBAL_TRACE_CACHE_MAX_ENTRIES", "0")
+    stored = _context(run_id="run-1")
+    stored._trace["c1"] = dict(RECORD)
+    platform: dict[str, dict] = {}
+    patch_sent, release = asyncio.Event(), asyncio.Event()
+    methods = []
+
+    async def request(method, path, content=None, **_):
+        methods.append(method)
+        if method == "PATCH":
+            patch_sent.set()
+            await release.wait()
+            platform[path] = json.loads(content)
+            return _ok()
+        if path not in platform:
+            raise RuntimeError("404")
+        return _ok(platform[path])
+
+    with patch("timbal.platform.utils._request", request):
+        save = asyncio.create_task(Provider._store(stored))
+        await patch_sent.wait()
+        read = asyncio.create_task(Provider.get(_context(parent_id="run-1")))
+        await asyncio.sleep(0.05)
+        assert not read.done()
+        release.set()
+        trace = await read
+        await save
+
+    assert trace["c1"].path == "voice_agent"
+    assert methods == (["PATCH"] if cache == "on" else ["PATCH", "GET"])
+
+
+@pytest.mark.asyncio
+async def test_a_save_that_hangs_holds_the_read_only_for_the_bound(monkeypatch):
+    monkeypatch.setattr(PlatformTracingProvider, "_save_wait_s", 0.05)
+    stored = _context(run_id="run-1")
+    stored._trace["c1"] = dict(RECORD)
+    patch_sent = asyncio.Event()
+
+    async def request(method, **_):
+        if method == "PATCH":
+            patch_sent.set()
+            await asyncio.Event().wait()
+        return _ok({"trace": [dict(RECORD)]})
+
+    with patch("timbal.platform.utils._request", request):
+        save = asyncio.create_task(Provider._store(stored))
+        await patch_sent.wait()
+        trace = await asyncio.wait_for(Provider.get(_context(parent_id="run-1")), timeout=1)
+        save.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await save
+
+    assert trace is not None
+    assert not PlatformTracingProvider._saving
+
+
 def test_interleaved_conversations_keep_their_previous_turn():
     conversations = 64
     for conv in range(conversations):

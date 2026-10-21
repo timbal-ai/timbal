@@ -880,6 +880,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 parent_id=run_context.parent_id,
                 run_id=run_context.id,
             )
+            run_context.update_usage("memory:parent_missing", 1)
             current_span.memory = [prompt]
             return
 
@@ -978,8 +979,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
                 source = None
             else:
-                trace = await run_context._get_parent_trace(trace.parent_id)
-                source = self._own_span(trace) if trace is not None else None
+                parent_id = trace.parent_id
+                trace = await run_context._get_parent_trace(parent_id)
+                if trace is None:
+                    logger.error(
+                        "Earlier turn not found. Continuing from the interrupted turns' prompts only...",
+                        parent_id=parent_id,
+                        run_id=run_context.id,
+                    )
+                    run_context.update_usage("memory:parent_missing", 1)
+                    source = None
+                else:
+                    source = self._own_span(trace)
 
         memory = [Message.validate(m) for m in source.memory] if source is not None else []
         status = source.status if source is not None else None

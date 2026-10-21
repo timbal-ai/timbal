@@ -72,6 +72,8 @@ A turn can end early: a voice barge-in cancels it, a timeout expires, or it fail
 
 This holds on every built-in provider, with or without the platform trace cache. Rebuilding relies on the provider returning the run a trace continued from (`Trace.parent_id`); a custom provider that does not set it continues from the interrupted prompt alone.
 
+When the run a turn continues from cannot be loaded at all (never stored, deleted, or unreachable), the turn continues without that conversation. It logs an error and counts `memory:parent_missing` in the run's usage, so lost conversations can be monitored.
+
 ## Rewind
 
 Timbal supports conversation branching, allowing you to rewind to any previous point and explore alternative conversation paths.

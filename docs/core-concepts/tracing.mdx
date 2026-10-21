@@ -84,4 +84,6 @@ Setting either value to `0` disables caching and clears existing entries on the 
 
 Cache reads and writes remove expired entries, including entries for other runs. Cleanup is lazy: an idle process retains entries until the next cache access. When either limit is exceeded, the least recently saved runs are evicted; a single trace larger than the byte limit is not cached. Eviction only removes the local copy; traces remain stored on the platform, and cache misses fetch them there. Traces fetched from the platform are not added to this cache.
 
+A read of a run this process is still saving waits up to 2 seconds for the saves already in flight, with or without the cache: until a PATCH lands, the platform may answer 404 or an older snapshot. This covers a voice turn whose save is still on the wire when the next turn starts.
+
 Entries are scoped by host, organization, app, token, and run ID, and each read returns an independent copy. Updates made by another process can remain invisible until the cached entry expires or is evicted; lower the TTL or disable caching when those updates must be visible immediately.

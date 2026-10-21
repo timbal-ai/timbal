@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import functools
 import hashlib
 import itertools
@@ -53,6 +54,17 @@ def _parse_cache_limits(
     return capacity, ttl
 
 
+class _Saves:
+    """One run's saves in flight, and the newest snapshot among its saves that finished."""
+
+    __slots__ = ("newest", "pending")
+
+    def __init__(self) -> None:
+        # snapshot -> resolved when that save finishes, successfully or not
+        self.pending: dict[int, asyncio.Future[None]] = {}
+        self.newest = -1
+
+
 class PlatformTracingProvider(TracingProvider):
     """Platform tracing provider using platform-wide storage.
 
@@ -83,6 +95,10 @@ class PlatformTracingProvider(TracingProvider):
     cache. Either set to zero disables caching. The cache also holds at most
     64 MiB of serialized traces. Expired entries are removed on cache reads
     and writes; there is no background cleanup task.
+
+    Reading a run this process is still saving waits for those saves first,
+    up to ``_save_wait_s`` (default 2 s), cache or no cache: until the PATCH
+    lands, the platform may answer 404 or an older snapshot.
     """
 
     platform_config: PlatformConfig | None = None
@@ -92,9 +108,11 @@ class PlatformTracingProvider(TracingProvider):
     # Numbers snapshots as they are taken: saves of one run overlap (parallel tools, background
     # children) and their PATCHes can finish in any order.
     _snapshots: ClassVar[itertools.count] = itertools.count()
-    # run key -> [saves in flight, newest snapshot among those that finished]. Kept apart from _recent so
-    # eviction cannot lose it, and dropped with the run's last save in flight: any later save takes a higher number.
-    _saving: ClassVar[dict[str, list[int]]] = {}
+    # run key -> the run's saves in flight. Kept apart from _recent so eviction cannot lose it, and dropped
+    # with the run's last save in flight: any later save takes a higher number.
+    _saving: ClassVar[dict[str, _Saves]] = {}
+    # How long a read waits for saves of that run already in flight before asking the platform.
+    _save_wait_s: ClassVar[float] = 2.0
     # One entry per live conversation: concurrent calls sharing a process must not evict each other between turns.
     _recent_max: ClassVar[int] = 256
     _recent_max_bytes: ClassVar[int] = 64 * 1024 * 1024
@@ -138,12 +156,14 @@ class PlatformTracingProvider(TracingProvider):
         capacity, ttl = cls._recent_limits()
         now = time.monotonic()
         newest = -1
-        saving = PlatformTracingProvider._saving.get(key)
-        if saving is not None:
-            saving[0] -= 1
-            if not saving[0]:
+        saves = PlatformTracingProvider._saving.get(key)
+        if saves is not None:
+            settled = saves.pending.pop(snapshot, None)
+            if settled is not None and not settled.done():
+                settled.set_result(None)
+            if not saves.pending:
                 del PlatformTracingProvider._saving[key]
-            newest, saving[1] = saving[1], max(saving[1], snapshot)
+            newest, saves.newest = saves.newest, max(saves.newest, snapshot)
         # An older snapshot finishing after a newer one leaves the cache as the newer one left it.
         if snapshot > newest:
             recent = PlatformTracingProvider._recent
@@ -203,7 +223,14 @@ class PlatformTracingProvider(TracingProvider):
             subject_path = f"apps/{subject.app_id}"
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
-        recalled = cls._recall(cls._recent_key(platform_config, subject_path, run_context.parent_id))
+        key = cls._recent_key(platform_config, subject_path, run_context.parent_id)
+        saves = PlatformTracingProvider._saving.get(key)
+        if saves is not None and saves.pending:
+            # The parent's save is still in flight (a voice turn's shielded save racing the next turn): the
+            # platform could answer 404, or an older snapshot. Only saves already started are awaited, so a
+            # parent that keeps saving (background children) does not hold every read for the full bound.
+            await asyncio.wait(list(saves.pending.values()), timeout=cls._save_wait_s)
+        recalled = cls._recall(key)
         if recalled is not None:
             return recalled
         res = await _request(
@@ -241,7 +268,8 @@ class PlatformTracingProvider(TracingProvider):
         # Taken with no await since model_dump(), so numbers follow snapshot order.
         snapshot = next(PlatformTracingProvider._snapshots)
         key = cls._recent_key(platform_config, subject_path, run_context.id)
-        PlatformTracingProvider._saving.setdefault(key, [0, -1])[0] += 1
+        saves = PlatformTracingProvider._saving.setdefault(key, _Saves())
+        saves.pending[snapshot] = asyncio.get_running_loop().create_future()
         try:
             res = await _request(
                 method="PATCH",

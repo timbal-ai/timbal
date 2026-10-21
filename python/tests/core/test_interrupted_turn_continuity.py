@@ -72,30 +72,64 @@ class GatedModel(TestModel):
         await self.after.hit()
 
 
-@pytest.fixture
-def platform():
-    """The platform's run store, behind the provider's HTTP calls."""
-    runs: dict[str, dict] = {}
+class FakePlatform:
+    """The platform's runs API as monolith serves it (``apps/runs/edit.rs``, ``single.rs``).
 
-    async def request(method, path, headers=None, json=None, content=None, **_):
+    Runs get a numeric id; the SDK's run id is the idempotency key. Either one looks a run up.
+    PATCH replaces the stored trace; creating a run whose ``parent_id`` matches no run is 403.
+    GET returns ``parent_id`` as the parent's numeric id, serialized as a string.
+    """
+
+    def __init__(self) -> None:
+        self.runs: dict[int, dict] = {}
+        self.reads: list[str] = []
+
+    def find(self, run_id: str | None) -> dict | None:
+        if run_id is None:
+            return None
+        if run_id.isdigit():
+            return self.runs.get(int(run_id))
+        return next((run for run in self.runs.values() if run["idempotency_key"] == run_id), None)
+
+    async def request(self, method, path, content=None, **_):
         run_id = path.rsplit("/", 1)[-1]
+        run = self.find(run_id)
         res = MagicMock()
         res.raise_for_status = MagicMock()
         if method == "PATCH":
-            runs[run_id] = _json.loads(content)
-        elif run_id in runs:
-            res.json = MagicMock(return_value=runs[run_id])
-        else:
+            body = json.loads(content)
+            if run is None:
+                parent = self.find(body.get("parent_id"))
+                if body.get("parent_id") is not None and parent is None:
+                    raise RuntimeError(f"403 {path}: parent not found")
+                run = {"id": len(self.runs) + 1, "idempotency_key": run_id, "parent_pk": parent and parent["id"]}
+                self.runs[run["id"]] = run
+            run["trace"] = body["trace"]
+            return res
+        self.reads.append(run_id)
+        if run is None:
             raise RuntimeError(f"404 {path}")
+        parent_pk = run["parent_pk"]
+        res.json = MagicMock(
+            return_value={
+                "id": str(run["id"]),
+                "parent_id": None if parent_pk is None else str(parent_pk),
+                "idempotency_key": run["idempotency_key"],
+                "trace": run["trace"],
+            }
+        )
         return res
 
-    _json = json
-    with patch("timbal.platform.utils._request", request):
-        yield runs
+
+@pytest.fixture(autouse=True)
+def platform():
+    fake = FakePlatform()
+    with patch("timbal.platform.utils._request", fake.request):
+        yield fake
 
 
 @pytest.fixture
-def provider(request, tmp_path, platform, monkeypatch):
+def provider(request, tmp_path, monkeypatch):
     monkeypatch.delenv("TIMBAL_TRACE_CACHE_MAX_ENTRIES", raising=False)
     _parse_cache_limits.cache_clear()
     kind = request.param
@@ -132,12 +166,15 @@ class Conversation:
             await self.gates["parent_load"].hit()
             return await load_parent(ctx, *args)
 
+        def charge_card(amount: int) -> str:
+            return f"charged {amount}"
+
         monkeypatch.setattr(RunContext, "_get_parent_trace", gated_load)
         self.agent = Agent(
             name="voice_agent",
             model=GatedModel(handler, before=self.gates["model_call"], after=self.gates["after_reply"]),
             system_prompt=system_prompt,
-            tools=[Tool(name="charge_card", handler=lambda amount: "charged", requires_approval=True)],
+            tools=[Tool(name="charge_card", handler=charge_card, requires_approval=True)],
             tracing_provider=provider,
         )
 
@@ -221,6 +258,41 @@ async def test_consecutive_interrupted_turns_are_all_kept(provider, monkeypatch)
         "Well, near Paris.",
         "What is my name?",
     ]
+
+
+@pytest.mark.parametrize("provider", ["platform_uncached"], indirect=True)
+async def test_the_walk_back_follows_the_platforms_numeric_parent_id(provider, monkeypatch, platform):
+    chat = Conversation(provider, monkeypatch, replies=["Nice to meet you, Ada."])
+    first = await chat.turn("My name is Ada.")
+    cut = await chat.interrupted_turn("I live in Paris.", parent_id=first.run_id, at="system_prompt")
+
+    await chat.turn("What is my name?", parent_id=cut)
+
+    assert chat.last_input() == ["My name is Ada.", "Nice to meet you, Ada.", "I live in Paris.", "What is my name?"]
+    assert any(read.isdigit() for read in platform.reads)
+
+
+@pytest.mark.parametrize("provider", ["in_memory", "jsonl", "sqlite"], indirect=True)
+async def test_a_turn_whose_parent_cannot_be_loaded_is_counted(provider, monkeypatch):
+    chat = Conversation(provider, monkeypatch)
+
+    result = await chat.turn("What is my name?", parent_id="run-that-was-never-stored")
+
+    assert chat.last_input() == ["What is my name?"]
+    assert result.usage["memory:parent_missing"] == 1
+
+
+@pytest.mark.parametrize("provider", ["in_memory"], indirect=True)
+async def test_a_chain_broken_behind_an_interrupted_turn_is_counted(provider, monkeypatch):
+    chat = Conversation(provider, monkeypatch, replies=["Nice to meet you, Ada."])
+    first = await chat.turn("My name is Ada.")
+    cut = await chat.interrupted_turn("I live in Paris.", parent_id=first.run_id, at="system_prompt")
+    del InMemoryTracingProvider._storage[first.run_id]
+
+    result = await chat.turn("What is my name?", parent_id=cut)
+
+    assert chat.last_input() == ["I live in Paris.", "What is my name?"]
+    assert result.usage["memory:parent_missing"] == 1
 
 
 @pytest.mark.parametrize("provider", ["in_memory"], indirect=True)
