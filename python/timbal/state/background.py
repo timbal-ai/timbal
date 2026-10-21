@@ -905,6 +905,9 @@ class BackgroundTaskStore:
         self._completion_inbox: list[dict[str, Any]] = []
         # task_ids already enqueued, drained, or acked via peek — never re-inject.
         self._completion_notified: set[str] = set()
+        self._completion_changed: asyncio.Event | None = None
+        self._continuation_owner: object | None = None
+        self._continuation_run_id: str | None = None
         self.max_concurrent = (
             _default_max_concurrent() if max_concurrent is _UNSET else max_concurrent  # type: ignore[assignment]
         )
@@ -976,6 +979,7 @@ class BackgroundTaskStore:
             if record.finished_at is None:
                 record.finished_at = time.monotonic()
             self._enqueue_completion(record)
+            self._wake_completion_waiter()
         else:
 
             def _on_done(_t: asyncio.Task) -> None:
@@ -983,6 +987,7 @@ class BackgroundTaskStore:
                 if record.finished_at is None:
                     record.finished_at = time.monotonic()
                 self._enqueue_completion(record)
+                self._wake_completion_waiter()
 
             task.add_done_callback(_on_done)
 
@@ -1103,6 +1108,54 @@ class BackgroundTaskStore:
     def pending_completions(self) -> list[dict[str, Any]]:
         """Peek the completion inbox without draining (tests / UIs)."""
         return list(self._completion_inbox)
+
+    def acquire_continuation(self, owner: object) -> None:
+        """Reserve this process-local store for one automatic continuation driver."""
+        if self._continuation_owner is not None:
+            raise RuntimeError("This session already has an active continuation stream.")
+        self._continuation_owner = owner
+
+    def release_continuation(self, owner: object) -> None:
+        """Release only the reservation belonging to this driver."""
+        if self._continuation_owner is owner:
+            self._continuation_owner = None
+            self._continuation_run_id = None
+            if not self._tasks and not self._pending_spawns and not self._completion_inbox:
+                for run_id in [run_id for run_id, store in _STORES_BY_RUN_ID.items() if store is self]:
+                    del _STORES_BY_RUN_ID[run_id]
+
+    def authorize_continuation_turn(self, owner: object, run_id: str) -> None:
+        """Allow only the owning driver's next run to consume its session inbox."""
+        if self._continuation_owner is not owner:
+            raise RuntimeError("Continuation stream does not own this session.")
+        self._continuation_run_id = run_id
+
+    def check_continuation_turn(self, run_id: str) -> None:
+        """Reject direct root calls while an automatic driver owns the store."""
+        if self._continuation_owner is not None and self._continuation_run_id != run_id:
+            raise RuntimeError("Stop the session's continuation stream before starting another turn.")
+
+    def _wake_completion_waiter(self) -> None:
+        if self._completion_changed is not None:
+            self._completion_changed.set()
+
+    async def wait_for_completion(self) -> bool:
+        """Wait without polling or consuming; False means no children remain.
+
+        Reconcile done tasks before checking quiescence: their callbacks may
+        not have run yet. The driver owns admission; this method owns no task.
+        """
+        if self._completion_changed is None:
+            self._completion_changed = asyncio.Event()
+        while True:
+            self._completion_changed.clear()
+            for record in self._tasks.values():
+                self._enqueue_completion(record)
+            if self._completion_inbox:
+                return True
+            if self.running_count() == 0:
+                return False
+            await self._completion_changed.wait()
 
     def drain_completions(self) -> list[dict[str, Any]]:
         """Take all pending completion notices. Empty after a successful drain."""

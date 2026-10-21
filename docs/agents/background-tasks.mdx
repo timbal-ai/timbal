@@ -113,6 +113,52 @@ The summary is deliberately bounded — it's for briefing the user, not for dump
 
 Handlers that yield progress dicts (e.g. `{"stage": "processing", "progress": 50}`) surface as `summary.phase` and `summary.pct`. Agent children also expose `summary.last_tool` and `summary.tools_in_flight` (open tool calls inferred from the event log — a tool drops off when its `OutputEvent` arrives). While running with no explicit stage, `phase` falls back to `streaming`, `tool:{name}`, or `running`; on terminal success `phase` becomes `completed` and `pct` is `100`.
 
+## Opt-in automatic follow-up turns
+
+`Agent.stream_until_idle()` streams the initial turn and starts another turn
+when a background task finishes. Ordinary `agent(...)` calls keep their existing
+single-turn behavior.
+
+```python
+from contextlib import aclosing
+
+stream = agent.stream_until_idle(
+    prompt="Prepare the report in the background, then tell me the result.",
+    max_idle_secs=300,
+    max_continuations=10,
+)
+async with aclosing(stream):
+    async for event in stream:
+        print(event)
+
+print(stream.stop_reason, stream.last_run_id)
+```
+
+Each turn has a fresh `run_id`, the previous turn as its `parent_run_id`, and its
+own root `OUTPUT` event. Consume the whole stream, not just the first output.
+Completion notices enter the receiving turn's memory; they are not new human
+utterances and do not rewrite earlier traces. Follow-up outputs are tagged with
+`metadata.trigger.kind == "background_completion"`.
+
+The stream ends when no children or pending notices remain, or on an idle
+timeout, continuation limit, unsuccessful run, or approval/input suspension.
+Read `stop_reason` after iteration. `max_idle_secs` bounds waiting between turns,
+not the duration of a model call. `max_continuations=0` allows only the initial
+turn. Tracing must be enabled so subsequent turns can read their history.
+
+This is a **process-local, caller-driven** stream, not a durable session service.
+Closing/cancelling it stops further automatic responses but leaves detached
+children running. Use explicit background-task cancellation to stop those too.
+Close it explicitly when breaking iteration. Before sending another user turn,
+cancel and await the consuming task, then use `parent_id=stream.last_run_id`.
+Concurrent root calls sharing its session store are rejected while it owns it.
+
+Existing HTTP routes and voice transports do not opt into this behavior. In
+particular, voice admission must also wait for playback and caller silence;
+model-run completion alone is not sufficient. Restart recovery, cross-worker
+ownership, arbitrary notification ingress, and guarantees that a user heard a
+response are outside this API's scope.
+
 ## Timeouts
 
 Set `background_timeout` (seconds) on a tool to hard-cap how long a detached child may run. When the deadline hits, the child is cancelled like a user cancel (Task cancel + handler `aclose` + `on_background_cancel`) but reports status `timed_out` so the next-turn completion notice is unambiguous.
