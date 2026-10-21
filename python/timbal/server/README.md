@@ -14,6 +14,10 @@ Two things are documented here: [running a runnable over HTTP](#runs-run-stream-
 | `POST /stream` | Run and stream every event as SSE. |
 | `GET /runs/{run_id}/events` | Replay a run's events after a cursor — the reconnect path. |
 | `POST /cancel/{run_id}` | Cancel a running run. `404` if unknown or already finished. |
+| `GET /runs/{run_id}/background` | List the session's [background children](#polling-background-children). |
+| `GET /runs/{run_id}/background/{task_id}` | Snapshot one child; `wait_ms` long-polls. |
+| `GET /runs/{run_id}/background/{task_id}/events` | A child's raw events after a cursor. |
+| `POST /runs/{run_id}/background/{task_id}/cancel` | Cancel one child; the parent run is untouched. |
 
 Set `context.id` on the request to choose the run id; otherwise one is generated and you can read it off the first event. Naming an id that a *running* run already holds is a `409` — the alternative is silently orphaning that run, leaving it executing with nothing able to read or cancel it.
 
@@ -64,9 +68,19 @@ data: {"run_id":"0198f3aa…","next_cursor":41,"done":true,"expired":true}
 
 Same meaning as the field: terminal, possibly incomplete. A `/run` in that position answers `500` instead — its whole response is the run's last event, and the one it holds is not it.
 
+### Polling background children
+
+A child spawned with `background_mode` keeps running after its parent's run returns, so the run's own event log never sees its output. These routes read the child from the session's background store instead. `run_id` is the one on the run's events (`context.id` when you set it); the spawning turn and every later turn chained on it via `parent_id` address the same children. A run that never spawned one lists `[]`; an unknown `task_id` is `404`.
+
+`GET /runs/{run_id}/background/{task_id}` returns the same snapshot as `get_background_task` (`status`, `summary`, `transcript_cursor`, plus `result`/`error` once terminal). With `wait_ms` (clamped to 30000) it long-polls: without `after` until the child is terminal, with `after=<transcript_cursor>` until its log advances past that cursor. When the budget lapses you get the current snapshot, so just poll again. Polling never acks the completion notice — the parent agent still hears about the result on its next turn.
+
+`GET /runs/{run_id}/background/{task_id}/events` pages the child's log with the same `after` / `limit` / `wait_ms` contract as `/runs/{run_id}/events`, except that cursors are logical counts (`after=0` = from the start, `next_cursor` = events seen so far) and a cursor behind the ring's floor comes back as `gapped: true` with `forgotten_through`. `done` means the child has finished — not merely been asked to stop, since a cancelled child can still log while it unwinds — and you have read to the end of its log.
+
+In Python the same polling works outside the run by passing `run_id=`: `get_background_task(task_id, run_id=result.run_id)`, `await wait_for_background(task_id, run_id=..., timeout=...)`, and likewise `list_background_tasks`, `read_background_transcript`, `cancel_background_task`.
+
 ### Limits
 
-**Single process.** The log and the job registry live in the serving process's memory, and nothing routes a request to the worker that owns a given run. Run the server with one worker, or pin runs to a worker at the load balancer. With `--workers > 1` (the CLI warns) both `/cancel/{run_id}` and `/runs/{run_id}/events` are a coin flip: a request landing on a sibling worker gets `404` and `expired: true` respectively, for a run that is alive and fine. `expired` cannot distinguish "gone" from "not mine", so a client would go reconciling against durable storage for a run still eight minutes from finishing.
+**Single process.** The log and the job registry live in the serving process's memory, and nothing routes a request to the worker that owns a given run. Run the server with one worker, or pin runs to a worker at the load balancer. The background store is process-local too, so the `/runs/{run_id}/background` routes share this limit. With `--workers > 1` (the CLI warns) both `/cancel/{run_id}` and `/runs/{run_id}/events` are a coin flip: a request landing on a sibling worker gets `404` and `expired: true` respectively, for a run that is alive and fine. `expired` cannot distinguish "gone" from "not mine", so a client would go reconciling against durable storage for a run still eight minutes from finishing.
 
 A run whose process dies has nothing to replay. A replayable log is a ring: default 50 000 events or 32 MiB, whichever hits first (`JobStore(max_events=…, max_bytes=…)`). Older events are dropped and a reconnect whose cursor is behind the floor reports `expired: true` rather than silently skipping to the new head. Durable, cross-process replay needs a backing store behind this same cursor contract.
 
