@@ -49,11 +49,11 @@ The three models share the same router and differ in which models, and at which 
 
 | Model | fast | medium | extended |
 |---|---|---|---|
-| `timbal/auto` | Haiku 5.5 · low → GPT-6 Luna → Gemini 3.5 Flash-Lite | Sonnet 5.5 · high → Grok 4.7 → GPT-6.1 Sol | Opus 5.5 · max → GPT-6 Astra |
+| `timbal/auto` | Haiku 5.5 · low → GPT-6 Luna → Gemini 3.5 Flash-Lite | Sonnet 5.5 · high → Grok 4.7 → GPT-6.1 Sol | Opus 5.5 · max → GPT-6 Astra → Grok 4.7 |
 | `timbal/auto-cost` | Haiku 5.5 · low → GPT-6 Luna → Gemini 3.5 Flash-Lite | Sonnet 5.5 · high → Grok 4.7 | Sonnet 5.5 · xhigh → Grok 4.7 |
-| `timbal/auto-intelligence` | Opus 5.5 · medium → Sonnet 5.5 → GPT-6 Astra | Opus 5.5 · high → GPT-6 Astra | Opus 5.5 · max → Fable 5.1 → GPT-6 Astra |
+| `timbal/auto-intelligence` | Opus 5.5 · medium → Sonnet 5.5 → GPT-6 Astra → Grok 4.7 | Opus 5.5 · high → GPT-6 Astra → Grok 4.7 | Opus 5.5 · max → Fable 5.1 → GPT-6 Astra → Grok 4.7 |
 
-Fast turns with a prompt above about 100K tokens go to GPT-6 Luna first, because Haiku 5.5 bills those at 5× its base rate.
+Fast turns with a prompt above about 100K tokens go to GPT-6 Luna first, because Haiku 5.5 bills those at 5× its base rate. Requests that carry tools skip GPT-6.1 Sol and GPT-6 Astra, which don't accept tools on this path, and GPT-6 Luna serves them with reasoning off.
 
 In `timbal/auto` and `timbal/auto-cost`, two kinds of turn skip the medium tier:
 
@@ -71,3 +71,6 @@ Why these models: on GDPval-AA (documents, spreadsheets and slides judged by pro
 - **One model per turn**: the model is chosen once per turn, so every call of an agent's tool loop uses the same model.
 - **Usage and traces**: recorded under the model that served the turn (for example `anthropic/claude-haiku-5-5`), not `timbal/auto`.
 - **Context window**: each entry declares the smallest window among the models it can route to, so memory compaction and attachment bounding stay safe whichever model serves.
+- **Named configurations**: `timbal/auto:<name>` (or `timbal/auto-cost:<name>`, ...) routes with a configuration your organization saved under that name on the platform, and shares the profile's catalogue entry. An unknown name routes with the default and never fails the call.
+- **Tags**: `model_params={"metadata": {"timbal_tags": "vip,voice"}}` labels an agent's requests (customer tier, channel, workflow step) for the routing rules your organization configures. The platform removes `timbal_*` keys before the request reaches a provider.
+- **Response headers**: routed responses carry `x-timbal-route` (the tier), `x-timbal-routed-model` (the model that answered) and `x-timbal-route-pinned` (reused within the turn).
