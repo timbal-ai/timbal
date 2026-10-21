@@ -282,6 +282,21 @@ async def test_a_turn_whose_parent_cannot_be_loaded_is_counted(provider, monkeyp
     assert result.usage["memory:parent_missing"] == 1
 
 
+@pytest.mark.parametrize("provider", ["platform", "platform_uncached"], indirect=True)
+async def test_a_turn_the_platform_refuses_to_store_still_answers(provider, monkeypatch, platform):
+    """The platform answers 403 to a new run whose parent it has no row for. The turn still
+    answers; only its trace is lost, which is logged and counted."""
+    chat = Conversation(provider, monkeypatch, replies=["Hello, who is calling?"])
+
+    result = await chat.turn("Hi there.", parent_id="run-that-was-never-stored")
+
+    assert result.status.code == "success"
+    assert result.output.collect_text() == "Hello, who is calling?"
+    assert result.usage["memory:parent_missing"] == 1
+    assert result.usage["tracing:save_failed"] >= 1
+    assert platform.runs == {}
+
+
 @pytest.mark.parametrize("provider", ["in_memory"], indirect=True)
 async def test_a_chain_broken_behind_an_interrupted_turn_is_counted(provider, monkeypatch):
     chat = Conversation(provider, monkeypatch, replies=["Nice to meet you, Ada."])

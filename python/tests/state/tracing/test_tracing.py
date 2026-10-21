@@ -743,3 +743,36 @@ class TestPlatformTracingProvider:
 
         json_payload = json.loads(mock_request.call_args.kwargs["content"])
         assert "rev" not in json_payload
+
+
+class TestFailedTraceSave:
+    """A provider that fails to store a snapshot must not fail the run that produced it."""
+
+    @pytest.mark.asyncio
+    async def test_the_run_completes_and_counts_every_failed_save(self):
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        class RejectingProvider(InMemoryTracingProvider):
+            @classmethod
+            async def _store(cls, _run_context):
+                raise RuntimeError("403 parent not found")
+
+        agent = Agent(name="a", model=TestModel(responses=["still here"]), tracing_provider=RejectingProvider)
+        result = await agent(prompt="hi").collect()
+
+        assert result.status.code == "success"
+        assert result.output.collect_text() == "still here"
+        assert result.usage["tracing:save_failed"] == len(get_run_context()._trace)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_still_propagates(self):
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        class CancelledProvider(InMemoryTracingProvider):
+            @classmethod
+            async def _store(cls, _run_context):
+                raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await RunContext(tracing_provider=CancelledProvider)._save_trace()

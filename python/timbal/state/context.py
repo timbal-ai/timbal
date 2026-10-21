@@ -400,13 +400,22 @@ class RunContext(BaseModel):
                 return None
         return None
 
-    async def _save_trace(self) -> None:
+    async def _save_trace(self) -> bool:
         """Save the trace data for the run.
 
         INTERNAL METHOD: This method is intended for internal framework use.
         It persists the current run's trace data using the configured
         tracing provider. Manual calls to this method may interfere with
         the framework's automatic tracing lifecycle.
+
+        A provider failure does not fail the run: the run already happened,
+        and failing it loses the reply along with the trace (a platform 403
+        for a parent run that was never stored, an outage past the retries).
+        It is logged and counted as ``tracing:save_failed`` in usage.
+        Cancellation still propagates.
+
+        Returns:
+            False when the provider failed to store this snapshot.
         """
         # Sync session data to root span before saving. Skip when the session
         # was never populated ({} from get_session()) and never synced before —
@@ -418,7 +427,18 @@ class RunContext(BaseModel):
             root.session = self._session_data
             root._session_dump = await dump(self._session_data)
         if self._tracing_provider is not None:
-            await self._tracing_provider.put(self)
+            try:
+                await self._tracing_provider.put(self)
+            except Exception as e:
+                _get_logger().error(
+                    "Trace save failed. The run continues, but this snapshot was not stored...",
+                    run_id=self.id,
+                    parent_id=self.parent_id,
+                    error=str(e),
+                )
+                self.update_usage("tracing:save_failed", 1)
+                return False
+        return True
 
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
