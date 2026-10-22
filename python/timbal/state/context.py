@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -400,7 +401,7 @@ class RunContext(BaseModel):
                 return None
         return None
 
-    async def _save_trace(self) -> bool:
+    async def _save_trace(self, *, barrier: bool = False) -> bool:
         """Save the trace data for the run.
 
         INTERNAL METHOD: This method is intended for internal framework use.
@@ -414,8 +415,14 @@ class RunContext(BaseModel):
         It is logged and counted as ``tracing:save_failed`` in usage.
         Cancellation still propagates.
 
+        With a buffered provider, a save while the run is still going is
+        scheduled instead (:mod:`timbal.state.tracing.uploads`). The end of
+        the root run and ``barrier=True`` (a snapshot that must be stored
+        before the caller goes on) store it now, after any upload in flight.
+
         Returns:
-            False when the provider failed to store this snapshot.
+            False when the provider failed to store this snapshot. A scheduled
+            save returns True; its failures are counted when they happen.
         """
         # Sync session data to root span before saving. Skip when the session
         # was never populated ({} from get_session()) and never synced before —
@@ -426,18 +433,29 @@ class RunContext(BaseModel):
 
             root.session = self._session_data
             root._session_dump = await dump(self._session_data)
-        if self._tracing_provider is not None:
-            try:
-                await self._tracing_provider.put(self)
-            except Exception as e:
-                _get_logger().error(
-                    "Trace save failed. The run continues, but this snapshot was not stored...",
-                    run_id=self.id,
-                    parent_id=self.parent_id,
-                    error=str(e),
-                )
-                self.update_usage("tracing:save_failed", 1)
-                return False
+        if self._tracing_provider is None:
+            return True
+        from .tracing import uploads
+
+        if not barrier and root is not None and root.t1 is None and uploads.buffered(self._tracing_provider):
+            if uploads.schedule(self):
+                return True
+        t0 = time.monotonic()
+        await uploads.barrier(self)
+        try:
+            await self._tracing_provider.put(self)
+        except Exception as e:
+            _get_logger().error(
+                "Trace save failed. The run continues, but this snapshot was not stored...",
+                run_id=self.id,
+                parent_id=self.parent_id,
+                error=str(e),
+            )
+            self.update_usage("tracing:save_failed", 1)
+            return False
+        finally:
+            uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
+        uploads.count(self, "tracing:saves")
         return True
 
     async def get_session(self) -> dict[str, Any]:

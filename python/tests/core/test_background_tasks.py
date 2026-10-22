@@ -3096,11 +3096,11 @@ class TestForegroundBackgroundHandoff:
         context: list[Any] = []
         original_save = RunContext._save_trace
 
-        async def delayed_save(self: Any) -> None:
+        async def delayed_save(self: Any, **kwargs: Any) -> None:
             if self is context[0] and not release_save.is_set():
                 save_entered.set()
                 await release_save.wait()
-            await original_save(self)
+            await original_save(self, **kwargs)
 
         monkeypatch.setattr(RunContext, "_save_trace", delayed_save)
 
@@ -3159,11 +3159,11 @@ class TestForegroundBackgroundHandoff:
         parent_outputs: list[OutputEvent] = []
         original_save = RunContext._save_trace
 
-        async def delayed_save(self: Any) -> None:
+        async def delayed_save(self: Any, **kwargs: Any) -> None:
             if self is context[0] and not release_save.is_set():
                 save_entered.set()
                 await release_save.wait()
-            await original_save(self)
+            await original_save(self, **kwargs)
 
         monkeypatch.setattr(RunContext, "_save_trace", delayed_save)
 

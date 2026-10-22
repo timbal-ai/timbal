@@ -92,6 +92,10 @@ async def lifespan(
     try:
         yield
     finally:
+        # Buffered trace saves still pending are stored before the process goes.
+        from ..state.tracing.uploads import flush_all
+
+        await flush_all()
         if warmup_task is not None and not warmup_task.done():
             warmup_task.cancel()
         if livekit_task is not None and not livekit_task.done():
