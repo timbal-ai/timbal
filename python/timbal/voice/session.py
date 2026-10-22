@@ -3077,7 +3077,9 @@ class VoiceSession:
         # turn's own truncation owns the field.
         was_newest = index == len(self._transcript) - 1
         if heard:
-            self._greeting_entry = TranscriptEntry(role="assistant", text=heard)
+            self._greeting_entry = TranscriptEntry(
+                role="assistant", text=heard, timestamp=self._greeting_entry.timestamp
+            )
             self._transcript[index] = self._greeting_entry
         else:
             self._transcript.pop(index)

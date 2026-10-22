@@ -37,6 +37,7 @@ from timbal.voice import (
     VoiceSession,
     VoiceSessionEvent,
 )
+from timbal.voice.playback import BufferedPlaybackTracker
 
 from .test_voice_ws import _collect_ws_messages, _make_stt_class, _make_tts_class
 from .voice_env import VOICE_ENV_KEYS
@@ -144,6 +145,7 @@ def _make_session(
     tts: TextToSpeech | None = None,
     model: Any = None,
     system_prompt: str | None = SYSTEM_PROMPT,
+    playback_tracker: BufferedPlaybackTracker | None = None,
 ) -> VoiceSession:
     agent = Agent(
         name="voice_test",
@@ -157,6 +159,7 @@ def _make_session(
         tts or _make_tts_class()(),
         turn_detector="heuristic",
         greeting=greeting,
+        playback_tracker=playback_tracker,
     )
 
 
@@ -833,6 +836,7 @@ class TestGreetingInterruptions:
         session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
         await session._claim_greeting(GREETING)  # synthesis is instant here
         assert session.transcript[-1].text == GREETING  # recorded in full...
+        said_at = session.transcript[-1].timestamp
 
         await asyncio.sleep(0.2)  # ...of which ~0.2s of 1.0s has played
         await session.interrupt()
@@ -840,11 +844,18 @@ class TestGreetingInterruptions:
         [entry] = session.transcript  # ...then rewritten to the heard prefix
         assert entry.text != GREETING
         assert GREETING.startswith(entry.text)
+        assert entry.timestamp == said_at  # when it was said, not when it was cut off
 
     async def test_unheard_greeting_is_removed_from_the_transcript(self) -> None:
         """Interrupted before a single word landed → it was never said."""
         tts = _PacedTTS(num_chunks=2, every_secs=0.0)
-        session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
+        # Playback is estimated from the clock: a frozen one keeps a slow runner from
+        # "playing" a word between the claim and the interrupt.
+        session = _make_session(
+            greeting={"text": GREETING, "interruptible": True},
+            tts=tts,
+            playback_tracker=BufferedPlaybackTracker(bytes_per_second=32_000, clock=lambda: 0.0),
+        )
         await session._claim_greeting(GREETING)
 
         await session.interrupt()

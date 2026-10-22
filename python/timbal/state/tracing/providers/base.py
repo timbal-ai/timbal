@@ -196,6 +196,20 @@ class TracingProvider(ABC):
     Runs on span copies — the live run is never mutated. Note that resumed sessions
     load memory from stored traces, so chained turns see the redacted history."""
 
+    durability: str | None = None
+    """``"sync"``: every save is awaited (the default). ``"buffered"``: a save while the run is still going
+    is stored in the background, coalesced, and the run waits only at its end and at other barriers (see
+    :mod:`timbal.state.tracing.uploads`). ``"end"``: saves while the run is going are skipped; only its end
+    and other barriers store. ``None`` reads ``TIMBAL_TRACE_DURABILITY``."""
+
+    flush_interval_s: float | None = None
+    """Buffered mode: the least time between the starts of two background saves of one run. ``None`` reads
+    ``TIMBAL_TRACE_FLUSH_INTERVAL_MS``, else 0.5 s."""
+
+    max_lag_s: float | None = None
+    """Buffered mode: how old a run's oldest unsaved change may get before its saves are awaited again
+    (uploads failing or falling behind). ``None`` reads ``TIMBAL_TRACE_MAX_LAG_S``, else 30 s."""
+
     @classmethod
     def configured(cls, **kwargs) -> type["TracingProvider"]:
         """Return a configured subclass with the given class-level attributes.

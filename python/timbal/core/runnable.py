@@ -1768,6 +1768,7 @@ class Runnable(ABC, BaseModel):
 
         async def _bg_handler_execution():
             token = set_background_depth(depth + 1)
+            run_context._live_background += 1
             record = record_box[0]
             # Ambient emits from the detached child must reach its background
             # log — after detach the only copy of its stream — not the finished
@@ -1800,6 +1801,7 @@ class Runnable(ABC, BaseModel):
                 bg_emit_sink.close()
                 reset_background_depth(token)
                 record.log.close()
+                await run_context._end_background_work()
             return output
 
         task: asyncio.Task | None = None
@@ -1849,6 +1851,7 @@ class Runnable(ABC, BaseModel):
 
         async def _continue_in_background() -> Any:
             token = set_background_depth(depth + 1)
+            run_context._live_background += 1
             output = None
             bg_emit_sink = None
             try:
@@ -1900,8 +1903,10 @@ class Runnable(ABC, BaseModel):
                 if bg_emit_sink is not None:
                     bg_emit_sink.close()
                 span.t1 = int(time.time() * 1000)
+                run_context._live_background -= 1
                 try:
-                    await run_context._save_trace()
+                    # The continuation's end: stored before the task finishes, like the end of a root run.
+                    await run_context._save_trace(barrier=True)
                 finally:
                     reset_background_depth(token)
                     if record_box:
@@ -2038,6 +2043,13 @@ class Runnable(ABC, BaseModel):
                         tracing_provider=self.tracing_provider,
                         platform_config=_inherited_platform_config,
                     )
+                    if _entry_call_id is not None:
+                        # Started by a running call's code (an Agent inside a tool or step
+                        # body): link the two runs both ways so a trace viewer can follow it.
+                        run_context._invoked_by = {"run_id": _entry_run_context.id, "call_id": _entry_call_id}
+                        caller_span = _entry_run_context._trace.get(_entry_call_id)
+                        if caller_span is not None:
+                            caller_span.metadata.setdefault("invoked_runs", []).append(run_context.id)
             # Whether we forked above or kept a caller-provided context whose
             # trace is still empty (e.g. `set_run_context(RunContext(...))`
             # inside a handler, a common platform-bootstrap pattern), the
@@ -2083,12 +2095,15 @@ class Runnable(ABC, BaseModel):
         set_call_id(_new_call_id)
 
         assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
+        metadata = {**self.metadata}  # Shallow copy
+        if _new_parent_call_id is None and run_context._invoked_by is not None:
+            metadata["invoked_by"] = run_context._invoked_by
         span = Span(
             path=self._path,
             call_id=_new_call_id,
             parent_call_id=_new_parent_call_id,
             t0=t0,
-            metadata={**self.metadata},  # Shallow copy
+            metadata=metadata,
             runnable=self,
         )
         run_context._trace[_new_call_id] = span
@@ -2599,15 +2614,16 @@ class Runnable(ABC, BaseModel):
             output_event._input_dump = span._input_dump
             output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
             if handoff_start is None:
-                if not await run_context._save_trace():
-                    # The failure was counted on the span after the event copied its usage.
-                    output_event.usage = dict(span.usage)
+                # The end of the root run is stored before the caller goes on, even with background work still live.
+                await run_context._save_trace(barrier=span is run_context.root_span())
+                # The save counts on the span (a failure, the tracing counters) after the event copied its usage.
+                output_event.usage = dict(span.usage)
             else:
                 # The continuation must not mutate the shared span until the
                 # foreground placeholder has been snapshotted for tracing.
                 try:
-                    if not await run_context._save_trace():
-                        output_event.usage = dict(span.usage)
+                    await run_context._save_trace(barrier=True)
+                    output_event.usage = dict(span.usage)
                 finally:
                     handoff_start.set()
                     if handoff_control is not None and handoff_result is not None:

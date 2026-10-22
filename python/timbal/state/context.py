@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -218,6 +219,11 @@ class RunContext(BaseModel):
     #       suspension_id for a ``suspend()`` call (value is arbitrary).
     #   _used_resume_ids: set — resume ids that matched a gate or ``suspend()``
     #       during this run; used to warn about unrecognized resume values.
+    #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
+    #       code started this run (an Agent called inside a tool or step body);
+    #       stamped on the root span. Not ``parent_id``: that chains turns.
+    #   _live_background: int — background work (spawned tasks, handed-off
+    #       continuations) running on this context; it can outlive the root run.
     # Do not add class-level annotations for them — pydantic would turn any
     # annotated underscore name back into a (slow) private attribute.
 
@@ -315,6 +321,8 @@ class RunContext(BaseModel):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._resume_values: dict[str, Any] = {}
         self._used_resume_ids: set[str] = set()
+        self._invoked_by: dict[str, str] | None = None
+        self._live_background = 0
         self._trace = Trace()
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
@@ -400,7 +408,7 @@ class RunContext(BaseModel):
                 return None
         return None
 
-    async def _save_trace(self) -> bool:
+    async def _save_trace(self, *, barrier: bool = False) -> bool:
         """Save the trace data for the run.
 
         INTERNAL METHOD: This method is intended for internal framework use.
@@ -414,8 +422,17 @@ class RunContext(BaseModel):
         It is logged and counted as ``tracing:save_failed`` in usage.
         Cancellation still propagates.
 
+        With a buffered provider, a save while the run is still going is
+        scheduled instead (:mod:`timbal.state.tracing.uploads`), including
+        saves while background work outlives the root run. With an end-only
+        provider it is skipped: only barriers store.
+        ``barrier=True`` (the end of the root run, a snapshot that must be
+        stored before the caller goes on) stores it now, after any upload in
+        flight.
+
         Returns:
-            False when the provider failed to store this snapshot.
+            False when the provider failed to store this snapshot. A scheduled
+            save returns True; its failures are counted when they happen.
         """
         # Sync session data to root span before saving. Skip when the session
         # was never populated ({} from get_session()) and never synced before —
@@ -426,19 +443,47 @@ class RunContext(BaseModel):
 
             root.session = self._session_data
             root._session_dump = await dump(self._session_data)
-        if self._tracing_provider is not None:
-            try:
-                await self._tracing_provider.put(self)
-            except Exception as e:
-                _get_logger().error(
-                    "Trace save failed. The run continues, but this snapshot was not stored...",
-                    run_id=self.id,
-                    parent_id=self.parent_id,
-                    error=str(e),
-                )
-                self.update_usage("tracing:save_failed", 1)
-                return False
+        if self._tracing_provider is None:
+            return True
+        from .tracing import uploads
+
+        running = root is not None and (root.t1 is None or self._live_background > 0)
+        if not barrier and running:
+            mode = uploads.durability(self._tracing_provider)
+            if mode == "end":
+                uploads.count(self, "tracing:saves_coalesced")
+                return True
+            if mode == "buffered" and uploads.schedule(self):
+                return True
+        t0 = time.monotonic()
+        try:
+            await uploads.write_through(self, self._tracing_provider.put)
+        except Exception as e:
+            _get_logger().error(
+                "Trace save failed. The run continues, but this snapshot was not stored...",
+                run_id=self.id,
+                parent_id=self.parent_id,
+                error=str(e),
+            )
+            self.update_usage("tracing:save_failed", 1)
+            return False
+        finally:
+            uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
+        uploads.count(self, "tracing:saves")
         return True
+
+    async def _end_background_work(self) -> None:
+        """INTERNAL: one piece of background work on this context finished.
+
+        After the root run its end is a barrier: what it wrote last (a spawned
+        task's real output over its placeholder) and anything buffering left
+        pending are stored, and the run's upload state is released. Before
+        the root's end, that barrier stores it.
+        """
+        self._live_background -= 1
+        root = self.root_span()
+        if root is not None and root.t1 is not None:
+            await self._save_trace(barrier=True)
 
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
