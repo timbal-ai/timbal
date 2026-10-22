@@ -833,6 +833,7 @@ class TestGreetingInterruptions:
         session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
         await session._claim_greeting(GREETING)  # synthesis is instant here
         assert session.transcript[-1].text == GREETING  # recorded in full...
+        said_at = session.transcript[-1].timestamp
 
         await asyncio.sleep(0.2)  # ...of which ~0.2s of 1.0s has played
         await session.interrupt()
@@ -840,6 +841,7 @@ class TestGreetingInterruptions:
         [entry] = session.transcript  # ...then rewritten to the heard prefix
         assert entry.text != GREETING
         assert GREETING.startswith(entry.text)
+        assert entry.timestamp == said_at  # when it was said, not when it was cut off
 
     async def test_unheard_greeting_is_removed_from_the_transcript(self) -> None:
         """Interrupted before a single word landed → it was never said."""
