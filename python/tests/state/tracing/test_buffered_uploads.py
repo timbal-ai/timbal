@@ -7,7 +7,7 @@ import time
 import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
-from timbal.state import RunContext, get_run_context, set_run_context
+from timbal.state import RunContext, get_run_context, list_background_tasks, set_run_context, wait_for_background
 from timbal.state.background import reset_background_depth, set_background_depth
 from timbal.state.tracing import uploads
 from timbal.state.tracing.providers.base import TracingProvider
@@ -167,22 +167,89 @@ async def test_background_work_after_the_root_ends_stays_buffered():
     assert run_context.root_span().t1 is not None
     stored = len(storage.stored)
 
-    # A span finishing in a background continuation, after the turn: scheduled, not awaited.
-    token = set_background_depth(1)
-    try:
-        await run_context._save_trace()
-        assert len(storage.stored) == stored
-        assert uploads.pending_runs() == [run_context.id]
-        # The continuation's end is a barrier: stored before it returns, nothing left pending.
-        await run_context._save_trace(barrier=True)
-        assert len(storage.stored) == stored + 1
-        assert uploads.pending_runs() == []
-    finally:
-        reset_background_depth(token)
+    # A span finishing in background work on this context, after the turn: scheduled, not awaited.
+    run_context._live_background += 1
+    await run_context._save_trace()
+    assert len(storage.stored) == stored
+    assert uploads.pending_runs() == [run_context.id]
+    # The last background work to finish stores it and releases the run's upload state.
+    await run_context._end_background_work()
+    assert len(storage.stored) == stored + 1
+    assert not uploads.tracked(run_context)
 
-    # Outside background work, a save after the end stays synchronous.
+    # With no background work left, a save after the end is synchronous again.
     await run_context._save_trace()
     assert len(storage.stored) == stored + 2
+    assert not uploads.tracked(run_context)
+
+
+async def test_a_spawned_subagent_that_outlives_the_turn_stores_its_end():
+    """Saves after the turn are buffered; the spawned task's end stores the final trace and releases the run."""
+    storage = make_storage(delay=0.01).configured(durability="buffered", flush_interval_s=10.0)
+
+    async def slow_lookup(query: str) -> str:
+        await asyncio.sleep(0.2)
+        return f"result for {query}"
+
+    sub = Agent(
+        name="sub",
+        model=TestModel(
+            responses=[
+                Message(role="assistant", content=[ToolUseContent(id="s1", name="slow_lookup", input={"query": "x"})]),
+                "sub done",
+            ]
+        ),
+        tools=[slow_lookup],
+        background_mode="auto",
+    )
+    original = get_run_context()
+    run_context = RunContext(tracing_provider=storage)
+    try:
+        set_run_context(run_context)
+        agent = Agent(
+            name="worker",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[
+                            ToolUseContent(id="c1", name="sub", input={"prompt": "go", "run_in_background": True})
+                        ],
+                    ),
+                    "started",
+                ]
+            ),
+            tools=[sub],
+            tracing_provider=storage,
+        )
+        output = await agent(prompt="go").collect()
+        assert output.status.code == "success"
+        assert storage.stored[-1]["finished"]
+        (task,) = list_background_tasks()
+        await wait_for_background(task["task_id"], timeout=5.0)
+        for _ in range(100):
+            if run_context._live_background == 0:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        set_run_context(original)
+    assert run_context._live_background == 0
+    assert not uploads.tracked(run_context)
+    # The last snapshot holds the sub-agent's spans, finished after the turn.
+    assert storage.stored[-1]["spans"] == len(run_context._trace)
+
+
+async def test_a_run_started_inside_background_work_still_stores_its_end():
+    """An Agent forked from a background tool inherits the background depth, not the work: its end is a barrier."""
+    storage = make_storage(delay=0.02).configured(durability="buffered", flush_interval_s=10.0)
+    token = set_background_depth(1)
+    try:
+        output, _ = await run_agent(storage, rounds=2, per_round=1)
+    finally:
+        reset_background_depth(token)
+    assert output.status.code == "success"
+    assert storage.stored[-1]["finished"]
+    assert uploads.pending_runs() == []
 
 
 async def test_failed_background_saves_are_retried_and_the_end_still_stores():

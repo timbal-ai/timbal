@@ -6,7 +6,8 @@ state once the flush interval since its previous save has passed, and saves requ
 that one. Barriers store synchronously, after waiting out the upload in flight so that the barrier's
 snapshot lands last: the end of the root run (including a run suspended for approval), a foreground task
 handed to the background, the end of that background continuation, and shutdown (:func:`flush_all`).
-Background work that outlives the root run saves the same way: scheduled while it runs.
+Background work that outlives the root run saves the same way: scheduled while it runs, and the last
+piece to finish stores what is still pending.
 
 The live trace is the buffer, so memory does not grow with pending changes; what grows is the lag, the age
 of the oldest change not yet stored. A run whose uploads fail or fall behind by more than ``max_lag_s``
@@ -124,6 +125,11 @@ def schedule(run_context: RunContext) -> bool:
     if run.task is None or run.task.done():
         run.task = loop.create_task(_drain(run))
     return True
+
+
+def tracked(run_context: RunContext) -> bool:
+    """Whether buffered saves of this run have state here (a save pending, in flight, or spacing out)."""
+    return _key(run_context) in _RUNS
 
 
 async def barrier(run_context: RunContext) -> None:

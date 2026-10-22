@@ -1768,6 +1768,7 @@ class Runnable(ABC, BaseModel):
 
         async def _bg_handler_execution():
             token = set_background_depth(depth + 1)
+            run_context._live_background += 1
             record = record_box[0]
             # Ambient emits from the detached child must reach its background
             # log — after detach the only copy of its stream — not the finished
@@ -1800,6 +1801,7 @@ class Runnable(ABC, BaseModel):
                 bg_emit_sink.close()
                 reset_background_depth(token)
                 record.log.close()
+                await run_context._end_background_work()
             return output
 
         task: asyncio.Task | None = None
@@ -1849,6 +1851,7 @@ class Runnable(ABC, BaseModel):
 
         async def _continue_in_background() -> Any:
             token = set_background_depth(depth + 1)
+            run_context._live_background += 1
             output = None
             bg_emit_sink = None
             try:
@@ -1900,6 +1903,7 @@ class Runnable(ABC, BaseModel):
                 if bg_emit_sink is not None:
                     bg_emit_sink.close()
                 span.t1 = int(time.time() * 1000)
+                run_context._live_background -= 1
                 try:
                     # The continuation's end: stored before the task finishes, like the end of a root run.
                     await run_context._save_trace(barrier=True)
@@ -2610,7 +2614,8 @@ class Runnable(ABC, BaseModel):
             output_event._input_dump = span._input_dump
             output_event._output_dump = await dump(handoff_result) if handed_off else span._output_dump
             if handoff_start is None:
-                await run_context._save_trace()
+                # The end of the root run is stored before the caller goes on, even with background work still live.
+                await run_context._save_trace(barrier=span is run_context.root_span())
                 # The save counts on the span (a failure, the tracing counters) after the event copied its usage.
                 output_event.usage = dict(span.usage)
             else:

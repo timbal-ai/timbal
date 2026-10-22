@@ -222,6 +222,8 @@ class RunContext(BaseModel):
     #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
     #       code started this run (an Agent called inside a tool or step body);
     #       stamped on the root span. Not ``parent_id``: that chains turns.
+    #   _live_background: int — background work (spawned tasks, handed-off
+    #       continuations) running on this context; it can outlive the root run.
     # Do not add class-level annotations for them — pydantic would turn any
     # annotated underscore name back into a (slow) private attribute.
 
@@ -320,6 +322,7 @@ class RunContext(BaseModel):
         self._resume_values: dict[str, Any] = {}
         self._used_resume_ids: set[str] = set()
         self._invoked_by: dict[str, str] | None = None
+        self._live_background = 0
         self._trace = Trace()
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
@@ -420,10 +423,11 @@ class RunContext(BaseModel):
         Cancellation still propagates.
 
         With a buffered provider, a save while the run is still going is
-        scheduled instead (:mod:`timbal.state.tracing.uploads`), including a
-        save from background work that outlives the root run. The end of
-        the root run and ``barrier=True`` (a snapshot that must be stored
-        before the caller goes on) store it now, after any upload in flight.
+        scheduled instead (:mod:`timbal.state.tracing.uploads`), including
+        saves while background work outlives the root run.
+        ``barrier=True`` (the end of the root run, a snapshot that must be
+        stored before the caller goes on) stores it now, after any upload in
+        flight.
 
         Returns:
             False when the provider failed to store this snapshot. A scheduled
@@ -440,11 +444,9 @@ class RunContext(BaseModel):
             root._session_dump = await dump(self._session_data)
         if self._tracing_provider is None:
             return True
-        from .background import get_background_depth
         from .tracing import uploads
 
-        # Background work keeps running on this context after the root span has ended.
-        running = root is not None and (root.t1 is None or get_background_depth() > 0)
+        running = root is not None and (root.t1 is None or self._live_background > 0)
         if not barrier and running and uploads.buffered(self._tracing_provider):
             if uploads.schedule(self):
                 return True
@@ -465,6 +467,19 @@ class RunContext(BaseModel):
             uploads.count(self, "tracing:wait_ms", round((time.monotonic() - t0) * 1000))
         uploads.count(self, "tracing:saves")
         return True
+
+    async def _end_background_work(self) -> None:
+        """INTERNAL: one piece of background work on this context finished.
+
+        The last one to finish after the root run stores what buffering left
+        pending, so the end state is stored and the run's upload state released.
+        """
+        from .tracing import uploads
+
+        self._live_background -= 1
+        root = self.root_span()
+        if self._live_background == 0 and root is not None and root.t1 is not None and uploads.tracked(self):
+            await self._save_trace(barrier=True)
 
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
