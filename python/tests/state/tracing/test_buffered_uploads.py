@@ -5,7 +5,7 @@ import json
 import time
 
 import pytest
-from timbal import Agent
+from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.state import RunContext, get_run_context, list_background_tasks, set_run_context, wait_for_background
 from timbal.state.background import reset_background_depth, set_background_depth
@@ -172,7 +172,7 @@ async def test_background_work_after_the_root_ends_stays_buffered():
     await run_context._save_trace()
     assert len(storage.stored) == stored
     assert uploads.pending_runs() == [run_context.id]
-    # The last background work to finish stores it and releases the run's upload state.
+    # The background work's end stores it and releases the run's upload state.
     await run_context._end_background_work()
     assert len(storage.stored) == stored + 1
     assert not uploads.tracked(run_context)
@@ -237,6 +237,58 @@ async def test_a_spawned_subagent_that_outlives_the_turn_stores_its_end():
     assert not uploads.tracked(run_context)
     # The last snapshot holds the sub-agent's spans, finished after the turn.
     assert storage.stored[-1]["spans"] == len(run_context._trace)
+
+
+@pytest.mark.parametrize("durability", ["sync", "buffered"])
+async def test_a_spawned_tool_that_outlives_the_turn_stores_its_real_output(durability):
+    """The spawned task writes its result over the placeholder after the turn; that write is stored."""
+    snapshots: list[str] = []
+
+    class Storage(TracingProvider):
+        @classmethod
+        async def get(cls, _run_context):
+            return None
+
+        @classmethod
+        async def _store(cls, run_context):
+            snapshots.append(json.dumps(run_context._trace.model_dump(), default=str))
+
+    provider = Storage.configured(durability=durability, flush_interval_s=10.0)
+
+    async def slow_job() -> str:
+        await asyncio.sleep(0.2)
+        return "the late result"
+
+    original = get_run_context()
+    run_context = RunContext(tracing_provider=provider)
+    try:
+        set_run_context(run_context)
+        agent = Agent(
+            name="worker",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="c1", name="slow_job", input={"run_in_background": True})],
+                    ),
+                    "started",
+                ]
+            ),
+            tools=[Tool(name="slow_job", handler=slow_job, background_mode="auto")],
+            tracing_provider=provider,
+        )
+        await agent(prompt="go").collect()
+        assert "the late result" not in snapshots[-1]
+        (task,) = list_background_tasks()
+        await wait_for_background(task["task_id"], timeout=5.0)
+        for _ in range(100):
+            if run_context._live_background == 0:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        set_run_context(original)
+    assert "the late result" in snapshots[-1]
+    assert not uploads.tracked(run_context)
 
 
 async def test_a_run_started_inside_background_work_still_stores_its_end():

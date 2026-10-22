@@ -471,14 +471,14 @@ class RunContext(BaseModel):
     async def _end_background_work(self) -> None:
         """INTERNAL: one piece of background work on this context finished.
 
-        The last one to finish after the root run stores what buffering left
-        pending, so the end state is stored and the run's upload state released.
+        After the root run its end is a barrier: what it wrote last (a spawned
+        task's real output over its placeholder) and anything buffering left
+        pending are stored, and the run's upload state is released. Before
+        the root's end, that barrier stores it.
         """
-        from .tracing import uploads
-
         self._live_background -= 1
         root = self.root_span()
-        if self._live_background == 0 and root is not None and root.t1 is not None and uploads.tracked(self):
+        if root is not None and root.t1 is not None:
             await self._save_trace(barrier=True)
 
     async def get_session(self) -> dict[str, Any]:

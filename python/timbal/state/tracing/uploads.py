@@ -6,8 +6,8 @@ state once the flush interval since its previous save has passed, and saves requ
 that one. Barriers store synchronously, after waiting out the upload in flight so that the barrier's
 snapshot lands last: the end of the root run (including a run suspended for approval), a foreground task
 handed to the background, the end of that background continuation, and shutdown (:func:`flush_all`).
-Background work that outlives the root run saves the same way: scheduled while it runs, and the last
-piece to finish stores what is still pending.
+Background work that outlives the root run saves the same way: scheduled while it runs, and each piece's
+end is a barrier.
 
 The live trace is the buffer, so memory does not grow with pending changes; what grows is the lag, the age
 of the oldest change not yet stored. A run whose uploads fail or fall behind by more than ``max_lag_s``
