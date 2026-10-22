@@ -154,6 +154,51 @@ async def test_a_barrier_save_is_stored_before_it_returns():
     assert seen["stored_during_call"] == 1
 
 
+@pytest.mark.parametrize("by_env", [False, True])
+async def test_end_stores_once_when_the_run_ends(monkeypatch, by_env):
+    if by_env:
+        monkeypatch.setenv(uploads.DURABILITY_ENV, "end")
+        storage = make_storage()
+    else:
+        storage = make_storage().configured(durability="end")
+    output, _ = await run_agent(storage, rounds=4, per_round=3)
+    assert output.status.code == "success"
+    assert storage.stored == [{"spans": storage.stored[0]["spans"], "finished": True}]
+    assert output.usage["tracing:saves"] == 1
+    assert output.usage["tracing:saves_coalesced"] >= 7
+    assert uploads.pending_runs() == []
+
+
+async def test_end_still_stores_a_barrier_mid_run():
+    storage = make_storage().configured(durability="end")
+    seen = {}
+
+    async def checkpoint() -> str:
+        await get_run_context()._save_trace(barrier=True)
+        seen["stored"] = list(storage.stored)
+        return "ok"
+
+    original = get_run_context()
+    try:
+        set_run_context(RunContext(tracing_provider=storage))
+        agent = Agent(
+            name="worker",
+            model=TestModel(
+                responses=[
+                    Message(role="assistant", content=[ToolUseContent(id="c1", name="checkpoint", input={})]),
+                    "done",
+                ]
+            ),
+            tools=[checkpoint],
+            tracing_provider=storage,
+        )
+        await agent(prompt="go").collect()
+    finally:
+        set_run_context(original)
+    assert [snapshot["finished"] for snapshot in seen["stored"]] == [False]
+    assert [snapshot["finished"] for snapshot in storage.stored] == [False, True]
+
+
 async def test_background_work_after_the_root_ends_stays_buffered():
     storage = make_storage(delay=0.05).configured(durability="buffered", flush_interval_s=10.0)
     original = get_run_context()
@@ -239,7 +284,7 @@ async def test_a_spawned_subagent_that_outlives_the_turn_stores_its_end():
     assert storage.stored[-1]["spans"] == len(run_context._trace)
 
 
-@pytest.mark.parametrize("durability", ["sync", "buffered"])
+@pytest.mark.parametrize("durability", ["sync", "buffered", "end"])
 async def test_a_spawned_tool_that_outlives_the_turn_stores_its_real_output(durability):
     """The spawned task writes its result over the placeholder after the turn; that write is stored."""
     snapshots: list[str] = []

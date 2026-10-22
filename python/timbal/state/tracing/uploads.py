@@ -17,6 +17,11 @@ goes back to synchronous saves until one succeeds: the state may be the only cop
 dropped. Before returning, a run with pending changes stores them at its end barrier; a crash in between
 loses at most the lag.
 
+``durability="end"`` skips mid-run saves altogether: only the barriers store. It suits runs nobody reads
+while they run and that are resumed from their end, such as a subagent or a builder whose progress its caller
+already streams: their traces carry the whole message history, so each mid-run save resends megabytes. A crash
+loses everything since the last barrier.
+
 Configure per provider (``Provider.configured(durability="buffered", flush_interval_s=0.5)``) or through
 ``TIMBAL_TRACE_DURABILITY``, ``TIMBAL_TRACE_FLUSH_INTERVAL_MS`` and ``TIMBAL_TRACE_MAX_LAG_S``.
 """
@@ -57,14 +62,19 @@ def _env_float(name: str, scale: float = 1.0) -> float | None:
         return None
 
 
+def durability(provider: type[TracingProvider]) -> str:
+    """``sync`` (the default, and any value it does not know), ``buffered`` or ``end``."""
+    mode = (getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or "sync").strip().lower()
+    return mode if mode in ("buffered", "end") else "sync"
+
+
 def buffered(provider: type[TracingProvider]) -> bool:
-    mode = getattr(provider, "durability", None) or os.environ.get(DURABILITY_ENV) or "sync"
-    return mode.strip().lower() == "buffered"
+    return durability(provider) == "buffered"
 
 
 def metrics_on(provider: type[TracingProvider]) -> bool:
     """Counters go into usage only when asked: they are new usage keys for every run."""
-    return buffered(provider) or os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
+    return durability(provider) != "sync" or os.environ.get(METRICS_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
 def _flush_interval(provider: type[TracingProvider]) -> float:

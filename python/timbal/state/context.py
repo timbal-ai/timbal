@@ -424,7 +424,8 @@ class RunContext(BaseModel):
 
         With a buffered provider, a save while the run is still going is
         scheduled instead (:mod:`timbal.state.tracing.uploads`), including
-        saves while background work outlives the root run.
+        saves while background work outlives the root run. With an end-only
+        provider it is skipped: only barriers store.
         ``barrier=True`` (the end of the root run, a snapshot that must be
         stored before the caller goes on) stores it now, after any upload in
         flight.
@@ -447,8 +448,12 @@ class RunContext(BaseModel):
         from .tracing import uploads
 
         running = root is not None and (root.t1 is None or self._live_background > 0)
-        if not barrier and running and uploads.buffered(self._tracing_provider):
-            if uploads.schedule(self):
+        if not barrier and running:
+            mode = uploads.durability(self._tracing_provider)
+            if mode == "end":
+                uploads.count(self, "tracing:saves_coalesced")
+                return True
+            if mode == "buffered" and uploads.schedule(self):
                 return True
         t0 = time.monotonic()
         try:

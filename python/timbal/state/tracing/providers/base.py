@@ -199,7 +199,8 @@ class TracingProvider(ABC):
     durability: str | None = None
     """``"sync"``: every save is awaited (the default). ``"buffered"``: a save while the run is still going
     is stored in the background, coalesced, and the run waits only at its end and at other barriers (see
-    :mod:`timbal.state.tracing.uploads`). ``None`` reads ``TIMBAL_TRACE_DURABILITY``."""
+    :mod:`timbal.state.tracing.uploads`). ``"end"``: saves while the run is going are skipped; only its end
+    and other barriers store. ``None`` reads ``TIMBAL_TRACE_DURABILITY``."""
 
     flush_interval_s: float | None = None
     """Buffered mode: the least time between the starts of two background saves of one run. ``None`` reads
