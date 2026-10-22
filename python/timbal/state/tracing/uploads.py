@@ -182,18 +182,25 @@ async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[
         _release(run)
 
 
-def _release(run: _RunUploads) -> None:
+def _release(run: _RunUploads, *, draining: bool = False) -> None:
     """Drop a run with nothing left to store, and its drain.
 
-    Called after a barrier's write, when the drain cannot be uploading (the barrier held the lock after it):
-    it is waiting out an interval or backoff, or queued for the lock, so cancelling it interrupts no write.
+    After a barrier's write the drain cannot be uploading (the barrier held the lock after it): it is waiting
+    out an interval or backoff, or queued for the lock, so cancelling it interrupts no write. ``draining``:
+    the drain itself is exiting.
     """
     key = _key(run.context)
     if run.pending or run.writers or run.sending or _RUNS.get(key) is not run:
         return
-    if run.task is not None and not run.task.done():
+    if not draining and run.task is not None and not run.task.done():
         run.task.cancel()
     del _RUNS[key]
+
+
+def _finished(run_context: RunContext) -> bool:
+    """The root run has ended and no background work is left on it: nothing will save it again."""
+    root = run_context.root_span()
+    return root is not None and root.t1 is not None and run_context._live_background == 0
 
 
 async def flush_all(timeout: float | None = 10.0) -> None:
@@ -214,6 +221,16 @@ async def flush_all(timeout: float | None = 10.0) -> None:
 
 
 async def _drain(run: _RunUploads) -> None:
+    try:
+        await _upload_while_pending(run)
+    finally:
+        # Nothing saves a finished run again: once its last change is stored (the retry of a failed end
+        # barrier, or the upload a cancelled one was waiting on), let it go.
+        if _finished(run.context):
+            _release(run, draining=True)
+
+
+async def _upload_while_pending(run: _RunUploads) -> None:
     loop = asyncio.get_running_loop()
     key = _key(run.context)
     interval = _flush_interval(run.provider)

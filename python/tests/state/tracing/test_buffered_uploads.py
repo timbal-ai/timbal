@@ -416,6 +416,42 @@ async def test_a_save_during_a_barrier_write_is_stored_after_it():
     assert persisted == [1, 2]
 
 
+async def test_a_finished_run_is_released_once_a_retry_stores_its_end():
+    """The root's end barrier fails with a save pending; the drain's retry stores it and lets the run go."""
+    state = {"fail_next": True}
+    attempts: list[str] = []
+
+    class Storage(TracingProvider):
+        @classmethod
+        async def get(cls, _run_context):
+            return None
+
+        @classmethod
+        async def _store(cls, _run_context):
+            failing, state["fail_next"] = state["fail_next"], False
+            attempts.append("failed" if failing else "stored")
+            if failing:
+                raise RuntimeError("platform unavailable")
+
+    run_context = await finished_run(Storage.configured(durability="buffered", flush_interval_s=0.01))
+    await until(lambda: attempts == ["failed", "stored"] and not uploads.pending_runs())
+    await until(lambda: not uploads.tracked(run_context))
+
+
+async def test_a_cancelled_end_barrier_still_releases_the_run():
+    """The end of background work is cancelled while an upload is in flight; that upload's drain lets the run go."""
+    storage = make_storage(delay=0.1).configured(durability="buffered", flush_interval_s=0.01)
+    run_context = await finished_run(storage)
+    run_context._live_background += 1
+    await run_context._save_trace()  # scheduled: the upload starts at once
+    await until(lambda: uploads.tracked(run_context) and uploads._RUNS[uploads._key(run_context)].sending)
+    end = asyncio.create_task(run_context._end_background_work())  # waits for that upload
+    await asyncio.sleep(0.01)
+    end.cancel()
+    await asyncio.gather(end, return_exceptions=True)
+    await until(lambda: not uploads.tracked(run_context))
+
+
 @pytest.mark.parametrize("durability", ["buffered", "end"])
 async def test_overlapping_barriers_store_in_order(durability):
     """The root's end and a background task's end can overlap: the barrier that starts later lands last."""
@@ -497,9 +533,13 @@ async def test_flush_all_stores_what_is_pending():
     class FakeRun:
         id = "run-1"
         _tracing_provider = Recorder
+        _live_background = 0
 
         def update_usage(self, key, value):
             pass
+
+        def root_span(self):
+            return None  # still going
 
     run = FakeRun()
     assert uploads.schedule(run)  # the first save starts at once
