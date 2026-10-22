@@ -3,9 +3,11 @@
 A run saves its whole trace each time a span finishes. With ``durability="buffered"`` a save while the run
 is still going is scheduled instead of awaited: the run moves on, the provider stores the run's latest
 state once the flush interval since its previous save has passed, and saves requested meanwhile fold into
-that one. Barriers store synchronously, after waiting out the upload in flight so that the barrier's
-snapshot lands last: the end of the root run (including a run suspended for approval), a foreground task
-handed to the background, the end of that background continuation, and shutdown (:func:`flush_all`).
+that one. Barriers (:func:`write_through`) store synchronously: the end of the root run (including a run
+suspended for approval), a foreground task handed to the background, the end of that background
+continuation, and shutdown (:func:`flush_all`). A run has one write at a time, background or barrier, so a
+write that starts later stores a newer snapshot; a barrier waits for an upload in flight, never for a retry
+backoff.
 Background work that outlives the root run saves the same way: scheduled while it runs, and each piece's
 end is a barrier.
 
@@ -24,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -84,7 +87,10 @@ def count(run_context: RunContext, key: str, value: int = 1) -> None:
 
 
 class _RunUploads:
-    __slots__ = ("context", "provider", "task", "pending", "sending", "started_at", "unsent_since", "failures")
+    __slots__ = (
+        "context", "provider", "task", "pending", "sending", "started_at", "unsent_since", "failures",
+        "lock", "requests", "writers",
+    )  # fmt: skip
 
     def __init__(self, context: RunContext, provider: type[TracingProvider]) -> None:
         self.context = context
@@ -96,6 +102,13 @@ class _RunUploads:
         self.sending = False
         self.started_at = float("-inf")
         self.failures = 0
+        # One write per run at a time, background upload or barrier: a write that starts later stores a
+        # newer snapshot, so an older one never lands over it.
+        self.lock = asyncio.Lock()
+        # Saves requested so far; a write that starts after the n-th one covers it.
+        self.requests = 0
+        # Barrier writes holding or waiting for the lock.
+        self.writers = 0
 
 
 _RUNS: dict[tuple[int, str], _RunUploads] = {}
@@ -116,6 +129,7 @@ def schedule(run_context: RunContext) -> bool:
     if run.unsent_since is not None and now - run.unsent_since > _max_lag(provider):
         count(run_context, "tracing:lag_exceeded")
         return False
+    run.requests += 1
     if run.pending:
         count(run_context, "tracing:saves_coalesced")
     else:
@@ -132,15 +146,44 @@ def tracked(run_context: RunContext) -> bool:
     return _key(run_context) in _RUNS
 
 
-async def barrier(run_context: RunContext) -> None:
-    """Wait out this run's upload in flight and drop one still waiting: the caller stores the latest state."""
-    run = _RUNS.pop(_key(run_context), None)
-    if run is None or run.task is None or run.task.done():
+async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[None]]) -> None:
+    """Store the run's latest state now, as its next write (a barrier).
+
+    It waits for an upload in flight, never for a drain waiting out its interval or a retry backoff; saves
+    requested while it writes are uploaded after it; what it covers is not uploaded again. Raises what
+    ``put`` raises.
+    """
+    key = _key(run_context)
+    run = _RUNS.get(key)
+    if run is None:
+        if not buffered(run_context._tracing_provider):
+            await put(run_context)
+            return
+        run = _RUNS[key] = _RunUploads(run_context, run_context._tracing_provider)
+    run.writers += 1
+    try:
+        async with run.lock:
+            covered = run.requests
+            await put(run_context)
+            if run.requests == covered:
+                run.pending, run.unsent_since, run.failures = False, None, 0
+    finally:
+        run.writers -= 1
+        _release(run)
+
+
+def _release(run: _RunUploads) -> None:
+    """Drop a run with nothing left to store, and its drain.
+
+    Called after a barrier's write, when the drain cannot be uploading (the barrier held the lock after it):
+    it is waiting out an interval or backoff, or queued for the lock, so cancelling it interrupts no write.
+    """
+    key = _key(run.context)
+    if run.pending or run.writers or run.sending or _RUNS.get(key) is not run:
         return
-    run.pending = False
-    if not run.sending:
+    if run.task is not None and not run.task.done():
         run.task.cancel()
-    await asyncio.gather(run.task, return_exceptions=True)
+    del _RUNS[key]
 
 
 async def flush_all(timeout: float | None = 10.0) -> None:
@@ -148,9 +191,8 @@ async def flush_all(timeout: float | None = 10.0) -> None:
     runs = list(_RUNS.values())
 
     async def flush(run: _RunUploads) -> None:
-        await barrier(run.context)
         try:
-            await run.provider.put(run.context)
+            await write_through(run.context, run.provider.put)
         except Exception as e:
             logger.error("trace_flush_failed", run_id=run.context.id, error=str(e))
 
@@ -172,31 +214,40 @@ async def _drain(run: _RunUploads) -> None:
             await asyncio.sleep(wait)
         if _RUNS.get(key) is not run:
             return
-        covered_since = run.unsent_since
-        run.pending, run.unsent_since = False, None
-        run.sending, run.started_at = True, loop.time()
-        t0 = time.monotonic()
-        try:
-            await run.provider.put(run.context)
-        except Exception as e:
-            # The state may be the only copy: retry it, with backoff, until a save or the run's end barrier.
-            run.failures += 1
-            run.pending = True
-            if covered_since is not None:
-                run.unsent_since = covered_since if run.unsent_since is None else min(run.unsent_since, covered_since)
-            logger.error(
-                "Background trace save failed. Retrying...",
-                run_id=run.context.id,
-                failures=run.failures,
-                error=str(e),
-            )
-            count(run.context, "tracing:save_failed")
-        else:
-            run.failures = 0
-            count(run.context, "tracing:saves")
-        finally:
-            run.sending = False
-            count(run.context, "tracing:save_ms", round((time.monotonic() - t0) * 1000))
+        async with run.lock:
+            # A barrier may have stored it meanwhile.
+            if not run.pending:
+                break
+            # One is waiting: it stores the latest state, then this re-checks what is still pending.
+            if run.writers:
+                continue
+            covered_since = run.unsent_since
+            run.pending, run.unsent_since = False, None
+            run.sending, run.started_at = True, loop.time()
+            t0 = time.monotonic()
+            try:
+                await run.provider.put(run.context)
+            except Exception as e:
+                # The state may be the only copy: retry it, with backoff, until a save or a barrier stores it.
+                run.failures += 1
+                run.pending = True
+                if covered_since is not None:
+                    run.unsent_since = (
+                        covered_since if run.unsent_since is None else min(run.unsent_since, covered_since)
+                    )
+                logger.error(
+                    "Background trace save failed. Retrying...",
+                    run_id=run.context.id,
+                    failures=run.failures,
+                    error=str(e),
+                )
+                count(run.context, "tracing:save_failed")
+            else:
+                run.failures = 0
+                count(run.context, "tracing:saves")
+            finally:
+                run.sending = False
+                count(run.context, "tracing:save_ms", round((time.monotonic() - t0) * 1000))
 
 
 def pending_runs() -> list[str]:

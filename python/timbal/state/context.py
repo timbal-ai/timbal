@@ -451,9 +451,8 @@ class RunContext(BaseModel):
             if uploads.schedule(self):
                 return True
         t0 = time.monotonic()
-        await uploads.barrier(self)
         try:
-            await self._tracing_provider.put(self)
+            await uploads.write_through(self, self._tracing_provider.put)
         except Exception as e:
             _get_logger().error(
                 "Trace save failed. The run continues, but this snapshot was not stored...",

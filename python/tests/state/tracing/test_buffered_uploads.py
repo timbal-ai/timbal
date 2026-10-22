@@ -319,6 +319,90 @@ async def test_a_run_too_far_behind_saves_synchronously_again():
     assert output.usage.get("tracing:lag_exceeded", 0) >= 1
 
 
+async def finished_run(provider) -> RunContext:
+    """A run whose root has ended, on ``provider``."""
+    original = get_run_context()
+    run_context = RunContext(tracing_provider=provider)
+    try:
+        set_run_context(run_context)
+        await Agent(name="worker", model=TestModel(responses=["done"]), tracing_provider=provider)(
+            prompt="go"
+        ).collect()
+    finally:
+        set_run_context(original)
+    return run_context
+
+
+async def until(condition, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        await asyncio.sleep(0.005)
+
+
+async def test_a_save_during_a_barrier_write_is_stored_after_it():
+    """One write per run at a time: a background save while a barrier writes lands after it, never under it."""
+    state = {"version": 0, "delays": []}
+    persisted: list[int] = []
+
+    class Storage(TracingProvider):
+        @classmethod
+        async def get(cls, _run_context):
+            return None
+
+        @classmethod
+        async def _store(cls, _run_context):
+            version = state["version"]  # the snapshot is taken here
+            await asyncio.sleep(state["delays"].pop(0) if state["delays"] else 0)
+            persisted.append(version)
+
+    provider = Storage.configured(durability="buffered", flush_interval_s=0.01)
+    run_context = await finished_run(provider)
+    persisted.clear()
+    run_context._live_background += 1
+
+    state["version"], state["delays"] = 1, [0.1]
+    barrier = asyncio.create_task(run_context._save_trace(barrier=True))
+    await until(lambda: state["delays"] == [])  # the barrier is writing version 1
+    state["version"] = 2
+    await run_context._save_trace()  # background work saves meanwhile
+    await barrier
+    await until(lambda: not uploads.pending_runs())
+    assert persisted == [1, 2]
+
+
+async def test_a_failed_upload_backing_off_does_not_hold_the_shutdown_flush():
+    """A barrier waits for an upload in flight, not for a failed one's retry backoff."""
+    state = {"fail_next": False}
+    attempts: list[str] = []
+
+    class Storage(TracingProvider):
+        @classmethod
+        async def get(cls, _run_context):
+            return None
+
+        @classmethod
+        async def _store(cls, _run_context):
+            failing, state["fail_next"] = state["fail_next"], False
+            attempts.append("failed" if failing else "stored")
+            if failing:
+                await asyncio.sleep(0.02)
+                raise RuntimeError("platform unavailable")
+
+    # The failure backs off 0.1 s before its retry; the flush has 0.06 s.
+    provider = Storage.configured(durability="buffered", flush_interval_s=0.05)
+    run_context = await finished_run(provider)
+    attempts.clear()
+    run_context._live_background += 1
+
+    state["fail_next"] = True
+    await run_context._save_trace()  # the upload starts at once, and fails 0.02 s in
+    await until(lambda: attempts == ["failed"])
+    await uploads.flush_all(timeout=0.06)  # shutdown while that upload is in flight
+    assert attempts == ["failed", "stored"]
+    assert not uploads.tracked(run_context)
+
+
 async def test_flush_all_stores_what_is_pending():
     stored = []
 
