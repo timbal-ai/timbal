@@ -416,6 +416,37 @@ async def test_a_save_during_a_barrier_write_is_stored_after_it():
     assert persisted == [1, 2]
 
 
+@pytest.mark.parametrize("durability", ["buffered", "end"])
+async def test_overlapping_barriers_store_in_order(durability):
+    """The root's end and a background task's end can overlap: the barrier that starts later lands last."""
+    state = {"version": 0, "delays": []}
+    persisted: list[int] = []
+
+    class Storage(TracingProvider):
+        @classmethod
+        async def get(cls, _run_context):
+            return None
+
+        @classmethod
+        async def _store(cls, _run_context):
+            version = state["version"]  # the snapshot is taken here
+            await asyncio.sleep(state["delays"].pop(0) if state["delays"] else 0)
+            persisted.append(version)
+
+    provider = Storage.configured(durability=durability, flush_interval_s=0.01)
+    run_context = await finished_run(provider)
+    persisted.clear()
+
+    state["version"], state["delays"] = 1, [0.1]
+    first = asyncio.create_task(run_context._save_trace(barrier=True))
+    await until(lambda: state["delays"] == [])  # the first barrier is writing version 1
+    state["version"] = 2
+    await run_context._save_trace(barrier=True)
+    await first
+    assert persisted == [1, 2]
+    assert not uploads.tracked(run_context)
+
+
 async def test_a_failed_upload_backing_off_does_not_hold_the_shutdown_flush():
     """A barrier waits for an upload in flight, not for a failed one's retry backoff."""
     state = {"fail_next": False}

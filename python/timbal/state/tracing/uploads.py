@@ -159,14 +159,14 @@ def tracked(run_context: RunContext) -> bool:
 async def write_through(run_context: RunContext, put: Callable[[Any], Awaitable[None]]) -> None:
     """Store the run's latest state now, as its next write (a barrier).
 
-    It waits for an upload in flight, never for a drain waiting out its interval or a retry backoff; saves
-    requested while it writes are uploaded after it; what it covers is not uploaded again. Raises what
-    ``put`` raises.
+    It waits for an upload in flight or another barrier's write (the root's end and a background task's end
+    can overlap), never for a drain waiting out its interval or a retry backoff; saves requested while it
+    writes are uploaded after it; what it covers is not uploaded again. Raises what ``put`` raises.
     """
     key = _key(run_context)
     run = _RUNS.get(key)
     if run is None:
-        if not buffered(run_context._tracing_provider):
+        if durability(run_context._tracing_provider) == "sync":
             await put(run_context)
             return
         run = _RUNS[key] = _RunUploads(run_context, run_context._tracing_provider)
