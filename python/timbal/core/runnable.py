@@ -2038,6 +2038,13 @@ class Runnable(ABC, BaseModel):
                         tracing_provider=self.tracing_provider,
                         platform_config=_inherited_platform_config,
                     )
+                    if _entry_call_id is not None:
+                        # Started by a running call's code (an Agent inside a tool or step
+                        # body): link the two runs both ways so a trace viewer can follow it.
+                        run_context._invoked_by = {"run_id": _entry_run_context.id, "call_id": _entry_call_id}
+                        caller_span = _entry_run_context._trace.get(_entry_call_id)
+                        if caller_span is not None:
+                            caller_span.metadata.setdefault("invoked_runs", []).append(run_context.id)
             # Whether we forked above or kept a caller-provided context whose
             # trace is still empty (e.g. `set_run_context(RunContext(...))`
             # inside a handler, a common platform-bootstrap pattern), the
@@ -2083,12 +2090,15 @@ class Runnable(ABC, BaseModel):
         set_call_id(_new_call_id)
 
         assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
+        metadata = {**self.metadata}  # Shallow copy
+        if _new_parent_call_id is None and run_context._invoked_by is not None:
+            metadata["invoked_by"] = run_context._invoked_by
         span = Span(
             path=self._path,
             call_id=_new_call_id,
             parent_call_id=_new_parent_call_id,
             t0=t0,
-            metadata={**self.metadata},  # Shallow copy
+            metadata=metadata,
             runnable=self,
         )
         run_context._trace[_new_call_id] = span

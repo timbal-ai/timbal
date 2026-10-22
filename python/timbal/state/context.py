@@ -219,6 +219,9 @@ class RunContext(BaseModel):
     #       suspension_id for a ``suspend()`` call (value is arbitrary).
     #   _used_resume_ids: set — resume ids that matched a gate or ``suspend()``
     #       during this run; used to warn about unrecognized resume values.
+    #   _invoked_by: dict | None — ``{"run_id", "call_id"}`` of the call whose
+    #       code started this run (an Agent called inside a tool or step body);
+    #       stamped on the root span. Not ``parent_id``: that chains turns.
     # Do not add class-level annotations for them — pydantic would turn any
     # annotated underscore name back into a (slow) private attribute.
 
@@ -316,6 +319,7 @@ class RunContext(BaseModel):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._resume_values: dict[str, Any] = {}
         self._used_resume_ids: set[str] = set()
+        self._invoked_by: dict[str, str] | None = None
         self._trace = Trace()
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
