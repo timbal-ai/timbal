@@ -1901,7 +1901,8 @@ class Runnable(ABC, BaseModel):
                     bg_emit_sink.close()
                 span.t1 = int(time.time() * 1000)
                 try:
-                    await run_context._save_trace()
+                    # The continuation's end: stored before the task finishes, like the end of a root run.
+                    await run_context._save_trace(barrier=True)
                 finally:
                     reset_background_depth(token)
                     if record_box:

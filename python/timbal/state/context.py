@@ -420,7 +420,8 @@ class RunContext(BaseModel):
         Cancellation still propagates.
 
         With a buffered provider, a save while the run is still going is
-        scheduled instead (:mod:`timbal.state.tracing.uploads`). The end of
+        scheduled instead (:mod:`timbal.state.tracing.uploads`), including a
+        save from background work that outlives the root run. The end of
         the root run and ``barrier=True`` (a snapshot that must be stored
         before the caller goes on) store it now, after any upload in flight.
 
@@ -439,9 +440,12 @@ class RunContext(BaseModel):
             root._session_dump = await dump(self._session_data)
         if self._tracing_provider is None:
             return True
+        from .background import get_background_depth
         from .tracing import uploads
 
-        if not barrier and root is not None and root.t1 is None and uploads.buffered(self._tracing_provider):
+        # Background work keeps running on this context after the root span has ended.
+        running = root is not None and (root.t1 is None or get_background_depth() > 0)
+        if not barrier and running and uploads.buffered(self._tracing_provider):
             if uploads.schedule(self):
                 return True
         t0 = time.monotonic()

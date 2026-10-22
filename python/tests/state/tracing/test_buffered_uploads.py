@@ -8,6 +8,7 @@ import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.state import RunContext, get_run_context, set_run_context
+from timbal.state.background import reset_background_depth, set_background_depth
 from timbal.state.tracing import uploads
 from timbal.state.tracing.providers.base import TracingProvider
 from timbal.types.content import ToolUseContent
@@ -151,6 +152,37 @@ async def test_a_barrier_save_is_stored_before_it_returns():
     finally:
         set_run_context(original)
     assert seen["stored_during_call"] == 1
+
+
+async def test_background_work_after_the_root_ends_stays_buffered():
+    storage = make_storage(delay=0.05).configured(durability="buffered", flush_interval_s=10.0)
+    original = get_run_context()
+    run_context = RunContext(tracing_provider=storage)
+    try:
+        set_run_context(run_context)
+        agent = Agent(name="worker", model=TestModel(responses=["done"]), tracing_provider=storage)
+        await agent(prompt="go").collect()
+    finally:
+        set_run_context(original)
+    assert run_context.root_span().t1 is not None
+    stored = len(storage.stored)
+
+    # A span finishing in a background continuation, after the turn: scheduled, not awaited.
+    token = set_background_depth(1)
+    try:
+        await run_context._save_trace()
+        assert len(storage.stored) == stored
+        assert uploads.pending_runs() == [run_context.id]
+        # The continuation's end is a barrier: stored before it returns, nothing left pending.
+        await run_context._save_trace(barrier=True)
+        assert len(storage.stored) == stored + 1
+        assert uploads.pending_runs() == []
+    finally:
+        reset_background_depth(token)
+
+    # Outside background work, a save after the end stays synchronous.
+    await run_context._save_trace()
+    assert len(storage.stored) == stored + 2
 
 
 async def test_failed_background_saves_are_retried_and_the_end_still_stores():
