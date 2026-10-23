@@ -524,7 +524,9 @@ metrics); hosting `AgentContinuation` would bypass all of that.
   for work is the scheduler's `wait_ready`, event-driven on the store; waiting
   for the line polls the quiet-line check every 50 ms, because "the caller's
   audio has finished playing" is an estimate with no event to wait on.
-- Quiet line: session started and open, last run not parked on the caller, no
+- Quiet line: session started and open, the run the next turn chains onto not
+  parked on its caller (the call's last run, or another channel's turn that ran
+  since, which the scheduler records as `head_parked` when it ends), no
   other channel's turn running or queued, no turn running, agent not speaking,
   no greeting or idle prompt pending, playback finished, no held caller fragment,
   no uncommitted partial in the last 5 s, nothing from the caller in the last
@@ -603,7 +605,7 @@ Implementing it changed these points of earlier revisions of this RFC:
   `now`. Rejecting busy turns becomes an `on_busy` choice, not the only answer.
 - `post_session_event` with an unknown run id raised nothing and posted into a
   store no turn would read; it now raises unless `create=True`.
-- Review of the scheduler found four gaps, now covered by tests:
+- Review of the scheduler found five gaps, now covered by tests:
   - **Stale parent.** An admitted turn kept the parent it was sent with, so a
     chat queued behind a voice turn forked the conversation. It is now
     re-chained onto the session head.
@@ -616,6 +618,11 @@ Implementing it changed these points of earlier revisions of this RFC:
   - **No watcher for work between turns.** Work posted between turns started
     no voice watcher unless it came through `notify()`. The store now tells
     its owner.
+  - **Parked chat head.** The pause check looked only at the call's own last
+    run. An admitted chat turn parked on an approval or `ask_user` let an
+    event turn start onto it: the receipt said delivered, the resume dropped
+    the prompt, and the event was gone. The check now follows the head, and
+    the event waits until that pause is resolved.
 
 `Agent.handler` is unchanged from `main`; `_inject_background_completions` also
 drains posted events and accounts for them. The rest is
@@ -738,6 +745,8 @@ Executable tests in the repository:
   - an `interrupt` going ahead of a queued chat turn, with a slow `interrupt()`
     standing in for the trace re-save that opens the gap after the cut;
   - a chat turn admitted before the call's first turn, which then continues it;
+  - an event waiting while an admitted chat turn is parked on an approval, then
+    delivered by a turn chained onto the resumed chat;
   - progress reported after the reply by a silent task, and an event posted by
     run id from outside the call, each starting an event turn;
   - an event `notify()` queued before turn one reaching the store that turn
@@ -769,7 +778,9 @@ of them. Mutated:
   re-chained;
 - an interrupt not going ahead of a queued turn, and no hold across the cut;
 - no watcher started on new work;
-- events queued before turn one orphaned.
+- events queued before turn one orphaned;
+- the pause check ignoring a parked head, and the scheduler never recording
+  one.
 
 Existing background, runnable, tracing, guardrail, and voice tests remain
 regression gates.

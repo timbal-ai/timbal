@@ -31,6 +31,21 @@ if TYPE_CHECKING:
 OnBusy = Literal["reject", "enqueue"]
 Urgency = Literal["when_idle", "interrupt"]
 
+_PARKED_REASONS = frozenset({"approval_required", "input_required"})
+
+
+def is_parked(status: Any) -> bool:
+    """A run status that leaves the run parked on its caller (an approval, ``ask_user``).
+
+    The next run chained onto it resumes it, and memory resolution drops that
+    run's prompt: a turn started for an event would be swallowed whole.
+    """
+    if isinstance(status, dict):
+        code, reason = status.get("code"), status.get("reason")
+    else:
+        code, reason = getattr(status, "code", None), getattr(status, "reason", None)
+    return code == "cancelled" and reason in _PARKED_REASONS
+
 
 class SessionBusyError(RuntimeError):
     """Another turn of the session is in flight and its owner refuses to queue."""
@@ -164,6 +179,8 @@ class SessionScheduler:
         self._holding = 0
         # The session's latest root run, the owner's or an admitted one: where the next turn chains.
         self.head: str | None = None
+        # The head is another channel's run that ended parked on its caller (see is_parked).
+        self.head_parked = False
         self._changed: asyncio.Future[None] | None = None
 
     @property
@@ -211,6 +228,7 @@ class SessionScheduler:
     def note_run(self, run_id: str) -> None:
         """One of the owner's runs started: it is the session's head now."""
         self.head = run_id
+        self.head_parked = False
 
     @contextlib.contextmanager
     def holding(self) -> Iterator[None]:
@@ -285,6 +303,7 @@ class SessionScheduler:
         self._others.add(run_context.id)
         run_context._foreign_turn_of = weakref.ref(self)
         head, self.head = self.head, run_context.id
+        self.head_parked = False
         if self._on_preempt is not None:
             self._on_preempt()
         self._notify()
@@ -295,8 +314,11 @@ class SessionScheduler:
     def _occupied(self) -> bool:
         return self.busy or bool(self._others) or self._holding > 0
 
-    def foreign_finished(self, run_id: str) -> None:
+    def foreign_finished(self, run_id: str, status: Any = None) -> None:
+        """An admitted turn ended with root ``status``; a parked head holds back turns chaining onto it."""
         self._others.discard(run_id)
+        if run_id == self.head:
+            self.head_parked = is_parked(status)
         self._notify()
 
     # -- Turns the session starts itself -----------------------------------------

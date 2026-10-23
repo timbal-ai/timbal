@@ -32,8 +32,8 @@ from urllib.parse import urlsplit
 import structlog
 from uuid_extensions import uuid7
 
-from ..core.agent import _PAUSE_REASONS, Agent
-from ..core.session_scheduler import Followup, OnBusy, SessionScheduler
+from ..core.agent import Agent
+from ..core.session_scheduler import Followup, OnBusy, SessionScheduler, is_parked
 from ..guardrails.types import GuardrailContext, GuardrailStage
 from ..state import get_run_context, set_run_context
 from ..state.background import (
@@ -2130,19 +2130,18 @@ class VoiceSession:
         return None
 
     def _last_run_paused(self) -> bool:
-        """The last turn's run is parked on the caller (``ask_user``, an approval).
+        """The run the call's next turn chains onto is parked on its caller (``ask_user``, an approval).
 
         The next run resumes it, and memory resolution drops that run's prompt,
-        so an event turn would be swallowed whole.
+        so an event turn would be swallowed whole. That run is the call's own
+        last one, or another channel's turn that has run since (the head).
         """
         ctx = self._last_run_context
+        head = self._scheduler.head
+        if head is not None and (ctx is None or head != ctx.id):
+            return self._scheduler.head_parked
         root = ctx.root_span() if ctx is not None else None
-        status = getattr(root, "status", None)
-        if isinstance(status, dict):
-            code, reason = status.get("code"), status.get("reason")
-        else:
-            code, reason = getattr(status, "code", None), getattr(status, "reason", None)
-        return code == "cancelled" and reason in _PAUSE_REASONS
+        return is_parked(getattr(root, "status", None))
 
     # -- Internal: agent turn → TTS ----------------------------------------
 

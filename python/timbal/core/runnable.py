@@ -2668,7 +2668,7 @@ class Runnable(ABC, BaseModel):
                 scheduler = run_context._foreign_turn_of()
                 run_context._foreign_turn_of = None
                 if scheduler is not None:
-                    scheduler.foreign_finished(run_context.id)
+                    scheduler.foreign_finished(run_context.id, span.status)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children

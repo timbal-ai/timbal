@@ -26,6 +26,7 @@ from timbal.state import post_session_event, report_progress, set_run_context
 from timbal.state.background import store_for_run
 from timbal.state.tracing.providers import JsonlTracingProvider
 from timbal.types.content import ToolUseContent
+from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import SESSION_EVENT_KIND, Message
 from timbal.voice import (
     AgentTextDone,
@@ -924,6 +925,43 @@ class TestOtherChannel:
         assert chats[0].status.code == "success"
         assert session._last_run_context.parent_id == chats[0].run_id
         assert "from chat" in [m.collect_text() for m in model.calls[2]]
+
+    async def test_an_event_waits_for_a_chat_turn_parked_on_its_caller(self) -> None:
+        def wire_money() -> str:
+            """Wire money."""
+            return "wired"
+
+        tool = Tool(name="wire_money", handler=wire_money, requires_approval=True)
+        model = _Model(REPLY, _tool_call("wire_money"), "Hecho.", "Aviso.")
+        session, stt, _tts = _session(model, tools=[tool])
+        receipts, chats = [], []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            chat_events = [e async for e in session.agent(prompt="pay", parent_id=session._last_run_context.id)]
+            parked = chat_events[-1]
+            assert isinstance(parked, OutputEvent) and parked.status.reason == "approval_required"
+            receipts.append(await session.notify("IMPORTANT_NEW_EVENT"))
+            await asyncio.sleep(0.3)
+            # The call's next turn would resume the parked chat turn and drop the event with its prompt.
+            assert receipts[0].state == "pending" and len(model.calls) == 2
+            assert session._event_turn_blocker() == "run_awaiting_caller"
+            approval = next(e for e in chat_events if isinstance(e, ApprovalEvent))
+            chats.append(
+                await session.agent(
+                    prompt="pay", parent_id=parked.run_id, resume={approval.approval_id: True}
+                ).collect()
+            )
+            await _until(lambda: "Aviso." in _texts(events))
+
+        await _run(session, stt, drive)
+
+        assert chats[0].status.code == "success"
+        assert receipts[0].state == "delivered"
+        assert "IMPORTANT_NEW_EVENT" in model.calls[3][-1].collect_text()
+        assert session._last_run_context.parent_id == chats[0].run_id
 
     async def test_a_call_turn_waits_for_a_running_text_turn(self) -> None:
         model = _GatedModel(REPLY, "Desde el chat.", "Hola.", gate_at=1)
