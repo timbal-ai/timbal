@@ -1,6 +1,8 @@
 """Unit tests for gmail_send's optional extra headers (httpx and the integration mocked)."""
 
 import base64
+from email import policy
+from email.parser import Parser
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -42,7 +44,6 @@ async def _send(**overrides) -> tuple[str, MagicMock]:
         "attachment_urls": None,
         "message_format": "text",
         "email_signature": None,
-        "headers": None,
         **overrides,
     }
     with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
@@ -93,8 +94,9 @@ async def test_headers_also_go_on_multipart_messages():
 @pytest.mark.asyncio
 async def test_without_headers_the_message_is_unchanged():
     plain, _ = await _send()
+    explicit_none, _ = await _send(headers=None)
     empty, _ = await _send(headers={})
-    assert plain == empty
+    assert plain == explicit_none == empty
     assert not any(line.lower().startswith("list-") for line in _header_block(plain))
 
 
@@ -130,3 +132,24 @@ async def test_a_value_with_a_line_break_is_refused():
 async def test_an_empty_value_is_skipped():
     message, _ = await _send(headers={"Reply-To": "  "})
     assert not any(line.startswith("Reply-To:") for line in _header_block(message))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("support@example.com", [("", "support@example.com")]),
+        ('"Support, Team" <support@example.com>', [("Support, Team", "support@example.com")]),
+        ("José <jose@example.com>", [("José", "jose@example.com")]),
+        (
+            "José <jose@example.com>, Zoë <zoe@example.com>",
+            [("José", "jose@example.com"), ("Zoë", "zoe@example.com")],
+        ),
+        ("Support: José <jose@example.com>;", [("José", "jose@example.com")]),
+    ],
+)
+async def test_reply_to_preserves_display_names_and_mailboxes(value, expected):
+    message, _ = await _send(headers={"Reply-To": value})
+    reply_to = Parser(policy=policy.default).parsestr(message)["Reply-To"]
+    assert not reply_to.defects
+    assert [(address.display_name, address.addr_spec) for address in reply_to.addresses] == expected

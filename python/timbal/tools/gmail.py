@@ -2,6 +2,7 @@ import base64
 import mimetypes
 import re
 from datetime import datetime
+from email import policy
 from email.header import Header
 from html import escape as html_escape
 from typing import Annotated, Any, Literal
@@ -10,6 +11,7 @@ from pydantic import Field
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+from ..utils import resolve_default
 
 _BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 
@@ -50,7 +52,11 @@ def _extra_header_lines(headers: dict[str, str] | None) -> list[str]:
             raise ValueError(f"Header {canonical} must be a single line.")
         if not text.strip():
             continue
-        lines.append(f"{canonical}: {_encode_header(text.strip())}")
+        if canonical == "Reply-To":
+            # Encode display names without hiding mailbox delimiters inside encoded words.
+            lines.append(policy.SMTP.fold(canonical, text.strip()).rstrip("\r\n"))
+        else:
+            lines.append(f"{canonical}: {_encode_header(text.strip())}")
     return lines
 
 
@@ -217,7 +223,7 @@ class GmailSend(Tool):
                 ),
             ),
         ) -> Any:
-            extra_lines = _extra_header_lines(headers)
+            extra_lines = _extra_header_lines(resolve_default("headers", headers))
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
             credentials = await self.integration.resolve()
