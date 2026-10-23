@@ -85,6 +85,7 @@ from typing import Any
 
 import structlog
 
+from ..state.background import MAX_SESSION_EVENT_CHARS
 from ..voice.config import VoiceConfig
 from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
 from .voice import (
@@ -532,6 +533,52 @@ def parse_interaction_answer(data: dict[str, Any]) -> tuple[str, str, str | None
     return interaction_id, value, run_id or None
 
 
+def parse_notify(data: dict[str, Any]) -> tuple[str, str | None] | None:
+    """Event the agent should speak up about (``notify``): ``(text, key)``.
+
+    ``None`` when the frame is not this event, has no text or more than
+    ``MAX_SESSION_EVENT_CHARS`` of it, a non-string ``key``, or a ``policy``
+    other than ``"when_idle"`` (events never interrupt).
+    """
+    if data.get("type") != "notify":
+        return None
+    text = data.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_SESSION_EVENT_CHARS:
+        return None
+    key = data.get("key")
+    if key is not None and not isinstance(key, str):
+        return None
+    if data.get("policy") not in (None, "when_idle"):
+        return None
+    return text.strip(), (key or "").strip() or None
+
+
+def notify_ack(key: str | None, *, event: Any = None, reason: str | None = None) -> dict[str, Any]:
+    """Reply to a ``notify`` frame: the event's receipt, or ``state="rejected"`` with a ``reason``."""
+    if event is not None:
+        return {"type": "notify_ack", **event.receipt()}
+    return {"type": "notify_ack", "key": key, "state": "rejected", "reason": reason}
+
+
+async def deliver_notify(session: Any, text: str, key: str | None, *, source: str) -> dict[str, Any]:
+    """Post a ``notify`` frame's event on ``session``; returns the ack to send back.
+
+    ``source="client"`` (the caller's device) needs the session's
+    ``client_events``; its text then goes through the agent's input guardrails.
+    """
+    if source == "client" and not getattr(session, "client_events", False):
+        return notify_ack(key, reason="not_enabled")
+    try:
+        event = await session.notify(text, key=key, source=source)
+    except PermissionError:
+        return notify_ack(key, reason="blocked")
+    except RuntimeError:
+        return notify_ack(key, reason="closed")
+    except (TypeError, ValueError):
+        return notify_ack(key, reason="invalid")
+    return notify_ack(key, event=event)
+
+
 def merge_client_config(env_raw: str, hello: dict[str, Any] | None) -> dict[str, Any]:
     """Env JSON is the base; the data-message hello overlays it."""
     config: dict[str, Any] = {}
@@ -871,6 +918,32 @@ async def _run_livekit_session(
                 sess.playback.on_playback_ack(float(data["played_ms"]))
             except (KeyError, TypeError, ValueError):
                 logger.debug("voice_livekit_bad_playback_ack", data=str(data)[:120])
+            return
+        note = parse_notify(data)
+        if note is not None:
+            text, key = note
+            sender = getattr(getattr(pkt, "participant", None), "identity", "") or ""
+            # No participant: the server API's SendData, i.e. the app's own backend.
+            if not sender:
+                source = "app"
+            elif not caller_identity or sender == caller_identity:
+                source = "client"
+            else:
+                logger.debug("voice_livekit_notify_ignored", reason="not_caller")
+                return
+            if sess is None:
+                logger.info("voice_livekit_notify_dropped", reason="no_session")
+                return
+
+            async def _notify() -> None:
+                try:
+                    ack = await deliver_notify(sess, text, key, source=source)
+                except Exception as e:  # noqa: BLE001 — an event must not kill the call
+                    logger.warning("voice_livekit_notify_failed", error=str(e))
+                    return
+                await send_q.put(ack)
+
+            asyncio.create_task(_notify(), name="voice-livekit-notify")
             return
         parsed = parse_interaction_answer(data)
         if parsed is not None:

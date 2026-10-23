@@ -24,6 +24,10 @@ Protocol expectations for clients:
   paced by the server, so there are no base64 audio messages and **no
   playback acks** — the server's own pacing clock is the played position,
   which makes barge-in ``heard_text`` exact instead of estimated.
+* The client may send the LiveKit transport's JSON frames on the same
+  channel: ``interaction_answer`` (answered with ``interaction_answer_ack``)
+  and ``notify`` (answered with ``notify_ack``) — see
+  :func:`handle_client_message`.
 
 Requires the ``timbal[voice]`` extra (aiortc); the route answers 501 without it.
 """
@@ -36,6 +40,7 @@ import hmac
 import json
 import os
 import secrets
+from collections.abc import Callable
 from contextlib import aclosing
 from typing import Any
 
@@ -45,6 +50,7 @@ from fastapi.responses import JSONResponse
 
 from ..voice.config import VoiceConfig
 from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
+from .livekit_session import deliver_notify, parse_interaction_answer, parse_notify
 from .voice import (
     build_voice_session,
     client_call_context,
@@ -193,6 +199,47 @@ def _strip_non_relay_candidates(sdp: str) -> str:
     return "\r\n".join(kept)
 
 
+def handle_client_message(session: Any, message: str | bytes, send: Callable[[dict], None]) -> asyncio.Task | None:
+    """Act on one client frame from the data channel: ``interaction_answer`` or ``notify``.
+
+    Same frames and acks as the LiveKit transport, from the caller's device:
+    ``notify`` needs the session's ``client_events``. Anything else is
+    ignored. Returns the task doing the work, or ``None`` for other frames.
+    """
+    try:
+        data = json.loads(message)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if (answer := parse_interaction_answer(data)) is not None:
+        interaction_id, value, run_id = answer
+
+        async def _submit_tap() -> None:
+            try:
+                ok = await session.submit_user_text(value, interaction_id=interaction_id, run_id=run_id)
+            except Exception as e:  # noqa: BLE001 — a tap must not kill the call
+                logger.warning("voice_rtc_interaction_answer_failed", error=str(e))
+                return
+            if ok:
+                send({"type": "interaction_answer_ack", "interaction_id": interaction_id})
+
+        return asyncio.create_task(_submit_tap(), name="voice-rtc-interaction-answer")
+    if (note := parse_notify(data)) is not None:
+        text, key = note
+
+        async def _notify() -> None:
+            try:
+                ack = await deliver_notify(session, text, key, source="client")
+            except Exception as e:  # noqa: BLE001 — an event must not kill the call
+                logger.warning("voice_rtc_notify_failed", error=str(e))
+                return
+            send(ack)
+
+        return asyncio.create_task(_notify(), name="voice-rtc-notify")
+    return None
+
+
 @router.post("/rtc")
 async def voice_rtc(request: Request) -> JSONResponse:
     # Body-discriminated fork. `{"transport": "livekit", "url", "token", …}`
@@ -286,6 +333,8 @@ async def voice_rtc(request: Request) -> JSONResponse:
         # Session events can fire before SCTP is up; buffer until the client's
         # data channel arrives.
         pending_payloads: list[str] = []
+        # Client-frame tasks, held so they are not collected mid-flight.
+        _client_tasks: set[asyncio.Task] = set()
 
         def _dc_send(payload: dict) -> None:
             msg = json.dumps(payload)
@@ -307,6 +356,14 @@ async def voice_rtc(request: Request) -> JSONResponse:
         def on_datachannel(ch: Any) -> None:
             nonlocal channel
             channel = ch
+
+            @ch.on("message")
+            def on_message(message: str | bytes) -> None:
+                task = handle_client_message(session, message, _dc_send)
+                if task is not None:
+                    _client_tasks.add(task)
+                    task.add_done_callback(_client_tasks.discard)
+
             for msg in pending_payloads:
                 try:
                     ch.send(msg)

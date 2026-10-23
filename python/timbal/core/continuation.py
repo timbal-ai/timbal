@@ -6,14 +6,16 @@ import math
 import weakref
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import aclosing
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..state import get_call_id, get_run_context, set_call_id, set_parent_call_id, set_run_context
-from ..state.background import BackgroundTaskStore, format_background_completion_notice, store_for_run
+from ..state.background import BackgroundTaskStore, SessionEvent, format_session_notice, store_for_run
 from ..types.events import BaseEvent, OutputEvent
 
 if TYPE_CHECKING:
     from ..state.context import RunContext
+    from ..types.message import Message
     from .agent import Agent
 
 ContinuationStopReason = Literal[
@@ -32,6 +34,67 @@ ContinuationStopReason = Literal[
 
 _PAUSE_REASONS = frozenset({"approval_required", "input_required"})
 _FOLLOWUP_DROPPED_KWARGS = frozenset({"prompt", "messages", "parent_id", "resume"})
+
+
+@dataclass(eq=False)
+class Followup:
+    """A turn the session starts on its own: its prompt, and what it took from the store.
+
+    Until :meth:`started` the work is only held: :meth:`release` hands it back,
+    so a turn cancelled before its run exists loses nothing.
+    """
+
+    prompt: "Message"
+    store: BackgroundTaskStore
+    completions: list[dict[str, Any]]
+    events: list[SessionEvent]
+    is_started: bool = False
+
+    @property
+    def task_ids(self) -> list[str]:
+        return [note["task_id"] for note in self.completions]
+
+    @property
+    def trigger(self) -> dict[str, Any]:
+        """Root-span ``metadata.trigger`` for the receiving run."""
+        trigger: dict[str, Any] = {
+            "kind": "session_event" if self.events else "background_completion",
+            "task_ids": self.task_ids,
+        }
+        if self.events:
+            trigger["event_ids"] = [event.id for event in self.events]
+        return trigger
+
+    def started(self, run_id: str) -> None:
+        """The receiving run exists: its input holds the prompt, so the events are delivered."""
+        self.is_started = True
+        for event in self.events:
+            event._settle("delivered", run_id)
+
+    def release(self) -> None:
+        """Hand everything back to the store if no run ever started with it."""
+        if not self.is_started:
+            self.is_started = True
+            self.store.requeue(self.completions, self.events)
+
+
+def take_followup(store: BackgroundTaskStore) -> Followup | None:
+    """Take every pending notice and event for a turn the session starts itself, or None.
+
+    Taking is the commitment: start the turn before anything else can take a
+    turn in the session, then call :meth:`Followup.started` with its run id,
+    or :meth:`Followup.release` if it never runs.
+    """
+    completions = store.drain_completions()
+    events = store.drain_events(settle=False)
+    if not completions and not events:
+        return None
+    return Followup(
+        prompt=format_session_notice(completions, events, own_turn=True),
+        store=store,
+        completions=completions,
+        events=events,
+    )
 
 
 def continuation_for_run(run_id: str) -> "AgentContinuation | None":
@@ -79,7 +142,7 @@ class AgentContinuation:
         self._max_continuations = max_continuations
         self._kwargs = kwargs
         self._context: RunContext | None = None
-        self._trigger: dict[str, Any] | None = None
+        self._followup: Followup | None = None
         # From the moment a run is committed to until its root OUTPUT.
         self._busy = False
         self._stop_requested = False
@@ -128,6 +191,8 @@ class AgentContinuation:
             self._waiter.cancel()
 
     def _release(self) -> None:
+        if self._followup is not None:
+            self._followup.release()
         context = self._context
         if context is None:
             return
@@ -161,10 +226,10 @@ class AgentContinuation:
                     self._finish("run_stopped")
                 if self.stop_reason is not None:
                     return
-                notices = await self._next_notices()
-                if notices is None:
+                followup = await self._next_followup()
+                if followup is None:
                     return
-                kwargs = self._followup_kwargs(notices)
+                kwargs = self._followup_kwargs(followup)
         except asyncio.CancelledError:
             self._finish("cancelled")
             raise
@@ -196,8 +261,12 @@ class AgentContinuation:
             # A new driver's first run is a root turn like any other: it preempts a waiting driver or is refused.
             store.check_continuation_turn(context)
             store.acquire_continuation(self)
-        if self._trigger is not None:
-            context.root_span().metadata["trigger"] = self._trigger
+        if self._followup is not None:
+            context.root_span().metadata["trigger"] = {
+                **self._followup.trigger,
+                "continuation_index": self.continuations,
+            }
+            self._followup.started(context.id)
 
     def _end_run(self, output: OutputEvent) -> None:
         self._busy = False
@@ -209,8 +278,8 @@ class AgentContinuation:
         elif self._stop_requested:
             self._finish("stopped")
 
-    async def _next_notices(self) -> list[dict[str, Any]] | None:
-        """Wait between runs: the notices a follow-up starts with, or None once the stream ends."""
+    async def _next_followup(self) -> Followup | None:
+        """Wait between runs: what the follow-up starts with, or None once the stream ends."""
         context = self._context
         assert context is not None
         store = context._bg_store
@@ -234,10 +303,10 @@ class AgentContinuation:
             if self.stop_reason is not None:
                 return None
             # Drain and busy in one step: a root turn either preempts before it or is refused after it.
-            notices = store.drain_completions()
-            if notices:
+            followup = take_followup(store)
+            if followup is not None:
                 self._busy = True
-                return notices
+                return followup
 
     async def _await_followup(
         self, context: "RunContext", store: BackgroundTaskStore, deadline: float
@@ -269,24 +338,20 @@ class AgentContinuation:
                         admitted = self._admit()
                         if inspect.isawaitable(admitted):
                             await admitted
-                    if store.pending_completions():
+                    if store.pending_completions() or store.pending_events():
                         return None
         except TimeoutError:
             if timeout.expired():
                 return "idle_timeout"
             raise
 
-    def _followup_kwargs(self, notices: list[dict[str, Any]]) -> dict[str, Any]:
+    def _followup_kwargs(self, followup: Followup) -> dict[str, Any]:
         context = self._context
         assert context is not None
         self.continuations += 1
-        self._trigger = {
-            "kind": "background_completion",
-            "continuation_index": self.continuations,
-            "task_ids": [notice["task_id"] for notice in notices],
-        }
+        self._followup = followup
         kwargs = {key: value for key, value in self._kwargs.items() if key not in _FOLLOWUP_DROPPED_KWARGS}
-        kwargs["prompt"] = format_background_completion_notice(notices)
+        kwargs["prompt"] = followup.prompt
         kwargs["parent_id"] = context.id
         # The follow-up inherits the finished run's platform config from the ambient context.
         set_run_context(context)

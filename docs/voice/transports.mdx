@@ -110,3 +110,20 @@ The routes answer and bridge calls. Placing an outbound call requires your carri
 Voice sessions forward `agent_approval` and `agent_interaction` events when the agent pauses. Render the request and resume through `POST /stream` with the event's `run_id` as `parent_id` and the decision in `resume`. Speaking into the microphone is not an approval resolution. See [Client integration](/human-in-the-loop/client-integration).
 
 An `agent_text_done` event also carries the agent `run_id`, allowing an authorized application to continue that conversation through the text endpoint. Identity and prior-run continuation require host-controlled authorization; they are separate from speech tuning in the hello.
+
+## Reporting events
+
+On WebRTC and LiveKit, a client can tell the agent that something happened, such as a background task finishing, so it speaks up without waiting for the caller. Send this on the data channel (LiveKit: the room data channel):
+
+```json
+{"type": "notify", "text": "Task 'report' finished: sales are up 4%.", "key": "task:report"}
+```
+
+`key` is optional; a newer event with the same key replaces one that has not been delivered. The agent waits for a quiet line and never interrupts. The server answers at once with the event's receipt, or a rejection:
+
+```json
+{"type": "notify_ack", "event_id": "06ad…", "key": "task:report", "state": "pending", "run_id": null}
+{"type": "notify_ack", "key": "task:report", "state": "rejected", "reason": "not_enabled"}
+```
+
+Text from the caller's device is untrusted. The server accepts it only when the agent's `voice_config` sets `"events": {"client_notify": true}` (the hello cannot), runs it through the agent's input guardrails (`reason: "blocked"`), and labels it for the model as information rather than instructions. On LiveKit, frames from other participants are ignored, and frames the room server API sends (`SendData`, no participant) come from your backend and need no opt-in. Server-side code calls `VoiceSession.notify` directly; see [Using tools](/voice/tools#report-back-when-slow-work-finishes).

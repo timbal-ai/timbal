@@ -1,10 +1,12 @@
 # RFC: event-triggered turns across chat and voice
 
-Status: **draft; design plus a deliberately limited first implementation**.
+Status: **draft; design plus a first implementation covering #214's use case**.
 Reviewed against main at `49af46e9` on 2026-10-23 (after #216 and #223 merged).
-Phase 1 is implemented on this branch as described below; "Implementation
-notes" records where implementing it changed the earlier revision of this text.
-Names for the later session API (Phase 2) are proposals, not shipped interfaces.
+Phase 1 (the text driver, session events, and the voice adapter) is implemented
+on this branch as described below; "Implementation notes" records where
+implementing it changed earlier revisions of this text. What remains of Phase 2
+(durable inbox, authenticated session identity, cross-worker ownership,
+idempotency keys, expiry) is a proposal, not a shipped interface.
 
 ## Decision in brief
 
@@ -16,21 +18,29 @@ an instruction to speak immediately. Separate three responsibilities:
 3. Deliver its output through chat or voice, with channel-specific interruption
    and playback rules.
 
-The first implementation is a **hostable continuation driver** over the existing
-background-completion inbox. `Agent.stream_until_idle(...)` is sugar over it for
-the local, caller-driven case. The driver is the unit both channels share: the
-HTTP job layer and `VoiceSession` already own long-lived loops, so the reusable
-piece has to be something they can host, not an agent method that only lives
-while a request iterates it.
+The shared unit is the **session store**: the existing background-task store
+gains an event inbox, and both kinds of input (finished tasks, posted events)
+are waited for, drained, and formatted by the same primitives
+(`wait_for_completion`, `take_followup`, `format_session_notice`). Each channel
+owns its turn loop on top of them:
+
+- Text: `AgentContinuation` (with `Agent.stream_until_idle(...)` as sugar), a
+  caller-driven stream of ordinary runs.
+- Voice: `VoiceSession`, whose turns already run through `_run_turn` (TTS,
+  fillers, barge-in, heard-prefix memory, metrics), adds an event loop gated by
+  its quiet-line check.
+- Any turn of the session, including a plain `agent(...)` call, receives what
+  is pending ahead of its prompt, so nothing waits for a driver to exist.
 
 It does not create a second task store, make `VoiceSession` the owner of
-conversation state, expose untrusted event frames, or silently change the
-lifetime of existing agent calls.
+conversation state, promote client text to trusted runtime context, or change
+the lifetime of existing agent calls. Event turns are opt-in: calling
+`notify()`/`post_session_event()` is the opt-in for events; finished tasks start
+a voice turn only with `announce_background_results`.
 
-This PR is **not** a complete replacement for #214. External notification
-ingress, arbitrary session wakeups after a driver has ended, and the voice
-adapter remain unimplemented. Do not merge it as a claim that those product
-requirements are finished.
+Not implemented: events surviving a process restart or reaching another worker,
+wakeups for a text session with no driver running (its next turn still gets
+them), and an interrupting (`now`) policy.
 
 ## Related work and migration
 
@@ -43,24 +53,27 @@ requirements are finished.
   body that was stored and #223's end barrier has already uploaded the final
   snapshot, so that edit diverges from both), a `bool` return for several
   distinct outcomes, and client frames promoted to `source="runtime"` without
-  input guardrails. Carry forward from its branch (`voice/session-notify`) into
-  a voice adapter PR once the driver lands:
-  - the admission predicate (`when_idle` rules: no turn running, playback
-    finished, no greeting/filler/held fragment, quiet window, VAD silent) as
-    the driver's `admit`;
-  - `current_voice_session()` and `TurnMetrics.event`;
-  - the transport frame parsing and tests, with client `notify` frames opt-in
-    (`VoiceConfig`) and routed through input guardrails as ordinary input;
-  - an overdue note stays pending and attaches to the **next** run as a
-    runtime message, the same way background completions do;
-  - event turns tagged with the same `metadata.trigger` as below;
-  - receipt states instead of `bool` (at minimum `own_turn`, `deferred`,
-    `replaced`, `call_ended`), aligned with Phase 2.
+  input guardrails. Carried forward from its branch (`voice/session-notify`)
+  into this PR:
+  - the quiet-line check (no turn running, playback finished, no greeting or
+    idle prompt, no held fragment, quiet window, VAD silent, last run not
+    parked on the caller), unchanged in substance;
+  - `current_voice_session()`, the session-context snapshot turns start from,
+    `TurnMetrics.event`, and no fillers on event turns;
+  - the LiveKit/WebRTC frame parsing and tests, with client `notify` frames
+    opt-in through server-only config and screened by input guardrails;
+  - key replacement and batching of waiting events.
+
+  Changed on the way: an event the line never has room for rides the caller's
+  **next** turn through the agent's normal injection (no `max_wait_secs`, no
+  edit of the previous run); `notify()` returns a `SessionEvent` receipt at
+  once instead of a `bool` after placement; the `now` policy is not carried.
 - [#218: end call](https://github.com/timbal-ai/timbal/pull/218): was stacked on
   #214's branch. Its design is unaffected by this RFC: keep hang-up-after-playback
   as a voice policy, not a generic session close, and count partial speech/VAD
-  as caller activity. Retarget it to `main` and bring `current_voice_session()`
-  with it; #215, which it needed for `session_ended` on WebRTC, is merged.
+  as caller activity. `current_voice_session()` now lands with this PR, so it
+  can retarget onto this branch (or `main` once this merges) without carrying
+  it; #215, which it needed for `session_ended` on WebRTC, is merged.
 - [#216: tracing and interrupted history](https://github.com/timbal-ai/timbal/pull/216)
   and [#223: buffered persistence](https://github.com/timbal-ai/timbal/pull/223):
   merged. Reuse read-after-save, interrupted-turn recovery, and the end
@@ -141,9 +154,43 @@ Primary references:
 The useful commonality is not one universal Session class. It is the separation
 of event receipt, execution ownership, and output policy.
 
-## Phase 1: continuation driver
+## Phase 1: session events, text driver, voice adapter
 
-### API
+### Session events
+
+```python
+from timbal.state import post_session_event
+
+event = post_session_event(run_id, "The nightly export finished.", key="export")
+event.state            # "pending" -> "delivered" (event.run_id) | "superseded"
+await event.settled()  # observer; cancelling it does not withdraw the event
+```
+
+- The event goes to the `BackgroundTaskStore` of `run_id`'s session (one is
+  registered under `run_id` when the session has none, for the turn chained on
+  it). `BackgroundTaskStore.post_event` is the same thing given a store.
+- Nonblocking: posting never waits for a turn. Text is capped at 4,000
+  characters. A pending event with the same `key` is superseded (receipt state
+  `superseded`); one a turn has already taken is not replaced.
+- `source="app"` (server code) or `"client"` (a user's device). Client text is
+  labelled for the model as information, never instructions; the voice
+  transport additionally screens it with the agent's input guardrails and
+  accepts it only when server config allows.
+- Every root turn of the session drains pending events with the finished-task
+  notices into one runtime message ahead of its prompt (`format_session_notice`;
+  without events the notice is byte-identical to the existing one), records
+  `metadata.session_events`, and settles the receipts with its run id. A run
+  resuming an approval/suspension does not drain (the same rule as for
+  completions), so nothing lands between a tool use and its result.
+- A turn the session starts itself takes everything with `take_followup`. The
+  receipts settle as delivered only once that run has started (its stored input
+  then holds the notice); if it never starts, `Followup.release()` hands the
+  work back, ahead of anything newer, superseding an event whose key a newer
+  pending event now carries.
+- The text is wrapped in `<session_event id source key>` blocks; a closing tag
+  inside the text is neutralized so it cannot speak outside its block.
+
+### Text driver API
 
 ```python
 from contextlib import aclosing
@@ -161,10 +208,10 @@ async with aclosing(stream):
         await publish(event)
 print(stream.stop_reason, stream.last_run_id, stream.continuations)
 
-# Hosted: the channel owns the loop and decides when a follow-up may start.
+# Hosted: the host owns the consumer task and decides when a follow-up may start.
 stream = AgentContinuation(
     agent,
-    admit=session.wait_until_quiet,  # awaited before each follow-up; may be None
+    admit=wait_until_channel_free,  # awaited before each follow-up; may be None
     max_idle_secs=300,
     max_continuations=10,
     prompt=...,  # the remaining keywords are the agent call's
@@ -204,17 +251,21 @@ no single `.collect()` result that hides the extra turns.
    or the model run.
 2. Streams the run to completion, including tracing finalization.
 3. Stops on unsuccessful output, approval, or interaction suspension.
-4. Waits on the store's completion signal without polling or draining. Already
-   finished tasks are reconciled before declaring quiescence, including the
-   interval before their done callbacks have executed. A direct human turn on
-   the session preempts this wait (see "Ownership and preemption").
+4. Waits on the store's signal, which a finished task or a posted event wakes,
+   without polling or draining. Already finished tasks are reconciled before
+   declaring quiescence, including the interval before their done callbacks
+   have executed. A direct human turn on the session preempts this wait (see
+   "Ownership and preemption").
 5. Verifies readable parent history and no unresolved tool calls, then awaits
    `admit` if given.
-6. Drains the pending notices and starts another ordinary run with the formatted
-   completion notice as its `prompt`. The notice is a `role="user"` message with
-   `metadata.source="runtime"`, so it is not a human utterance, is hidden from
-   transcripts by `Message.is_runtime()`, and skips input guardrails like every
-   runtime message. No previous-trace edit occurs.
+6. Takes the pending notices and events (`take_followup`) and starts another
+   ordinary run with the formatted notice as its `prompt`. The notice is a
+   `role="user"` message with `metadata.source="runtime"`, so it is not a human
+   utterance, is hidden from transcripts by `Message.is_runtime()`, and skips
+   input guardrails like every runtime message. It opens with a line saying the
+   turn was started by the updates, not by the user. No previous-trace edit
+   occurs. If the driver is closed or cancelled before that run starts, the
+   work goes back to the store.
 7. Repeats until quiescent or a stop condition is reached.
 
 Draining in the driver rather than in the receiving run means the notice is in
@@ -266,11 +317,15 @@ only exists once a store exists.
 ### Trace shape
 
 - Initial run: `input.prompt` is the human prompt, as today.
-- Follow-up run: `input.prompt` is the completion notice (runtime user message,
-  kind `background_task_completed`); `metadata.trigger = {"kind":
-  "background_completion", "continuation_index": n, "task_ids": [...]}`.
-- A preempting human turn has no `trigger`; the notices it carries sit in its
-  memory before its prompt, as for any next turn today.
+- A turn the session starts itself (text follow-up or voice event turn):
+  `input.prompt` is the notice (runtime user message; kind
+  `background_task_completed`, or `session_event` when it carries events);
+  `metadata.trigger = {"kind": "background_completion" | "session_event",
+  "task_ids": [...], "event_ids": [...]}`, plus `continuation_index` from the
+  text driver.
+- A human turn that receives pending work has no `trigger`; the notice sits in
+  its memory before its prompt, and `metadata.session_events` lists the event
+  ids it received.
 - A follow-up that fails before assembling memory still holds the notice in its
   stored `input`, so the next turn's rebuild (#216) re-attaches it. The notice
   is never only in memory.
@@ -308,13 +363,57 @@ After a notice is taken, cancellation, provider failure, or a failed trace save
 does not prove whether the model or user received it. Preserve that distinction
 rather than automatically replaying a potentially side-effecting turn.
 
+### Voice adapter
+
+`VoiceSession` runs its own event loop over the same store, because its turns
+must go through `_run_turn` (TTS, fillers, barge-in, heard-prefix memory,
+metrics); hosting `AgentContinuation` would bypass all of that.
+
+- `await session.notify(text, key=None, source="app") -> SessionEvent` posts to
+  the call's conversation store and returns at once. The store is made on
+  demand; one made before any turn has a run is adopted by the first turn's run.
+- One watcher task per call, started by `notify()` and at the end of any turn
+  whose store holds pending events (or, with `announce_background_results`,
+  background work). Waiting for work uses the store's waiter; waiting for the
+  line polls the quiet-line check every 50 ms, because "the caller's audio has
+  finished playing" is an estimate with no event to wait on.
+- Quiet line: session started and open, last run not parked on the caller, no
+  turn running, agent not speaking, no greeting or idle prompt pending, playback
+  finished, no held caller fragment, no uncommitted partial in the last 5 s,
+  nothing from the caller in the last 0.6 s, local VAD silent. Event turns never
+  interrupt; once one has started, the caller barges in as on any reply.
+- The event turn starts under the same lock as caller turns, right after
+  `take_followup`, as `_run_turn(followup=...)`: the notice is the prompt,
+  fillers are off, `TurnMetrics.event` is true, the root span gets `trigger`,
+  and the receipts settle at the run's first event. A task cancelled before its
+  first step releases the work from a done callback, since its `finally` never
+  runs.
+- A caller who speaks first gets everything pending with their turn, through
+  the agent's normal injection: #214's "overdue" case, without an edit of the
+  previous run.
+- Finished background tasks start an event turn only with
+  `announce_background_results`; otherwise they wait for the caller's next turn
+  as before. When an event turn happens anyway, finished tasks ride it.
+- `source="client"` needs `client_events` and is screened by the agent's input
+  guardrails (a block raises `PermissionError`). WebRTC data-channel frames and
+  LiveKit frames from the caller are client events; LiveKit frames with no
+  participant (the server API's `SendData`, i.e. the app's backend) are app
+  events; other participants are ignored. `VoiceConfig.events`
+  (`announce_background_results`, `client_notify`) is read from server config
+  only, never from the hello.
+- Events undelivered at hang-up stay pending in the conversation's store for
+  its next turn (a text turn continuing the call), and are logged.
+- `current_voice_session()` is set for the session's turns, the tools they
+  call, and tasks they spawn; turns start from a snapshot of the session's
+  context, so code outside the call (a `notify` caller, a LiveKit tap) does not
+  leak its run context into them.
+
 ## Implementation notes
 
-The first implementation on this branch followed an earlier form (empty
-runtime wakeup prompt drained by the receiving run, every competing root turn
-rejected, an opaque owner, a store allocated for every driver run). It was
-replaced by the design above. Implementing it changed three points of the
-previous revision of this RFC:
+Earlier forms on this branch: an empty runtime wakeup prompt drained by the
+receiving run, every competing root turn rejected, an opaque owner, a store
+allocated for every driver run. They were replaced by the design above.
+Implementing it changed these points of earlier revisions of this RFC:
 
 - A new driver on an owned session is treated like a direct turn (preempt while
   waiting, reject while in flight) instead of always failing. A host that starts
@@ -324,15 +423,26 @@ previous revision of this RFC:
   `Agent` (see "Ownership and preemption" for why).
 - `AgentContinuation` takes the agent call's keywords directly (`prompt=...`)
   rather than a `kwargs=` dict, matching `stream_until_idle`.
+- Voice does not host `AgentContinuation` with its quiet-line check as `admit`,
+  as an earlier revision said: the driver starts agent runs itself, and voice
+  turns must start in `_run_turn`. The two share the store-level primitives
+  (waiter, `take_followup`, notice formatting, receipts) instead.
+- Taking work for a turn the session starts itself no longer settles it at
+  once: receipts settle when the run starts, and `Followup.release()` hands the
+  work back otherwise. Without this, a barge-in landing in the same loop tick as
+  an event turn's start lost the events.
 
-`Agent._inject_background_completions` and `Agent.handler` are unchanged from
-`main`; the continuation-specific code is `core/continuation.py`, a few methods
-on `BackgroundTaskStore`, one `RunContext` attribute, and the check call in
-`Runnable._stream`.
+`Agent.handler` is unchanged from `main`; `_inject_background_completions` also
+drains posted events. The rest is `core/continuation.py`, the event inbox on
+`BackgroundTaskStore`, one `RunContext` attribute, the check call in
+`Runnable._stream`, the voice event loop, and the transport frames.
 
 ## Phase 2: proposed shared session contract
 
-This section is a design target, not an API implemented by Phase 1.
+Phase 1 implements part of it: event ids, nonblocking ingress with receipts and
+an observer, key replacement only while pending, a bounded payload, an
+app/client source with screening and labelling, human-first admission, and
+release before attachment. The rest is a design target.
 
 ### Identity and ownership
 
@@ -350,116 +460,88 @@ claiming support for events arriving after an HTTP request or voice call ends.
 
 ### Event identity and admission
 
-An event records an immutable ID, authenticated producer, session identity,
-kind, causal task/run IDs, bounded payload/reference, and admission time.
-Idempotency keys suppress repeat delivery of the same event; replacement keys
-coalesce pending updates. Do not conflate the two. Same idempotency key with a
-different payload is a conflict, not a silent overwrite. Claimed/attached events
-are not replaced behind a running model's back.
-
-Ingress acknowledges acceptance promptly, returning an event ID and receipt
-state. It must not await completion of a future turn: a tool awaiting that turn
-would deadlock the currently running turn. Waiting for receipt changes is a
-separate observer operation whose cancellation does not withdraw the event.
-
-Start with server-generated task completions. A browser may request an action
-or submit ordinary input; it must not assert `source="runtime"` or bypass input
-guardrails by sending a notification frame. Authenticated tool results remain
-untrusted data, not instructions. Event validation, payload limits, admission
-policy, and any result screening are independent of transcript visibility.
+Still to add: an authenticated producer and session identity (today: whoever
+can call `post_session_event` in-process, or the transport's caller check);
+idempotency keys distinct from replacement keys (the same idempotency key with
+a different payload is a conflict, not a silent overwrite); a bounded inbox with
+explicit overflow; causal task/run ids on the event. Authenticated tool results
+remain untrusted data, not instructions. Event validation, payload limits,
+admission policy, and any result screening are independent of transcript
+visibility.
 
 ### Scheduling versus delivery
 
-Proposed scheduling choices:
-
 - `context_only`: retain for the next eligible turn; never start one itself.
-- `when_idle`: start a turn once the owner/channel admits it; batch ready events.
-  Phase 1's driver with an `admit` hook is this policy for one event kind.
+  Phase 1: a finished task in voice without `announce_background_results`.
+- `when_idle`: start a turn once the owner/channel admits it; batch ready
+  events. Phase 1: the text driver, and voice event turns.
 - `interrupt`: explicit privileged policy, not a default or an expiry fallback.
-  Voice must preserve its heard-prefix interruption behavior.
+  Voice must preserve its heard-prefix interruption behavior. Not implemented.
 
 An event waiting too long does not silently become an interruption. Expiry
-reports a reason and preserves whatever source/task result remains available.
-Events cannot bypass approvals or interactively suspended tool calls. Results
-remain outside the pending tool-use/tool-result sequence until it is safe to
-attach them. Human input preempts pending autonomous turns, as in Phase 1.
-
-The inbox lifecycle is `pending -> taken -> attached`, or a terminal
-`withdrawn / superseded / expired / closed` before being taken. Taking and turn
-admission are atomic for one owner. Cancellation before the run's `START` is
-stored releases the event back to pending; after that the event is in the run's
-stored `input` and recovery goes through the trace, never by re-enqueueing.
-Attachment records the receiving run ID and belongs to that run's memory, never
-an older trace.
-
-Track separately: accepted into local/durable storage, attached to model context,
-run completed/failed/interrupted, and output delivered. Text generated, audio
-sent, and audio played are distinct facts. No `True/False` receipt can represent
-all of these. At-least-once transport and deduplicated admission still do not
-provide exactly-once tool side effects or exactly-once audible announcements.
-
-### Voice adapter
-
-The adapter contributes `admit` (no foreground turn, outstanding playback,
-greeting/filler, held fragment, or active/recent caller speech) and wakes the
-driver when that changes. Quiet windows need measured defaults; they live in the
-adapter, not the generic driver.
-
-Both user and event turns enter the same voice owner. Barge-in stops the
-foreground response, persists heard-prefix history, and leaves detached jobs
-alone unless explicit application policy cancels them. Hang-up stops voice
-delivery, not necessarily the underlying conversation's work. A separate
-application policy decides whether the completion is later presented in chat.
+reports a reason and preserves whatever source/task result remains available;
+not implemented: today an event waits until a turn takes it. Track separately:
+accepted into local/durable storage, attached to model context, run
+completed/failed/interrupted, and output delivered. Text generated, audio sent,
+and audio played are distinct facts; Phase 1's receipt covers only the first
+two. At-least-once transport and deduplicated admission still do not provide
+exactly-once tool side effects or exactly-once audible announcements.
 
 ## Acceptance gates and rollout
 
-Phase 1's executable tests are in `python/tests/core/test_continuation.py` in
-the repository. Besides multi-run chaining, in-memory and JSONL history, no
-historical edits, no extra human message, completion batching, completion during
-generation, acknowledgement, same-agent session isolation, paused/failed runs,
-idle/continuation limits, missing history, close, and cancellation while waiting
-or generating, they cover:
+Executable tests in the repository:
 
-- A direct turn while the driver waits: driver ends `preempted`, exactly one
-  run starts, its memory carries the pending notice before the human prompt,
-  nothing is drained twice.
-- A direct turn while a follow-up is in flight: rejected before hooks (per-run
-  hook record) and the follow-up finishes. The same two cases for a new driver.
-- `stop()` before iteration, while waiting, and during a follow-up (which
-  reaches `OUTPUT`, then no more); `continuation_for_run` finds the driver and
-  returns `None` after release.
-- Follow-up `input.prompt` is the notice and `is_runtime()`; `metadata.trigger`
-  lists its task ids; a follow-up cut before memory assembly leaves the notice
-  to the next turn through the #216 rebuild; an acknowledgement after the driver
-  has taken a notice does not remove it from that run.
-- `admit` (sync or async) is called before each follow-up and cancelled by
-  preemption.
-- An agent without background tools allocates no store and registers no run id.
+- `python/tests/core/test_continuation.py`, the text driver. Besides multi-run
+  chaining, in-memory and JSONL history, no historical edits, no extra human
+  message, completion batching, completion during generation, acknowledgement,
+  same-agent session isolation, paused/failed runs, idle/continuation limits,
+  missing history, close, and cancellation while waiting or generating:
+  - A direct turn while the driver waits: driver ends `preempted`, exactly one
+    run starts, its memory carries the pending notice before the human prompt,
+    nothing is drained twice.
+  - A direct turn while a follow-up is in flight: rejected before hooks (per-run
+    hook record) and the follow-up finishes. The same two cases for a new driver.
+  - `stop()` before iteration, while waiting, and during a follow-up (which
+    reaches `OUTPUT`, then no more); `continuation_for_run` finds the driver and
+    returns `None` after release.
+  - Follow-up `input.prompt` is the notice and `is_runtime()`; `metadata.trigger`
+    lists its task ids; a follow-up cut before memory assembly leaves the notice
+    to the next turn through the #216 rebuild; an acknowledgement after the driver
+    has taken a notice does not remove it from that run.
+  - `admit` (sync or async) is called before each follow-up and cancelled by
+    preemption.
+  - An agent without background tools allocates no store and registers no run id.
+- `python/tests/core/test_session_events.py`: posting (validation, key
+  replacement only while pending, receipts and their observer), waking a waiter
+  blocked on children, release ahead of newer work, the notice (byte-identical
+  without events, labelled blocks, neutralized closing tag, client note), a turn
+  receiving an event posted by run id, an event waking a waiting driver.
+- `python/tests/voice/test_voice_events.py`: event turns spoken and never the
+  caller's words, still in memory later, silence with no filler; waiting for
+  playback and for caller speech; barge-in on an event turn; a caller who speaks
+  first, or a busy line, gets the event with their turn (in-memory and JSONL);
+  an event before any turn; key replacement and batching; announced versus
+  left-for-the-caller background results; client events refused, screened and
+  labelled; events before the call starts and at hang-up; an event turn cut
+  before its run; `current_voice_session()`; the quiet-line check.
+- `python/tests/server/test_voice_notify.py` and
+  `test_livekit_session.py::TestNotifyFromTheRoom`: frame parsing, acks and
+  rejections, the WebRTC data channel, LiveKit sender attribution, and
+  server-only enabling.
 
-The ownership tests were checked against mutations of the preempt/reject
-decision and of the store's owner inheritance; each mutation fails at least two
-of them. Existing background, runnable, tracing, guardrail, and voice tests
-remain regression gates.
+These tests were checked against mutations of the preempt/reject decision, the
+store's owner inheritance, the agent draining events, the quiet-line check,
+`release()`, the event turn's done callback, store adoption, LiveKit sender
+attribution, client screening, and closing-tag neutralization; each mutation
+fails at least one of them. Existing background, runnable, tracing, guardrail,
+and voice tests remain regression gates.
 
-Before adding external notifications/voice, require deterministic tests for:
+Not yet tested: two producers/retries with idempotency, a bounded inbox and
+overflow; deployment owner routing; trace-save failure reporting; the quiet-line
+windows on real LiveKit/STT/TTS timing (0.6 s quiet and 5 s stranded partial
+are carried from #214, not measured).
 
-- Two producers/retries: stable idempotency, replacement only while pending,
-  bounded inbox, and explicit overflow/expiry results.
-- Cancellation at every take/attach boundary and close while waiting: no
-  unresolvable receipt and no swallowed cancellation.
-- Approval/input suspension: no inserted event between tool use and result and
-  no fabricated resume value.
-- Voice playback/partial speech/VAD/greetings: never interrupt under `when_idle`;
-  normal barge-in and heard-prefix memory under authorized interruption.
-- Disconnect versus hang-up versus stopping the driver versus cancelling jobs:
-  separate outcomes and no assumption that the runtime survives deployment shutdown.
-- Unauthorized producer/session, forged runtime metadata, and oversized payload:
-  rejected before privileged admission; hidden transcript status is not trust.
-- Deployment owner routing and trace-save failure: report uncertainty, never
-  claim durable acceptance based solely on an in-memory append.
-
-Merge/readiness decisions: agree the driver's API and output contract; then
-open the voice adapter PR on the `admit` hook,
-carrying forward what "Related work" lists from #214; then implement the shared
-inbox as a separately reviewable change. Do not expose client notification
-frames before the trust boundary and receipt protocol are approved.
+Merge/readiness decisions: agree the driver's API and output contract, the
+`SessionEvent` receipt, and the trust rules for client frames (server-only
+opt-in, guardrails, labelling); then the durable/cross-worker inbox as a
+separately reviewable change.

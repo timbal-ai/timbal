@@ -52,7 +52,7 @@ from ..state.background import (
     LIST_BACKGROUND_TASKS_DESCRIPTION,
     READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
-    format_background_completion_notice,
+    format_session_notice,
 )
 from ..types.content import (
     CustomContent,
@@ -1066,7 +1066,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return loaded
 
     def _inject_background_completions(self, current_span: Any) -> None:
-        """Drain session completion inbox into memory at turn start (Claude-style).
+        """Drain finished-task notices and posted session events into memory at turn start.
 
         Delivered between turns only — never mid-loop — so the parent is not
         interrupted while talking. Skipped for subagents and approval/suspend
@@ -1081,9 +1081,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if store is None:
             return
         notifications = store.drain_completions()
-        if not notifications:
+        run_context = get_run_context()
+        events = store.drain_events(run_id=run_context.id if run_context is not None else None)
+        if not notifications and not events:
             return
-        notice = format_background_completion_notice(notifications)
+        notice = format_session_notice(notifications, events)
+        if events:
+            current_span.metadata["session_events"] = [event.id for event in events]
         memory = current_span.memory
         # Sit immediately before the current user prompt so history stays
         # [...prior turns..., completion notice, user prompt].

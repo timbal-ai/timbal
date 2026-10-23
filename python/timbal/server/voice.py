@@ -37,6 +37,7 @@ from ..voice.config import (
     RecordingConfig,
     UserIdleConfig,
     VoiceConfig,
+    VoiceEventsConfig,
     greeting_for_direction,
     omit_empty_voice_blocks,
 )
@@ -161,6 +162,7 @@ _SPARSE_NESTED: tuple[tuple[str, type], ...] = (
     ("outbound_greeting", GreetingConfig),
     ("user_idle", UserIdleConfig),
     ("ambient", AmbientAudioConfig),
+    ("events", VoiceEventsConfig),
 )
 
 
@@ -1152,6 +1154,11 @@ def build_voice_session(
         session_kwargs["call_context"] = call_context
     if parent_run_id:
         session_kwargs["parent_run_id"] = parent_run_id
+    # Server config only, like recording: ``events`` is not client-settable, so
+    # a browser cannot let itself post notify frames into the call.
+    if defaults.events is not None:
+        session_kwargs["announce_background_results"] = defaults.events.announce_background_results
+        session_kwargs["client_events"] = defaults.events.client_notify
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).

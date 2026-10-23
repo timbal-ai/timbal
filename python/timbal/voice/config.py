@@ -315,6 +315,20 @@ class RecordingConfig(BaseModel):
     """Async callable invoked with the ``RecordingResult``. Python-only."""
 
 
+class VoiceEventsConfig(BaseModel):
+    """Event turns (see ``VoiceSession.notify``). Server-side only — never client-settable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    announce_background_results: bool = False
+    """Start a turn when one of the agent's background tasks finishes, instead of
+    leaving the result for the caller's next turn."""
+    client_notify: bool = False
+    """Accept ``notify`` frames from the caller's device (WebRTC data channel,
+    the LiveKit caller's participant). Their text is screened by the agent's
+    input guardrails and labelled for the model as information, not instructions."""
+
+
 _OPTIONAL_VOICE_BLOCKS = {
     "greeting": GreetingConfig,
     "outbound_greeting": GreetingConfig,
@@ -322,6 +336,7 @@ _OPTIONAL_VOICE_BLOCKS = {
     "ambient": AmbientAudioConfig,
     "filler": FillerConfig,
     "recording": RecordingConfig,
+    "events": VoiceEventsConfig,
 }
 
 
@@ -410,6 +425,9 @@ class VoiceConfig(BaseModel):
     """None → ``VoiceSession`` default; "" → no spoken apology on timeout."""
     recording: RecordingConfig | None = None
     """Empty/unset → inherit recording policy; an empty object does not enable it."""
+    events: VoiceEventsConfig | None = None
+    """None → ``notify()`` from server code only; background results wait for the
+    caller. See :class:`VoiceEventsConfig`."""
     ambient: AmbientAudioConfig | None = None
     """None → no background audio. An empty object is treated as unset."""
     filler: FillerConfig | None = None

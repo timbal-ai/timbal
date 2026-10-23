@@ -237,7 +237,7 @@ Once per turn — after `agent_text_done`, and also when the turn is interrupted
 }
 ```
 
-`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). `playback_acks_received` says whether the heard position was client-truth (acks) or the wall-clock estimate; interrupted turns set `heard_bytes` to the PCM bytes the user actually heard (`null` on uninterrupted turns). `vad_endpointed` is `true` when the turn's transcript was force-committed by the local [VAD endpointing](#config-overrides) fast path instead of the provider's silence debounce. Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
+`eou_to_first_audio_ms` is the headline voice latency: user end-of-utterance (committed transcript) to the first TTS byte emitted. Duration fields are `null` when the stage never happened (e.g. an interrupted turn with no audio). `playback_acks_received` says whether the heard position was client-truth (acks) or the wall-clock estimate; interrupted turns set `heard_bytes` to the PCM bytes the user actually heard (`null` on uninterrupted turns). `vad_endpointed` is `true` when the turn's transcript was force-committed by the local [VAD endpointing](#config-overrides) fast path instead of the provider's silence debounce. `event` is `true` for a turn the session started on its own (`VoiceSession.notify`, an announced background result) rather than the caller; its `eou_to_*` clocks start when the turn did. Server-side, the same metrics are available as `session.metrics` (Python API) and are attached to the run trace as `voice_turn_metrics` on the root span metadata.
 
 ### Frontend notes
 
@@ -278,6 +278,13 @@ The offer **must** contain:
 - **A data channel** (any label) — created by the client so its SCTP m-line rides the offer. All non-audio session events arrive here as JSON: the exact payloads of the WS protocol, except there are **no `audio` messages** (TTS is a real audio track the browser plays natively) and **no `playback` acks** (`session_started.playback_acks` is `"native"`, and `transport` is `"webrtc"`).
 
 The server answers with the TTS audio track on the same m-line. Client teardown = close the peer connection; server teardown (session end/error) closes the connection and fires `session_ended` on the data channel first.
+
+### Client frames (client → server)
+
+The data channel also carries the two JSON frames the LiveKit transport accepts on its data topic (there, only from the caller's own participant, or the server API for `notify`):
+
+- `{"type": "interaction_answer", "interaction_id": "...", "value": "...", "run_id"?: "..."}` — answers a parked `ask_user` as if spoken (`VoiceSession.submit_user_text`); `{"type": "interaction_answer_ack", "interaction_id": "..."}` once a turn starts.
+- `{"type": "notify", "text": "...", "key"?: "..."}` — something happened that the agent should speak up about (`VoiceSession.notify`, `source="client"`). Accepted only when the agent's `voice_config` has `"events": {"client_notify": true}` — server config, never the hello. `text` (at most 4,000 chars) goes through the agent's input guardrails and reaches the model labelled as reported by the caller's device; it is never shown as the caller's words. Answered at once with `{"type": "notify_ack", "event_id", "key", "state": "pending", "run_id": null}`, or `{"type": "notify_ack", "key", "state": "rejected", "reason": "not_enabled" | "blocked" | "invalid" | "closed"}`. The event waits for a quiet line and never interrupts; if the caller speaks first it rides their turn.
 
 ### ICE configuration
 

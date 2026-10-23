@@ -116,8 +116,8 @@ Handlers that yield progress dicts (e.g. `{"stage": "processing", "progress": 50
 ## Opt-in automatic follow-up turns
 
 `Agent.stream_until_idle()` streams the initial turn and starts another turn
-when a background task finishes. Ordinary `agent(...)` calls keep their existing
-single-turn behavior.
+when a background task finishes or a [session event](#posting-events-to-a-session)
+arrives. Ordinary `agent(...)` calls keep their existing single-turn behavior.
 
 ```python
 from contextlib import aclosing
@@ -144,6 +144,7 @@ outputs carry `metadata.trigger`:
 
 ```python
 {"kind": "background_completion", "continuation_index": 1, "task_ids": ["..."]}
+# with posted events: "kind": "session_event" and "event_ids": [...]
 ```
 
 The stream ends when no children or pending notices remain, or on an idle
@@ -194,9 +195,31 @@ Stopping, closing, or cancelling it stops further automatic responses but leaves
 detached children running. Use explicit background-task cancellation to stop
 those too. Close it explicitly when breaking iteration.
 
-Existing HTTP routes and voice transports do not opt into this behavior.
-Restart recovery, cross-worker ownership, arbitrary notification ingress, and
-guarantees that a user heard a response are outside this API's scope.
+Existing HTTP routes do not opt into this behavior; voice sessions run their
+own version of it (see [Using tools](/voice/tools#report-back-when-slow-work-finishes)).
+Restart recovery, cross-worker ownership, and guarantees that a user heard a
+response are outside this API's scope.
+
+## Posting events to a session
+
+Work that is not a background task of the agent (another service, a job queue,
+a webhook) reports into the conversation with a session event:
+
+```python
+from timbal.state import post_session_event
+
+event = post_session_event(run_id, "The nightly export finished: 1,204 rows.", key="export")
+```
+
+`run_id` is the session's latest run. The session's next turn receives the event
+as a runtime message ahead of its prompt (never as a user utterance); a
+`stream_until_idle` stream waiting on the session wakes and starts a follow-up.
+A pending event with the same `key` is superseded. The returned `SessionEvent`
+is a receipt: `state` is `"pending"`, then `"delivered"` (with `run_id`) once a
+turn has it, or `"superseded"`; `await event.settled()` waits for that. Text is
+limited to 4,000 characters. `source="client"` marks text from a user's device,
+which the model is told to treat as information, not instructions. Events are
+process-local, like background tasks.
 
 ## Timeouts
 

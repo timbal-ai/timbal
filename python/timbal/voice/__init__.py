@@ -7,6 +7,7 @@ from .config import (
     RecordingConfig,
     UserIdleConfig,
     VoiceConfig,
+    VoiceEventsConfig,
 )
 from .endpointing import (
     VadEndpointer,
@@ -57,7 +58,7 @@ from .realtime import (
     RealtimeModel,
     RealtimeSession,
 )
-from .session import VoiceSession
+from .session import VoiceSession, current_voice_session
 from .turn_detection import (
     CommitAction,
     CommitDecision,
@@ -179,9 +180,11 @@ __all__ = [
     "UserIdleConfig",
     "VadEndpointer",
     "VoiceConfig",
+    "VoiceEventsConfig",
     "VoiceSession",
     "VoiceSessionEvent",
     "VoiceUsageEvent",
+    "current_voice_session",
     "endpointing_delay",
     "resolve_stt",
     "resolve_turn_detector",

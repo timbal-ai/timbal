@@ -9,6 +9,7 @@ Public API:
     - emit(): Fire-and-forget custom DELTA event on the current call's stream.
     - get_background_task / list_background_tasks / cancel_background_task /
       read_background_transcript / wait_for_background: session-scoped background children.
+    - post_session_event / SessionEvent: events posted to a session from outside its runs.
 
 The context is typically managed automatically by the framework. Advanced users
 may need to set the context manually when creating custom execution flows.
@@ -25,6 +26,9 @@ from .background import (
     BACKGROUND_LOG_GAPPED as BACKGROUND_LOG_GAPPED,
 )
 from .background import (
+    SessionEvent as SessionEvent,
+)
+from .background import (
     cancel_background_task as cancel_background_task,
 )
 from .background import (
@@ -32,6 +36,9 @@ from .background import (
 )
 from .background import (
     list_background_tasks as list_background_tasks,
+)
+from .background import (
+    post_session_event as post_session_event,
 )
 from .background import (
     read_background_transcript as read_background_transcript,
