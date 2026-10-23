@@ -1902,7 +1902,8 @@ class VoiceSession:
     def _session_store(self, *, create: bool = False) -> BackgroundTaskStore | None:
         """The background store of this call's conversation; made on demand with ``create``."""
         store = None
-        for ctx in (self._turn_run_context, self._last_run_context):
+        # The seed too: notify() before turn one hangs the store on the context that turn will reuse.
+        for ctx in (self._turn_run_context, self._last_run_context, self._seed_run_context()):
             if ctx is not None and ctx._bg_store is not None:
                 store = ctx._bg_store
                 break

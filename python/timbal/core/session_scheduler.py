@@ -21,6 +21,7 @@ from ..state.background import (
     BackgroundTaskStore,
     SessionEvent,
     _check_announce,
+    adopt_background_store,
     format_session_notice,
 )
 
@@ -302,6 +303,9 @@ class SessionScheduler:
                 return
         self._others.add(run_context.id)
         run_context._foreign_turn_of = weakref.ref(self)
+        if run_context._bg_store is None:
+            # Chained onto a run from before the session had its store: it joins the session now.
+            adopt_background_store(run_context, store)
         head, self.head = self.head, run_context.id
         self.head_parked = False
         if self._on_preempt is not None:

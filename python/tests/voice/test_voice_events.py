@@ -926,6 +926,37 @@ class TestOtherChannel:
         assert session._last_run_context.parent_id == chats[0].run_id
         assert "from chat" in [m.collect_text() for m in model.calls[2]]
 
+    async def test_a_chat_turn_on_the_run_the_call_continued_from(self) -> None:
+        """The chat names the run the call joined, from before the call made its store: nothing to inherit."""
+        model = _GatedModel("Antes.", REPLY, "Vale.", "Desde el chat.", gate_at=2)
+        session, stt, _tts = _session(model, on_busy="enqueue")
+        earlier = await session.agent(prompt="earlier chat").collect()
+        set_run_context(None)  # a transport starts the call from a clean context
+        session.parent_run_id = earlier.run_id
+        results, call_turns = [], []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)  # the call's store, made after the run it continued from
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            assert store_for_run(earlier.run_id) is None
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await asyncio.wait_for(model.entered.wait(), 2)
+            text_turn = asyncio.create_task(session.agent(prompt="from chat", parent_id=earlier.run_id).collect())
+            await asyncio.sleep(0.1)
+            assert not text_turn.done() and len(model.calls) == 2  # queued behind the call's turn
+            model.opened.set()
+            results.append(await asyncio.wait_for(text_turn, 3))
+            call_turns.append(session._last_run_context.id)
+            assert store_for_run(results[0].run_id) is session._scheduler.store  # it joined the session
+
+        await _run(session, stt, drive)
+
+        chat = results[0]
+        assert chat.status.code == "success"
+        assert chat.parent_run_id == call_turns[0] and chat.metadata["requested_parent_id"] == earlier.run_id
+        assert _in_order(_seen(model.calls[3]), "Hola", "Vale.", "from chat")
+
     async def test_an_event_waits_for_a_chat_turn_parked_on_its_caller(self) -> None:
         def wire_money() -> str:
             """Wire money."""
@@ -1004,6 +1035,23 @@ class TestRecordsAndCleanup:
         assert "4111" not in model.calls[0][-1].collect_text()
         root = session._last_run_context.root_span()
         assert root.metadata["guardrails"] and root.usage["session_events:delivered"] == 1
+
+    async def test_an_event_before_turn_one_of_a_continued_call_is_spoken(self) -> None:
+        """A call continuing a conversation hangs notify()'s store on its seeded context."""
+        model = _Model("Antes.", REPLY)
+        session, stt, _tts = _session(model)
+        earlier = await session.agent(prompt="earlier chat").collect()
+        set_run_context(None)  # a transport starts the call from a clean context
+        session.parent_run_id = earlier.run_id
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+
+        await _run(session, stt, drive)
+
+        assert NOTE in model.calls[1][-1].collect_text()
+        assert "earlier chat" in _seen(model.calls[1])
 
     async def test_an_event_before_the_first_turn_reaches_the_store_it_inherits(self) -> None:
         """No seeded context to hang notify()'s store on, and turn one's run inherits another store."""

@@ -448,9 +448,22 @@ retained ones included, no pending notices or events, no owner). Otherwise the
 existing retention/reaping rules own it. A voice call that only posted events
 no longer leaves one map entry per turn behind.
 
+A store also records the runs its session continued from before it existed
+(`_joined_from`): the parent of the run that created or adopted it, when that
+parent has no store of its own. Typically that's the run a voice call joined
+(`parent_run_id`), or the run a driver was started on. A root turn chained
+onto such a run inherits nothing, since no map entry leads from it. Yet a chat
+tab that last saw that run is still part of the conversation. So while a
+channel owns the store, admission finds it there (`store_joined_from`, a scan
+of the few owned stores), and the turn is admitted, refused or queued like
+any other. Once admitted it adopts the store and is re-chained onto the head.
+With no owner, nothing changes: a branch from that run does not pick up the
+session's notices.
+
 Known gap, unchanged from today: two root turns on one session that both start
 before either spawns a child are not serialized by anything. The guard above
-only exists once a store exists.
+only exists once a store exists. Runs further back than the store's join
+point (two or more turns before it existed) are not found either.
 
 ### Trace shape
 
@@ -623,6 +636,13 @@ Implementing it changed these points of earlier revisions of this RFC:
     event turn start onto it: the receipt said delivered, the resume dropped
     the prompt, and the event was gone. The check now follows the head, and
     the event waits until that pause is resolved.
+  - **Parent from before the store.** A chat turn naming the run a call
+    continued from, created before the call made its store, inherited
+    nothing. So it was never admitted: it ran beside a call turn and was never
+    re-chained. Stores now record that join point (see "Store lifetime").
+    The same test exposed a separate bug: `notify()` before turn one of a
+    seeded call (`parent_run_id` / `call_context`) hung the store on the seed,
+    which the watcher never looked at, so the event waited for the caller.
 
 `Agent.handler` is unchanged from `main`; `_inject_background_completions` also
 drains posted events and accounts for them. The rest is
@@ -747,6 +767,11 @@ Executable tests in the repository:
   - a chat turn admitted before the call's first turn, which then continues it;
   - an event waiting while an admitted chat turn is parked on an approval, then
     delivered by a turn chained onto the resumed chat;
+  - a chat turn naming the run the call continued from (before the call's
+    store existed) queued behind a call turn, re-chained onto it, joining the
+    store;
+  - an event `notify()` posted before turn one of a call continuing a
+    conversation, spoken without waiting for the caller;
   - progress reported after the reply by a silent task, and an event posted by
     run id from outside the call, each starting an event turn;
   - an event `notify()` queued before turn one reaching the store that turn
@@ -780,7 +805,10 @@ of them. Mutated:
 - no watcher started on new work;
 - events queued before turn one orphaned;
 - the pause check ignoring a parked head, and the scheduler never recording
-  one.
+  one;
+- no lookup of the store a pre-store parent joined, the join point never
+  recorded, and the admitted turn not adopting the store;
+- the seeded context not searched for the call's store.
 
 Existing background, runnable, tracing, guardrail, and voice tests remain
 regression gates.

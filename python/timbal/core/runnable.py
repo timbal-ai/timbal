@@ -2181,13 +2181,16 @@ class Runnable(ABC, BaseModel):
             _restore_context()
 
             # Before param resolution and pre_hook: a turn refused here must not run either.
-            if (
-                _new_parent_call_id is None
-                and run_context._bg_store is not None
-                and run_context._bg_store._continuation is not None
-            ):
-                await run_context._bg_store.admit_root_turn(run_context)
-                _restore_context()
+            if _new_parent_call_id is None:
+                session_store = run_context._bg_store
+                if session_store is None and run_context.parent_id is not None:
+                    # Chained onto a run from before its session had a store: nothing was inherited.
+                    from ..state.background import store_joined_from
+
+                    session_store = store_joined_from(run_context.parent_id)
+                if session_store is not None and session_store._continuation is not None:
+                    await session_store.admit_root_turn(run_context)
+                    _restore_context()
 
             # Resolve input params (merging fixed defaults, runtime defaults, and provided input)
             # We then store the unvalidated input, as sent by the user to ensure full replayability of the run.

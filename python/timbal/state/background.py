@@ -61,6 +61,9 @@ DEFAULT_BG_TASK_RETENTION_SECS = 300.0
 # Process-local: run_id → store. Sequential turns find the bag via parent_id.
 # Concurrent siblings (no parent_id) each create a new store.
 _STORES_BY_RUN_ID: dict[str, BackgroundTaskStore] = {}
+# Stores a channel has owned (a text driver, a voice call): searched for the run
+# a session continued from before it had a store (see store_joined_from).
+_OWNED_STORES: weakref.WeakSet[BackgroundTaskStore] = weakref.WeakSet()
 
 _DONE = object()
 _GAPPED = object()
@@ -1100,6 +1103,9 @@ class BackgroundTaskStore:
         self._events: list[SessionEvent] = []
         # Weak, so a scheduler nobody holds stops owning the session.
         self._continuation: weakref.ref[Any] | None = None
+        # Runs the session continued from before it had this store (no map entry leads here
+        # from them): a turn chained onto one of them still joins the session while it is owned.
+        self._joined_from: set[str] = set()
         # The loop the store's waiters run on; post_event from another thread hops onto it.
         try:
             self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
@@ -1333,6 +1339,7 @@ class BackgroundTaskStore:
         if current is not None and current is not owner:
             raise RuntimeError("This session already has an active continuation stream.")
         self._continuation = weakref.ref(owner)
+        _OWNED_STORES.add(self)
 
     def release_continuation(self, owner: Any) -> None:
         """Release only the reservation belonging to ``owner``."""
@@ -1565,10 +1572,31 @@ def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
         )
         # A driver cannot acquire a store before its run spawns one; the store joins it here.
         store._continuation = getattr(run_context, "_continuation_owner", None)
+        if store._continuation is not None:
+            _OWNED_STORES.add(store)
         run_context._bg_store = store
     store.reap_finished()
-    _STORES_BY_RUN_ID[run_context.id] = store
+    _register_run(run_context, store)
     return store
+
+
+def _register_run(run_context: Any, store: BackgroundTaskStore) -> None:
+    _STORES_BY_RUN_ID[run_context.id] = store
+    parent_id = run_context.parent_id
+    if parent_id is not None and parent_id not in _STORES_BY_RUN_ID:
+        store._joined_from.add(parent_id)
+
+
+def store_joined_from(run_id: str) -> BackgroundTaskStore | None:
+    """The owned store whose session continued from ``run_id`` before it had a store.
+
+    A turn chained onto such a run inherits nothing (no map entry), yet the
+    session it belongs to may have a live owner that must admit it.
+    """
+    for store in list(_OWNED_STORES):
+        if run_id in store._joined_from and store.continuation_owner() is not None:
+            return store
+    return None
 
 
 def post_session_event(
@@ -1631,7 +1659,7 @@ def forget_idle_background_store(store: BackgroundTaskStore) -> bool:
 def adopt_background_store(run_context: Any, store: BackgroundTaskStore) -> None:
     """Bind a store made before this run existed (no ``parent_id`` chain led to it yet)."""
     run_context._bg_store = store
-    _STORES_BY_RUN_ID[run_context.id] = store
+    _register_run(run_context, store)
 
 
 def store_for_run(run_id: str) -> BackgroundTaskStore | None:
@@ -1877,6 +1905,7 @@ def register_background_task(
 def clear_background_stores() -> None:
     """Drop the process-local registry. Tests only."""
     _STORES_BY_RUN_ID.clear()
+    _OWNED_STORES.clear()
 
 
 GET_BACKGROUND_TASK_DESCRIPTION = (
