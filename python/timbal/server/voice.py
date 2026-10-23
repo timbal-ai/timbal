@@ -1159,6 +1159,7 @@ def build_voice_session(
     if defaults.events is not None:
         session_kwargs["announce_background_results"] = defaults.events.announce_background_results
         session_kwargs["client_events"] = defaults.events.client_notify
+        session_kwargs["on_busy"] = defaults.events.on_busy
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).
@@ -1246,6 +1247,7 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         AgentTextDelta,
         AgentTextDone,
         AudioOutput,
+        EventTurnStarted,
         FillerSpoken,
         SessionEnded,
         SessionError,
@@ -1286,6 +1288,16 @@ def event_to_payloads(event: Any, session: Any, meta: dict[str, Any]) -> list[di
         return [dump_value(event.model_dump(), mode="json")]
     if isinstance(event, FillerSpoken):
         return [{"type": "filler", "text": event.text}]
+    if isinstance(event, EventTurnStarted):
+        return [
+            {
+                "type": "event_turn_started",
+                "task_ids": event.task_ids,
+                "event_ids": event.event_ids,
+                "keys": event.keys,
+                "urgent": event.urgent,
+            }
+        ]
     if isinstance(event, AgentTextDelta):
         return [{"type": "agent_text_delta", "text": event.text}]
     if isinstance(event, AgentTextDone):

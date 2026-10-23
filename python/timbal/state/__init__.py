@@ -10,6 +10,7 @@ Public API:
     - get_background_task / list_background_tasks / cancel_background_task /
       read_background_transcript / wait_for_background: session-scoped background children.
     - post_session_event / SessionEvent: events posted to a session from outside its runs.
+    - report_progress: progress from inside a background task, as an event keyed on the task.
 
 The context is typically managed automatically by the framework. Advanced users
 may need to set the context manually when creating custom execution flows.
@@ -42,6 +43,9 @@ from .background import (
 )
 from .background import (
     read_background_transcript as read_background_transcript,
+)
+from .background import (
+    report_progress as report_progress,
 )
 from .background import (
     wait_for_background as wait_for_background,

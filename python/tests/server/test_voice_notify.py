@@ -24,13 +24,15 @@ class _Session:
         self.raises = raises
         self.store = BackgroundTaskStore()
         self.notified: list[tuple[str, str | None, str]] = []
+        self.announced: list[str | None] = []
         self.taps: list[tuple[str, str, str | None]] = []
 
-    async def notify(self, text: str, *, key: str | None = None, source: str = "app") -> Any:
+    async def notify(self, text: str, *, key: str | None = None, source: str = "app", announce: Any = None) -> Any:
         self.notified.append((text, key, source))
+        self.announced.append(announce)
         if self.raises is not None:
             raise self.raises
-        return self.store.post_event(text, key=key, source=source)
+        return self.store.post_event(text, key=key, source=source, announce=announce)
 
     async def submit_user_text(self, text: str, *, interaction_id: str, run_id: str | None) -> bool:
         self.taps.append((text, interaction_id, run_id))
@@ -38,12 +40,14 @@ class _Session:
 
 
 class TestParse:
-    def test_text_and_optional_key(self) -> None:
-        assert parse_notify({"type": "notify", "text": "  Task finished.  "}) == ("Task finished.", None)
+    def test_text_optional_key_and_announce(self) -> None:
+        assert parse_notify({"type": "notify", "text": "  Task finished.  "}) == ("Task finished.", None, None)
         assert parse_notify({"type": "notify", "text": "x", "key": " task:1 ", "policy": "when_idle"}) == (
             "x",
             "task:1",
+            "when_idle",
         )
+        assert parse_notify({"type": "notify", "text": "x", "announce": "silent"}) == ("x", None, "silent")
 
     @pytest.mark.parametrize(
         "frame",
@@ -54,6 +58,7 @@ class TestParse:
             {"type": "notify", "text": 42},
             {"type": "notify", "text": "x", "key": 7},
             {"type": "notify", "text": "x", "policy": "now"},
+            {"type": "notify", "text": "x", "announce": "later"},
             {"type": "notify", "text": "x" * (MAX_SESSION_EVENT_CHARS + 1)},
         ],
     )
@@ -74,6 +79,13 @@ class TestDeliver:
         assert await deliver_notify(session, "x", "k", source="client") == notify_ack("k", reason="not_enabled")
         assert session.notified == []
         assert (await deliver_notify(session, "x", None, source="app"))["state"] == "pending"
+
+    async def test_only_the_backend_may_interrupt(self) -> None:
+        session = _Session()
+        ack = await deliver_notify(session, "x", "k", source="client", announce="interrupt")
+        assert ack == notify_ack("k", reason="not_allowed")
+        assert (await deliver_notify(session, "y", None, source="app", announce="interrupt"))["state"] == "pending"
+        assert session.announced == ["interrupt"]
 
     @pytest.mark.parametrize(
         ("error", "reason"),
@@ -133,3 +145,19 @@ class TestWhoEnablesEvents:
 
     def test_an_empty_block_is_unset(self) -> None:
         assert VoiceConfig(events={}).events is None
+
+    def test_server_config_sets_how_other_turns_are_admitted(self) -> None:
+        defaults = VoiceConfig(turn_detector="heuristic", events=VoiceEventsConfig(on_busy="enqueue"))
+        session, _ = voice_routes.build_voice_session(self._agent(), defaults, {})
+        assert session._scheduler.on_busy == "enqueue"
+
+
+def test_event_turn_started_reaches_the_client() -> None:
+    from timbal.voice import EventTurnStarted
+
+    payloads = voice_routes.event_to_payloads(
+        EventTurnStarted(task_ids=["t1"], event_ids=["e1"], keys=["k"], urgent=True), None, {}
+    )
+    assert payloads == [
+        {"type": "event_turn_started", "task_ids": ["t1"], "event_ids": ["e1"], "keys": ["k"], "urgent": True}
+    ]

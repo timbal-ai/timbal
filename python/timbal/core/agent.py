@@ -72,6 +72,7 @@ from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
 from .runnable import Runnable, RunnableLike
+from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_result_offload import (
@@ -1081,13 +1082,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if store is None:
             return
         notifications = store.drain_completions()
-        run_context = get_run_context()
-        events = store.drain_events(run_id=run_context.id if run_context is not None else None)
+        events = store.drain_events(settle=False)
         if not notifications and not events:
             return
         notice = format_session_notice(notifications, events)
         if events:
             current_span.metadata["session_events"] = [event.id for event in events]
+            record_delivery(get_run_context(), current_span, events)
         memory = current_span.memory
         # Sit immediately before the current user prompt so history stays
         # [...prior turns..., completion notice, user prompt].

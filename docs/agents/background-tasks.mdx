@@ -161,8 +161,31 @@ Just send it: `agent(prompt=..., parent_id=stream.last_run_id)`, or start anothe
 runs, the new turn **preempts** it: the stream ends with `stop_reason ==
 "preempted"`, and any notices that were pending ride along in the new turn's
 memory just before its prompt. While one of the stream's runs is still in flight,
-the new turn is rejected (an error before hooks or the model run); wait for that
-run's `OUTPUT` first.
+the new turn raises `SessionBusyError` before hooks or the model run; wait for
+that run's `OUTPUT` first. To queue it instead, create the stream with
+`on_busy="enqueue"`: the new turn waits for the in-flight run to finish, then
+preempts the stream as above.
+
+### Which results start a turn
+
+By default every finished task and every posted event starts a follow-up. A tool
+or an event can ask for less, or more, attention:
+
+```python
+Tool(handler=refresh_cache, background_mode="always", background_announce="silent")
+```
+
+- `"when_idle"` (default): start a follow-up once the in-flight run, if any, has
+  finished.
+- `"silent"`: start nothing. The result rides the next turn that starts for
+  another reason, like any pending notice. A stream with only silent work left
+  ends with `stop_reason == "idle"`.
+- `"interrupt"`: in a voice call, cut in on the agent's reply (see
+  [Using tools](/voice/tools#report-back-when-slow-work-finishes)). A text run is
+  never cut, so here it behaves like `"when_idle"`.
+
+A follow-up started by an interrupting item records `"announce": "interrupt"` in
+its `metadata.trigger`.
 
 ### Stopping, hosting, and gating follow-ups
 
@@ -211,15 +234,49 @@ from timbal.state import post_session_event
 event = post_session_event(run_id, "The nightly export finished: 1,204 rows.", key="export")
 ```
 
-`run_id` is the session's latest run. The session's next turn receives the event
-as a runtime message ahead of its prompt (never as a user utterance); a
-`stream_until_idle` stream waiting on the session wakes and starts a follow-up.
-A pending event with the same `key` is superseded. The returned `SessionEvent`
-is a receipt: `state` is `"pending"`, then `"delivered"` (with `run_id`) once a
-turn has it, or `"superseded"`; `await event.settled()` waits for that. Text is
-limited to 4,000 characters. `source="client"` marks text from a user's device,
-which the model is told to treat as information, not instructions. Events are
-process-local, like background tasks.
+The session's next turn receives the event as a runtime message ahead of its
+prompt (never as a user utterance); a `stream_until_idle` stream waiting on the
+session wakes and starts a follow-up unless the event says `announce="silent"`
+(see [Which results start a turn](#which-results-start-a-turn)). A pending event
+with the same `key` is superseded. The returned `SessionEvent` is a receipt:
+`state` is `"pending"`, then `"delivered"` (with `run_id`) once a turn has it,
+or `"superseded"`; `await event.settled()` waits for that. Turns that receive
+events count them in their usage as `session_events:delivered`.
+
+Any run id of a session that has started a background task (or received an
+event) reaches it. For a session with neither, `post_session_event` raises
+`LookupError`; pass `create=True` with the session's **latest** run id, since
+only the turn chained directly on that run will find the event. Posting is safe
+from another thread (a webhook handler, a sync tool). Text is limited to 4,000
+characters. `source="client"` marks text from a user's device, which the model
+is told to treat as information, not instructions. Events are process-local,
+like background tasks.
+
+## Reporting progress into the conversation
+
+[Structured progress](#structured-progress) is for peeking: it updates the
+task's summary and the model sees it only if it polls. To tell the
+conversation while the task runs, call `report_progress` from inside the
+background task:
+
+```python
+from timbal.state import report_progress
+
+
+async def build_site(repo: str) -> str:
+    """Build and deploy the site. Takes a few minutes."""
+    for phase in ("install", "build", "deploy"):
+        await run_phase(repo, phase)
+        report_progress(f"{phase} finished")
+    return "Deployed."
+```
+
+Each report is a session event keyed on the task, so a newer report replaces
+one no turn has read yet, and the task's completion notice replaces any report
+still pending. The model is told the task is still running. A streaming session
+starts a follow-up for a report like for any event; pass `announce="silent"` to
+only let it ride the next turn. Outside a background task, `report_progress`
+raises `RuntimeError`.
 
 ## Timeouts
 

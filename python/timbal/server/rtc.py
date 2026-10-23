@@ -226,11 +226,11 @@ def handle_client_message(session: Any, message: str | bytes, send: Callable[[di
 
         return asyncio.create_task(_submit_tap(), name="voice-rtc-interaction-answer")
     if (note := parse_notify(data)) is not None:
-        text, key = note
+        text, key, announce = note
 
         async def _notify() -> None:
             try:
-                ack = await deliver_notify(session, text, key, source="client")
+                ack = await deliver_notify(session, text, key, source="client", announce=announce)
             except Exception as e:  # noqa: BLE001 — an event must not kill the call
                 logger.warning("voice_rtc_notify_failed", error=str(e))
                 return

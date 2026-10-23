@@ -2,11 +2,16 @@
 
 Status: **draft; design plus a first implementation covering #214's use case**.
 Reviewed against main at `49af46e9` on 2026-10-23 (after #216 and #223 merged).
-Phase 1 (the text driver, session events, and the voice adapter) is implemented
-on this branch as described below; "Implementation notes" records where
-implementing it changed earlier revisions of this text. What remains of Phase 2
-(durable inbox, authenticated session identity, cross-worker ownership,
-idempotency keys, expiry) is a proposal, not a shipped interface.
+Phase 1 is implemented on this branch as described below:
+- session events;
+- per-producer announce policies (`when_idle`, `silent`, `interrupt`);
+- progress from background tasks;
+- one `SessionScheduler` shared by the text driver and the voice adapter.
+
+"Implementation notes" records where implementing it changed earlier revisions
+of this text. What remains of Phase 2 (durable inbox, authenticated session
+identity, cross-worker ownership, idempotency keys, expiry) is a proposal, not
+a shipped interface.
 
 ## Decision in brief
 
@@ -20,9 +25,12 @@ an instruction to speak immediately. Separate three responsibilities:
 
 The shared unit is the **session store**: the existing background-task store
 gains an event inbox, and both kinds of input (finished tasks, posted events)
-are waited for, drained, and formatted by the same primitives
-(`wait_for_completion`, `take_followup`, `format_session_notice`). Each channel
-owns its turn loop on top of them:
+are drained and formatted by the same primitives (`take_followup`,
+`format_session_notice`). The channel that owns the session holds a
+**`SessionScheduler`** (`core/session_scheduler.py`) over that store. It
+resolves each item's announce policy, decides when a turn of the session's own
+is due, and admits every other root turn on the session. Each channel keeps its
+own turn loop on top of it:
 
 - Text: `AgentContinuation` (with `Agent.stream_until_idle(...)` as sugar), a
   caller-driven stream of ordinary runs.
@@ -32,15 +40,22 @@ owns its turn loop on top of them:
 - Any turn of the session, including a plain `agent(...)` call, receives what
   is pending ahead of its prompt, so nothing waits for a driver to exist.
 
+Each producer says how much attention its item deserves: a background tool
+(`background_announce=`), a posted event (`announce=`), or a progress report.
+`when_idle` starts a turn once the channel is free, `silent` waits for the next
+turn, and `interrupt` cuts in where the channel can (voice). Unset, the
+channel's default applies.
+
 It does not create a second task store, make `VoiceSession` the owner of
 conversation state, promote client text to trusted runtime context, or change
 the lifetime of existing agent calls. Event turns are opt-in: calling
 `notify()`/`post_session_event()` is the opt-in for events; finished tasks start
-a voice turn only with `announce_background_results`.
+a voice turn only with `announce_background_results` or the tool's own
+`background_announce`.
 
 Not implemented: events surviving a process restart or reaching another worker,
 wakeups for a text session with no driver running (its next turn still gets
-them), and an interrupting (`now`) policy.
+them), interrupting a text run in flight, and an HTTP route for posting events.
 
 ## Related work and migration
 
@@ -67,7 +82,8 @@ them), and an interrupting (`now`) policy.
   Changed on the way: an event the line never has room for rides the caller's
   **next** turn through the agent's normal injection (no `max_wait_secs`, no
   edit of the previous run); `notify()` returns a `SessionEvent` receipt at
-  once instead of a `bool` after placement; the `now` policy is not carried.
+  once instead of a `bool` after placement; its `now` policy returns as
+  `announce="interrupt"`, which the app may use and the caller's device may not.
 - [#218: end call](https://github.com/timbal-ai/timbal/pull/218): was stacked on
   #214's branch. Its design is unaffected by this RFC: keep hang-up-after-playback
   as a voice policy, not a generic session close, and count partial speech/VAD
@@ -151,6 +167,27 @@ Primary references:
 [ADK long-running tools](https://adk.dev/tools-custom/function-tools/#long-run-tool),
 [ADK live tools](https://adk.dev/live/tools/).
 
+Checked against current documentation on 2026-10-23 (documentation, not
+experiments):
+
+- LiveKit Agents **1.6** async tools: the first `ctx.update()` hands control
+  back to the LLM while the tool keeps running. Later updates are coalesced into
+  a deferred reply, spoken once both the agent and the user are idle, and the
+  final return arrives the same way. `report_progress` follows that model:
+  keyed per task, so a newer report replaces an unread one, and delivered
+  `when_idle`.
+- Gemini Live `FunctionResponseScheduling`: `SILENT` (context only),
+  `WHEN_IDLE` (default; no interruption), and `INTERRUPT` (cut in), chosen per
+  function response. The announce policy has the same three values per
+  producer. Here, though, `silent` is the voice default for finished tasks
+  (today's behaviour) unless `announce_background_results` is set.
+- LangGraph Agent Server "double texting": `enqueue` (the default), `reject`,
+  `interrupt`, `rollback`, per run on a thread. `on_busy` offers `reject`
+  and `enqueue`, defaulting to `reject`. Here the competing turn is an
+  in-process `agent(...)` call, and queueing it blocks the caller for however
+  long the owner's turn takes (a whole spoken reply), so that is opt-in. A
+  text run is never cut mid-flight, and nothing rolls back.
+
 The useful commonality is not one universal Session class. It is the separation
 of event receipt, execution ownership, and output policy.
 
@@ -161,17 +198,22 @@ of event receipt, execution ownership, and output policy.
 ```python
 from timbal.state import post_session_event
 
-event = post_session_event(run_id, "The nightly export finished.", key="export")
+event = post_session_event(run_id, "The nightly export finished.", key="export", announce="when_idle")
 event.state            # "pending" -> "delivered" (event.run_id) | "superseded"
 await event.settled()  # observer; cancelling it does not withdraw the event
 ```
 
-- The event goes to the `BackgroundTaskStore` of `run_id`'s session (one is
-  registered under `run_id` when the session has none, for the turn chained on
-  it). `BackgroundTaskStore.post_event` is the same thing given a store.
-- Nonblocking: posting never waits for a turn. Text is capped at 4,000
-  characters. A pending event with the same `key` is superseded (receipt state
-  `superseded`); one a turn has already taken is not replaced.
+- The event goes to the `BackgroundTaskStore` of `run_id`'s session; any run id
+  of a session that has a store reaches it. A session without one raises
+  `LookupError` unless `create=True`, which registers a store under `run_id`.
+  Only the turn chained directly on `run_id` finds that store, so a stale run
+  id fails loudly instead of posting into a store no turn will read.
+  `BackgroundTaskStore.post_event` is the same thing given a store.
+- Nonblocking and thread-safe: posting never waits for a turn, and a post from
+  another thread (a webhook handler, `offload_blocking`) hops onto the store's
+  loop, as `emit()` does. Text is capped at 4,000 characters. A pending event
+  with the same `key` is superseded (receipt state `superseded`); one a turn
+  has already taken is not replaced.
 - `source="app"` (server code) or `"client"` (a user's device). Client text is
   labelled for the model as information, never instructions; the voice
   transport additionally screens it with the agent's input guardrails and
@@ -182,6 +224,12 @@ await event.settled()  # observer; cancelling it does not withdraw the event
   `metadata.session_events`, and settles the receipts with its run id. A run
   resuming an approval/suspension does not drain (the same rule as for
   completions), so nothing lands between a tool use and its result.
+- Announce policies decide whether an item *starts* a turn. Every turn still
+  receives every pending item, `silent` ones included.
+- The receiving run counts what it got as usage
+  `session_events:delivered`. The guardrail records from screening a client
+  event land on the receiving run as `metadata.guardrails`, the same report
+  input rails write.
 - A turn the session starts itself takes everything with `take_followup`. The
   receipts settle as delivered only once that run has started (its stored input
   then holds the notice); if it never starts, `Followup.release()` hands the
@@ -189,6 +237,59 @@ await event.settled()  # observer; cancelling it does not withdraw the event
   pending event now carries.
 - The text is wrapped in `<session_event id source key>` blocks; a closing tag
   inside the text is neutralized so it cannot speak outside its block.
+
+### Announce policy
+
+```python
+Tool(name="build", handler=..., background_mode="always", background_announce="when_idle")
+post_session_event(run_id, "Deploy failed.", key="deploy", announce="interrupt")
+await session.notify("Your table is ready.", announce="interrupt")
+```
+
+| Policy | Text driver | Voice |
+| --- | --- | --- |
+| `when_idle` | follow-up after the in-flight run | event turn once the line is quiet |
+| `silent` | no follow-up; reaches the next turn | no event turn; reaches the caller's next turn |
+| `interrupt` | same as `when_idle` | event turn now: cuts the reply in flight |
+
+- Per item: `Runnable.background_announce` for a child's completion (copied
+  onto its task record at spawn), `announce=` on `post_event` /
+  `post_session_event` / `notify` / `report_progress`. `None` means the
+  channel's default, set on its `SessionScheduler` (`completions=`, `events=`).
+  Defaults: `when_idle` for both in the text driver. In voice, `when_idle` for
+  events, and `silent` for completions unless `announce_background_results`.
+- The scheduler keeps waiting only while something pending, or a running child
+  that is not `silent`, could still ask for a turn. A session whose remaining
+  children are all silent ends the driver `idle`, not `idle_timeout`.
+- Voice `interrupt` skips the quiet-line wait and the caller's held fragment
+  (disarmed as `submit_user_text` does), and calls `interrupt()` on the reply
+  in flight, as a barge-in would. It is still blocked by a closed or unstarted
+  call, a run parked on the caller (that run's prompt would be dropped on
+  resume), and another channel's turn. A turn it starts records
+  `trigger.announce="interrupt"`.
+- Client events cannot interrupt: `notify(source="client", announce="interrupt")`
+  raises `PermissionError`, and the transports answer `not_allowed`.
+
+### Progress from background tasks
+
+```python
+async def build(target: str):
+    for phase in ("compile", "link", "test"):
+        await run_phase(phase)
+        report_progress(f"{phase} done")  # from timbal.state
+    return "built"
+```
+
+- `report_progress(text, *, announce=None)` posts an event keyed
+  `progress:{task_id}` to the task's session store, carrying `task_id`. It only
+  works inside a background child: the spawn paths set the task id on the
+  child's context. Outside one it raises `RuntimeError`.
+- A newer report replaces one no turn has taken yet; the task's completion
+  notice supersedes any report still pending, and `requeue` drops reports of
+  tasks that have finished meanwhile. So the model never gets "50%" after
+  "done".
+- Rendered with `task_id="..."` on the block and a note that the task is still
+  running and must not be presented as finished.
 
 ### Text driver API
 
@@ -214,6 +315,7 @@ stream = AgentContinuation(
     admit=wait_until_channel_free,  # awaited before each follow-up; may be None
     max_idle_secs=300,
     max_continuations=10,
+    on_busy="enqueue",  # other root turns wait for an in-flight follow-up instead of raising
     prompt=...,  # the remaining keywords are the agent call's
     parent_id=...,
 )
@@ -276,30 +378,47 @@ the inbox is empty and no follow-up starts.
 
 ### Ownership and preemption
 
-Only one driver owns a store at a time. Any other **root turn** on an owned
-session (a direct `agent(...)` call, or the first run of a new driver) is
-handled by the owner's timing:
+One `SessionScheduler` owns a store at a time: a text driver's or a voice
+call's. The store holds it by weak reference. Binding a store another
+channel's scheduler owns raises. The owner's own runs carry a marker on their
+`RunContext`, and a store a spawn creates inherits it. Any other **root turn**
+on an owned session goes through `SessionScheduler.admit_foreign`: a direct
+`agent(...)` call, the first run of a new driver, or a text turn on the
+conversation of a live call. It is handled by the owner's timing:
 
-- Driver waiting between runs (completion signal or `admit`): the direct turn
-  **preempts**. The driver ends with `stop_reason="preempted"` and releases the
-  store; the new turn proceeds and any pending notices attach to it through the
-  existing `_inject_background_completions`. A new driver then owns the store.
-  One run, nothing lost, human first.
-- Driver with a run in flight (from the drain that commits to a follow-up until
-  that run's root `OUTPUT`): the new turn is **rejected** before parameter
-  resolution, hooks, or the model run, with an error telling the caller to wait
-  for that `OUTPUT`. Running two turns of one session concurrently is the one
-  thing the owner guard exists to prevent.
+- Owner idle (a driver waiting between runs or in `admit`, a call with no turn
+  running): the turn **preempts**. A driver ends with `stop_reason="preempted"`
+  and releases the store; the turn proceeds, and any pending notices attach to
+  it through `_inject_background_completions`. One run, nothing lost, human
+  first.
+- Owner busy (from the take that commits to a turn of the owner's until that
+  run's root `OUTPUT`, or while another admitted turn runs):
+  - `on_busy="reject"` (default): the turn raises `SessionBusyError` before
+    parameter resolution, hooks, or the model run, telling the caller to wait
+    for that `OUTPUT`;
+  - `on_busy="enqueue"`: the turn waits there instead, then is admitted (a
+    waiting driver is preempted). If the owner let go while it waited, it asks
+    whoever owns the store now.
 
-This is the Phase 1 form of "human input takes priority": the common case (a
-user types while the agent waits for a task) produces a normal turn, not an
-error. Hosts that want queueing instead of rejection for the in-flight case
-build it on `stop()` and `continuation_for_run`.
+  Running two turns of one session concurrently is the one thing the owner
+  guard exists to prevent.
+
+While an admitted turn runs, the owner starts nothing of its own. Its event
+turns wait (`wait_ready`, `take`), and a voice turn for a caller who spoke waits
+for running turns only, not queued ones, which would deadlock: they wait for
+it. Admitted turns leave through a finish hook (`RunContext._foreign_turn_of`,
+called from `Runnable._stream`'s `finally` after the trace save), so a crashed
+or cancelled one cannot wedge the owner.
+
+A voice call stays the owner after another channel's turn ran. Its next turn
+chains onto that run (`take_head()` → `parent_id`), so the call continues from
+what the chat just said instead of forking the conversation.
 
 The check runs in the root path of `Runnable._stream`, right after `START` and
-before parameter resolution. It cannot live in `Agent.handler`: `pre_hook` runs
-in `Runnable` before the handler, so a refused turn would already have run its
-hook. Sessions without a store pay one attribute read.
+before parameter resolution, and it is async (enqueue awaits there). It cannot
+live in `Agent.handler`: `pre_hook` runs in `Runnable` before the handler, so a
+refused turn would already have run its hook. Sessions without an owned store
+pay two attribute reads.
 
 ### Store lifetime
 
@@ -307,8 +426,12 @@ The driver must not allocate a `BackgroundTaskStore`, or register run ids in
 the process-local map, for an agent that never spawns a child. The owner is
 stashed on the `RunContext`; `ensure_background_store` copies it onto the store
 it creates on the spawn path. After the first run, no store means `idle`.
-Releasing the owner does not delete map entries; the existing retention/reaping
-rules own that.
+Releasing the owner does not delete map entries by itself. When a text driver
+or a voice call ends, `forget_idle_background_store` drops every run id
+registered for its store if nothing in it can matter again (no children,
+retained ones included, no pending notices or events, no owner). Otherwise the
+existing retention/reaping rules own it. A voice call that only posted events
+no longer leaves one map entry per turn behind.
 
 Known gap, unchanged from today: two root turns on one session that both start
 before either spawns a child are not serialized by anything. The guard above
@@ -322,10 +445,12 @@ only exists once a store exists.
   `background_task_completed`, or `session_event` when it carries events);
   `metadata.trigger = {"kind": "background_completion" | "session_event",
   "task_ids": [...], "event_ids": [...]}`, plus `continuation_index` from the
-  text driver.
+  text driver and `announce: "interrupt"` for a turn an interrupt started.
 - A human turn that receives pending work has no `trigger`; the notice sits in
   its memory before its prompt, and `metadata.session_events` lists the event
   ids it received.
+- Either way, the receiving run's usage has `session_events:delivered`, and a
+  screened client event's guardrail records are in its `metadata.guardrails`.
 - A follow-up that fails before assembling memory still holds the notice in its
   stored `input`, so the next turn's rebuild (#216) re-attaches it. The notice
   is never only in memory.
@@ -344,7 +469,8 @@ distinguishable. `continuations` counts admitted follow-up runs.
   lives with nothing to publish; pick it per channel.
 - `max_continuations` is a non-negative integer; zero allows the initial turn only.
 - No background work means immediate completion; this is not a permanent listener
-  for hypothetical future tasks.
+  for hypothetical future tasks. Neither is work that can never ask for a turn:
+  only `silent` items pending and only `silent` children running is `idle`.
 - Notices not yet taken by the driver remain pending on timeout, limit, stop,
   close, preemption, or missing history. A model that already polled a result
   does not get a duplicate.
@@ -369,40 +495,56 @@ rather than automatically replaying a potentially side-effecting turn.
 must go through `_run_turn` (TTS, fillers, barge-in, heard-prefix memory,
 metrics); hosting `AgentContinuation` would bypass all of that.
 
-- `await session.notify(text, key=None, source="app") -> SessionEvent` posts to
-  the call's conversation store and returns at once. The store is made on
-  demand; one made before any turn has a run is adopted by the first turn's run.
+- `await session.notify(text, key=None, source="app", announce=None) -> SessionEvent`
+  posts to the call's conversation store and returns at once. The store is made
+  on demand and bound to the call's scheduler; one made before any turn has a
+  run is adopted by the first turn's run.
 - One watcher task per call, started by `notify()` and at the end of any turn
-  whose store holds pending events (or, with `announce_background_results`,
-  background work). Waiting for work uses the store's waiter; waiting for the
-  line polls the quiet-line check every 50 ms, because "the caller's audio has
-  finished playing" is an estimate with no event to wait on.
+  after which something could still ask for a turn (`may_need_turn()`). Waiting
+  for work is the scheduler's `wait_ready`, event-driven on the store; waiting
+  for the line polls the quiet-line check every 50 ms, because "the caller's
+  audio has finished playing" is an estimate with no event to wait on.
 - Quiet line: session started and open, last run not parked on the caller, no
-  turn running, agent not speaking, no greeting or idle prompt pending, playback
-  finished, no held caller fragment, no uncommitted partial in the last 5 s,
-  nothing from the caller in the last 0.6 s, local VAD silent. Event turns never
-  interrupt; once one has started, the caller barges in as on any reply.
-- The event turn starts under the same lock as caller turns, right after
-  `take_followup`, as `_run_turn(followup=...)`: the notice is the prompt,
+  other channel's turn running or queued, no turn running, agent not speaking,
+  no greeting or idle prompt pending, playback finished, no held caller fragment,
+  no uncommitted partial in the last 5 s, nothing from the caller in the last
+  0.6 s, local VAD silent. Only an `interrupt` item skips the second half (see
+  "Announce policy"); once an event turn has started, the caller barges in as on
+  any reply.
+- The event turn starts under the same lock as caller turns, right after the
+  scheduler's `take()`, as `_run_turn(followup=...)`: the notice is the prompt,
   fillers are off, `TurnMetrics.event` is true, the root span gets `trigger`,
   and the receipts settle at the run's first event. A task cancelled before its
   first step releases the work from a done callback, since its `finally` never
   runs.
+- The client gets `EventTurnStarted` (`{"type": "event_turn_started",
+  "task_ids", "event_ids", "keys", "urgent"}`) when one starts, so a UI can tell
+  an announcement from a reply to the caller before any text arrives.
+- Another channel's turn on the call's conversation (a chat tab on the same
+  `parent_id` chain) is admitted by the call's scheduler like any foreign turn.
+  `VoiceConfig.events.on_busy` picks reject or enqueue while a call turn runs.
+  A caller who speaks meanwhile waits for it, and the call's next turn chains
+  onto it.
 - A caller who speaks first gets everything pending with their turn, through
   the agent's normal injection: #214's "overdue" case, without an edit of the
   previous run.
 - Finished background tasks start an event turn only with
-  `announce_background_results`; otherwise they wait for the caller's next turn
-  as before. When an event turn happens anyway, finished tasks ride it.
+  `announce_background_results` or the tool's `background_announce`;
+  otherwise they wait for the caller's next turn as before. When an event turn
+  happens anyway, finished tasks ride it.
 - `source="client"` needs `client_events` and is screened by the agent's input
-  guardrails (a block raises `PermissionError`). WebRTC data-channel frames and
-  LiveKit frames from the caller are client events; LiveKit frames with no
-  participant (the server API's `SendData`, i.e. the app's backend) are app
-  events; other participants are ignored. `VoiceConfig.events`
-  (`announce_background_results`, `client_notify`) is read from server config
-  only, never from the hello.
+  guardrails. A block raises `PermissionError` and logs
+  `voice_client_event_blocked`; the records of a rail that let it through
+  (redacted, warned) travel with the event to the receiving run. WebRTC
+  data-channel frames and LiveKit frames from the caller are client events;
+  LiveKit frames with no participant (the server API's `SendData`, i.e. the
+  app's backend) are app events; other participants are ignored. Frames carry
+  `announce` (`policy: "when_idle"` from #214 is accepted as an alias).
+  `VoiceConfig.events` (`announce_background_results`, `client_notify`,
+  `on_busy`) is read from server config only, never from the hello.
 - Events undelivered at hang-up stay pending in the conversation's store for
-  its next turn (a text turn continuing the call), and are logged.
+  its next turn (a text turn continuing the call), and are logged. A store with
+  nothing left in it is forgotten (see "Store lifetime").
 - `current_voice_session()` is set for the session's turns, the tools they
   call, and tasks they spawn; turns start from a snapshot of the session's
   context, so code outside the call (a `notify` caller, a LiveKit tap) does not
@@ -431,11 +573,23 @@ Implementing it changed these points of earlier revisions of this RFC:
   once: receipts settle when the run starts, and `Followup.release()` hands the
   work back otherwise. Without this, a barge-in landing in the same loop tick as
   an event turn's start lost the events.
+- The text driver and the voice watcher each reimplemented "wait, admit, take,
+  start", and only the driver owned the store. A chat turn on a live call's
+  conversation was not admitted by anyone. Both now sit on one
+  `SessionScheduler`: ownership, policy resolution, waiting, taking, and
+  foreign-turn admission live there, and the channels keep only how a turn
+  starts (an agent run vs. `_run_turn`).
+- Interrupting comes back as a per-item policy instead of #214's session-wide
+  `now`. Rejecting busy turns becomes an `on_busy` choice, not the only answer.
+- `post_session_event` with an unknown run id raised nothing and posted into a
+  store no turn would read; it now raises unless `create=True`.
 
 `Agent.handler` is unchanged from `main`; `_inject_background_completions` also
-drains posted events. The rest is `core/continuation.py`, the event inbox on
-`BackgroundTaskStore`, one `RunContext` attribute, the check call in
-`Runnable._stream`, the voice event loop, and the transport frames.
+drains posted events and accounts for them. The rest is
+`core/session_scheduler.py`, `core/continuation.py`, the event inbox and
+announce/progress plumbing on `BackgroundTaskStore`, two `RunContext`
+attributes, the admission call and finish hook in `Runnable._stream`,
+`Runnable.background_announce`, the voice event loop, and the transport frames.
 
 ## Phase 2: proposed shared session contract
 
@@ -471,12 +625,15 @@ visibility.
 
 ### Scheduling versus delivery
 
-- `context_only`: retain for the next eligible turn; never start one itself.
-  Phase 1: a finished task in voice without `announce_background_results`.
+- `silent`: retain for the next eligible turn; never start one itself.
+  Phase 1: `announce="silent"`, and the voice default for finished tasks
+  without `announce_background_results`.
 - `when_idle`: start a turn once the owner/channel admits it; batch ready
-  events. Phase 1: the text driver, and voice event turns.
+  events. Phase 1: the default for events, and for finished tasks in text.
 - `interrupt`: explicit privileged policy, not a default or an expiry fallback.
-  Voice must preserve its heard-prefix interruption behavior. Not implemented.
+  Phase 1: per item, app only (client events cannot use it). Voice cuts in
+  through `interrupt()`, so the heard-prefix memory of the cut reply is kept.
+  Text has no mid-run cut; there it acts as `when_idle`.
 
 An event waiting too long does not silently become an interruption. Expiry
 reports a reason and preserves whatever source/task result remains available;
@@ -511,11 +668,23 @@ Executable tests in the repository:
   - `admit` (sync or async) is called before each follow-up and cancelled by
     preemption.
   - An agent without background tools allocates no store and registers no run id.
-- `python/tests/core/test_session_events.py`: posting (validation, key
-  replacement only while pending, receipts and their observer), waking a waiter
-  blocked on children, release ahead of newer work, the notice (byte-identical
-  without events, labelled blocks, neutralized closing tag, client note), a turn
-  receiving an event posted by run id, an event waking a waiting driver.
+- `python/tests/core/test_session_events.py`:
+  - posting: validation, key replacement only while pending, receipts and their
+    observer, `create=` versus `LookupError`, a post from another thread landing
+    on the loop's thread;
+  - waking a waiter blocked on children; release ahead of newer work;
+  - the notice: byte-identical without events, labelled blocks, neutralized
+    closing tag, client note;
+  - a turn receiving an event posted by run id (with the usage key); an event
+    waking a waiting driver;
+  - announce: a silent event riding a turn something else started, a silent
+    task starting no follow-up, `interrupt` acting as `when_idle` for text,
+    unknown policies refused;
+  - progress: only inside a background task, newer report replaces, completion
+    (and a report arriving after it) supersedes, the follow-up told the task is
+    still running;
+  - an enqueued turn waiting out a follow-up, then preempting;
+  - an idle store forgotten.
 - `python/tests/voice/test_voice_events.py`: event turns spoken and never the
   caller's words, still in memory later, silence with no filler; waiting for
   playback and for caller speech; barge-in on an event turn; a caller who speaks
@@ -523,18 +692,37 @@ Executable tests in the repository:
   an event before any turn; key replacement and batching; announced versus
   left-for-the-caller background results; client events refused, screened and
   labelled; events before the call starts and at hang-up; an event turn cut
-  before its run; `current_voice_session()`; the quiet-line check.
+  before its run; `current_voice_session()`; the quiet-line check. Also:
+  - a tool announcing itself or staying silent; an `interrupt` event cutting a
+    reply in flight; the caller's device refused `interrupt`; a silent event
+    waiting for the caller;
+  - progress narrated while the task runs;
+  - another channel's turn refused while a call turn runs, queued and then
+    chained onto by the call, and waited for by a caller's turn;
+  - screening records on the receiving run; a quiet store forgotten at hang-up;
+    `EventTurnStarted`.
 - `python/tests/server/test_voice_notify.py` and
   `test_livekit_session.py::TestNotifyFromTheRoom`: frame parsing, acks and
   rejections, the WebRTC data channel, LiveKit sender attribution, and
   server-only enabling.
 
-These tests were checked against mutations of the preempt/reject decision, the
-store's owner inheritance, the agent draining events, the quiet-line check,
-`release()`, the event turn's done callback, store adoption, LiveKit sender
-attribution, client screening, and closing-tag neutralization; each mutation
-fails at least one of them. Existing background, runnable, tracing, guardrail,
-and voice tests remain regression gates.
+These tests were checked against mutations; each mutation fails at least one
+of them. Mutated:
+- the preempt/reject decision and admitting a busy owner's foreign turn;
+- the store's owner inheritance and store adoption;
+- the agent draining events, and delivery accounting;
+- the quiet-line check, and `interrupt` waiting for a quiet line;
+- `release()` and the event turn's done callback;
+- LiveKit sender attribution, client screening, and closing-tag neutralization;
+- ignoring an item's own policy;
+- the progress key, and completion superseding progress;
+- the thread hop onto the store's loop;
+- the call adopting the other channel's head, and a call turn not waiting for
+  a running other turn;
+- keeping an idle store at hang-up.
+
+Existing background, runnable, tracing, guardrail, and voice tests remain
+regression gates.
 
 Not yet tested: two producers/retries with idempotency, a bounded inbox and
 overflow; deployment owner routing; trace-save failure reporting; the quiet-line

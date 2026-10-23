@@ -327,6 +327,9 @@ class VoiceEventsConfig(BaseModel):
     """Accept ``notify`` frames from the caller's device (WebRTC data channel,
     the LiveKit caller's participant). Their text is screened by the agent's
     input guardrails and labelled for the model as information, not instructions."""
+    on_busy: Literal["reject", "enqueue"] = "reject"
+    """Another channel's turn on the call's conversation (a text turn chained on
+    it) while a call turn runs: refused, or queued until that turn ends."""
 
 
 _OPTIONAL_VOICE_BLOCKS = {

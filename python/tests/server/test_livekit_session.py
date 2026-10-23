@@ -1668,7 +1668,7 @@ class TestNotifyFromTheRoom:
                 self.notified: list[tuple[str, str | None, str]] = []
                 self.running = asyncio.Event()
 
-            async def notify(self, text: str, *, key: str | None = None, source: str = "app") -> object:
+            async def notify(self, text: str, *, key: str | None = None, source: str = "app", **_: object) -> object:
                 self.notified.append((text, key, source))
                 return SimpleNamespace(
                     receipt=lambda: {

@@ -33,15 +33,17 @@ import structlog
 from uuid_extensions import uuid7
 
 from ..core.agent import _PAUSE_REASONS, Agent
-from ..core.continuation import Followup, take_followup
+from ..core.session_scheduler import Followup, OnBusy, SessionScheduler
 from ..guardrails.types import GuardrailContext, GuardrailStage
 from ..state import get_run_context, set_run_context
 from ..state.background import (
+    Announce,
     BackgroundTaskStore,
     SessionEvent,
     SessionEventSource,
     adopt_background_store,
     ensure_background_store,
+    forget_idle_background_store,
 )
 from ..state.context import RunContext
 from ..state.tracing.providers import TRACING_UNSET
@@ -67,6 +69,7 @@ from .events import (
     AgentTextDelta,
     AgentTextDone,
     AudioOutput,
+    EventTurnStarted,
     FillerSpoken,
     SessionEnded,
     SessionError,
@@ -274,10 +277,13 @@ class VoiceSession:
 
     Event turns
     -----------
-    :meth:`notify` (and, with ``announce_background_results=True``, a finished
-    background task) starts a turn the caller did not: the agent reads a note
-    that is never recorded as the caller's words, and decides what, if
-    anything, to say. Event turns wait for a quiet line and never interrupt.
+    :meth:`notify` (and a finished background task, by its announce policy)
+    starts a turn the caller did not: the agent reads a note that is never
+    recorded as the caller's words, and decides what, if anything, to say.
+    ``when_idle`` waits for a quiet line; ``interrupt`` cuts in like a barge-in.
+    Another channel's turn on the same conversation (a text turn chained on
+    this call) is refused or queued while a call turn runs (``on_busy``), and
+    the call's next turn continues from it.
 
     After the session closes, :attr:`transcript` contains the ordered list of
     committed user/assistant text, and (when ``record_audio=True``)
@@ -309,6 +315,7 @@ class VoiceSession:
         parent_run_id: str | None = None,
         announce_background_results: bool = False,
         client_events: bool = False,
+        on_busy: OnBusy = "reject",
     ):
         self.agent = agent
         self.stt = stt
@@ -464,11 +471,18 @@ class VoiceSession:
         # __call__ auto-chains parent_id for multi-turn memory.
         self._last_run_context: RunContext | None = None
 
-        # Event turns (see notify()). A finished background task starts one
-        # only with announce_background_results; notify() events always may.
-        # client_events lets transports pass on the caller device's notify frames.
+        # Event turns (see notify()). announce_background_results is the default
+        # for finished background tasks (a tool's background_announce wins);
+        # events default to when_idle. client_events lets transports pass on
+        # the caller device's notify frames.
         self.announce_background_results = announce_background_results
         self.client_events = client_events
+        self._scheduler = SessionScheduler(
+            channel=self,
+            completions="when_idle" if announce_background_results else "silent",
+            events="when_idle",
+            on_busy=on_busy,
+        )
         self._event_task: asyncio.Task[None] | None = None
         # The in-flight turn's run, from its first event until the turn ends.
         self._turn_run_context: RunContext | None = None
@@ -678,7 +692,14 @@ class VoiceSession:
             await self._begin_user_turn(text, replace_user_entry=False)
             return True
 
-    async def notify(self, text: str, *, key: str | None = None, source: SessionEventSource = "app") -> SessionEvent:
+    async def notify(
+        self,
+        text: str,
+        *,
+        key: str | None = None,
+        source: SessionEventSource = "app",
+        announce: Announce | None = None,
+    ) -> SessionEvent:
         """Tell the agent something happened, so it can speak up without waiting for the caller.
 
         ``text`` is a note for the model ("Background task 'report' finished:
@@ -693,32 +714,41 @@ class VoiceSession:
         run has it (``event.run_id``), or ``"superseded"`` when a later event
         with the same ``key`` replaced it first.
 
-        The event gets a turn of its own once the line is quiet — no turn
-        running, the agent's audio finished playing, no greeting or idle prompt
-        pending, no caller fragment held, no recent partial or commit, local VAD
-        silent — and never interrupts. If the caller speaks first, it reaches
-        the model with their turn instead, ahead of what they said. Events
-        waiting together share one turn. While the last run is parked on the
-        caller (``ask_user``, an approval) no event turn starts.
+        ``announce`` (default ``"when_idle"``): ``when_idle`` gets a turn of
+        its own once the line is quiet — no turn running, the agent's audio
+        finished playing, no greeting or idle prompt pending, no caller
+        fragment held, no recent partial or commit, local VAD silent — and
+        never interrupts; if the caller speaks first, it reaches the model with
+        their turn instead, ahead of what they said. ``silent`` only reaches
+        the next turn. ``interrupt`` cuts in at once like a barge-in (a held
+        caller fragment is dropped). Events waiting together share one turn.
+        While the last run is parked on the caller (``ask_user``, an approval)
+        no event turn starts.
 
         ``source="client"`` is for text the caller's device sent (transport
         ``notify`` frames): refused unless the session has ``client_events``,
-        screened by the agent's input guardrails, and labelled for the model as
-        information rather than instructions. Call on the session's event loop.
+        never allowed to ``interrupt``, screened by the agent's input
+        guardrails, and labelled for the model as information rather than
+        instructions. Call on the session's event loop.
         """
         if self._closed:
             raise RuntimeError("The call has ended.")
+        records: list[Any] = []
         if source == "client":
             if not self.client_events:
                 raise PermissionError("This session does not accept events from the caller's device.")
-            text = await self._screen_client_event(text)
+            if announce == "interrupt":
+                raise PermissionError("Events from the caller's device cannot interrupt.")
+            text, records = await self._screen_client_event(text)
         store = self._session_store(create=True)
-        event = store.post_event(text, key=key, source=source)
+        event = store.post_event(text, key=key, source=source, announce=announce)
+        event.guardrails = records
         logger.info(
             "voice_event_posted",
             event_id=event.id,
             key=event.key,
             source=source,
+            announce=announce,
             pending=len(store.pending_events()),
             text_preview=event.text[:120],
         )
@@ -1868,16 +1898,31 @@ class VoiceSession:
 
     def _session_store(self, *, create: bool = False) -> BackgroundTaskStore | None:
         """The background store of this call's conversation; made on demand with ``create``."""
+        store = None
         for ctx in (self._turn_run_context, self._last_run_context):
             if ctx is not None and ctx._bg_store is not None:
-                return ctx._bg_store
-        if self._unbound_store is not None or not create:
-            return self._unbound_store
-        ctx = self._turn_run_context or self._last_run_context or self._seed_run_context()
-        if ctx is not None:
-            return ensure_background_store(ctx)
-        self._unbound_store = BackgroundTaskStore()
-        return self._unbound_store
+                store = ctx._bg_store
+                break
+        if store is None:
+            store = self._unbound_store
+        if store is None and create:
+            ctx = self._turn_run_context or self._last_run_context or self._seed_run_context()
+            if ctx is not None:
+                store = ensure_background_store(ctx)
+            else:
+                self._unbound_store = store = BackgroundTaskStore()
+        if store is not None:
+            self._own_store(store)
+        return store
+
+    def _own_store(self, store: BackgroundTaskStore) -> None:
+        if self._scheduler.store is store:
+            return
+        try:
+            self._scheduler.bind(store)
+        except RuntimeError as e:
+            # Another channel (a text continuation stream) owns this conversation.
+            logger.warning("voice_session_store_owned_elsewhere", error=str(e))
 
     def _seed_run_context(self) -> RunContext | None:
         """The empty-trace context turn one will reuse, when run() seeded one."""
@@ -1887,33 +1932,45 @@ class VoiceSession:
         return ctx if ctx is not None and not ctx._trace else None
 
     def _on_turn_run_started(self, followup: Followup | None) -> None:
-        """The turn's run exists: hang the call's store on it, and stamp an event turn."""
+        """The turn's run exists: mark it the call's own, hang the call's store on it, stamp an event turn."""
         ctx = get_run_context()
         if ctx is None or not ctx._trace:
             return
         self._turn_run_context = ctx
+        # Before the run resumes: its session admission check must see it as the call's own.
+        self._scheduler.mark_own(ctx)
         if ctx._bg_store is None:
             previous = self._last_run_context._bg_store if self._last_run_context is not None else None
             store = previous or self._unbound_store
             if store is not None:
                 adopt_background_store(ctx, store)
                 self._unbound_store = None
+        if ctx._bg_store is not None:
+            self._own_store(ctx._bg_store)
         if followup is not None:
-            root = ctx.root_span()
-            if root is not None:
-                root.metadata["trigger"] = followup.trigger
-            followup.started(ctx.id)
+            followup.started(ctx)
 
-    async def _screen_client_event(self, text: str) -> str:
-        """Run the agent's input guardrails on event text the caller's device sent."""
+    async def _screen_client_event(self, text: str) -> tuple[str, list[Any]]:
+        """Run the agent's input guardrails on event text the caller's device sent.
+
+        Returns the (possibly redacted) text and the rails that fired, for the
+        receiving run's guardrail report. Raises ``PermissionError`` on a block.
+        """
         runner = getattr(self.agent, "_guardrail_runner", None)
         if runner is None or not runner.has_stage(GuardrailStage.INPUT):
-            return text
+            return text, []
         ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None))
         outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
         if outcome.verdict is not None:
+            # No run exists yet to carry a guardrail report, so the log is the record.
+            logger.warning(
+                "voice_client_event_blocked",
+                rail=outcome.rail.name,
+                reason=outcome.verdict.reason,
+                text_preview=text[:120],
+            )
             raise PermissionError(f"Blocked by guardrail {outcome.rail.name!r}.")
-        return outcome.text
+        return outcome.text, list(outcome.triggered)
 
     def _ensure_event_watch(self) -> None:
         if self._closed or (self._event_task is not None and not self._event_task.done()):
@@ -1926,76 +1983,105 @@ class VoiceSession:
         self._event_task = None
 
     def _after_turn_events(self) -> None:
-        """Watch for an event turn once this turn is over, if the store holds anything for one."""
+        """Watch for an event turn once this turn is over, if the store holds anything that could ask for one."""
         if self._closed:
             return
         store = self._session_store()
-        if store is None:
-            return
-        if store.pending_events() or (self.announce_background_results and store.has_pending_work()):
+        if store is not None and self._scheduler.may_need_turn():
             self._ensure_event_watch()
 
     async def _event_watch(self) -> None:
         """Start event turns for what the call's store holds, once the line allows it.
 
-        Waiting for work is event-driven (the store's waiter). Waiting for the
-        line polls, like the user-idle watcher, because "the caller's audio has
-        finished playing" is an estimate with no event to wait on.
+        Waiting for work is event-driven (the scheduler waits on the store).
+        Waiting for the line polls, like the user-idle watcher, because "the
+        caller's audio has finished playing" is an estimate with no event.
         """
         try:
             while not self._closed:
-                store = self._session_store()
-                if store is None:
+                if self._session_store() is None:
                     return
-                if self.announce_background_results:
-                    if not await store.wait_for_completion():
-                        return
-                elif not store.pending_events():
+                urgency = await self._scheduler.wait_ready(self._until_line_allows)
+                if urgency is None or self._closed:
                     return
-                while self._event_turn_blocker() is not None:
-                    if self._closed:
-                        return
-                    await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
-                await self._start_event_turn(store)
+                await self._start_event_turn()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             # Whatever is left still reaches the model with the caller's next turn.
             logger.warning("voice_event_watch_failed", error=str(e), exc_info=True)
 
-    async def _start_event_turn(self, store: BackgroundTaskStore) -> bool:
+    async def _until_line_allows(self) -> None:
+        while self._event_turn_blocker(urgent=self._scheduler.pending_turn() == "interrupt") is not None:
+            if self._closed:
+                return
+            await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
+
+    async def _start_event_turn(self) -> bool:
         """Start one event turn with everything pending. Returns whether it started.
 
         Same lock as the caller's turns, so a commit landing meanwhile waits
-        and then barges in on the event turn like on any reply.
+        and then barges in on the event turn like on any reply. An ``interrupt``
+        event cuts in the way ``submit_user_text`` does.
         """
         async with self._user_turn_lock:
-            if self._event_turn_blocker() is not None:
+            urgent = self._scheduler.pending_turn() == "interrupt"
+            if self._event_turn_blocker(urgent=urgent) is not None:
                 return False
-            followup = take_followup(store)
+            if urgent:
+                # Same disarm as submit_user_text: a pending HOLD expiry would
+                # otherwise interrupt() the event turn with leftover speech.
+                self._cancel_hold()
+                self._held_user_text = None
+                self._hold_armed_timeout_secs = None
+                await self.interrupt()
+                if self._closed:
+                    return False
+            followup = self._scheduler.take()
             if followup is None:
                 return False
+            # Busy from here: another channel's turn arriving before the task starts waits or is refused.
+            self._scheduler.turn_started()
             self._cancel_turn.clear()
             self._turn_vad_endpointed = False
             self._turn_stt_latency = None
             self._active_turn_user_text = ""
             self._turn_eou_at = time.monotonic()
+            keys = [event.key for event in followup.events if event.key]
             logger.info(
                 "voice_event_turn_started",
                 task_ids=followup.task_ids,
                 event_ids=[event.id for event in followup.events],
-                keys=[event.key for event in followup.events if event.key],
+                keys=keys,
+                urgent=followup.urgent,
                 **_trace_debug_fields(),
             )
             task = self._spawn_session_task(self._run_turn("", followup=followup))
             # A task cancelled before its first step never runs _run_turn's
-            # finally: hand the work back from here too (release is idempotent).
-            task.add_done_callback(lambda _task: followup.release())
+            # finally: hand the work back and clear busy from here too.
+            task.add_done_callback(lambda _task: self._event_turn_done(followup))
             self._current_turn_task = task
+        await self._emit(
+            EventTurnStarted(
+                task_ids=followup.task_ids,
+                event_ids=[event.id for event in followup.events],
+                keys=keys,
+                urgent=followup.urgent,
+            )
+        )
         return True
 
-    def _event_turn_blocker(self) -> str | None:
-        """Why an event turn cannot start right now, or ``None`` when it can."""
+    def _event_turn_done(self, followup: Followup) -> None:
+        followup.release()
+        if self._current_turn_task is None or self._current_turn_task.done():
+            self._scheduler.turn_finished()
+
+    def _event_turn_blocker(self, *, urgent: bool = False) -> str | None:
+        """Why an event turn cannot start right now, or ``None`` when it can.
+
+        ``urgent`` (an ``interrupt`` event) cuts in on whatever is in flight,
+        so only what no turn may cut through blocks it.
+        """
         if self._closed:
             return "closed"
         if self._session_context is None:
@@ -2003,6 +2089,10 @@ class VoiceSession:
             return "not_started"
         if self._last_run_paused():
             return "run_awaiting_caller"
+        if self._scheduler.other_turn_active:
+            return "other_channel_turn"
+        if urgent:
+            return None
         if self._current_turn_task is not None and not self._current_turn_task.done():
             return "turn_running"
         if self._is_speaking or self._greeting_speaking or self._idle_prompt_speaking or self._tts_tasks:
@@ -2076,6 +2166,10 @@ class VoiceSession:
 
     async def _run_turn(self, user_text: str, *, followup: Followup | None = None) -> None:
         """One agent turn: the caller's ``user_text``, or an event turn's ``followup`` (``user_text`` "")."""
+        if self._scheduler.other_turn_active:
+            # Another channel's turn on this conversation runs: the call's goes after it.
+            await self._scheduler.until_no_other_turn(include_queued=False)
+        self._scheduler.turn_started()
         self._is_speaking = True
         self._turn_is_event = followup is not None
         self._turn_assistant_text = ""
@@ -2144,6 +2238,11 @@ class VoiceSession:
             agent_kwargs: dict[str, Any] = {"prompt": msg}
             if self.model:
                 agent_kwargs["model"] = self.model
+            # Another channel's turn ran on this conversation since the call's
+            # last one: continue from it, not from the call's own last run.
+            head = self._scheduler.take_head()
+            if head is not None and self._last_run_context is not None and head != self._last_run_context.id:
+                agent_kwargs["parent_id"] = head
             # First turn after an opener. The opener was spoken outside any run,
             # so it is in no memory the agent can resolve — without telling it,
             # the model opens by greeting a caller it has already greeted. Turn
@@ -2612,6 +2711,7 @@ class VoiceSession:
                     # Cut before its run started (a barge-in right after the
                     # start): what it carried goes back for the caller's turn.
                     followup.release()
+                self._scheduler.turn_finished()
                 self._after_turn_events()
 
     # -- Internal: tool-call filler ------------------------------------------
@@ -4047,6 +4147,9 @@ class VoiceSession:
                 keys=[event.key for event in pending if event.key],
                 kept=store is not self._unbound_store,
             )
+        self._scheduler.release(store)
+        if store is not None:
+            forget_idle_background_store(store)
         if self._llm_warmup_task is not None and not self._llm_warmup_task.done():
             self._llm_warmup_task.cancel()
         self._llm_warmup_task = None

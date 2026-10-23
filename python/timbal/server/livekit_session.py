@@ -85,7 +85,7 @@ from typing import Any
 
 import structlog
 
-from ..state.background import MAX_SESSION_EVENT_CHARS
+from ..state.background import ANNOUNCE_POLICIES, MAX_SESSION_EVENT_CHARS
 from ..voice.config import VoiceConfig
 from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
 from .voice import (
@@ -533,12 +533,13 @@ def parse_interaction_answer(data: dict[str, Any]) -> tuple[str, str, str | None
     return interaction_id, value, run_id or None
 
 
-def parse_notify(data: dict[str, Any]) -> tuple[str, str | None] | None:
-    """Event the agent should speak up about (``notify``): ``(text, key)``.
+def parse_notify(data: dict[str, Any]) -> tuple[str, str | None, str | None] | None:
+    """Event the agent should speak up about (``notify``): ``(text, key, announce)``.
 
+    ``announce`` is ``"when_idle"``, ``"silent"``, ``"interrupt"`` or absent
+    (the session's default); the legacy ``policy: "when_idle"`` reads the same.
     ``None`` when the frame is not this event, has no text or more than
-    ``MAX_SESSION_EVENT_CHARS`` of it, a non-string ``key``, or a ``policy``
-    other than ``"when_idle"`` (events never interrupt).
+    ``MAX_SESSION_EVENT_CHARS`` of it, a non-string ``key``, or an unknown policy.
     """
     if data.get("type") != "notify":
         return None
@@ -550,7 +551,10 @@ def parse_notify(data: dict[str, Any]) -> tuple[str, str | None] | None:
         return None
     if data.get("policy") not in (None, "when_idle"):
         return None
-    return text.strip(), (key or "").strip() or None
+    announce = data.get("announce", data.get("policy"))
+    if announce is not None and announce not in ANNOUNCE_POLICIES:
+        return None
+    return text.strip(), (key or "").strip() or None, announce
 
 
 def notify_ack(key: str | None, *, event: Any = None, reason: str | None = None) -> dict[str, Any]:
@@ -560,16 +564,21 @@ def notify_ack(key: str | None, *, event: Any = None, reason: str | None = None)
     return {"type": "notify_ack", "key": key, "state": "rejected", "reason": reason}
 
 
-async def deliver_notify(session: Any, text: str, key: str | None, *, source: str) -> dict[str, Any]:
+async def deliver_notify(
+    session: Any, text: str, key: str | None, *, source: str, announce: str | None = None
+) -> dict[str, Any]:
     """Post a ``notify`` frame's event on ``session``; returns the ack to send back.
 
     ``source="client"`` (the caller's device) needs the session's
-    ``client_events``; its text then goes through the agent's input guardrails.
+    ``client_events``, may not ``interrupt``, and its text goes through the
+    agent's input guardrails.
     """
     if source == "client" and not getattr(session, "client_events", False):
         return notify_ack(key, reason="not_enabled")
+    if source == "client" and announce == "interrupt":
+        return notify_ack(key, reason="not_allowed")
     try:
-        event = await session.notify(text, key=key, source=source)
+        event = await session.notify(text, key=key, source=source, announce=announce)
     except PermissionError:
         return notify_ack(key, reason="blocked")
     except RuntimeError:
@@ -921,7 +930,7 @@ async def _run_livekit_session(
             return
         note = parse_notify(data)
         if note is not None:
-            text, key = note
+            text, key, announce = note
             sender = getattr(getattr(pkt, "participant", None), "identity", "") or ""
             # No participant: the server API's SendData, i.e. the app's own backend.
             if not sender:
@@ -937,7 +946,7 @@ async def _run_livekit_session(
 
             async def _notify() -> None:
                 try:
-                    ack = await deliver_notify(sess, text, key, source=source)
+                    ack = await deliver_notify(sess, text, key, source=source, announce=announce)
                 except Exception as e:  # noqa: BLE001 — an event must not kill the call
                     logger.warning("voice_livekit_notify_failed", error=str(e))
                     return
