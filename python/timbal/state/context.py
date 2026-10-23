@@ -213,6 +213,8 @@ class RunContext(BaseModel):
     #   _session_data: dict | None
     #   _bg_store: BackgroundTaskStore — session bag of detached children;
     #       inherited across sequential turns via parent_id (see background.py)
+    #   _continuation_owner: weakref | None — the continuation driver whose run
+    #       this is (see core/continuation.py); None for ordinary runs
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a
@@ -324,6 +326,7 @@ class RunContext(BaseModel):
         self._invoked_by: dict[str, str] | None = None
         self._live_background = 0
         self._trace = Trace()
+        self._continuation_owner = None
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
         # Allocates nothing unless this session actually has children.

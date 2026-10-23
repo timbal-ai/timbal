@@ -2,9 +2,9 @@
 
 Status: **draft; design plus a deliberately limited first implementation**.
 Reviewed against main at `49af46e9` on 2026-10-23 (after #216 and #223 merged).
-Names for the later session API are proposals, not shipped interfaces. The
-"Implementation status" section lists where the current branch still differs
-from this text.
+Phase 1 is implemented on this branch as described below; "Implementation
+notes" records where implementing it changed the earlier revision of this text.
+Names for the later session API (Phase 2) are proposals, not shipped interfaces.
 
 ## Decision in brief
 
@@ -167,7 +167,8 @@ stream = AgentContinuation(
     admit=session.wait_until_quiet,  # awaited before each follow-up; may be None
     max_idle_secs=300,
     max_continuations=10,
-    kwargs={"prompt": ..., "parent_id": ...},
+    prompt=...,  # the remaining keywords are the agent call's
+    parent_id=...,
 )
 
 # From a request handler that only has a run id.
@@ -181,11 +182,12 @@ consume all runs, including multiple root `OUTPUT` events; each run retains a
 fresh `run_id` and the previous turn as `parent_run_id`. There is intentionally
 no single `.collect()` result that hides the extra turns.
 
-- `admit` is an optional parameterless awaitable. The driver awaits it after a
-  completion is pending and before it starts the follow-up; when it returns, the
-  driver starts immediately, so it *is* the start boundary. A preemption or
-  `stop()` while `admit` is pending cancels that wait. The generic driver has no
-  quiet windows or playback knowledge; those live in the channel's `admit`.
+- `admit` is an optional parameterless callable, sync or async. The driver calls
+  it after a completion is pending and before it starts the follow-up; when it
+  returns, the driver drains and starts immediately, so it *is* the start
+  boundary. A preemption, `stop()`, or the idle timeout while `admit` is pending
+  cancels it. The generic driver has no quiet windows or playback knowledge;
+  those live in the channel's `admit`.
 - `stop()` ends the stream at the next boundary: immediately while waiting,
   after the current run's `OUTPUT` while one is in flight. `aclose()` closes the
   in-flight run too. Neither cancels detached children.
@@ -198,7 +200,8 @@ no single `.collect()` result that hides the extra turns.
 1. Starts the ordinary foreground agent run and marks the run context as owned
    by this driver. If the run spawns children, the store it creates inherits
    the owner; if a store already exists for the session (`parent_id` chain), the
-   driver acquires it before the run starts.
+   driver acquires it at the run's `START`, before parameter resolution, hooks,
+   or the model run.
 2. Streams the run to completion, including tracing finalization.
 3. Stops on unsuccessful output, approval, or interaction suspension.
 4. Waits on the store's completion signal without polling or draining. Already
@@ -222,27 +225,30 @@ the inbox is empty and no follow-up starts.
 
 ### Ownership and preemption
 
-Only one driver may own a store. A competing driver on the same session fails
-before parameter resolution, hooks, or model execution.
-
-A **direct root turn** on an owned session is handled by its timing:
+Only one driver owns a store at a time. Any other **root turn** on an owned
+session (a direct `agent(...)` call, or the first run of a new driver) is
+handled by the owner's timing:
 
 - Driver waiting between runs (completion signal or `admit`): the direct turn
-  **preempts**. The driver ends with `stop_reason="preempted"`; the direct turn
-  proceeds and any pending notices attach to it through the existing
-  `_inject_background_completions`. One run, nothing lost, human first.
-- Driver with a follow-up run in flight: the direct turn is **rejected** before
-  hooks or model execution, with an error telling the caller to wait for the
-  in-flight run or `stop()` the driver. Running two turns of one session
-  concurrently is the one thing the owner guard exists to prevent.
+  **preempts**. The driver ends with `stop_reason="preempted"` and releases the
+  store; the new turn proceeds and any pending notices attach to it through the
+  existing `_inject_background_completions`. A new driver then owns the store.
+  One run, nothing lost, human first.
+- Driver with a run in flight (from the drain that commits to a follow-up until
+  that run's root `OUTPUT`): the new turn is **rejected** before parameter
+  resolution, hooks, or the model run, with an error telling the caller to wait
+  for that `OUTPUT`. Running two turns of one session concurrently is the one
+  thing the owner guard exists to prevent.
 
 This is the Phase 1 form of "human input takes priority": the common case (a
 user types while the agent waits for a task) produces a normal turn, not an
 error. Hosts that want queueing instead of rejection for the in-flight case
 build it on `stop()` and `continuation_for_run`.
 
-The ownership check runs on the orchestrator's root path (`Agent`), not in
-`Runnable` for every runnable.
+The check runs in the root path of `Runnable._stream`, right after `START` and
+before parameter resolution. It cannot live in `Agent.handler`: `pre_hook` runs
+in `Runnable` before the handler, so a refused turn would already have run its
+hook. Sessions without a store pay one attribute read.
 
 ### Store lifetime
 
@@ -302,27 +308,27 @@ After a notice is taken, cancellation, provider failure, or a failed trace save
 does not prove whether the model or user received it. Preserve that distinction
 rather than automatically replaying a potentially side-effecting turn.
 
-## Implementation status
+## Implementation notes
 
-The branch at the time of this revision implements an earlier form of Phase 1.
-Deltas against this text, to be closed before merge:
+The first implementation on this branch followed an earlier form (empty
+runtime wakeup prompt drained by the receiving run, every competing root turn
+rejected, an opaque owner, a store allocated for every driver run). It was
+replaced by the design above. Implementing it changed three points of the
+previous revision of this RFC:
 
-- Follow-ups start with an empty-content runtime `prompt`
-  (`kind="background_wakeup"`) and let the receiving run drain the inbox; this
-  needs a `_background_continuation` flag and a `continuation_skipped` early
-  return in `Agent.handler`, and persists an empty user message as the run's
-  `input`. Target: drain in the driver, notice as `prompt`, both branches gone.
-- A direct root turn is rejected whenever a driver owns the store. Target:
-  preempt while waiting, reject only while a follow-up is in flight.
-- `AgentContinuation` has no `admit`, no `stop()`, and the owner is an opaque
-  `object()`, so nothing can find the driver from a run id. Target: `admit`,
-  `stop()`, `continuation_for_run`.
-- The driver calls `ensure_background_store` on every root run and deletes
-  run-id map entries on release to compensate. Target: owner on `RunContext`,
-  copied by the spawn path.
-- `check_continuation_turn` is called from `Runnable._stream`. Target: the
-  agent's root path.
-- `run_stopped` does not carry the run's status code.
+- A new driver on an owned session is treated like a direct turn (preempt while
+  waiting, reject while in flight) instead of always failing. A host that starts
+  every user turn through a driver would otherwise have to find and stop the
+  previous driver first.
+- The ownership check stays in `Runnable._stream` rather than moving to
+  `Agent` (see "Ownership and preemption" for why).
+- `AgentContinuation` takes the agent call's keywords directly (`prompt=...`)
+  rather than a `kwargs=` dict, matching `stream_until_idle`.
+
+`Agent._inject_background_completions` and `Agent.handler` are unchanged from
+`main`; the continuation-specific code is `core/continuation.py`, a few methods
+on `BackgroundTaskStore`, one `RunContext` attribute, and the check call in
+`Runnable._stream`.
 
 ## Phase 2: proposed shared session contract
 
@@ -408,29 +414,32 @@ application policy decides whether the completion is later presented in chat.
 ## Acceptance gates and rollout
 
 Phase 1's executable tests are in `python/tests/core/test_continuation.py` in
-the repository. They cover multi-run chaining; in-memory and JSONL history; no
-historical edits; no extra human message; completion batching; completion during
-generation; acknowledgement; same-agent session isolation; owner conflicts
-before hooks; paused/failed runs; idle/continuation limits; missing history;
-close; and cancellation while waiting or generating. Existing background,
-runnable, tracing, guardrail, and voice tests remain regression gates.
-
-Required before merge, matching the "Implementation status" deltas:
+the repository. Besides multi-run chaining, in-memory and JSONL history, no
+historical edits, no extra human message, completion batching, completion during
+generation, acknowledgement, same-agent session isolation, paused/failed runs,
+idle/continuation limits, missing history, close, and cancellation while waiting
+or generating, they cover:
 
 - A direct turn while the driver waits: driver ends `preempted`, exactly one
-  run starts, its memory carries the pending notices before the human prompt,
+  run starts, its memory carries the pending notice before the human prompt,
   nothing is drained twice.
-- A direct turn while a follow-up is in flight: rejected before hooks (assert
-  with a per-prompt hook counter, not a global one) and the follow-up finishes.
-- `stop()` while waiting ends immediately; `stop()` during a follow-up lets it
-  reach `OUTPUT`; `continuation_for_run` finds the driver and returns `None`
-  after release.
+- A direct turn while a follow-up is in flight: rejected before hooks (per-run
+  hook record) and the follow-up finishes. The same two cases for a new driver.
+- `stop()` before iteration, while waiting, and during a follow-up (which
+  reaches `OUTPUT`, then no more); `continuation_for_run` finds the driver and
+  returns `None` after release.
 - Follow-up `input.prompt` is the notice and `is_runtime()`; `metadata.trigger`
-  lists its task ids; a follow-up failed before memory assembly leaves the
-  notice recoverable by the next turn's rebuild; an acknowledgement after the
-  driver has taken a notice does not remove it from that run.
-- `admit` is awaited before each follow-up and cancelled by preemption/`stop()`.
+  lists its task ids; a follow-up cut before memory assembly leaves the notice
+  to the next turn through the #216 rebuild; an acknowledgement after the driver
+  has taken a notice does not remove it from that run.
+- `admit` (sync or async) is called before each follow-up and cancelled by
+  preemption.
 - An agent without background tools allocates no store and registers no run id.
+
+The ownership tests were checked against mutations of the preempt/reject
+decision and of the store's owner inheritance; each mutation fails at least two
+of them. Existing background, runnable, tracing, guardrail, and voice tests
+remain regression gates.
 
 Before adding external notifications/voice, require deterministic tests for:
 
@@ -449,8 +458,8 @@ Before adding external notifications/voice, require deterministic tests for:
 - Deployment owner routing and trace-save failure: report uncertainty, never
   claim durable acceptance based solely on an in-memory append.
 
-Merge/readiness decisions: close the Phase 1 deltas above and agree the driver's
-API and output contract; then open the voice adapter PR on the `admit` hook,
+Merge/readiness decisions: agree the driver's API and output contract; then
+open the voice adapter PR on the `admit` hook,
 carrying forward what "Related work" lists from #214; then implement the shared
 inbox as a separately reviewable change. Do not expose client notification
 frames before the trust boundary and receipt protocol are approved.

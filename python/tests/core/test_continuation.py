@@ -3,6 +3,7 @@ from contextlib import aclosing
 
 import pytest
 from timbal import Agent, Tool, suspend
+from timbal.core.continuation import AgentContinuation, continuation_for_run
 from timbal.core.test_model import TestModel
 from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.background import BackgroundTaskStore, store_for_run
@@ -32,25 +33,44 @@ def tool_calls(*names):
     )
 
 
-def make_agent(release, *, tracing_provider=InMemoryTracingProvider, failure=False):
+def make_agent(release, *, tracing_provider=InMemoryTracingProvider, failure=False, **agent_kwargs):
     async def work() -> str:
         await release.wait()
         if failure:
             raise ValueError("job failed")
         return "result-42"
 
-    model = TestModel(responses=[tool_calls("work"), "Working.", "Finished."])
+    model = agent_kwargs.pop("model", None) or TestModel(responses=[tool_calls("work"), "Working.", "Finished."])
     agent = Agent(
         name="agent",
         model=model,
         tools=[Tool(name="work", handler=work, background_mode="always")],
         tracing_provider=tracing_provider,
+        **agent_kwargs,
     )
     return agent, model
 
 
+def gated_model(responses, *, at_call, entered, opened):
+    """A TestModel whose call number ``at_call`` (0-based) waits for ``opened``."""
+
+    class Gated(TestModel):
+        async def stream(self, messages, **kwargs):
+            if self.call_count == at_call:
+                entered.set()
+                await opened.wait()
+            async for message in super().stream(messages, **kwargs):
+                yield message
+
+    return Gated(responses=responses)
+
+
 def root_outputs(events):
     return [event for event in events if isinstance(event, OutputEvent) and event.parent_call_id is None]
+
+
+def texts(outputs):
+    return [output.output.collect_text() for output in outputs]
 
 
 async def consume(stream):
@@ -65,9 +85,26 @@ async def through_output(stream):
     raise AssertionError("No root output")
 
 
+async def until(predicate):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), 2)
+
+
+async def until_waiting(stream):
+    await until(lambda: stream._waiter is not None)
+
+
 async def settle(store):
     await asyncio.wait_for(asyncio.gather(*(record.task for record in store._tasks.values())), 2)
     await asyncio.sleep(0)
+
+
+async def stored_memory(output):
+    trace = await get_run_context()._get_parent_trace(output.run_id)
+    return [Message.validate(message) for message in trace[output.call_id].memory]
 
 
 async def test_no_background_tasks_finishes_without_extra_model_call():
@@ -78,7 +115,9 @@ async def test_no_background_tasks_finishes_without_extra_model_call():
     assert model.call_count == 1
     assert stream.stop_reason == "idle"
     assert stream.continuations == 0
+    assert stream.last_status == "success"
     assert store_for_run(stream.last_run_id) is None
+    assert continuation_for_run(stream.last_run_id) is None
 
 
 @pytest.mark.parametrize("provider_kind", ["memory", "jsonl"])
@@ -95,46 +134,45 @@ async def test_completion_starts_new_run_without_rewriting_history(tmp_path, pro
     initial = await through_output(stream)
     initial_context = get_run_context()
     initial_memory = [message.collect_text() for message in initial_context.root_span().memory]
+    task_id = store_for_run(initial.run_id).list()[0]["task_id"]
     release.set()
     events = await asyncio.wait_for(consume(stream), 3)
     outputs = root_outputs(events)
     assert len(outputs) == 1
     assert outputs[0].run_id != initial.run_id
     assert outputs[0].parent_run_id == initial.run_id
-    assert outputs[0].metadata["trigger"] == {"kind": "background_completion", "continuation_index": 1}
+    assert outputs[0].metadata["trigger"] == {
+        "kind": "background_completion",
+        "continuation_index": 1,
+        "task_ids": [task_id],
+    }
+    prompt = Message.validate(outputs[0].input["prompt"])
+    assert prompt.is_runtime()
+    assert prompt.metadata["kind"] == "background_task_completed"
+    assert ("job failed" if failure else "result-42") in prompt.collect_text()
+    assert "messages" not in outputs[0].input
     assert model.call_count == 3
     assert stream.stop_reason == "idle"
     assert stream.continuations == 1
-    context = get_run_context()
-    stored = await initial_context._get_parent_trace(outputs[0].run_id)
-    memory = [Message.validate(message) for message in stored[outputs[0].call_id].memory]
+    memory = await stored_memory(outputs[0])
     assert [message.collect_text() for message in memory if message.role == "user" and not message.is_runtime()] == [
         "start"
     ]
     notices = [message for message in memory if message.is_runtime()]
     assert len(notices) == 1
-    assert ("job failed" if failure else "result-42") in notices[0].collect_text()
+    assert notices[0].collect_text() == prompt.collect_text()
     assert [message.collect_text() for message in initial_context.root_span().memory] == initial_memory
     assert store_for_run(initial.run_id) is store_for_run(outputs[0].run_id)
-    assert context is not None
 
 
 async def test_completion_during_model_response_does_not_overlap():
     release = asyncio.Event()
     response_started = asyncio.Event()
     release_response = asyncio.Event()
-
-    class GatedModel(TestModel):
-        async def stream(self, messages, **kwargs):
-            if self.call_count == 1:
-                response_started.set()
-                await release_response.wait()
-            async for message in super().stream(messages, **kwargs):
-                yield message
-
-    agent, _ = make_agent(release)
-    model = GatedModel(responses=[tool_calls("work"), "Working", "Finished"])
-    agent.model = model
+    model = gated_model(
+        [tool_calls("work"), "Working", "Finished"], at_call=1, entered=response_started, opened=release_response
+    )
+    agent, _ = make_agent(release, model=model)
     stream = agent.stream_until_idle(prompt="start")
     consumer = asyncio.create_task(consume(stream))
     await asyncio.wait_for(response_started.wait(), 2)
@@ -172,7 +210,9 @@ async def test_two_completions_coalesce_into_one_turn():
     release.set()
     await settle(store)
     events = await consume(stream)
-    assert len(root_outputs(events)) == 1
+    outputs = root_outputs(events)
+    assert len(outputs) == 1
+    assert len(outputs[0].metadata["trigger"]["task_ids"]) == 2
     assert model.call_count == 3
     assert not store.pending_completions()
 
@@ -186,7 +226,7 @@ async def test_timeout_leaves_child_running_and_notice_for_next_user_turn():
     store = store_for_run(parent)
     assert stream.stop_reason == "idle_timeout"
     assert store.running_count() == 1
-    assert store._continuation_owner is None
+    assert store.continuation_owner() is None
     release.set()
     await settle(store)
     assert store.pending_completions()
@@ -215,14 +255,14 @@ async def test_cancel_waiting_driver_does_not_cancel_child():
     stream = agent.stream_until_idle(prompt="start")
     initial = await through_output(stream)
     consumer = asyncio.create_task(consume(stream))
-    await asyncio.sleep(0)
+    await until_waiting(stream)
     consumer.cancel()
     with pytest.raises(asyncio.CancelledError):
         await consumer
     store = store_for_run(initial.run_id)
     assert stream.stop_reason == "cancelled"
     assert store.running_count() == 1
-    assert store._continuation_owner is None
+    assert store.continuation_owner() is None
     release.set()
     await settle(store)
     assert model.call_count == 2
@@ -237,47 +277,225 @@ async def test_close_after_output_releases_owner_without_cancelling_child():
     await stream.aclose()
     store = store_for_run(initial.run_id)
     assert stream.stop_reason == "closed"
-    assert store._continuation_owner is None
+    assert store.continuation_owner() is None
     assert store.running_count() == 1
     release.set()
     await settle(store)
 
 
-async def test_duplicate_driver_rejected_without_releasing_first_owner():
+async def test_direct_turn_preempts_waiting_driver():
     release = asyncio.Event()
     agent, model = make_agent(release)
-    first = agent.stream_until_idle(prompt="start")
-    initial = await through_output(first)
-    second = agent.stream_until_idle(prompt="other", parent_id=initial.run_id)
-    with pytest.raises(RuntimeError, match="active continuation stream"):
-        await consume(second)
-    store = store_for_run(initial.run_id)
-    assert store._continuation_owner is first._owner
-    assert model.call_count == 2
-    await first.aclose()
-    release.set()
-    await settle(store)
-
-
-async def test_direct_turn_rejected_while_driver_owns_session():
-    release = asyncio.Event()
-    agent, model = make_agent(release)
-    hook_calls = []
-
-    def before_run():
-        hook_calls.append("called")
-
-    agent = Agent(name="agent", model=model, tools=agent.tools, pre_hook=before_run)
     stream = agent.stream_until_idle(prompt="start")
     initial = await through_output(stream)
-    output = await agent(prompt="racing user", parent_id=initial.run_id).collect()
+    consumer = asyncio.create_task(consume(stream))
+    await until_waiting(stream)
+    output = await asyncio.wait_for(agent(prompt="status", parent_id=initial.run_id).collect(), 2)
+    assert output.status.code == "success"
+    assert await asyncio.wait_for(consumer, 2) == []
+    assert stream.stop_reason == "preempted"
+    store = store_for_run(initial.run_id)
+    assert store.continuation_owner() is None
+    assert store.running_count() == 1
+    release.set()
+    await settle(store)
+    assert model.call_count == 3
+    assert store.pending_completions()
+
+
+async def test_direct_turn_takes_the_notice_a_driver_holds_for_admission():
+    release = asyncio.Event()
+    admit_entered = asyncio.Event()
+    admit_cancelled = []
+
+    async def admit():
+        admit_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            admit_cancelled.append(True)
+            raise
+
+    agent, model = make_agent(release)
+    stream = AgentContinuation(agent, admit=admit, prompt="start")
+    initial = await through_output(stream)
+    consumer = asyncio.create_task(consume(stream))
+    release.set()
+    await asyncio.wait_for(admit_entered.wait(), 2)
+    output = await asyncio.wait_for(agent(prompt="status", parent_id=initial.run_id).collect(), 2)
+    assert await asyncio.wait_for(consumer, 2) == []
+    assert stream.stop_reason == "preempted"
+    assert stream.continuations == 0
+    assert admit_cancelled == [True]
+    assert model.call_count == 3
+    memory = await stored_memory(output)
+    status = next(i for i, message in enumerate(memory) if message.collect_text() == "status")
+    assert memory[status - 1].is_runtime()
+    assert "result-42" in memory[status - 1].collect_text()
+    assert sum(message.is_runtime() for message in memory) == 1
+    assert not store_for_run(initial.run_id).pending_completions()
+
+
+async def test_direct_turn_rejected_while_followup_in_flight():
+    release = asyncio.Event()
+    entered, opened = asyncio.Event(), asyncio.Event()
+    hook_runs = []
+
+    def before_run():
+        hook_runs.append(get_run_context().id)
+
+    model = gated_model(
+        [tool_calls("work"), "Working.", "Finished.", "Unexpected"], at_call=2, entered=entered, opened=opened
+    )
+    agent, _ = make_agent(release, model=model, pre_hook=before_run)
+    stream = agent.stream_until_idle(prompt="start")
+    initial = await through_output(stream)
+    consumer = asyncio.create_task(consume(stream))
+    release.set()
+    await asyncio.wait_for(entered.wait(), 2)
+    output = await asyncio.wait_for(agent(prompt="racing user", parent_id=initial.run_id).collect(), 2)
     assert output.status.code == "error"
-    assert "Stop the session" in output.error["message"]
+    assert "in flight" in output.error["message"]
+    assert output.run_id not in hook_runs
+    opened.set()
+    events = await asyncio.wait_for(consumer, 2)
+    assert texts(root_outputs(events)) == ["Finished."]
+    assert stream.stop_reason == "idle"
+    assert hook_runs == [initial.run_id, stream.last_run_id]
+    assert model.call_count == 3
+
+
+async def test_new_driver_preempts_waiting_driver():
+    release = asyncio.Event()
+    model = TestModel(responses=[tool_calls("work"), "Working.", "Second turn.", "Finished."])
+    agent, _ = make_agent(release, model=model)
+    first = agent.stream_until_idle(prompt="start")
+    initial = await through_output(first)
+    first_consumer = asyncio.create_task(consume(first))
+    await until_waiting(first)
+    second = agent.stream_until_idle(prompt="next", parent_id=initial.run_id)
+    second_output = await asyncio.wait_for(through_output(second), 2)
+    assert second_output.status.code == "success"
+    assert await asyncio.wait_for(first_consumer, 2) == []
+    assert first.stop_reason == "preempted"
+    assert continuation_for_run(initial.run_id) is second
+    release.set()
+    events = await asyncio.wait_for(consume(second), 2)
+    assert texts(root_outputs(events)) == ["Finished."]
+    assert second.stop_reason == "idle"
+
+
+async def test_new_driver_rejected_while_followup_in_flight():
+    release = asyncio.Event()
+    entered, opened = asyncio.Event(), asyncio.Event()
+    model = gated_model(
+        [tool_calls("work"), "Working.", "Finished.", "Unexpected"], at_call=2, entered=entered, opened=opened
+    )
+    agent, _ = make_agent(release, model=model)
+    first = agent.stream_until_idle(prompt="start")
+    initial = await through_output(first)
+    consumer = asyncio.create_task(consume(first))
+    release.set()
+    await asyncio.wait_for(entered.wait(), 2)
+    second = agent.stream_until_idle(prompt="other", parent_id=initial.run_id)
+    with pytest.raises(RuntimeError, match="in flight"):
+        await asyncio.wait_for(consume(second), 2)
+    assert second.stop_reason == "error"
+    assert continuation_for_run(initial.run_id) is first
+    opened.set()
+    await asyncio.wait_for(consumer, 2)
+    assert first.stop_reason == "idle"
+    assert model.call_count == 3
+
+
+async def test_stop_while_waiting_ends_the_stream_and_leaves_the_child():
+    release = asyncio.Event()
+    agent, model = make_agent(release)
+    stream = agent.stream_until_idle(prompt="start")
+    initial = await through_output(stream)
+    consumer = asyncio.create_task(consume(stream))
+    await until_waiting(stream)
+    assert continuation_for_run(initial.run_id) is stream
+    stream.stop()
+    assert await asyncio.wait_for(consumer, 2) == []
+    assert stream.stop_reason == "stopped"
+    assert continuation_for_run(initial.run_id) is None
+    store = store_for_run(initial.run_id)
+    assert store.running_count() == 1
+    release.set()
+    await settle(store)
     assert model.call_count == 2
-    assert hook_calls == ["called"]
-    await stream.aclose()
+    assert store.pending_completions()
+
+
+async def test_stop_during_followup_lets_it_finish_and_starts_no_more():
+    release = asyncio.Event()
+    release.set()
+    entered, opened = asyncio.Event(), asyncio.Event()
+    model = gated_model(
+        [tool_calls("work"), "Working", tool_calls("work"), "Working again", "Unexpected"],
+        at_call=2,
+        entered=entered,
+        opened=opened,
+    )
+    agent, _ = make_agent(release, model=model)
+    stream = agent.stream_until_idle(prompt="start")
+    consumer = asyncio.create_task(consume(stream))
+    await asyncio.wait_for(entered.wait(), 2)
+    stream.stop()
+    assert stream.stop_reason is None
+    opened.set()
+    events = await asyncio.wait_for(consumer, 2)
+    assert texts(root_outputs(events)) == ["Working", "Working again"]
+    assert stream.stop_reason == "stopped"
+    assert model.call_count == 4
+    store = store_for_run(stream.last_run_id)
+    await settle(store)
+    assert store.pending_completions()
+
+
+async def test_stop_before_iteration_runs_nothing():
+    model = TestModel(responses=["Unused"])
+    stream = Agent(name="agent", model=model).stream_until_idle(prompt="start")
+    stream.stop()
+    assert await consume(stream) == []
+    assert stream.stop_reason == "stopped"
+    assert model.call_count == 0
+
+
+async def test_admit_is_awaited_before_each_followup():
+    release = asyncio.Event()
+    admitted = asyncio.Event()
+    admit_calls = []
+    agent, model = make_agent(release)
+
+    async def admit():
+        admit_calls.append(model.call_count)
+        await admitted.wait()
+
+    stream = AgentContinuation(agent, admit=admit, prompt="start")
+    initial = await through_output(stream)
+    consumer = asyncio.create_task(consume(stream))
     release.set()
     await settle(store_for_run(initial.run_id))
+    await until(lambda: admit_calls)
+    assert model.call_count == 2
+    admitted.set()
+    events = await asyncio.wait_for(consumer, 2)
+    assert len(root_outputs(events)) == 1
+    assert admit_calls == [2]
+    assert model.call_count == 3
+
+
+async def test_sync_admit_is_accepted():
+    release = asyncio.Event()
+    release.set()
+    admit_calls = []
+    agent, model = make_agent(release)
+    stream = AgentContinuation(agent, admit=lambda: admit_calls.append(True), prompt="start")
+    events = await asyncio.wait_for(consume(stream), 2)
+    assert len(root_outputs(events)) == 2
+    assert admit_calls == [True]
 
 
 async def test_pause_stops_driver_without_auto_resuming_tools():
@@ -305,6 +523,7 @@ async def test_error_stops_driver():
     events = await consume(stream)
     assert root_outputs(events)[0].status.code == "error"
     assert stream.stop_reason == "run_stopped"
+    assert stream.last_status == "error"
 
 
 async def test_missing_history_leaves_notice_pending():
@@ -369,17 +588,10 @@ async def test_empty_store_wait_returns_immediately():
 async def test_cancellation_during_continuation_is_not_swallowed():
     release = asyncio.Event()
     continuation_started = asyncio.Event()
-
-    class HangingModel(TestModel):
-        async def stream(self, messages, **kwargs):
-            if self.call_count == 2:
-                continuation_started.set()
-                await asyncio.Event().wait()
-            async for message in super().stream(messages, **kwargs):
-                yield message
-
-    agent, _ = make_agent(release)
-    agent.model = HangingModel(responses=[tool_calls("work"), "Working", "Finished"])
+    model = gated_model(
+        [tool_calls("work"), "Working", "Finished"], at_call=2, entered=continuation_started, opened=asyncio.Event()
+    )
+    agent, _ = make_agent(release, model=model)
     stream = agent.stream_until_idle(prompt="start")
 
     async def run():
@@ -394,7 +606,42 @@ async def test_cancellation_during_continuation_is_not_swallowed():
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(consumer, 3)
     assert stream.stop_reason == "cancelled"
-    assert store_for_run(stream.last_run_id)._continuation_owner is None
+    assert continuation_for_run(stream.last_run_id) is None
+
+
+async def test_followup_cut_before_memory_leaves_notice_for_next_turn():
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def system_prompt() -> str:
+        if get_run_context().root_span().metadata.get("trigger"):
+            entered.set()
+            await asyncio.Event().wait()
+        return "You are an agent."
+
+    model = TestModel(responses=[tool_calls("work"), "Working.", "Caught up."])
+    agent, _ = make_agent(release, model=model, system_prompt=system_prompt)
+    stream = agent.stream_until_idle(prompt="start")
+    await through_output(stream)
+    consumer = asyncio.create_task(consume(stream))
+    release.set()
+    await asyncio.wait_for(entered.wait(), 2)
+    cut_run_id = stream.last_run_id
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert stream.stop_reason == "cancelled"
+    assert model.call_count == 2
+    output = await asyncio.wait_for(agent(prompt="status", parent_id=cut_run_id).collect(), 2)
+    assert output.status.code == "success"
+    memory = await stored_memory(output)
+    assert [message.collect_text() for message in memory if message.role == "user" and not message.is_runtime()] == [
+        "start",
+        "status",
+    ]
+    notices = [message for message in memory if message.is_runtime()]
+    assert len(notices) == 1
+    assert "result-42" in notices[0].collect_text()
 
 
 async def test_two_sessions_using_one_agent_are_isolated():
@@ -439,6 +686,7 @@ async def test_approval_with_background_work_does_not_autoresume():
     assert root_outputs(events)[0].status.reason == "approval_required"
     release.set()
     store = store_for_run(stream.last_run_id)
+    assert store.continuation_owner() is None
     await settle(store)
     assert store.pending_completions()
     assert model.call_count == 2
@@ -464,18 +712,37 @@ async def test_completion_acknowledged_during_history_lookup_does_not_repeat_pro
     assert stream.stop_reason == "idle"
 
 
+async def test_ack_after_the_driver_takes_a_notice_keeps_it_in_the_followup():
+    release = asyncio.Event()
+
+    def acknowledge_before_model():
+        context = get_run_context()
+        if context.root_span().metadata.get("trigger"):
+            for task in context._bg_store.list():
+                context._bg_store.ack_completion(task["task_id"])
+
+    agent, model = make_agent(release, pre_hook=acknowledge_before_model)
+    stream = agent.stream_until_idle(prompt="start")
+    await through_output(stream)
+    release.set()
+    events = await consume(stream)
+    followup = root_outputs(events)[0]
+    assert followup.output.collect_text() == "Finished."
+    assert "result-42" in Message.validate(followup.input["prompt"]).collect_text()
+    assert model.call_count == 3
+    assert stream.stop_reason == "idle"
+
+
 async def test_followup_can_start_more_background_work_but_limit_bounds_loop():
     release = asyncio.Event()
     release.set()
-    agent, _ = make_agent(release)
-    agent.model = TestModel(
-        responses=[tool_calls("work"), "Working", tool_calls("work"), "Working again", "Unexpected"]
-    )
+    model = TestModel(responses=[tool_calls("work"), "Working", tool_calls("work"), "Working again", "Unexpected"])
+    agent, _ = make_agent(release, model=model)
     stream = agent.stream_until_idle(prompt="start", max_continuations=1)
     events = await consume(stream)
     assert len(root_outputs(events)) == 2
     assert stream.stop_reason == "continuation_limit"
-    assert agent.model.call_count == 4
+    assert model.call_count == 4
     store = store_for_run(stream.last_run_id)
     await settle(store)
     assert store.pending_completions()
@@ -489,27 +756,6 @@ async def test_invalid_parent_rejected_before_model_execution():
     assert model.call_count == 0
 
 
-async def test_ack_between_admission_and_context_attachment_skips_model_call():
-    release = asyncio.Event()
-    agent, model = make_agent(release)
-
-    def acknowledge_before_model():
-        context = get_run_context()
-        if getattr(context, "_background_continuation", False):
-            store = store_for_run(context.id)
-            for notice in store.pending_completions():
-                store.ack_completion(notice["task_id"])
-
-    agent = Agent(name="agent", model=model, tools=agent.tools, pre_hook=acknowledge_before_model)
-    stream = agent.stream_until_idle(prompt="start")
-    await through_output(stream)
-    release.set()
-    events = await consume(stream)
-    assert root_outputs(events)[0].metadata["continuation_skipped"] == "no_pending_completion"
-    assert model.call_count == 2
-    assert stream.stop_reason == "idle"
-
-
 @pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])
 def test_invalid_idle_limit(seconds):
     with pytest.raises(ValueError, match="max_idle_secs"):
@@ -520,3 +766,8 @@ def test_invalid_idle_limit(seconds):
 def test_invalid_continuation_limit(limit):
     with pytest.raises(ValueError, match="max_continuations"):
         Agent(name="agent", model=TestModel()).stream_until_idle(prompt="start", max_continuations=limit)
+
+
+def test_invalid_admit():
+    with pytest.raises(TypeError, match="admit"):
+        AgentContinuation(Agent(name="agent", model=TestModel()), admit="soon", prompt="start")

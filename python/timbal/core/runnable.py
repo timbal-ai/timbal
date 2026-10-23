@@ -2165,8 +2165,9 @@ class Runnable(ABC, BaseModel):
             yield start_event
             _restore_context()
 
+            # Before param resolution and pre_hook: a turn refused here must not run either.
             if _new_parent_call_id is None and run_context._bg_store is not None:
-                run_context._bg_store.check_continuation_turn(run_context.id)
+                run_context._bg_store.check_continuation_turn(run_context)
 
             # Resolve input params (merging fixed defaults, runtime defaults, and provided input)
             # We then store the unvalidated input, as sent by the user to ensure full replayability of the run.

@@ -743,15 +743,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     ) -> "AgentContinuation":
         """Stream a turn plus automatic follow-ups for background completions.
 
-        Every turn has its own run id and OUTPUT. The stream closes when no
-        children/notices remain, or on a limit, pause, or unsuccessful run.
-        Inspect ``stop_reason`` after iteration. Close/cancel the driver before
-        submitting another turn in this session; children keep running.
-        No network transport or voice playback policy is changed by this API.
+        Every turn has its own run id and OUTPUT; a follow-up's prompt is the
+        completion notice. The stream closes when no children/notices remain,
+        or on a limit, pause, unsuccessful run, ``stop()``, or another root turn
+        in the session (which preempts it while it waits). Inspect
+        ``stop_reason`` after iteration; children keep running. Hosts that gate
+        follow-ups (e.g. on voice playback) use ``AgentContinuation(admit=...)``.
         """
         from .continuation import AgentContinuation
 
-        return AgentContinuation(self, max_idle_secs=max_idle_secs, max_continuations=max_continuations, kwargs=kwargs)
+        return AgentContinuation(self, max_idle_secs=max_idle_secs, max_continuations=max_continuations, **kwargs)
 
     async def _resolve_system_prompt(self) -> str | None:
         """Resolve system prompt by executing callable or embedded template functions."""
@@ -1064,7 +1065,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 loaded.append(msg)
         return loaded
 
-    def _inject_background_completions(self, current_span: Any) -> bool:
+    def _inject_background_completions(self, current_span: Any) -> None:
         """Drain session completion inbox into memory at turn start (Claude-style).
 
         Delivered between turns only — never mid-loop — so the parent is not
@@ -1073,15 +1074,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         Peek APIs are unchanged; notices are one-shot after drain.
         """
         if current_span.parent_call_id is not None:
-            return False
+            return
         if self._find_pending_tool_uses(current_span.memory):
-            return False
+            return
         store = current_background_store()
         if store is None:
-            return False
+            return
         notifications = store.drain_completions()
         if not notifications:
-            return False
+            return
         notice = format_background_completion_notice(notifications)
         memory = current_span.memory
         # Sit immediately before the current user prompt so history stays
@@ -1090,7 +1091,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             memory.insert(-1, notice)
         else:
             memory.append(notice)
-        return True
 
     def _apply_background_limits(self, run_context: Any) -> None:
         """Push Agent concurrent/depth caps onto the session BG store."""
@@ -1721,7 +1721,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._apply_background_limits(run_context)
         # After memory is assembled (and before the dump): push any background
         # completions that finished since the last turn into the conversation.
-        completions_injected = self._inject_background_completions(current_span)
+        self._inject_background_completions(current_span)
 
         prev_dump = getattr(current_span, "_prev_memory_dump", None)
         if prev_dump is not None and "compaction" not in current_span.metadata:
@@ -1736,10 +1736,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Remove these so the llm runnable doesn't try to use/validate them again
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
-
-        if getattr(run_context, "_background_continuation", False) and not completions_injected:
-            current_span.metadata["continuation_skipped"] = "no_pending_completion"
-            return
 
         async def _append_memory(message: Message) -> None:
             """Append a message to both memory and its serialized dump in lockstep."""

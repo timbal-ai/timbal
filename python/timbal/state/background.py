@@ -39,6 +39,7 @@ import asyncio
 import contextvars
 import os
 import time
+import weakref
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -906,8 +907,8 @@ class BackgroundTaskStore:
         # task_ids already enqueued, drained, or acked via peek — never re-inject.
         self._completion_notified: set[str] = set()
         self._completion_changed: asyncio.Event | None = None
-        self._continuation_owner: object | None = None
-        self._continuation_run_id: str | None = None
+        # Weak, so a continuation driver nobody holds stops owning the session.
+        self._continuation: weakref.ref[Any] | None = None
         self.max_concurrent = (
             _default_max_concurrent() if max_concurrent is _UNSET else max_concurrent  # type: ignore[assignment]
         )
@@ -1109,52 +1110,64 @@ class BackgroundTaskStore:
         """Peek the completion inbox without draining (tests / UIs)."""
         return list(self._completion_inbox)
 
-    def acquire_continuation(self, owner: object) -> None:
-        """Reserve this process-local store for one automatic continuation driver."""
-        if self._continuation_owner is not None:
+    def continuation_owner(self) -> Any | None:
+        """The continuation driver that owns this session's turns, if any."""
+        ref = self._continuation
+        return ref() if ref is not None else None
+
+    def acquire_continuation(self, owner: Any) -> None:
+        """Make ``owner`` the session's continuation driver (idempotent for the same owner)."""
+        current = self.continuation_owner()
+        if current is not None and current is not owner:
             raise RuntimeError("This session already has an active continuation stream.")
-        self._continuation_owner = owner
+        self._continuation = weakref.ref(owner)
 
-    def release_continuation(self, owner: object) -> None:
-        """Release only the reservation belonging to this driver."""
-        if self._continuation_owner is owner:
-            self._continuation_owner = None
-            self._continuation_run_id = None
-            if not self._tasks and not self._pending_spawns and not self._completion_inbox:
-                for run_id in [run_id for run_id, store in _STORES_BY_RUN_ID.items() if store is self]:
-                    del _STORES_BY_RUN_ID[run_id]
+    def release_continuation(self, owner: Any) -> None:
+        """Release only the reservation belonging to ``owner``."""
+        if self.continuation_owner() is owner:
+            self._continuation = None
 
-    def authorize_continuation_turn(self, owner: object, run_id: str) -> None:
-        """Allow only the owning driver's next run to consume its session inbox."""
-        if self._continuation_owner is not owner:
-            raise RuntimeError("Continuation stream does not own this session.")
-        self._continuation_run_id = run_id
+    def check_continuation_turn(self, run_context: Any) -> None:
+        """Admit a root turn into a session a continuation driver may own.
 
-    def check_continuation_turn(self, run_id: str) -> None:
-        """Reject direct root calls while an automatic driver owns the store."""
-        if self._continuation_owner is not None and self._continuation_run_id != run_id:
-            raise RuntimeError("Stop the session's continuation stream before starting another turn.")
+        The driver's own runs pass. Any other root turn preempts a driver that
+        is waiting between runs, or is rejected while the driver has a run in
+        flight (two turns of one session must never overlap).
+        """
+        owner = self.continuation_owner()
+        if owner is None:
+            return
+        marker = getattr(run_context, "_continuation_owner", None)
+        if marker is not None and marker() is owner:
+            return
+        owner._yield_turn()
 
     def _wake_completion_waiter(self) -> None:
         if self._completion_changed is not None:
             self._completion_changed.set()
 
+    def has_pending_work(self) -> bool:
+        """True while a notice is pending or a child is still running.
+
+        Reconciles done tasks first: their done callbacks may not have run yet.
+        """
+        for record in self._tasks.values():
+            self._enqueue_completion(record)
+        return bool(self._completion_inbox) or self.running_count() > 0
+
     async def wait_for_completion(self) -> bool:
         """Wait without polling or consuming; False means no children remain.
 
-        Reconcile done tasks before checking quiescence: their callbacks may
-        not have run yet. The driver owns admission; this method owns no task.
+        The driver owns admission; this method owns no task.
         """
         if self._completion_changed is None:
             self._completion_changed = asyncio.Event()
         while True:
             self._completion_changed.clear()
-            for record in self._tasks.values():
-                self._enqueue_completion(record)
+            if not self.has_pending_work():
+                return False
             if self._completion_inbox:
                 return True
-            if self.running_count() == 0:
-                return False
             await self._completion_changed.wait()
 
     def drain_completions(self) -> list[dict[str, Any]]:
@@ -1242,6 +1255,8 @@ def ensure_background_store(run_context: Any) -> BackgroundTaskStore:
             max_log_bytes=max_log_bytes,
             task_retention_secs=task_retention_secs,
         )
+        # A driver cannot acquire a store before its run spawns one; the store joins it here.
+        store._continuation = getattr(run_context, "_continuation_owner", None)
         run_context._bg_store = store
     store.reap_finished()
     _STORES_BY_RUN_ID[run_context.id] = store

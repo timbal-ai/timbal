@@ -136,28 +136,67 @@ print(stream.stop_reason, stream.last_run_id)
 
 Each turn has a fresh `run_id`, the previous turn as its `parent_run_id`, and its
 own root `OUTPUT` event. Consume the whole stream, not just the first output.
-Completion notices enter the receiving turn's memory; they are not new human
-utterances and do not rewrite earlier traces. Follow-up outputs are tagged with
-`metadata.trigger.kind == "background_completion"`.
+A follow-up's `prompt` is the completion notice itself: a `role="user"` message
+with `metadata.source == "runtime"`, so transcripts that filter with
+`Message.is_runtime()` hide it and input guardrails skip it, as for any notice.
+It is not a human utterance and earlier traces are never rewritten. Follow-up
+outputs carry `metadata.trigger`:
+
+```python
+{"kind": "background_completion", "continuation_index": 1, "task_ids": ["..."]}
+```
 
 The stream ends when no children or pending notices remain, or on an idle
 timeout, continuation limit, unsuccessful run, or approval/input suspension.
-Read `stop_reason` after iteration. `max_idle_secs` bounds waiting between turns,
-not the duration of a model call. `max_continuations=0` allows only the initial
-turn. Tracing must be enabled so subsequent turns can read their history.
+Read `stop_reason` (and `last_status` for the last run's status code) after
+iteration. `max_idle_secs` bounds waiting between turns, not the duration of a
+model call. `max_continuations=0` allows only the initial turn. Tracing must be
+enabled so subsequent turns can read their history.
+
+### Sending another user turn
+
+Just send it: `agent(prompt=..., parent_id=stream.last_run_id)`, or start another
+`stream_until_idle` with that `parent_id`. While the stream is waiting between
+runs, the new turn **preempts** it: the stream ends with `stop_reason ==
+"preempted"`, and any notices that were pending ride along in the new turn's
+memory just before its prompt. While one of the stream's runs is still in flight,
+the new turn is rejected (an error before hooks or the model run); wait for that
+run's `OUTPUT` first.
+
+### Stopping, hosting, and gating follow-ups
+
+```python
+from timbal.core.continuation import AgentContinuation, continuation_for_run
+
+stream = AgentContinuation(
+    agent,
+    admit=wait_until_the_line_is_quiet,  # awaited before each follow-up starts
+    prompt="Prepare the report in the background, then tell me the result.",
+)
+
+# Elsewhere, with only a run id (a request handler, say):
+driver = continuation_for_run(run_id)
+if driver is not None:
+    driver.stop()
+```
+
+- `stop()` ends the stream immediately while it waits, or after the current run's
+  `OUTPUT` while one is in flight. `aclose()` also closes the in-flight run.
+- `admit` is an optional parameterless callable (sync or async). The stream calls
+  it once a completion is pending and starts the follow-up as soon as it returns;
+  a preemption, `stop()`, or the idle timeout cancels it. Channel-specific
+  conditions such as voice playback or caller silence belong here.
+- `continuation_for_run(run_id)` finds the stream that owns a session through its
+  background-task store, so it returns `None` before the session's first spawn.
 
 This is a **process-local, caller-driven** stream, not a durable session service.
-Closing/cancelling it stops further automatic responses but leaves detached
-children running. Use explicit background-task cancellation to stop those too.
-Close it explicitly when breaking iteration. Before sending another user turn,
-cancel and await the consuming task, then use `parent_id=stream.last_run_id`.
-Concurrent root calls sharing its session store are rejected while it owns it.
+Stopping, closing, or cancelling it stops further automatic responses but leaves
+detached children running. Use explicit background-task cancellation to stop
+those too. Close it explicitly when breaking iteration.
 
-Existing HTTP routes and voice transports do not opt into this behavior. In
-particular, voice admission must also wait for playback and caller silence;
-model-run completion alone is not sufficient. Restart recovery, cross-worker
-ownership, arbitrary notification ingress, and guarantees that a user heard a
-response are outside this API's scope.
+Existing HTTP routes and voice transports do not opt into this behavior.
+Restart recovery, cross-worker ownership, arbitrary notification ingress, and
+guarantees that a user heard a response are outside this API's scope.
 
 ## Timeouts
 
