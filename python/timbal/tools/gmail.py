@@ -23,6 +23,37 @@ def _encode_header(value: str) -> str:
         return Header(value, "utf-8").encode()
 
 
+# Headers a caller may add to a sent message, by their canonical spelling. The ones the
+# tool writes itself (To, Cc, Bcc, Subject, MIME-Version, Content-Type) are not on it.
+# List-Unsubscribe and List-Unsubscribe-Post (RFC 8058) are what Gmail and Outlook read
+# for their own unsubscribe button and weigh against spam.
+_EXTRA_HEADERS = {
+    "list-unsubscribe": "List-Unsubscribe",
+    "list-unsubscribe-post": "List-Unsubscribe-Post",
+    "list-id": "List-Id",
+    "reply-to": "Reply-To",
+}
+
+
+def _extra_header_lines(headers: dict[str, str] | None) -> list[str]:
+    """The caller's extra headers as message lines, or a ValueError naming the first bad one."""
+    if not headers:
+        return []
+    lines = []
+    for name, value in headers.items():
+        canonical = _EXTRA_HEADERS.get(str(name).strip().lower())
+        if canonical is None:
+            allowed = ", ".join(_EXTRA_HEADERS.values())
+            raise ValueError(f"Header not allowed: {name!r}. Allowed: {allowed}.")
+        text = str(value)
+        if "\r" in text or "\n" in text:
+            raise ValueError(f"Header {canonical} must be a single line.")
+        if not text.strip():
+            continue
+        lines.append(f"{canonical}: {_encode_header(text.strip())}")
+    return lines
+
+
 async def _download_and_encode_attachment(url: str) -> tuple[str, str, str]:
     """Download file from URL and return filename, content_type, and base64 content."""
     import httpx
@@ -178,7 +209,15 @@ class GmailSend(Tool):
             attachment_urls: list[str] | None = Field(None, description="URLs of files to attach"),
             message_format: Literal["text", "html"] = Field("text", description='"text" or "html"'),
             email_signature: str | None = Field(None, description="Email signature to append"),
+            headers: dict[str, str] | None = Field(
+                None,
+                description=(
+                    "Extra message headers, name to value. Allowed: List-Unsubscribe, "
+                    "List-Unsubscribe-Post, List-Id, Reply-To."
+                ),
+            ),
         ) -> Any:
+            extra_lines = _extra_header_lines(headers)
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
             credentials = await self.integration.resolve()
@@ -201,6 +240,7 @@ class GmailSend(Tool):
                 message_parts.append(f"Bcc: {bcc_str}")
 
             message_parts.append(f"Subject: {_encode_header(subject)}")
+            message_parts.extend(extra_lines)
 
             if attachment_urls or message_format == "html" or email_signature:
                 boundary = "----=_NextPart_" + base64.urlsafe_b64encode(str(hash(body)).encode()).decode()[:16]
