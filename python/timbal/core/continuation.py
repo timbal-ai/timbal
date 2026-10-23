@@ -199,11 +199,6 @@ class AgentContinuation:
             raise RuntimeError("Continuation stream did not start a top-level run.")
         if context._tracing_provider is None:
             raise ValueError("Continuation streams require a tracing provider for turn history.")
-        if not self.continuations and context.parent_id is not None:
-            previous = await context._get_parent_trace()
-            previous_root = self._agent._own_span(previous) if previous is not None else None
-            if previous_root is None or previous_root.t1 is None:
-                raise ValueError("Continuation streams require a completed, readable parent run.")
         self._scheduler.mark_own(context)
         self._context = context
         self.last_run_id = context.id
@@ -211,9 +206,15 @@ class AgentContinuation:
         if store is not None:
             other = store.continuation_owner()
             if other is not None and other is not self._scheduler:
-                # A new driver's first run is a root turn like any other.
+                # A new driver's first run is a root turn like any other (and may be re-chained).
                 await other.admit_foreign(context, store)
             self._scheduler.bind(store)
+        self._scheduler.note_run(context.id)
+        if not self.continuations and context.parent_id is not None:
+            previous = await context._get_parent_trace()
+            previous_root = self._agent._own_span(previous) if previous is not None else None
+            if previous_root is None or previous_root.t1 is None:
+                raise ValueError("Continuation streams require a completed, readable parent run.")
         if self._followup is not None:
             self._followup.started(context)
             context.root_span().metadata["trigger"]["continuation_index"] = self.continuations

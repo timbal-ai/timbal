@@ -482,6 +482,9 @@ class VoiceSession:
             completions="when_idle" if announce_background_results else "silent",
             events="when_idle",
             on_busy=on_busy,
+            can_interrupt=True,
+            # Work posted between turns (report_progress, post_session_event) has no notify() to start the watcher.
+            on_work=self._watch_for_event_turns,
         )
         self._event_task: asyncio.Task[None] | None = None
         # The in-flight turn's run, from its first event until the turn ends.
@@ -1939,12 +1942,18 @@ class VoiceSession:
         self._turn_run_context = ctx
         # Before the run resumes: its session admission check must see it as the call's own.
         self._scheduler.mark_own(ctx)
+        self._scheduler.note_run(ctx.id)
         if ctx._bg_store is None:
             previous = self._last_run_context._bg_store if self._last_run_context is not None else None
             store = previous or self._unbound_store
             if store is not None:
                 adopt_background_store(ctx, store)
                 self._unbound_store = None
+        elif self._unbound_store is not None and self._unbound_store is not ctx._bg_store:
+            # The run inherited its conversation's store: what notify() queued before it goes there.
+            unbound, self._unbound_store = self._unbound_store, None
+            self._scheduler.release(unbound)
+            ctx._bg_store.requeue([], unbound.drain_events(settle=False))
         if ctx._bg_store is not None:
             self._own_store(ctx._bg_store)
         if followup is not None:
@@ -1982,8 +1991,8 @@ class VoiceSession:
             self._event_task.cancel()
         self._event_task = None
 
-    def _after_turn_events(self) -> None:
-        """Watch for an event turn once this turn is over, if the store holds anything that could ask for one."""
+    def _watch_for_event_turns(self) -> None:
+        """Watch for an event turn if the store holds anything that could ask for one (after a turn, on new work)."""
         if self._closed:
             return
         store = self._session_store()
@@ -2028,20 +2037,23 @@ class VoiceSession:
             urgent = self._scheduler.pending_turn() == "interrupt"
             if self._event_turn_blocker(urgent=urgent) is not None:
                 return False
-            if urgent:
-                # Same disarm as submit_user_text: a pending HOLD expiry would
-                # otherwise interrupt() the event turn with leftover speech.
-                self._cancel_hold()
-                self._held_user_text = None
-                self._hold_armed_timeout_secs = None
-                await self.interrupt()
-                if self._closed:
+            # Cutting the reply in flight finishes the call's turn: hold the session until
+            # this one starts, or a turn queued behind the cut one slips in first.
+            with self._scheduler.holding() if urgent else contextlib.nullcontext():
+                if urgent:
+                    # Same disarm as submit_user_text: a pending HOLD expiry would
+                    # otherwise interrupt() the event turn with leftover speech.
+                    self._cancel_hold()
+                    self._held_user_text = None
+                    self._hold_armed_timeout_secs = None
+                    await self.interrupt()
+                    if self._closed:
+                        return False
+                followup = self._scheduler.take()
+                if followup is None:
                     return False
-            followup = self._scheduler.take()
-            if followup is None:
-                return False
-            # Busy from here: another channel's turn arriving before the task starts waits or is refused.
-            self._scheduler.turn_started()
+                # Busy from here: another channel's turn arriving before the task starts waits or is refused.
+                self._scheduler.turn_started()
             self._cancel_turn.clear()
             self._turn_vad_endpointed = False
             self._turn_stt_latency = None
@@ -2089,7 +2101,7 @@ class VoiceSession:
             return "not_started"
         if self._last_run_paused():
             return "run_awaiting_caller"
-        if self._scheduler.other_turn_active:
+        if self._scheduler.other_turn_first("interrupt" if urgent else None):
             return "other_channel_turn"
         if urgent:
             return None
@@ -2239,10 +2251,17 @@ class VoiceSession:
             if self.model:
                 agent_kwargs["model"] = self.model
             # Another channel's turn ran on this conversation since the call's
-            # last one: continue from it, not from the call's own last run.
-            head = self._scheduler.take_head()
-            if head is not None and self._last_run_context is not None and head != self._last_run_context.id:
-                agent_kwargs["parent_id"] = head
+            # last one (or before its first): continue from it, not from the
+            # call's own last run or the parent it was started with.
+            head = self._scheduler.head
+            if head is not None and (self._last_run_context is None or head != self._last_run_context.id):
+                seed = get_run_context() if self._last_run_context is None else None
+                if seed is not None and not seed._trace:
+                    # Turn one reuses the seeded context, which ignores a parent_id kwarg.
+                    await seed._continue_from(head)
+                    (await seed.get_session()).update(self.call_context)
+                else:
+                    agent_kwargs["parent_id"] = head
             # First turn after an opener. The opener was spoken outside any run,
             # so it is in no memory the agent can resolve — without telling it,
             # the model opens by greeting a caller it has already greeted. Turn
@@ -2712,7 +2731,7 @@ class VoiceSession:
                     # start): what it carried goes back for the caller's turn.
                     followup.release()
                 self._scheduler.turn_finished()
-                self._after_turn_events()
+                self._watch_for_event_turns()
 
     # -- Internal: tool-call filler ------------------------------------------
 

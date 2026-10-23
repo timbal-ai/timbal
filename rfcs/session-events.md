@@ -265,8 +265,11 @@ await session.notify("Your table is ready.", announce="interrupt")
   (disarmed as `submit_user_text` does), and calls `interrupt()` on the reply
   in flight, as a barge-in would. It is still blocked by a closed or unstarted
   call, a run parked on the caller (that run's prompt would be dropped on
-  resume), and another channel's turn. A turn it starts records
-  `trigger.announce="interrupt"`.
+  resume), and another channel's turn that is running. It goes ahead of other
+  turns still queued behind the reply it cuts. Cutting that reply finishes the
+  call's turn, which would let a queued turn in first, so the session is held
+  (`SessionScheduler.holding()`) from the cut until the interrupt's own turn is
+  busy. A turn it starts records `trigger.announce="interrupt"`.
 - Client events cannot interrupt: `notify(source="client", announce="interrupt")`
   raises `PermissionError`, and the transports answer `not_allowed`.
 
@@ -406,13 +409,25 @@ conversation of a live call. It is handled by the owner's timing:
 While an admitted turn runs, the owner starts nothing of its own. Its event
 turns wait (`wait_ready`, `take`), and a voice turn for a caller who spoke waits
 for running turns only, not queued ones, which would deadlock: they wait for
-it. Admitted turns leave through a finish hook (`RunContext._foreign_turn_of`,
-called from `Runnable._stream`'s `finally` after the trace save), so a crashed
-or cancelled one cannot wedge the owner.
+it. Queued turns also hold back the owner's event turns, except a voice
+`interrupt` (see "Announce policy"). Admitted turns leave through a finish hook
+(`RunContext._foreign_turn_of`, called from `Runnable._stream`'s `finally` after
+the trace save), so a crashed or cancelled one cannot wedge the owner.
 
-A voice call stays the owner after another channel's turn ran. Its next turn
-chains onto that run (`take_head()` → `parent_id`), so the call continues from
-what the chat just said instead of forking the conversation.
+The session stays one line of turns. `SessionScheduler.head` is the session's
+latest root run: the owner notes each of its runs, and an admitted turn
+becomes the head. A turn may be admitted with an older run as its parent,
+because it was queued while the owner's turn ran, or because its client had
+not seen the latest turn yet. Such a turn is re-chained onto the head before
+it reads anything (`RunContext._continue_from`: new `parent_id`, session data
+reloaded from it, the requested parent kept as `metadata.requested_parent_id`).
+Admission is after `START`, so that event still shows the requested parent;
+`OUTPUT` and the stored trace show the adopted one. Without this, a chat
+queued behind a voice turn would answer without that exchange, and the call,
+chaining onto the chat, would lose it for good. A voice call stays the owner
+after another channel's turn ran, and its next turn chains onto a newer head.
+That includes turn one, whose seeded context is re-chained the same way,
+because the reuse path ignores a `parent_id` keyword.
 
 The check runs in the root path of `Runnable._stream`, right after `START` and
 before parameter resolution, and it is async (enqueue awaits there). It cannot
@@ -498,9 +513,14 @@ metrics); hosting `AgentContinuation` would bypass all of that.
 - `await session.notify(text, key=None, source="app", announce=None) -> SessionEvent`
   posts to the call's conversation store and returns at once. The store is made
   on demand and bound to the call's scheduler; one made before any turn has a
-  run is adopted by the first turn's run.
-- One watcher task per call, started by `notify()` and at the end of any turn
-  after which something could still ask for a turn (`may_need_turn()`). Waiting
+  run is adopted by the first turn's run, or, if that run inherited its
+  conversation's store, hands its pending events over to it.
+- One watcher task per call, started by `notify()`, at the end of any turn
+  after which something could still ask for a turn (`may_need_turn()`), and
+  whenever the store gains work (the scheduler's `on_work`, called by the store
+  for every finished task and event). That covers work that arrives between
+  turns without `notify()`: a `report_progress` from a task that was silent
+  when the turn ended, or a `post_session_event` from the app's backend. Waiting
   for work is the scheduler's `wait_ready`, event-driven on the store; waiting
   for the line polls the quiet-line check every 50 ms, because "the caller's
   audio has finished playing" is an estimate with no event to wait on.
@@ -583,6 +603,19 @@ Implementing it changed these points of earlier revisions of this RFC:
   `now`. Rejecting busy turns becomes an `on_busy` choice, not the only answer.
 - `post_session_event` with an unknown run id raised nothing and posted into a
   store no turn would read; it now raises unless `create=True`.
+- Review of the scheduler found four gaps, now covered by tests:
+  - **Stale parent.** An admitted turn kept the parent it was sent with, so a
+    chat queued behind a voice turn forked the conversation. It is now
+    re-chained onto the session head.
+  - **Dropped head on turn one.** The call's first turn consumed and ignored a
+    chat admitted before it. The scheduler now has a `head` instead of a
+    consumed `take_head()`.
+  - **Interrupt waited for queued turns.** An `interrupt` waited for turns
+    queued behind the reply it should cut. It now goes ahead of them, holding
+    the session across the cut.
+  - **No watcher for work between turns.** Work posted between turns started
+    no voice watcher unless it came through `notify()`. The store now tells
+    its owner.
 
 `Agent.handler` is unchanged from `main`; `_inject_background_completions` also
 drains posted events and accounts for them. The rest is
@@ -683,7 +716,9 @@ Executable tests in the repository:
   - progress: only inside a background task, newer report replaces, completion
     (and a report arriving after it) supersedes, the follow-up told the task is
     still running;
-  - an enqueued turn waiting out a follow-up, then preempting;
+  - an enqueued turn waiting out a follow-up, then preempting, re-chained onto
+    that follow-up (`parent_run_id`, `requested_parent_id`, what the model saw);
+  - `RunContext._continue_from` reloading session data from the new parent;
   - an idle store forgotten.
 - `python/tests/voice/test_voice_events.py`: event turns spoken and never the
   caller's words, still in memory later, silence with no filler; waiting for
@@ -697,8 +732,16 @@ Executable tests in the repository:
     reply in flight; the caller's device refused `interrupt`; a silent event
     waiting for the caller;
   - progress narrated while the task runs;
-  - another channel's turn refused while a call turn runs, queued and then
-    chained onto by the call, and waited for by a caller's turn;
+  - another channel's turn refused while a call turn runs, queued, re-chained
+    onto the call turn it waited for, and then chained onto by the call, with
+    nothing dropped from either side's history; waited for by a caller's turn;
+  - an `interrupt` going ahead of a queued chat turn, with a slow `interrupt()`
+    standing in for the trace re-save that opens the gap after the cut;
+  - a chat turn admitted before the call's first turn, which then continues it;
+  - progress reported after the reply by a silent task, and an event posted by
+    run id from outside the call, each starting an event turn;
+  - an event `notify()` queued before turn one reaching the store that turn
+    inherits;
   - screening records on the receiving run; a quiet store forgotten at hang-up;
     `EventTurnStarted`.
 - `python/tests/server/test_voice_notify.py` and
@@ -719,7 +762,14 @@ of them. Mutated:
 - the thread hop onto the store's loop;
 - the call adopting the other channel's head, and a call turn not waiting for
   a running other turn;
-- keeping an idle store at hang-up.
+- keeping an idle store at hang-up;
+- an admitted turn keeping its stale parent, and session data not reloaded on
+  re-chaining;
+- the first voice turn ignoring the head, and the seeded turn one not
+  re-chained;
+- an interrupt not going ahead of a queued turn, and no hold across the cut;
+- no watcher started on new work;
+- events queued before turn one orphaned.
 
 Existing background, runnable, tracing, guardrail, and voice tests remain
 regression gates.

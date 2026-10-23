@@ -491,6 +491,23 @@ class RunContext(BaseModel):
         if root is not None and root.t1 is not None:
             await self._save_trace(barrier=True)
 
+    async def _continue_from(self, run_id: str) -> None:
+        """Chain this run onto ``run_id`` instead of the parent it started with.
+
+        INTERNAL METHOD: only before the run has read its history or written
+        session data (session admission). Reloads session data from the new
+        parent; the root span keeps the requested parent as
+        ``metadata.requested_parent_id``. The run's START event already went
+        out with the requested parent.
+        """
+        requested = self.parent_id
+        self.parent_id = run_id
+        self._session_data = None
+        await self.get_session()
+        root = self.root_span()
+        if root is not None:
+            root.metadata["requested_parent_id"] = requested
+
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
         if self._session_data is None:

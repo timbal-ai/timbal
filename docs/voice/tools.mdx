@@ -135,6 +135,6 @@ Pass `announce="silent"` to keep reports for the caller's next turn instead.
 
 When the agent takes a turn of its own, the client gets an `event_turn_started` event (`task_ids`, `event_ids`, `keys`, `urgent`) before any text or audio, so a UI can show the reply as an announcement rather than an answer. Its `voice_turn_metrics` have `event: true`.
 
-A text turn on the same conversation while the call is live (a chat tab continuing from the call's run) is let in only while the call is not mid-turn. While a call turn runs, the chat turn is refused, or queued with `"events": {"on_busy": "enqueue"}` in the server's `voice_config`. A caller who speaks while the chat turn runs is answered after it, and the call continues from what the chat said.
+A text turn on the same conversation while the call is live (a chat tab continuing from the call's run) is let in only while the call is not mid-turn. While a call turn runs, the chat turn is refused, or queued with `"events": {"on_busy": "enqueue"}` in the server's `voice_config`. Once let in, the chat turn continues from the call's latest turn, even if the chat sent an older run as its parent, so neither side loses what the other said. A caller who speaks while the chat turn runs is answered after it, and the call continues from what the chat said. An `"interrupt"` event goes ahead of a queued chat turn, but waits for one that is already running.
 
 Continue to [Thinking sounds](/voice/thinking-sounds).

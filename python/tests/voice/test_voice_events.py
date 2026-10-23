@@ -22,7 +22,7 @@ import pytest
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.guardrails import Verdict, guardrail
-from timbal.state import report_progress
+from timbal.state import post_session_event, report_progress, set_run_context
 from timbal.state.background import store_for_run
 from timbal.state.tracing.providers import JsonlTracingProvider
 from timbal.types.content import ToolUseContent
@@ -131,6 +131,16 @@ def _done(events: list[VoiceSessionEvent]) -> list[AgentTextDone]:
 
 def _texts(events: list[VoiceSessionEvent]) -> list[str]:
     return [e.text for e in _done(events)]
+
+
+def _seen(messages: list[Message]) -> list[str]:
+    return [m.collect_text() for m in messages]
+
+
+def _in_order(seen: list[str], *expected: str) -> bool:
+    """``expected`` appear in ``seen`` in this order (other messages may sit between them)."""
+    remaining = iter(seen)
+    return all(any(text == wanted for text in remaining) for wanted in expected)
 
 
 def _event_notice(messages: list[Message]) -> Message:
@@ -741,6 +751,50 @@ class TestProgress:
         assert "<background_task_completed>" in model.calls[3][-1].collect_text()
         assert sum(isinstance(e, EventTurnStarted) for e in events) == 2
 
+    async def test_progress_after_the_reply_starts_a_turn(self) -> None:
+        """A silent task (the default) reporting once the call is quiet: no watcher is running then."""
+        replied, release = asyncio.Event(), asyncio.Event()
+
+        async def build_report() -> str:
+            await replied.wait()
+            report_progress("Halfway through the export.")
+            await release.wait()
+            return "Sales are up 4%."
+
+        model = _Model(_tool_call("build_report"), "Lo preparo.", "Voy por la mitad.")
+        tool = Tool(name="build_report", handler=build_report, background_mode="always")
+        session, stt, _tts = _session(model, tools=[tool])
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await stt.inject(TranscriptEvent(type="committed", text="Prepárame el informe"))
+            await _until(lambda: "Lo preparo." in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            assert session._event_task is None or session._event_task.done()
+            replied.set()
+            await _until(lambda: "Voy por la mitad." in _texts(events))
+            release.set()
+
+        events = await _run(session, stt, drive)
+
+        assert "Halfway through the export." in model.calls[2][-1].collect_text()
+        assert sum(isinstance(e, EventTurnStarted) for e in events) == 1
+
+    async def test_an_event_posted_by_run_id_reaches_a_live_call(self) -> None:
+        model = _Model("Hola.", REPLY)
+        session, stt, _tts = _session(model)
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify("ping", announce="silent")  # the conversation has a store
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await _until(lambda: "Hola." in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            post_session_event(session._last_run_context.id, NOTE)  # the app's backend, not notify()
+            await _until(lambda: REPLY in _texts(events))
+
+        await _run(session, stt, drive)
+
+        assert NOTE in model.calls[1][-1].collect_text()
+
 
 class TestOtherChannel:
     """A text turn chained on the call's conversation while the call is live."""
@@ -768,7 +822,7 @@ class TestOtherChannel:
     async def test_queued_then_the_call_continues_from_it(self) -> None:
         model = _GatedModel(REPLY, "Vale.", "Hecho desde el chat.", "Visto.", gate_at=1)
         session, stt, _tts = _session(model, on_busy="enqueue")
-        text_results = []
+        text_results, requested = [], []
 
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await session.notify(NOTE)
@@ -776,9 +830,9 @@ class TestOtherChannel:
             await _until(lambda: session._current_turn_task.done())
             await stt.inject(TranscriptEvent(type="committed", text="Hola"))
             await asyncio.wait_for(model.entered.wait(), 2)
-            text_turn = asyncio.create_task(
-                session.agent(prompt="from chat", parent_id=session._last_run_context.id).collect()
-            )
+            # The chat only knows the last finished run, not the "Hola" turn in flight.
+            requested.append(session._last_run_context.id)
+            text_turn = asyncio.create_task(session.agent(prompt="from chat", parent_id=requested[0]).collect())
             await asyncio.sleep(0.1)
             assert not text_turn.done() and len(model.calls) == 1  # queued behind the call's turn
             model.opened.set()
@@ -789,10 +843,87 @@ class TestOtherChannel:
 
         await _run(session, stt, drive)
 
+        chat = text_results[0]
+        assert chat.status.code == "success"
+        # Admitted after the "Hola" turn, the chat continues from it rather than the parent it was sent with.
+        assert chat.metadata["requested_parent_id"] == requested[0] and chat.parent_run_id != requested[0]
+        assert _in_order(_seen(model.calls[2]), "Hola", "Vale.", "from chat")
+        # The call's next turn continues from the chat turn: one line, nothing dropped.
+        assert _in_order(_seen(model.calls[3]), "Hola", "Vale.", "from chat", "Hecho desde el chat.", "¿Lo has visto?")
+
+    async def test_an_interrupt_goes_ahead_of_a_queued_turn(self) -> None:
+        held = asyncio.Event()
+
+        class HoldsHola(_Model):
+            def __init__(self, *replies: str) -> None:
+                super().__init__(*replies)
+                outer = self
+
+                class Held(TestModel):
+                    async def stream(self, messages: list, **kwargs: Any) -> AsyncIterator[Any]:
+                        if messages[-1].collect_text() == "Hola":
+                            held.set()
+                            await asyncio.Event().wait()  # until the interrupt cuts this turn
+                        async for message in super().stream(messages, **kwargs):
+                            yield message
+
+                self.model = Held(handler=outer._reply)
+
+        model = HoldsHola(REPLY, "Aviso urgente.", "Desde el chat.")
+        session, stt, _tts = _session(model, on_busy="enqueue")
+        text_results = []
+        cut = session.interrupt
+
+        async def cut_then_resave(**kwargs: Any) -> None:
+            await cut(**kwargs)
+            # interrupt() re-saving the cut turn's trace: an await after that turn has ended,
+            # which is when the queued chat turn would get in ahead of the interrupt's turn.
+            await asyncio.sleep(0.05)
+
+        session.interrupt = cut_then_resave  # type: ignore[method-assign]
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await asyncio.wait_for(held.wait(), 2)
+            text_turn = asyncio.create_task(
+                session.agent(prompt="from chat", parent_id=session._last_run_context.id).collect()
+            )
+            await asyncio.sleep(0.1)
+            assert not text_turn.done()  # queued behind the "Hola" turn
+            await session.notify("The fire alarm test starts now.", announce="interrupt")
+            text_results.append(await asyncio.wait_for(text_turn, 3))
+
+        events = await _run(session, stt, drive)
+
+        assert [e for e in events if isinstance(e, EventTurnStarted)][-1].urgent is True
+        # The interrupt's turn ran before the queued chat turn, and the chat continues from it.
+        assert model.calls[1][-1].is_runtime() and "fire alarm" in model.calls[1][-1].collect_text()
+        assert _in_order(_seen(model.calls[2]), "Aviso urgente.", "from chat")
         assert text_results[0].status.code == "success"
-        assert [m.collect_text() for m in model.calls[2]][-1] == "from chat"
-        # The call's next turn continues from the chat turn, not from its own last run.
-        assert "from chat" in [m.collect_text() for m in model.calls[3]]
+
+    async def test_a_chat_turn_before_the_calls_first_turn(self) -> None:
+        model = _Model("Antes.", "Desde el chat.", "Hola.")
+        session, stt, _tts = _session(model)
+        earlier = await session.agent(prompt="earlier chat").collect()
+        set_run_context(None)  # a transport starts the call from a clean context
+        post_session_event(earlier.run_id, NOTE, create=True, announce="silent")  # the conversation has a store
+        session.parent_run_id = earlier.run_id  # the call continues that conversation
+        chats = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify("ping", announce="silent")  # the call owns the conversation's store
+            chats.append(await session.agent(prompt="from chat", parent_id=earlier.run_id).collect())
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await _until(lambda: "Hola." in _texts(events))
+
+        await _run(session, stt, drive)
+
+        assert chats[0].status.code == "success"
+        assert session._last_run_context.parent_id == chats[0].run_id
+        assert "from chat" in [m.collect_text() for m in model.calls[2]]
 
     async def test_a_call_turn_waits_for_a_running_text_turn(self) -> None:
         model = _GatedModel(REPLY, "Desde el chat.", "Hola.", gate_at=1)
@@ -835,6 +966,24 @@ class TestRecordsAndCleanup:
         assert "4111" not in model.calls[0][-1].collect_text()
         root = session._last_run_context.root_span()
         assert root.metadata["guardrails"] and root.usage["session_events:delivered"] == 1
+
+    async def test_an_event_before_the_first_turn_reaches_the_store_it_inherits(self) -> None:
+        """No seeded context to hang notify()'s store on, and turn one's run inherits another store."""
+        model = _Model("Antes.", "Hola.")
+        session, stt, _tts = _session(model)
+        earlier = await session.agent(prompt="earlier chat").collect()  # stays the ambient run context
+        post_session_event(earlier.run_id, NOTE, create=True, announce="silent")
+        receipts = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            receipts.append(await session.notify("ping", announce="silent"))
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await _until(lambda: "Hola." in _texts(events))
+
+        await _run(session, stt, drive)
+
+        assert receipts[0].state == "delivered"
+        assert "ping" in model.calls[1][-2].collect_text()
 
     async def test_a_quiet_conversation_store_is_forgotten_at_hang_up(self) -> None:
         model = _Model(REPLY)

@@ -26,6 +26,7 @@ from timbal.state.background import (
     format_session_notice,
     store_for_run,
 )
+from timbal.state.context import RunContext
 from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import SESSION_EVENT_KIND, Message
@@ -393,6 +394,8 @@ class TestBusySession:
             await release.wait()
             return "done"
 
+        seen: list[list[str]] = []
+
         class Gated(TestModel):
             """Holds only the follow-up's call (its prompt is the runtime notice)."""
 
@@ -400,6 +403,7 @@ class TestBusySession:
                 if messages[-1].is_runtime():
                     entered.set()
                     await opened.wait()
+                seen.append([m.collect_text() for m in messages])
                 async for message in super().stream(messages, **kwargs):
                     yield message
 
@@ -423,9 +427,28 @@ class TestBusySession:
         assert [o.output.collect_text() for o in outputs] == ["Working.", "Finished."]
         assert result.t1 >= outputs[1].t1
         assert stream.stop_reason == "preempted"
+        # Queued with the first run as its parent, it continues from the follow-up that ran meanwhile.
+        assert result.parent_run_id == outputs[1].run_id
+        assert result.metadata["requested_parent_id"] == outputs[0].run_id
+        assert seen[-1][-2:] == ["Finished.", "me now"]
 
 
 class TestPlumbing:
+    async def test_continue_from_reloads_session_data_from_the_new_parent(self):
+        labels = iter(["A", "B"])
+
+        async def remember() -> None:
+            (await get_run_context().get_session())["who"] = next(labels)
+
+        agent = Agent(name="agent", model=TestModel(responses=["a", "b"]), pre_hook=remember)
+        first = await agent(prompt="one").collect()
+        second = await agent(prompt="two", parent_id=first.run_id).collect()
+        context = RunContext(parent_id=first.run_id)
+        assert await context.get_session() == {"who": "A"}
+        await context._continue_from(second.run_id)
+        assert context.parent_id == second.run_id
+        assert await context.get_session() == {"who": "B"}
+
     async def test_post_from_another_thread_lands_on_the_loop(self):
         store = BackgroundTaskStore()
         store._pending_spawns = 1  # a child is on its way: the waiter must block

@@ -9,9 +9,10 @@ of the owner's turns is in flight, otherwise let through.
 """
 
 import asyncio
+import contextlib
 import inspect
 import weakref
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -124,7 +125,11 @@ class SessionScheduler:
     override them. ``on_busy`` is what happens to another root turn while one
     of the owner's turns is in flight: ``"reject"`` (``SessionBusyError``) or
     ``"enqueue"`` (it waits for that turn to end). ``on_preempt`` runs when
-    another turn is let in while the owner is idle.
+    another turn is let in while the owner is idle. ``can_interrupt``: the
+    channel cuts its own turn for an ``interrupt`` item (voice), which then
+    goes ahead of turns still queued. ``on_work`` runs whenever the store
+    gains something (a finished task, an event), for a channel that has no
+    waiter running at the time.
     """
 
     def __init__(
@@ -135,6 +140,8 @@ class SessionScheduler:
         events: Announce = "when_idle",
         on_busy: OnBusy = "reject",
         on_preempt: Callable[[], None] | None = None,
+        can_interrupt: bool = False,
+        on_work: Callable[[], None] | None = None,
     ) -> None:
         _check_announce(completions)
         _check_announce(events)
@@ -144,15 +151,19 @@ class SessionScheduler:
         self.completions: Announce = completions
         self.events: Announce = events
         self.on_busy: OnBusy = on_busy
+        self.can_interrupt = can_interrupt
         self._on_preempt = on_preempt
+        self._on_work = on_work
         self.store: BackgroundTaskStore | None = None
         # One of the owner's turns is committed to or in flight.
         self.busy = False
         # Other root turns admitted and still running, and those queued behind the owner.
         self._others: set[str] = set()
         self._others_waiting = 0
-        # The latest other turn admitted, for an owner that keeps the session afterwards.
-        self._head: str | None = None
+        # The owner is cutting its own turn to start another: queued turns keep waiting.
+        self._holding = 0
+        # The session's latest root run, the owner's or an admitted one: where the next turn chains.
+        self.head: str | None = None
         self._changed: asyncio.Future[None] | None = None
 
     @property
@@ -197,10 +208,38 @@ class SessionScheduler:
         self.busy = False
         self._notify()
 
+    def note_run(self, run_id: str) -> None:
+        """One of the owner's runs started: it is the session's head now."""
+        self.head = run_id
+
+    @contextlib.contextmanager
+    def holding(self) -> Iterator[None]:
+        """Keep queued turns waiting while the owner cuts its own turn to start another.
+
+        Cutting a turn finishes it, which would let a queued turn in ahead of
+        the one the cut was for; start that one (``turn_started``) inside.
+        """
+        self._holding += 1
+        try:
+            yield
+        finally:
+            self._holding -= 1
+            self._notify()
+
     @property
     def other_turn_active(self) -> bool:
         """Another root turn runs in the session, or waits for the owner's to end."""
         return bool(self._others) or self._others_waiting > 0
+
+    def other_turn_first(self, urgency: Urgency | None = None) -> bool:
+        """Another root turn goes before the owner's next one.
+
+        A running one always; a queued one unless the owner's turn is an
+        ``interrupt`` on a channel that cuts its own turns for it.
+        """
+        if self._others:
+            return True
+        return self._others_waiting > 0 and not (self.can_interrupt and urgency == "interrupt")
 
     async def until_no_other_turn(self, *, include_queued: bool = True) -> None:
         """Wait out other turns in the session before starting one of the owner's.
@@ -212,23 +251,30 @@ class SessionScheduler:
         while self._others or (include_queued and self._others_waiting):
             await self._wait_change()
 
-    def take_head(self) -> str | None:
-        """The latest other turn let in since the last call, to chain the owner's next turn onto."""
-        head, self._head = self._head, None
-        return head
+    def work_arrived(self) -> None:
+        """The store gained a finished task or an event (called by the store, on its loop)."""
+        self._notify()
+        if self._on_work is not None:
+            self._on_work()
 
     # -- Everyone else's turns ---------------------------------------------------
 
     async def admit_foreign(self, run_context: Any, store: BackgroundTaskStore) -> None:
-        """Let another root turn into the session, queue it, or refuse it."""
-        if self.busy or self._others:
+        """Let another root turn into the session, queue it, or refuse it.
+
+        An admitted turn continues from the session's head: one started with
+        an older run as its parent (queued while the owner's turn ran, or sent
+        by a client that had not seen the latest turn yet) is re-chained before
+        anything reads its history or session data.
+        """
+        if self._occupied:
             if self.on_busy == "reject":
                 raise SessionBusyError(
                     "A turn of this session is in flight; wait for its OUTPUT before starting another turn."
                 )
             self._others_waiting += 1
             try:
-                while (self.busy or self._others) and store.continuation_owner() is self:
+                while self._occupied and store.continuation_owner() is self:
                     await self._wait_change()
             finally:
                 self._others_waiting -= 1
@@ -238,10 +284,16 @@ class SessionScheduler:
                 return
         self._others.add(run_context.id)
         run_context._foreign_turn_of = weakref.ref(self)
-        self._head = run_context.id
+        head, self.head = self.head, run_context.id
         if self._on_preempt is not None:
             self._on_preempt()
         self._notify()
+        if head is not None and run_context.parent_id != head:
+            await run_context._continue_from(head)
+
+    @property
+    def _occupied(self) -> bool:
+        return self.busy or bool(self._others) or self._holding > 0
 
     def foreign_finished(self, run_id: str) -> None:
         self._others.discard(run_id)
@@ -294,25 +346,24 @@ class SessionScheduler:
             )
             if not ready:
                 return None
-            if self.other_turn_active:
-                await self.until_no_other_turn()
+            if self.other_turn_first(self.pending_turn()):
+                # Re-evaluated on every change: an interrupt arriving meanwhile may go ahead of queued turns.
+                await self._wait_change()
                 continue
             if admit is not None:
                 result = admit()
                 if inspect.isawaitable(result):
                     await result
-            if self.other_turn_active:
-                continue
             urgency = self.pending_turn()
-            if urgency is not None:
+            if urgency is not None and not self.other_turn_first(urgency):
                 return urgency
 
     def take(self) -> Followup | None:
         """Take everything pending for a turn of the session's own, unless another turn comes first."""
-        if self.store is None or self.other_turn_active:
+        if self.store is None:
             return None
         urgency = self.pending_turn()
-        if urgency is None:
+        if urgency is None or self.other_turn_first(urgency):
             return None
         return take_followup(self.store, urgent=urgency == "interrupt")
 

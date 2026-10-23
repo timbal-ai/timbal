@@ -1356,6 +1356,10 @@ class BackgroundTaskStore:
     def _wake_completion_waiter(self) -> None:
         if self._completion_changed is not None:
             self._completion_changed.set()
+        # The owning channel may have no waiter running (a call between turns): let it start one.
+        work_arrived = getattr(self.continuation_owner(), "work_arrived", None)
+        if work_arrived is not None:
+            work_arrived()
 
     def post_event(
         self,

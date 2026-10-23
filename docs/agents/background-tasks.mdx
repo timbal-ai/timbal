@@ -166,6 +166,12 @@ that run's `OUTPUT` first. To queue it instead, create the stream with
 `on_busy="enqueue"`: the new turn waits for the in-flight run to finish, then
 preempts the stream as above.
 
+A turn let into the session always continues from its latest run, even if it
+was sent with an older `parent_id` (one it queued behind, or one a client had
+not caught up with). Its `OUTPUT` carries the run it continued from as
+`parent_run_id`, and its root span keeps the one it asked for as
+`metadata.requested_parent_id`.
+
 ### Which results start a turn
 
 By default every finished task and every posted event starts a follow-up. A tool
