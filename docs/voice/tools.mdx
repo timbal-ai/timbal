@@ -137,4 +137,23 @@ When the agent takes a turn of its own, the client gets an `event_turn_started` 
 
 A text turn on the same conversation while the call is live (a chat tab continuing from the call's run) is let in only while the call is not mid-turn. While a call turn runs, the chat turn is refused, or queued with `"events": {"on_busy": "enqueue"}` in the server's `voice_config`. Once let in, the chat turn continues from the call's latest turn, even if the chat sent an older run as its parent, so neither side loses what the other said. A caller who speaks while the chat turn runs is answered after it, and the call continues from what the chat said. An `"interrupt"` event goes ahead of a queued chat turn, but waits for one that is already running.
 
+## Let the caller end the call
+
+`session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply:
+
+```python agent.py
+from timbal.voice import current_voice_session
+
+
+async def end_call() -> str:
+    """End the call when the caller asks to. Say a short goodbye in this same reply."""
+    session = current_voice_session()
+    if session is None:
+        return "There is no call to end."
+    session.end_call()
+    return "If you have not said goodbye yet, say it now in one short sentence. The call ends once it has been heard."
+```
+
+The session waits for the turn to finish and its audio to play, then closes itself, as `session.close()` does. Some models call the tool before writing the goodbye, so the tool's result asks for one; the goodbye then comes from a second model call in the same turn, and the session still waits for it. If the caller says something first, the call stays up. If the goodbye never finishes playing, the call ends after 20 seconds anyway. Calling it again changes nothing.
+
 Continue to [Thinking sounds](/voice/thinking-sounds).
