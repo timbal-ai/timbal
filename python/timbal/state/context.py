@@ -213,6 +213,11 @@ class RunContext(BaseModel):
     #   _session_data: dict | None
     #   _bg_store: BackgroundTaskStore — session bag of detached children;
     #       inherited across sequential turns via parent_id (see background.py)
+    #   _continuation_owner: weakref | None — the SessionScheduler whose own run
+    #       this is (see core/session_scheduler.py); None for ordinary runs
+    #   _foreign_turn_of: SessionScheduler | None — the scheduler that admitted this
+    #       root run into a session it owns, told when the run ends (strong until
+    #       then: a release it defers completes there)
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a
@@ -324,6 +329,8 @@ class RunContext(BaseModel):
         self._invoked_by: dict[str, str] | None = None
         self._live_background = 0
         self._trace = Trace()
+        self._continuation_owner = None
+        self._foreign_turn_of = None
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
         # Allocates nothing unless this session actually has children.
@@ -484,6 +491,23 @@ class RunContext(BaseModel):
         root = self.root_span()
         if root is not None and root.t1 is not None:
             await self._save_trace(barrier=True)
+
+    async def _continue_from(self, run_id: str) -> None:
+        """Chain this run onto ``run_id`` instead of the parent it started with.
+
+        INTERNAL METHOD: only before the run has read its history or written
+        session data (session admission). Reloads session data from the new
+        parent; the root span keeps the requested parent as
+        ``metadata.requested_parent_id``. The run's START event already went
+        out with the requested parent.
+        """
+        requested = self.parent_id
+        self.parent_id = run_id
+        self._session_data = None
+        await self.get_session()
+        root = self.root_span()
+        if root is not None:
+            root.metadata["requested_parent_id"] = requested
 
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""

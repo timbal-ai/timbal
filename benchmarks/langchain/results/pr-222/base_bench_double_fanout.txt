@@ -1,0 +1,176 @@
+Commit: 49af46e9
+Full mode; corrected isolated-run harness; PYTHONHASHSEED=0
+
+════════════════════════════════════════════════════════════════════════════════════════
+  Timbal vs LangGraph — Double Fan-out
+  Topology: root → [N×p1] → aggregator → [N×p2] → sink
+  Widths: [16, 32, 64, 128]  |  200 iters  |  100 burst
+  LangSmith: mock tracer (no network)
+════════════════════════════════════════════════════════════════════════════════════════
+
+  Verifying correctness (N=4, trivial)...
+  N=4: expected=1176  Timbal=1176 ✓  LangGraph=1176 ✓
+
+  Verifying async work (N=4, async_work=True)...
+  N=4: expected=1176  Timbal=1176 ✓  LangGraph=1176 ✓
+
+────────────────────────────────────────────────────────────────────────────────────────
+  Scenario A — Trivial branches (async, no sleep)  ← pure scheduling overhead
+────────────────────────────────────────────────────────────────────────────────────────
+  Benchmarking N=16 (35 steps)...
+  Benchmarking N=32 (67 steps)...
+  Benchmarking N=64 (131 steps)...
+  Benchmarking N=128 (259 steps)...
+
+  Latency p50  (×200 sequential runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35         1.96 ms         3.42 ms         10.7 ms
+      32       67         3.35 ms         5.80 ms         20.1 ms
+      64      131         6.35 ms         11.5 ms         38.3 ms
+     128      259         13.3 ms         26.6 ms         80.2 ms
+
+  Latency p95  (×200 sequential runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35         2.37 ms         4.23 ms         11.4 ms
+      32       67         7.92 ms         7.06 ms         46.7 ms
+      64      131         7.53 ms         50.8 ms         81.3 ms
+     128      259         16.7 ms         96.7 ms        163.9 ms
+
+  Latency p99  (×200 sequential runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35         2.60 ms         4.35 ms         12.7 ms
+      32       67         14.6 ms         32.7 ms         67.1 ms
+      64      131         55.3 ms         56.6 ms         85.6 ms
+     128      259        108.7 ms        101.3 ms        180.6 ms
+
+  Overhead per extra branch-pair  (slope of p50 vs N, 2 branches per unit)
+  Each N increment adds 2 async branches (one per phase)
+  Timbal          +102.2 µs / branch-pair  (+51.1 µs per branch)
+  LG (bare)       +209.8 µs / branch-pair  (+104.9 µs per branch)
+  LG+Smith        +621.3 µs / branch-pair  (+310.6 µs per branch)
+
+  Burst p50  (100 concurrent runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35        212.0 ms        431.8 ms       1212.4 ms
+      32       67        479.4 ms        968.2 ms       2408.7 ms
+      64      131       1086.1 ms       2014.8 ms       4806.6 ms
+     128      259       2143.9 ms       4589.4 ms      10296.2 ms
+
+  Burst p95  (100 concurrent runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35        215.6 ms        443.0 ms       1241.8 ms
+      32       67        485.6 ms        980.5 ms       2440.8 ms
+      64      131       1096.3 ms       2029.6 ms       4840.4 ms
+     128      259       2260.3 ms       4609.6 ms      10333.9 ms
+
+  Burst p99  (100 concurrent runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35        216.0 ms        444.2 ms       1244.8 ms
+      32       67        486.2 ms        981.8 ms       2444.0 ms
+      64      131       1097.1 ms       2031.2 ms       4844.3 ms
+     128      259       2261.8 ms       4611.7 ms      10338.0 ms
+
+────────────────────────────────────────────────────────────────────────────────────────
+  Scenario B — 1 ms async sleep per branch  ← parallelism verification
+────────────────────────────────────────────────────────────────────────────────────────
+  Benchmarking N=16 (35 steps)...
+  Benchmarking N=32 (67 steps)...
+  Benchmarking N=64 (131 steps)...
+  Benchmarking N=128 (259 steps)...
+
+  Latency p50  (×200 sequential runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35         4.65 ms         6.58 ms         13.4 ms
+      32       67         4.96 ms         8.59 ms         22.3 ms
+      64      131         7.20 ms         14.0 ms         41.1 ms
+     128      259         14.4 ms         31.2 ms         93.6 ms
+
+  Latency p95  (×200 sequential runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35         4.98 ms         7.05 ms         16.1 ms
+      32       67         5.20 ms         9.23 ms         53.1 ms
+      64      131         8.62 ms         52.7 ms         85.7 ms
+     128      259         94.8 ms        107.0 ms        184.2 ms
+
+  Latency p99  (×200 sequential runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35         5.14 ms         7.30 ms         18.9 ms
+      32       67         34.3 ms         36.8 ms         62.5 ms
+      64      131         58.3 ms         55.7 ms         93.4 ms
+     128      259        112.9 ms        118.5 ms        206.0 ms
+
+  Overhead per extra branch-pair  (slope of p50 vs N, 2 branches per unit)
+  Each N increment adds 2 async branches (one per phase)
+  Timbal          +89.9 µs / branch-pair  (+45.0 µs per branch)
+  LG (bare)       +224.3 µs / branch-pair  (+112.1 µs per branch)
+  LG+Smith        +722.8 µs / branch-pair  (+361.4 µs per branch)
+
+  Burst p50  (100 concurrent runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35        263.3 ms        442.0 ms       1212.2 ms
+      32       67        586.9 ms        978.5 ms       2488.4 ms
+      64      131       1378.3 ms       2173.2 ms       5002.1 ms
+     128      259       3161.0 ms       4966.4 ms      11013.7 ms
+
+  Burst p95  (100 concurrent runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35        267.2 ms        453.5 ms       1240.9 ms
+      32       67        592.7 ms        992.6 ms       2518.1 ms
+      64      131       1388.8 ms       2188.1 ms       5036.3 ms
+     128      259       3281.2 ms       4988.0 ms      11052.4 ms
+
+  Burst p99  (100 concurrent runs)
+       N    steps          Timbal       LG (bare)        LG+Smith
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35        267.7 ms        454.7 ms       1243.8 ms
+      32       67        593.2 ms        994.2 ms       2521.2 ms
+      64      131       1389.6 ms       2189.6 ms       5040.3 ms
+     128      259       3282.8 ms       4990.5 ms      11056.5 ms
+
+  Each phase: theoretical serial = N×1000 µs, parallel ≈ 1000 µs flat
+  Two phases: expect ~2000 µs floor + scheduling overhead
+
+────────────────────────────────────────────────────────────────────────────────────────
+  Memory — InMemoryTracingProvider vs tracing_provider=None vs LangGraph
+────────────────────────────────────────────────────────────────────────────────────────
+  Sequential: 100 runs, cleared between each  |  Burst: 100 concurrent
+
+  Sequential peak  (per-run, cleared between)
+       N    steps    T (InMemory)    T (no trace)       LG (bare)
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35        184.2 KB        180.0 KB        266.4 KB
+      32       67        311.6 KB        310.4 KB        477.8 KB
+      64      131        573.4 KB        573.0 KB        897.0 KB
+     128      259          1.1 MB          1.1 MB          1.7 MB
+
+  Burst peak  (100 concurrent, no GC between)
+       N    steps    T (InMemory)    T (no trace)       LG (bare)
+  ──────  ───────  ──────────────  ──────────────  ──────────────
+      16       35         15.2 MB         15.1 MB         22.8 MB
+      32       67         28.0 MB         28.0 MB         43.0 MB
+      64      131         53.7 MB         53.7 MB         83.0 MB
+     128      259        105.1 MB        105.1 MB        164.9 MB
+
+────────────────────────────────────────────────────────────────────────────────────────
+  Topology: root → [N parallel branches] → aggregator → [N parallel branches] → sink
+  Total steps: 2N + 3  |  Two full fan-out / fan-in cycles per invocation
+
+  Scenario A: measures pure scheduling cost at scale. Overhead accumulates
+  across both phases. Per-branch slope × 2 ≈ total overhead per extra width unit.
+
+  Scenario B: parallelism floor is ~2 ms (two sequential 1 ms phases).
+  Latency growing beyond 2 ms means the framework is serialising branches.
+  Burst tests reveal contention under concurrent workflow invocations.
+────────────────────────────────────────────────────────────────────────────────────────
+

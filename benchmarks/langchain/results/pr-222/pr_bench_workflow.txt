@@ -1,0 +1,135 @@
+Commit: 4e3dc4a6
+Full mode; corrected isolated-run harness; PYTHONHASHSEED=0
+
+════════════════════════════════════════════════════════════════════════════
+  Timbal Workflow vs LangGraph StateGraph — DAG benchmark
+  200 iters · 500 burst · 200 mem runs · 1000 throughput ops
+  Trivial handlers (no LLM). Pure DAG scheduling overhead.
+  Both use native async (ainvoke / .collect()). Single shared instance.
+════════════════════════════════════════════════════════════════════════════
+
+  Verifying correctness...
+  sequential: Timbal=19  LangGraph=19  ok
+  fanout: Timbal=54  LangGraph=54  ok
+  diamond: Timbal=46  LangGraph=46  ok
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 1: Sequential  (A → B → C → D)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×200)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     451.8 µs      1.50 ms      3.29 ms
+           p50     422.4 µs      1.40 ms      3.26 ms
+           p95     621.6 µs      2.03 ms      3.82 ms
+           p99     889.1 µs      2.96 ms      4.67 ms
+
+  Memory  (×200 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          44.5 KB         228  B
+  LG (bare)                       80.3 KB         411  B
+  LG + LangSmith                1487.0 KB        7613  B
+
+  Burst  (500 concurrent)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50     91.41 ms    398.01 ms    961.35 ms
+           p75     98.94 ms    413.89 ms   1028.10 ms
+           p95    105.17 ms    434.71 ms   1091.66 ms
+           p99    106.44 ms    439.37 ms   1105.39 ms
+           max    106.73 ms    440.55 ms   1109.01 ms
+
+  max invocation latency: Timbal 106.7 ms  |  LG bare 440.6 ms  |  LG+Smith 1109.0 ms
+
+  Throughput  (1000 runs)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        2112/s         693/s         298/s
+            10        2784/s        1015/s         348/s
+            50        3077/s        1062/s         421/s
+           200        2812/s        1027/s         371/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 2: Fan-out/in  (A → [B, C, D] → E)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×200)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     592.3 µs      2.08 ms      3.67 ms
+           p50     559.7 µs      1.47 ms      3.63 ms
+           p95     825.9 µs      6.90 ms      4.28 ms
+           p99      1.03 ms     15.25 ms      4.85 ms
+
+  Memory  (×200 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          58.3 KB         298  B
+  LG (bare)                       99.9 KB         511  B
+  LG + LangSmith                1118.4 KB        5726  B
+
+  Burst  (500 concurrent)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50    193.44 ms    560.52 ms   1174.50 ms
+           p75    199.46 ms    577.44 ms   1258.09 ms
+           p95    204.87 ms    592.82 ms   1300.60 ms
+           p99    205.78 ms    597.15 ms   1314.47 ms
+           max    206.04 ms    598.43 ms   1317.94 ms
+
+  max invocation latency: Timbal 206.0 ms  |  LG bare 598.4 ms  |  LG+Smith 1317.9 ms
+
+  Throughput  (1000 runs)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        1486/s         658/s         273/s
+            10        2399/s         895/s         275/s
+            50        2077/s         873/s         325/s
+           200        2081/s         808/s         356/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 3: Diamond  (A → [B, C] → D)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×200)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     578.4 µs      1.58 ms      3.44 ms
+           p50     524.8 µs      1.46 ms      3.32 ms
+           p95     895.9 µs      2.26 ms      4.15 ms
+           p99      1.45 ms      2.86 ms      8.40 ms
+
+  Memory  (×200 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          55.9 KB         286  B
+  LG (bare)                       84.5 KB         433  B
+  LG + LangSmith                1344.4 KB        6883  B
+
+  Burst  (500 concurrent)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50    148.61 ms    405.48 ms    935.43 ms
+           p75    153.65 ms    429.30 ms    998.36 ms
+           p95    157.70 ms    435.93 ms   1055.67 ms
+           p99    158.79 ms    439.04 ms   1065.05 ms
+           max    159.13 ms    440.23 ms   1066.50 ms
+
+  max invocation latency: Timbal 159.1 ms  |  LG bare 440.2 ms  |  LG+Smith 1066.5 ms
+
+  Throughput  (1000 runs)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        1921/s         700/s         316/s
+            10        3155/s        1092/s         405/s
+            50        2660/s        1076/s         389/s
+           200        2544/s         983/s         403/s
+
+────────────────────────────────────────────────────────────────────────────
+  Both frameworks execute identical DAGs with trivial handlers.
+  Both run natively async (ainvoke / .collect()) on a single shared instance.
+  Graph compilation and Workflow construction excluded from timing.
+────────────────────────────────────────────────────────────────────────────
+

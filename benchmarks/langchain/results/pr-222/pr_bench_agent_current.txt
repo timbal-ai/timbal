@@ -1,0 +1,188 @@
+  Agent API: current
+
+════════════════════════════════════════════════════════════════════════════
+  Timbal vs LangGraph — agent loop benchmark
+  100 iters · burst {1: 20, 2: 10, 3: 15} · 100 mem · 200 throughput
+  LangGraph + LangSmith
+  Agent/graph creation excluded. Traces cleared between batches.
+  Both frameworks: 1 shared instance, native async (ainvoke / .collect()).
+  LLMs faked; step detected from message history — no shared counter state.
+════════════════════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 1: Single tool call  (LLM → add → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     333.7 µs      2.31 ms      4.62 ms
+           p50     301.9 µs      1.99 ms      4.55 ms
+           p95     579.8 µs      5.25 ms      5.45 ms
+           p99     811.4 µs      7.18 ms      5.64 ms
+
+  Memory  (×100 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          53.4 KB         547  B
+  LG (bare)                      111.7 KB        1144  B
+  LG + LangSmith                1032.0 KB       10568  B
+
+  Burst  (20 concurrent loops)
+  Both use 1 shared instance. LangGraph uses native ainvoke().
+
+  burst [ 1/20]  last    725.5 µs
+  burst [ 2/20]  last    343.5 µs
+  burst [ 3/20]  last    296.1 µs
+  burst [ 4/20]  last    290.3 µs
+  burst [ 5/20]  last    325.5 µs
+  burst [ 6/20]  last    282.6 µs
+  burst [ 7/20]  last    273.0 µs
+  burst [ 8/20]  last    398.0 µs
+  burst [ 9/20]  last    447.3 µs
+  burst [10/20]  last    422.1 µs
+  burst [11/20]  last    400.5 µs
+  burst [12/20]  last    371.2 µs
+  burst [13/20]  last    293.9 µs
+  burst [14/20]  last    281.4 µs
+  burst [15/20]  last    273.4 µs
+  burst [16/20]  last    273.0 µs
+  burst [17/20]  last    271.1 µs
+  burst [18/20]  last    271.4 µs
+  burst [19/20]  last    679.0 µs
+  burst [20/20]  last    584.2 µs
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50     325.5 µs     19.57 ms    145.11 ms
+           p75     422.1 µs     20.63 ms    148.11 ms
+           p95     725.5 µs     21.87 ms    151.57 ms
+           p99     725.5 µs     21.87 ms    151.57 ms
+           max     725.5 µs     21.87 ms    151.57 ms
+
+  max invocation latency: Timbal 0.7 ms  |  LG bare 21.9 ms  |  LG+Smith 151.6 ms
+
+  Throughput  (200 loops)
+  Both use 1 shared instance, semaphore-bounded async.
+   concurrency        Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        3310/s         524/s         252/s
+            10        3388/s         789/s         326/s
+            50        3390/s         894/s         332/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     601.0 µs      3.58 ms      7.87 ms
+           p50     582.7 µs      3.55 ms      7.62 ms
+           p95     704.5 µs      3.97 ms      9.36 ms
+           p99      1.39 ms      4.52 ms     12.71 ms
+
+  Memory  (×100 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          59.4 KB         608  B
+  LG (bare)                      152.4 KB        1561  B
+  LG + LangSmith                1022.4 KB       10469  B
+
+  Burst  (10 concurrent loops)
+  Both use 1 shared instance. LangGraph uses native ainvoke().
+
+  burst [ 1/10]  last    800.0 µs
+  burst [ 2/10]  last    596.0 µs
+  burst [ 3/10]  last    625.4 µs
+  burst [ 4/10]  last    561.1 µs
+  burst [ 5/10]  last    559.6 µs
+  burst [ 6/10]  last    605.3 µs
+  burst [ 7/10]  last    570.3 µs
+  burst [ 8/10]  last    557.7 µs
+  burst [ 9/10]  last    597.4 µs
+  burst [10/10]  last    571.4 µs
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50     596.0 µs     24.03 ms     68.54 ms
+           p75     605.3 µs     24.48 ms     69.99 ms
+           p95     800.0 µs     25.04 ms     71.80 ms
+           p99     800.0 µs     25.04 ms     71.80 ms
+           max     800.0 µs     25.04 ms     71.80 ms
+
+  max invocation latency: Timbal 0.8 ms  |  LG bare 25.0 ms  |  LG+Smith 71.8 ms
+
+  Throughput  (200 loops)
+  Both use 1 shared instance, semaphore-bounded async.
+   concurrency        Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        1657/s         250/s         123/s
+            10        1645/s         368/s         155/s
+            50        1650/s         414/s         163/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 3: Parallel tools  (LLM → [add, mul, neg] → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     504.0 µs      2.43 ms      5.18 ms
+           p50     486.9 µs      2.27 ms      5.09 ms
+           p95     574.5 µs      3.29 ms      5.79 ms
+           p99     788.7 µs      3.59 ms      6.07 ms
+
+  Memory  (×100 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          65.5 KB         671  B
+  LG (bare)                      183.5 KB        1879  B
+  LG + LangSmith                 798.9 KB        8180  B
+
+  Burst  (15 concurrent loops)
+  Both use 1 shared instance. LangGraph uses native ainvoke().
+
+  burst [ 1/15]  last     5.10 ms
+  burst [ 2/15]  last     5.16 ms
+  burst [ 3/15]  last     5.11 ms
+  burst [ 4/15]  last     5.07 ms
+  burst [ 5/15]  last     4.97 ms
+  burst [ 6/15]  last     4.94 ms
+  burst [ 7/15]  last     4.90 ms
+  burst [ 8/15]  last     4.82 ms
+  burst [ 9/15]  last     4.78 ms
+  burst [10/15]  last     4.75 ms
+  burst [11/15]  last     4.71 ms
+  burst [12/15]  last     4.64 ms
+  burst [13/15]  last     4.60 ms
+  burst [14/15]  last     4.55 ms
+  burst [15/15]  last     4.46 ms
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50      4.82 ms     21.72 ms     57.06 ms
+           p75      5.07 ms     22.54 ms     59.60 ms
+           p95      5.16 ms     23.42 ms     61.88 ms
+           p99      5.16 ms     23.42 ms     61.88 ms
+           max      5.16 ms     23.42 ms     61.88 ms
+
+  max invocation latency: Timbal 5.2 ms  |  LG bare 23.4 ms  |  LG+Smith 61.9 ms
+
+  Throughput  (200 loops)
+  Both use 1 shared instance, semaphore-bounded async.
+   concurrency        Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        1881/s         418/s         169/s
+            10        2165/s         557/s         227/s
+            50        2227/s         569/s         222/s
+
+────────────────────────────────────────────────────────────────────────────
+  AgentExecutor vs create_react_agent vs Timbal  (Scenario 2: 3-tool chain)
+────────────────────────────────────────────────────────────────────────────
+
+  Optional legacy AgentExecutor is not installed; skipping.
+
+────────────────────────────────────────────────────────────────────────────
+  All measurements reuse 1 pre-built agent/graph (creation excluded).
+  LLMs faked via message inspection. Timbal traces cleared between batches.
+  Both frameworks run natively async on a single shared instance.
+────────────────────────────────────────────────────────────────────────────
+

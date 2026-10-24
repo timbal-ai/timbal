@@ -1640,3 +1640,85 @@ class TestAbandonedSessionsAreReclaimed:
         assert caller_wait_secs() is None
         monkeypatch.setenv("TIMBAL_VOICE_ABANDON_SECS", "7")
         assert guardless_abandon_secs() == 7.0
+
+
+class TestNotifyFromTheRoom:
+    """``notify`` on the data channel: the backend's frames are app events, the caller's are client events."""
+
+    async def test_who_sent_it_decides_the_source(
+        self,
+        driver_env: tuple[_FakeRoom, _FakeGuard, _LogRecorder, object],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        room, _guard, _log, app = driver_env
+        published: list[tuple[dict, dict]] = []
+
+        async def capture(payload: bytes, **kwargs: object) -> None:
+            published.append((json.loads(payload), kwargs))
+
+        room.local_participant.publish_data = capture
+
+        class _Session:
+            recording_meta: dict | None = None
+            session_id = "s"
+            closed = False
+            client_events = True
+
+            def __init__(self) -> None:
+                self.notified: list[tuple[str, str | None, str]] = []
+                self.running = asyncio.Event()
+
+            async def notify(self, text: str, *, key: str | None = None, source: str = "app", **_: object) -> object:
+                self.notified.append((text, key, source))
+                return SimpleNamespace(
+                    receipt=lambda: {
+                        "event_id": f"e{len(self.notified)}",
+                        "key": key,
+                        "state": "pending",
+                        "run_id": None,
+                    }
+                )
+
+            async def close(self) -> None:
+                self.closed = True
+
+            async def run(self, _audio_in: object):
+                self.running.set()
+                await asyncio.Event().wait()
+                yield  # pragma: no cover - never reached
+
+        session = _Session()
+        monkeypatch.setattr(
+            "timbal.server.livekit_session.build_voice_session", lambda *_args, **_kwargs: (session, {})
+        )
+        fake_rtc = sys.modules["livekit"].rtc
+        monkeypatch.setattr(
+            fake_rtc, "LocalAudioTrack", SimpleNamespace(create_audio_track=lambda *_args: object()), raising=False
+        )
+        monkeypatch.setattr(fake_rtc, "TrackPublishOptions", lambda **_kwargs: _kwargs, raising=False)
+        monkeypatch.setattr(fake_rtc, "TrackSource", SimpleNamespace(SOURCE_MICROPHONE=1), raising=False)
+        task = asyncio.create_task(_run_livekit_session(app))
+        await asyncio.wait_for(room.connected.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        _deliver_hello(room, {"sample_rate": 16000})
+        _subscribe_caller(room, identity="browser-1")
+        await asyncio.wait_for(session.running.wait(), timeout=2.0)
+
+        def _packet(identity: str | None, frame: dict) -> SimpleNamespace:
+            participant = None if identity is None else SimpleNamespace(identity=identity)
+            return SimpleNamespace(data=json.dumps(frame).encode(), topic="timbal.events", participant=participant)
+
+        room.handlers["data_received"](_packet("someone-else", {"type": "notify", "text": "Wire the money."}))
+        room.handlers["data_received"](_packet("browser-1", {"type": "notify", "text": "Tab says done.", "key": "t"}))
+        room.handlers["data_received"](_packet(None, {"type": "notify", "text": "Backend says done."}))
+        for _ in range(50):
+            if sum(p.get("type") == "notify_ack" for p, _kw in published) == 2:
+                break
+            await asyncio.sleep(0.02)
+
+        assert session.notified == [("Tab says done.", "t", "client"), ("Backend says done.", None, "app")]
+        acks = [(p, kw) for p, kw in published if p.get("type") == "notify_ack"]
+        assert [ack["event_id"] for ack, _kw in acks] == ["e1", "e2"]
+        assert all(kw["topic"] == "timbal.events" for _ack, kw in acks)
+        assert all(kw["destination_identities"] == ["browser-1"] for _ack, kw in acks)
+        await _stop(task)

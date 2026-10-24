@@ -83,8 +83,18 @@ def pct(s: list[float], p: float) -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from timbal import Workflow  # noqa: E402
-from timbal.state import get_run_context  # noqa: E402
+from timbal.state import get_run_context, set_run_context  # noqa: E402
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider  # noqa: E402
+
+
+async def _fresh_collect(runnable, **kwargs):
+    """Each sample is a root run; explicit parent_id still links session turns."""
+    previous = get_run_context()
+    set_run_context(None)
+    try:
+        return await runnable(**kwargs).collect()
+    finally:
+        set_run_context(previous)
 
 
 def _clear_timbal() -> None:
@@ -162,13 +172,20 @@ from typing_extensions import TypedDict  # noqa: E402
 
 
 try:
-    from unittest.mock import MagicMock
     from langchain_core.tracers.langchain import LangChainTracer
 
-    def _make_ls_tracer() -> LangChainTracer:
-        t = LangChainTracer()
-        t._persist_run_single = MagicMock(return_value=None)
-        return t
+    class _OfflineTracer(LangChainTracer):
+        # LangChain clones tracers when inheriting metadata. Class overrides
+        # survive that copy; patching one instance silently enables uploads.
+        def _persist_run_single(self, run):
+            pass
+
+        @staticmethod
+        def _update_run_single(run):
+            pass
+
+    def _make_ls_tracer():
+        return _OfflineTracer()
 
     HAS_LANGSMITH = True
 except Exception:
@@ -345,7 +362,7 @@ async def run_scenario(label: str, async_work: bool) -> None:
         lg_wf = _lg_double(n, async_work)
         ls_tracer = _make_ls_tracer() if HAS_LANGSMITH else None
         instances[n] = {
-            "t_run": lambda _w=t_wf: _w(x=5).collect(),
+            "t_run": lambda _w=t_wf: _fresh_collect(_w, x=5),
             "lg_run": lambda _w=lg_wf: _w.ainvoke(_lg_init()),
             "ls_run": (lambda _w=lg_wf, _tr=ls_tracer: _w.ainvoke(_lg_init(), config={"callbacks": [_tr]}))
                 if HAS_LANGSMITH else None,
@@ -444,8 +461,8 @@ async def run_memory() -> None:
             t_none_wf   = _timbal_double(n, async_work=False, tracing_provider=None)
             lg_wf       = _lg_double(n, async_work=False)
 
-            t_inmem_run = lambda _w=t_inmem_wf: _w(x=5).collect()
-            t_none_run  = lambda _w=t_none_wf:  _w(x=5).collect()
+            t_inmem_run = lambda _w=t_inmem_wf: _fresh_collect(_w, x=5)
+            t_none_run  = lambda _w=t_none_wf:  _fresh_collect(_w, x=5)
             lg_run      = lambda _w=lg_wf:       _w.ainvoke(_lg_init())
 
             if harness_label == "seq":
@@ -480,7 +497,7 @@ async def main() -> None:
     expected = _expected(4)
     t_wf = _timbal_double(4, async_work=False)
     lg_wf = _lg_double(4, async_work=False)
-    t_result = await t_wf(x=5).collect()
+    t_result = await _fresh_collect(t_wf, x=5)
     lg_result = await lg_wf.ainvoke(_lg_init())
     t_final = t_result.output
     lg_final = lg_result["final"]
@@ -493,7 +510,7 @@ async def main() -> None:
     print(f"\n  {DIM}Verifying async work (N=4, async_work=True)...{RESET}")
     t_wf_a = _timbal_double(4, async_work=True)
     lg_wf_a = _lg_double(4, async_work=True)
-    t_result_a = await t_wf_a(x=5).collect()
+    t_result_a = await _fresh_collect(t_wf_a, x=5)
     lg_result_a = await lg_wf_a.ainvoke(_lg_init())
     t_final_a = t_result_a.output
     lg_final_a = lg_result_a["final"]

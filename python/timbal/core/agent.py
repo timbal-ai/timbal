@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequ
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -52,7 +52,7 @@ from ..state.background import (
     LIST_BACKGROUND_TASKS_DESCRIPTION,
     READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
-    format_background_completion_notice,
+    format_session_notice,
 )
 from ..types.content import (
     CustomContent,
@@ -72,6 +72,7 @@ from .llm import _llm_router
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
 from .runnable import Runnable, RunnableLike
+from .session_scheduler import record_delivery
 from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_result_offload import (
@@ -85,6 +86,9 @@ from .tool_result_offload import (
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
+
+if TYPE_CHECKING:
+    from .continuation import AgentContinuation
 
 DEFAULT_MAX_ITER_NOTICE = (
     "[System notice] You have used all {max_iter} tool-call steps allowed for this turn, so no "
@@ -735,6 +739,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return self.output_model
         return Message
 
+    def stream_until_idle(
+        self, *, max_idle_secs: float = 300.0, max_continuations: int = 10, **kwargs: Any
+    ) -> "AgentContinuation":
+        """Stream a turn plus automatic follow-ups for background completions.
+
+        Every turn has its own run id and OUTPUT; a follow-up's prompt is the
+        completion notice. The stream closes when no children/notices remain,
+        or on a limit, pause, unsuccessful run, ``stop()``, or another root turn
+        in the session (which preempts it while it waits). Inspect
+        ``stop_reason`` after iteration; children keep running. Hosts that gate
+        follow-ups (e.g. on voice playback) use ``AgentContinuation(admit=...)``.
+        """
+        from .continuation import AgentContinuation
+
+        return AgentContinuation(self, max_idle_secs=max_idle_secs, max_continuations=max_continuations, **kwargs)
+
     async def _resolve_system_prompt(self) -> str | None:
         """Resolve system prompt by executing callable or embedded template functions."""
         system_prompt = self.system_prompt
@@ -1047,7 +1067,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return loaded
 
     def _inject_background_completions(self, current_span: Any) -> None:
-        """Drain session completion inbox into memory at turn start (Claude-style).
+        """Drain finished-task notices and posted session events into memory at turn start.
 
         Delivered between turns only — never mid-loop — so the parent is not
         interrupted while talking. Skipped for subagents and approval/suspend
@@ -1062,9 +1082,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if store is None:
             return
         notifications = store.drain_completions()
-        if not notifications:
+        events = store.drain_events(settle=False)
+        if not notifications and not events:
             return
-        notice = format_background_completion_notice(notifications)
+        notice = format_session_notice(notifications, events)
+        if events:
+            current_span.metadata["session_events"] = [event.id for event in events]
+            record_delivery(get_run_context(), current_span, events)
         memory = current_span.memory
         # Sit immediately before the current user prompt so history stays
         # [...prior turns..., completion notice, user prompt].

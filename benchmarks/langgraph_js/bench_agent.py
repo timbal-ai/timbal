@@ -2,12 +2,9 @@
 """
 Runtime calibration — LangGraph Python vs LangGraph.js (vs Timbal) agent loop.
 
-LangGraph ships the same architecture in Python and TypeScript: a prebuilt
-react agent over a Pregel graph. Running identical scenarios on both isolates
-the language-runtime factor (CPython vs V8) that cross-framework,
-cross-language benchmarks (e.g. benchmarks/mastra) cannot separate on their
-own. The LG.js/LG.py ratio is the calibration number: apply it mentally when
-reading any Timbal-vs-TypeScript-framework table.
+Matching workloads on the Python and JavaScript implementations of LangGraph,
+plus Timbal. Ratios include both implementation and runtime differences, and
+must not be used as a pure language factor to normalize other frameworks.
 
 Scenarios (identical to benchmarks/langchain and benchmarks/mastra):
   1. Single tool call   2. Multi-step (3 tools)   3. Parallel tools
@@ -127,7 +124,20 @@ def run_lgjs_side(script: str) -> dict | None:
 
 from timbal import Agent  # noqa: E402
 from timbal.core.test_model import TestModel  # noqa: E402
+from timbal.state import get_run_context, set_run_context  # noqa: E402
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider  # noqa: E402
+
+
+async def _fresh_collect(runnable, **kwargs):
+    """Each sample is a root run; explicit parent_id still links session turns."""
+    previous = get_run_context()
+    set_run_context(None)
+    try:
+        return await runnable(**kwargs).collect()
+    finally:
+        set_run_context(previous)
+
+
 from timbal.types.content import TextContent, ToolResultContent, ToolUseContent  # noqa: E402
 from timbal.types.message import Message  # noqa: E402
 
@@ -411,19 +421,45 @@ def print_scenario(key: str, timbal: dict, lgpy: dict | None, lgjs: dict | None)
         print(f"  {conc:>{COL_W}}" + "".join(f"  {v:>10.0f}/s" for v in vals))
 
     if lgpy and lgjs:
-        subsection("Runtime calibration  (LG.py ÷ LG.js — same framework, so ≈ CPython/V8 factor)")
+        subsection("Implementation/runtime comparison  (LG.py ÷ LG.js)")
         p50 = lgpy["latency_us"]["p50"] / lgjs["latency_us"]["p50"]
         mean = lgpy["latency_us"]["mean"] / lgjs["latency_us"]["mean"]
         tp10 = lgjs["throughput_ops_s"]["10"] / lgpy["throughput_ops_s"]["10"]
         print(f"  latency p50: {p50:.2f}x  ·  latency mean: {mean:.2f}x  ·  throughput c=10: {tp10:.2f}x")
 
 
+async def _verify_agent_loops():
+    """Reject shortcuts caused by leaked history before measuring anything."""
+    for scenario, calls, answer in ((1, 2, "3"), (2, 4, "9"), (3, 2, "done")):
+        agent = _make_timbal_agent(scenario)
+        for _ in range(2):
+            before = agent.model.call_count
+            out = await _fresh_collect(agent, prompt="go")
+            assert out.status.code == "success", out.status
+            assert out.output.collect_text() == answer, out.output
+            assert agent.model.call_count - before == calls, "Agent skipped tool steps"
+        before = agent.model.call_count
+        outputs = await asyncio.gather(*[_fresh_collect(agent, prompt="go") for _ in range(4)])
+        assert agent.model.call_count - before == 4 * calls, "Concurrent runs shared history"
+        assert all(out.status.code == "success" and out.output.collect_text() == answer for out in outputs)
+    if not _args.timbal_only and HAS_LANGGRAPH_PY:
+        for scenario, count, answer in ((1, 1, "3"), (2, 3, "9"), (3, 3, "done")):
+            graph = _make_lg_graph(scenario)
+            for _ in range(2):
+                result = await graph.ainvoke(_LG_INPUT)
+                messages = result["messages"]
+                assert messages[-1].content == answer, messages[-1]
+                assert sum(isinstance(m, ToolMessage) for m in messages) == count
+    _clear_traces()
+
+
 async def main() -> None:
+    await _verify_agent_loops()
     print()
     print(f"{BOLD}{'═' * WIDTH}{RESET}")
     print(f"{BOLD}  Runtime calibration — LangGraph Python vs LangGraph.js (agent loop){RESET}")
     print(f"  {N_ITERS} iters · burst {N_BURST} · {N_MEM} mem · {THROUGHPUT_OPS} throughput")
-    print(f"  {DIM}Same framework, both runtimes: the LG.py÷LG.js ratio isolates CPython vs V8.{RESET}")
+    print(f"  {DIM}LG.py÷LG.js compares both implementations and runtimes; it is not a pure language factor.{RESET}")
     print(f"  {DIM}Timbal shown for reference (built-in tracing always on; LG columns are bare).{RESET}")
     print(f"{BOLD}{'═' * WIDTH}{RESET}")
     print()
@@ -443,7 +479,7 @@ async def main() -> None:
         t_agent = _make_timbal_agent(scenario)
 
         async def t_run(agent=t_agent):
-            await agent(prompt="go").collect()
+            await _fresh_collect(agent, prompt="go")
 
         timbal = await measure_python(t_run, scenario, clear=_clear_traces)
 
@@ -464,9 +500,9 @@ async def main() -> None:
     print()
     print(f"{DIM}{'─' * WIDTH}")
     if ratios:
-        print(f"  Calibration summary: LG.py ÷ LG.js latency p50 spans {min(ratios):.2f}-{max(ratios):.2f}x across")
-        print("  identical agent loops (>1 = V8 faster). Apply that factor when reading any")
-        print("  Timbal (Python) vs TypeScript-framework table in benchmarks/.")
+        print(f"  Comparison summary: LG.py ÷ LG.js latency p50 spans {min(ratios):.2f}-{max(ratios):.2f}x across")
+        print("  matching agent loops (>1 = LG.js faster on this workload).")
+        print("  Do not apply this ratio to unrelated frameworks.")
     print("  All measurements reuse pre-built agents/graphs (creation excluded).")
     print("  LLMs faked via message inspection on all sides — no network, no API keys.")
     print(f"{'─' * WIDTH}{RESET}")

@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-24",
+  "base": "49af46e9724467d600c77ec466fa896e488ce895",
+  "head": "4e3dc4a6cd1c7099a12b69fea4eb559dfb468c89",
+  "python": "3.11.11 (main, Jan 14 2025, 23:36:41) [Clang 19.1.6 ]",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "node": "v22.18.0",
+  "packages": {
+    "langgraph": "1.2.17",
+    "langgraph-prebuilt": "1.1.1",
+    "langgraph-checkpoint": "4.3.0",
+    "langgraph-sdk": "0.4.9",
+    "langchain-core": "1.7.0",
+    "langsmith": "0.14.12",
+    "pydantic": "2.14.1",
+    "httpx": "0.28.1",
+    "openai": "2.24.0",
+    "anthropic": "0.84.0",
+    "structlog": "25.5.0",
+    "langchain": "1.4.7"
+  },
+  "javascript": {
+    "@langchain/core": "1.3.0",
+    "@langchain/langgraph": "1.5.2",
+    "zod": "^4.4.3"
+  },
+  "mode": "full",
+  "pythonhashseed": 0,
+  "cwd": "/tmp",
+  "order": "alternating base/pr per benchmark; serial execution",
+  "notes": "LangChain added after legacy agent/DAG runs; no existing dependency versions changed.",
+  "cpu": "Apple M1 Pro",
+  "logical_cpus": 10,
+  "memory_bytes": 17179869184,
+  "javascript_resolved": {
+    "@langchain/langgraph": "1.5.2",
+    "@langchain/core": "1.3.0",
+    "zod": "4.4.3"
+  }
+}

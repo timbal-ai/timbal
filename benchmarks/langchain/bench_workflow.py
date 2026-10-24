@@ -84,8 +84,18 @@ def pct(samples: list[float], p: float) -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from timbal import Workflow  # noqa: E402
-from timbal.state import get_run_context  # noqa: E402
+from timbal.state import get_run_context, set_run_context  # noqa: E402
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider  # noqa: E402
+
+
+async def _fresh_collect(runnable, **kwargs):
+    """Each sample is a root run; explicit parent_id still links session turns."""
+    previous = get_run_context()
+    set_run_context(None)
+    try:
+        return await runnable(**kwargs).collect()
+    finally:
+        set_run_context(previous)
 
 
 def _clear_timbal_traces():
@@ -182,14 +192,21 @@ from langgraph.graph import END, START, StateGraph  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402
 
 try:
-    from unittest.mock import MagicMock
 
     from langchain_core.tracers.langchain import LangChainTracer
 
-    def _make_ls_tracer() -> LangChainTracer:
-        tracer = LangChainTracer()
-        tracer._persist_run_single = MagicMock(return_value=None)
-        return tracer
+    class _OfflineTracer(LangChainTracer):
+        # LangChain clones tracers when inheriting metadata. Class overrides
+        # survive that copy; patching one instance silently enables uploads.
+        def _persist_run_single(self, run):
+            pass
+
+        @staticmethod
+        def _update_run_single(run):
+            pass
+
+    def _make_ls_tracer():
+        return _OfflineTracer()
 
     HAS_LANGSMITH = True
 except (ImportError, Exception):
@@ -451,7 +468,7 @@ async def bench_scenario(scenario: int) -> None:
     # ── Latency ──────────────────────────────────────────────────────────────
     subsection(f"Latency  (×{N_ITERS})")
 
-    t_samples = await _latency_async(lambda: t_wf(x=input_val).collect(), N_ITERS, N_WARMUP)
+    t_samples = await _latency_async(lambda: _fresh_collect(t_wf, x=input_val), N_ITERS, N_WARMUP)
     lg_samples = await _latency_async(lg_run, N_ITERS, N_WARMUP)
     ls_samples = await _latency_async(ls_run, N_ITERS, N_WARMUP) if HAS_LANGSMITH else None
 
@@ -465,7 +482,7 @@ async def bench_scenario(scenario: int) -> None:
     # ── Memory ───────────────────────────────────────────────────────────────
     subsection(f"Memory  (×{N_MEM} runs)")
 
-    t_peak, t_per = await _memory_async(lambda: t_wf(x=input_val).collect(), N_MEM, N_WARMUP)
+    t_peak, t_per = await _memory_async(lambda: _fresh_collect(t_wf, x=input_val), N_MEM, N_WARMUP)
     lg_peak, lg_per = await _memory_async(lg_run, N_MEM, N_WARMUP)
     ls_peak, ls_per = (await _memory_async(ls_run, N_MEM, N_WARMUP)) if HAS_LANGSMITH else (None, None)
 
@@ -480,7 +497,7 @@ async def bench_scenario(scenario: int) -> None:
     # ── Burst ────────────────────────────────────────────────────────────────
     subsection(f"Burst  ({N_BURST} concurrent)")
 
-    t_burst = await _burst_async(lambda: t_wf(x=input_val).collect(), N_BURST)
+    t_burst = await _burst_async(lambda: _fresh_collect(t_wf, x=input_val), N_BURST)
     lg_burst = await _burst_async(lg_run, N_BURST)
     ls_burst = (await _burst_async(ls_run, N_BURST)) if HAS_LANGSMITH else None
 
@@ -490,7 +507,7 @@ async def bench_scenario(scenario: int) -> None:
         vals = [pct(t_burst, p), pct(lg_burst, p)] + ([pct(ls_burst, p)] if ls_burst else [])
         print(f"  {label:>12}" + "".join(f"  {fmt_us(v)}" for v in vals))
 
-    wall = f"\n  {DIM}wall: Timbal {max(t_burst) / 1000:.1f} ms  |  LG bare {max(lg_burst) / 1000:.1f} ms"
+    wall = f"\n  {DIM}max invocation latency: Timbal {max(t_burst) / 1000:.1f} ms  |  LG bare {max(lg_burst) / 1000:.1f} ms"
     if ls_burst:
         wall += f"  |  LG+Smith {max(ls_burst) / 1000:.1f} ms"
     print(wall + RESET)
@@ -502,7 +519,7 @@ async def bench_scenario(scenario: int) -> None:
     print(sep)
 
     for conc in CONCURRENCY_LEVELS:
-        t_ops = await _throughput_async(lambda: t_wf(x=input_val).collect(), THROUGHPUT_OPS, conc)
+        t_ops = await _throughput_async(lambda: _fresh_collect(t_wf, x=input_val), THROUGHPUT_OPS, conc)
         lg_ops = await _throughput_async(lg_run, THROUGHPUT_OPS, conc)
         line = f"  {conc:>12}  {t_ops:>10.0f}/s  {lg_ops:>10.0f}/s"
         if HAS_LANGSMITH:
@@ -534,7 +551,7 @@ async def main() -> None:
     ]:
         t_wf = t_factory()
         lg_wf = lg_factory()
-        t_result = await t_wf(x=inp).collect()
+        t_result = await _fresh_collect(t_wf, x=inp)
         lg_result = await lg_wf.ainvoke({"x": inp})
         # Get the last meaningful value from LangGraph state
         lg_final = lg_result.get("d") or lg_result.get("e")

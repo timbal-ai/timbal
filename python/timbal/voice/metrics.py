@@ -66,6 +66,10 @@ class TurnMetrics(BaseModel):
     ``eou_to_first_audio_ms`` stamp then reflects the filler, not the reply."""
     filler_count: int = 0
     """How many filler phrases were spoken (>1 with ``repeat_secs`` on)."""
+    event: bool = False
+    """True for a turn the session started on its own (``VoiceSession.notify``, a
+    background result) rather than the caller: ``user_text_chars`` is 0 and the
+    ``eou_to_*`` clocks start at the turn's start."""
 
 
 class TurnMetricsEvent(VoiceSessionEvent):

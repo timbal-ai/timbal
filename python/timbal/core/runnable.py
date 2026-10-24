@@ -403,6 +403,12 @@ class Runnable(ABC, BaseModel):
     cancelled as ``stalled``. Resets on every emitted event. Distinct from
     ``background_timeout`` (wall-clock). ``None`` / non-positive = disabled."""
 
+    background_announce: Literal["when_idle", "silent", "interrupt"] | None = None
+    """How this child's completion asks for the session's attention, overriding
+    the channel's default: ``when_idle`` starts a turn once the channel is free,
+    ``silent`` only reaches the next turn, ``interrupt`` cuts in where the
+    channel can (voice; elsewhere it acts as ``when_idle``). ``None`` = default."""
+
     on_background_cancel: Callable[..., Any] | None = Field(default=None, exclude=True)
     """Optional hook fired when ``cancel_background_task`` cancels this child.
     Receives the ``BackgroundTask`` record (has ``task_id``, ``metadata`` with
@@ -1753,7 +1759,9 @@ class Runnable(ABC, BaseModel):
             get_background_depth,
             register_background_task,
             reset_background_depth,
+            reset_background_task_id,
             set_background_depth,
+            set_background_task_id,
         )
 
         parent_span = run_context.parent_span()
@@ -1770,6 +1778,7 @@ class Runnable(ABC, BaseModel):
             token = set_background_depth(depth + 1)
             run_context._live_background += 1
             record = record_box[0]
+            task_id_token = set_background_task_id(record.task_id)
             # Ambient emits from the detached child must reach its background
             # log — after detach the only copy of its stream — not the finished
             # foreground call. Nested runnables inside the child attach their
@@ -1799,6 +1808,7 @@ class Runnable(ABC, BaseModel):
                 raise
             finally:
                 bg_emit_sink.close()
+                reset_background_task_id(task_id_token)
                 reset_background_depth(token)
                 record.log.close()
                 await run_context._end_background_work()
@@ -1815,6 +1825,7 @@ class Runnable(ABC, BaseModel):
                 on_cancel=self.on_background_cancel,
                 timeout=self.background_timeout,
                 stall_timeout=self.background_stall_timeout,
+                announce=self.background_announce,
             )
             registered = True
         except BaseException:
@@ -1841,6 +1852,7 @@ class Runnable(ABC, BaseModel):
             register_background_task,
             reset_background_depth,
             set_background_depth,
+            set_background_task_id,
         )
 
         store = ensure_background_store(run_context)
@@ -1857,6 +1869,8 @@ class Runnable(ABC, BaseModel):
             try:
                 await start.wait()
                 record = record_box[0]
+                # This task's own context: no reset needed, the task ends with it.
+                set_background_task_id(record.task_id)
                 # After cutover the record log is the only copy of the child's
                 # stream: rebind ambient RunContext.emit() delivery to it (the
                 # foreground sink was drained and closed by _stream's finally).
@@ -1923,6 +1937,7 @@ class Runnable(ABC, BaseModel):
                 on_cancel=self.on_background_cancel,
                 timeout=self.background_timeout,
                 stall_timeout=self.background_stall_timeout,
+                announce=self.background_announce,
             )
             # Stall time starts when the continuation owns the iterator. Keep
             # the wall-clock timeout armed so a stuck trace snapshot is bounded.
@@ -2059,9 +2074,6 @@ class Runnable(ABC, BaseModel):
             # produce an orphan parent_call_id that trace validation rejects.
             _parent_call_id = None
             _call_id = None
-        # Session data is loaded once per run; nested calls see it already set.
-        if run_context._session_data is None:
-            await run_context.get_session()
         previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
         if _background_handoff_control is not None:
             run_context._background_handoff_control = _background_handoff_control
@@ -2164,6 +2176,23 @@ class Runnable(ABC, BaseModel):
                 _get_logger().info(start_event.type, **start_event.model_dump())
             yield start_event
             _restore_context()
+
+            # Before param resolution and pre_hook: a turn refused here must not run either.
+            if _new_parent_call_id is None:
+                session_store = run_context._bg_store
+                if session_store is None and run_context.parent_id is not None:
+                    # Chained onto a run from before its session had a store: nothing was inherited.
+                    from ..state.background import store_joined_from
+
+                    session_store = store_joined_from(run_context.parent_id)
+                if session_store is not None and session_store._continuation is not None:
+                    await session_store.admit_root_turn(run_context)
+                    _restore_context()
+            # Session data is loaded once per run, after admission: a queued turn reads what the
+            # turn it waited for saved. Nested calls see it already set.
+            if run_context._session_data is None:
+                await run_context.get_session()
+                _restore_context()
 
             # Resolve input params (merging fixed defaults, runtime defaults, and provided input)
             # We then store the unvalidated input, as sent by the user to ensure full replayability of the run.
@@ -2639,6 +2668,10 @@ class Runnable(ABC, BaseModel):
                             handoff_control.unregister(span.call_id)
                         else:
                             handoff_control.complete(span.call_id, handoff_result)
+            # After the save: a turn queued behind this one reads what it stored.
+            if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
+                scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
+                scheduler.foreign_finished(run_context.id, span.status)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children

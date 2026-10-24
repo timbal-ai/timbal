@@ -2,10 +2,9 @@
 """
 Runtime calibration — LangGraph Python vs LangGraph.js (vs Timbal) DAG workflows.
 
-Same StateGraph shapes on both LangGraph runtimes, plus Timbal Workflow for
-reference. The LG.py÷LG.js ratio isolates CPython-vs-V8 for identical Pregel
-scheduling — the calibration factor for reading cross-language DAG benchmarks
-like benchmarks/mastra/bench_workflow.py.
+Matching workloads on the Python and JavaScript implementations of LangGraph,
+plus Timbal. Ratios include both implementation and runtime differences, and
+must not be used as a pure language factor to normalize other frameworks.
 
 Scenarios: sequential (A→B→C→D), fan-out/in (A→[B,C,D]→E), diamond (A→[B,C]→D).
 Trivial handlers, no LLM.
@@ -119,8 +118,18 @@ def run_lgjs_side(script: str) -> dict | None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from timbal import Workflow  # noqa: E402
-from timbal.state import get_run_context  # noqa: E402
+from timbal.state import get_run_context, set_run_context  # noqa: E402
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider  # noqa: E402
+
+
+async def _fresh_collect(runnable, **kwargs):
+    """Each sample is a root run; explicit parent_id still links session turns."""
+    previous = get_run_context()
+    set_run_context(None)
+    try:
+        return await runnable(**kwargs).collect()
+    finally:
+        set_run_context(previous)
 
 
 def _clear_traces():
@@ -423,7 +432,7 @@ def print_scenario(key: str, timbal: dict, lgpy: dict | None, lgjs: dict | None)
         print(f"  {conc:>{COL_W}}" + "".join(f"  {v:>10.0f}/s" for v in vals))
 
     if lgpy and lgjs:
-        subsection("Runtime calibration  (LG.py ÷ LG.js — same framework, so ≈ CPython/V8 factor)")
+        subsection("Implementation/runtime comparison  (LG.py ÷ LG.js)")
         p50 = lgpy["latency_us"]["p50"] / lgjs["latency_us"]["p50"]
         mean = lgpy["latency_us"]["mean"] / lgjs["latency_us"]["mean"]
         tp10 = lgjs["throughput_ops_s"]["10"] / lgpy["throughput_ops_s"]["10"]
@@ -436,7 +445,7 @@ async def main() -> None:
     print(f"{BOLD}{'═' * WIDTH}{RESET}")
     print(f"{BOLD}  Runtime calibration — LangGraph Python vs LangGraph.js (DAG workflows){RESET}")
     print(f"  {N_ITERS} iters · {N_BURST} burst · {N_MEM} mem runs · {THROUGHPUT_OPS} throughput ops")
-    print(f"  {DIM}Same framework, both runtimes: the LG.py÷LG.js ratio isolates CPython vs V8.{RESET}")
+    print(f"  {DIM}LG.py÷LG.js compares both implementations and runtimes; it is not a pure language factor.{RESET}")
     print(f"  {DIM}Timbal shown for reference (built-in tracing always on; LG columns are bare).{RESET}")
     print(f"{BOLD}{'═' * WIDTH}{RESET}")
     print()
@@ -455,7 +464,7 @@ async def main() -> None:
         wf = TIMBAL_FACTORIES[key]()
 
         async def t_run(w=wf):
-            await w(x=3).collect()
+            await _fresh_collect(w, x=3)
 
         timbal = await measure_python(t_run, clear=_clear_traces)
 
@@ -476,9 +485,9 @@ async def main() -> None:
     print()
     print(f"{DIM}{'─' * WIDTH}")
     if ratios:
-        print(f"  Calibration summary: LG.py ÷ LG.js latency p50 spans {min(ratios):.2f}-{max(ratios):.2f}x across")
-        print("  identical DAGs (>1 = V8 faster). Apply that factor when reading any Timbal")
-        print("  (Python) vs TypeScript-framework workflow table in benchmarks/.")
+        print(f"  Comparison summary: LG.py ÷ LG.js latency p50 spans {min(ratios):.2f}-{max(ratios):.2f}x across")
+        print("  matching DAGs (>1 = LG.js faster on this workload).")
+        print("  Do not apply this ratio to unrelated frameworks.")
     print("  Graph compilation and Workflow construction excluded from timing.")
     print(f"{'─' * WIDTH}{RESET}")
     print()

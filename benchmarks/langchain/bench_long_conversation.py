@@ -95,7 +95,20 @@ def pct(samples: list[float], p: float) -> float:
 
 from timbal import Agent  # noqa: E402
 from timbal.core.test_model import TestModel  # noqa: E402
+from timbal.state import get_run_context, set_run_context  # noqa: E402
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider  # noqa: E402
+
+
+async def _fresh_collect(runnable, **kwargs):
+    """Each sample is a root run; explicit parent_id still links session turns."""
+    previous = get_run_context()
+    set_run_context(None)
+    try:
+        return await runnable(**kwargs).collect()
+    finally:
+        set_run_context(previous)
+
+
 from timbal.types.message import Message  # noqa: E402
 
 
@@ -237,7 +250,7 @@ async def bench_long_history() -> None:
         lg_history = _lc_history(n, text)
 
         async def t_run(h=t_history):
-            await t_agent(messages=h).collect()
+            await _fresh_collect(t_agent, messages=h)
 
         async def lg_run(h=lg_history):
             await lg_graph.ainvoke({"messages": h})
@@ -255,7 +268,7 @@ async def bench_long_history() -> None:
     lg_history = _lc_history(n, text)
 
     async def t_run_mem():
-        await t_agent(messages=t_history).collect()
+        await _fresh_collect(t_agent, messages=t_history)
 
     async def lg_run_mem():
         await lg_graph.ainvoke({"messages": lg_history})
@@ -287,7 +300,7 @@ async def bench_long_messages() -> None:
         lg_history = _lc_history(n, text)
 
         async def t_run(h=t_history):
-            await t_agent(messages=h).collect()
+            await _fresh_collect(t_agent, messages=h)
 
         async def lg_run(h=lg_history):
             await lg_graph.ainvoke({"messages": h})
@@ -306,7 +319,7 @@ async def bench_long_messages() -> None:
     lg_history = _lc_history(n, text)
 
     async def t_run_mem():
-        await t_agent(messages=t_history).collect()
+        await _fresh_collect(t_agent, messages=t_history)
 
     async def lg_run_mem():
         await lg_graph.ainvoke({"messages": lg_history})
@@ -332,7 +345,7 @@ async def _timbal_session(agent: Agent, turns: int, turn_samples: dict[int, list
         kwargs = {"prompt": f"turn {t}"}
         if parent_id is not None:
             kwargs["parent_id"] = parent_id
-        out = await agent(**kwargs).collect()
+        out = await _fresh_collect(agent, **kwargs)
         elapsed = (time.perf_counter() - t0) * 1e6
         if turn_samples is not None and t in turn_samples:
             turn_samples[t].append(elapsed)
@@ -432,7 +445,7 @@ async def _verify() -> None:
     # Stateless history: both fake LLMs must see the full injected history.
     n = 10
     t_agent = _make_timbal_agent()
-    out = await (t_agent(messages=_timbal_history(n, "hello"))).collect()
+    out = await _fresh_collect(t_agent, messages=_timbal_history(n, "hello"))
     t_text = out.output.collect_text()
     _clear_traces()
 
