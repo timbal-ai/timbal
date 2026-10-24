@@ -247,6 +247,11 @@ class SessionScheduler:
         """The channel let go of ``store``; turns admitted or queued here still hold it."""
         return store in self._releasing
 
+    def successor(self, store: BackgroundTaskStore) -> "SessionScheduler | None":
+        """Who takes ``store`` over once released (a call that joined meanwhile), if anyone."""
+        ref = self._successors.get(store)
+        return ref() if ref is not None else None
+
     def _release_deferred(self) -> None:
         if self._others or self._others_waiting or not self._releasing:
             return
@@ -379,14 +384,20 @@ class SessionScheduler:
             self._on_preempt()
         marker = run_context._continuation_owner
         new_owner = marker() if marker is not None else None
-        if store in self._releasing and new_owner is not None and new_owner is not self:
-            # Another channel's own run (a new driver's first): the session is theirs from here,
-            # and turns still queued here ask them.
+        successor = self.successor(store)
+        if (
+            store in self._releasing
+            and new_owner is not None
+            and new_owner is not self
+            and (successor is None or successor is new_owner)
+        ):
+            # Another channel's own run (a new driver's first, the successor's): the session is
+            # theirs from here, and turns still queued here ask them. A call next in line keeps it.
             self._releasing.discard(store)
+            self._successors.pop(store, None)
             store.release_continuation(self)
-            successor = self._successors.pop(store, None)
-            if successor is not None and successor() is new_owner:
-                new_owner.bind(store)
+            if successor is not None:
+                successor.bind(store)
         self._notify()
         if head is not None and run_context.parent_id != head:
             await run_context._continue_from(head)

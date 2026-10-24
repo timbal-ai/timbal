@@ -1363,6 +1363,75 @@ class TestOtherChannel:
         # The call took over the driver's head too: its turn continues from the chat turn.
         assert _in_order(_seen(model.calls[3]), "from chat", "Desde el chat.")
 
+    async def test_a_new_driver_is_refused_while_a_call_waits_to_take_the_session_over(self) -> None:
+        release = asyncio.Event()
+        chat_entered, chat_opened = asyncio.Event(), asyncio.Event()
+
+        async def work() -> str:
+            await release.wait()
+            return "Sales are up 4%."
+
+        class Gated(_Model):
+            def __init__(self, *replies: str | Message) -> None:
+                super().__init__(*replies)
+                outer = self
+
+                class Inner(TestModel):
+                    async def stream(self, messages: list, **kwargs: Any) -> AsyncIterator[Any]:
+                        if messages[-1].collect_text() == "from chat":
+                            chat_entered.set()
+                            await chat_opened.wait()
+                        async for message in super().stream(messages, **kwargs):
+                            yield message
+
+                self.model = Inner(handler=outer._reply)
+
+        model = Gated(_tool_call("work"), "Trabajando.", "Desde el chat.", REPLY)
+        tool = Tool(name="work", handler=work, background_mode="always")
+        session, stt, _tts = _session(model, tools=[tool], announce_background_results=True)
+        # Enqueue: a second driver would otherwise wait behind the chat turn and then take the session.
+        driver = session.agent.stream_until_idle(prompt="start", on_busy="enqueue")
+        outputs: list[OutputEvent] = []
+
+        async def consume() -> None:
+            async with aclosing(driver):
+                async for event in driver:
+                    if isinstance(event, OutputEvent) and event.parent_call_id is None:
+                        outputs.append(event)
+
+        consumer = asyncio.create_task(consume())
+        await _until(lambda: outputs and driver._waiter is not None)
+        chat_task = asyncio.create_task(session.agent(prompt="from chat", parent_id=outputs[0].run_id).collect())
+        await asyncio.wait_for(chat_entered.wait(), 2)
+        await asyncio.wait_for(consumer, 2)
+        set_run_context(None)
+        session.parent_run_id = outputs[0].run_id
+        refused: list[RuntimeError] = []
+
+        async def other_driver() -> None:
+            other = session.agent.stream_until_idle(
+                prompt="other driver", parent_id=outputs[0].run_id, max_continuations=0
+            )
+            try:
+                async with aclosing(other):
+                    async for _ in other:
+                        pass
+            except RuntimeError as e:
+                refused.append(e)
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            attempt = asyncio.create_task(other_driver())
+            await asyncio.sleep(0.05)
+            chat_opened.set()
+            await asyncio.wait_for(chat_task, 2)
+            await asyncio.wait_for(attempt, 2)
+            release.set()
+            await asyncio.sleep(0.3)
+
+        events = await _run(session, stt, drive)
+        assert len(refused) == 1 and "owned by another channel" in str(refused[0])
+        assert REPLY in _texts(events)
+
 
 class TestRecordsAndCleanup:
     async def test_client_event_screening_lands_on_the_receiving_run(self) -> None:

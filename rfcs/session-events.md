@@ -656,7 +656,8 @@ Implementing it changed these points of earlier revisions of this RFC:
     Another channel's own run admitted there takes the session at once, and
     turns still queued then ask the new owner. A call joining meanwhile is
     next in line (`take_over`): the store and the head pass to it when the
-    last of those turns ends. An admitted turn holds its scheduler strongly
+    last of those turns ends, and a new driver is refused meanwhile as on a
+    call's own session. An admitted turn holds its scheduler strongly
     until it ends, so a dropped driver still completes its release.
   - **Stale chat before the call's first turn.** The call's head was unset
     until its first turn, so a chat naming an older run was admitted without
@@ -834,7 +835,7 @@ Executable tests in the repository:
     inherits; an event posted by the run the call joined before it had a store;
     a call on the run a driver's session joined sharing that session's store;
     a call joining while a preempted driver releases, taking the store and its
-    head over afterwards; a stale chat before the call's first turn re-chained
+    head over afterwards, with a new driver refused in between; a stale chat before the call's first turn re-chained
     onto the run the call continues;
   - an event delivered after a parked call turn is resumed over HTTP; an
     `interrupt` event left pending when the turn it would cut asks its caller;

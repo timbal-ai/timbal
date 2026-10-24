@@ -218,8 +218,10 @@ class AgentContinuation:
         if store is not None:
             other = store.continuation_owner()
             if other is not None and other is not self._scheduler:
-                if not isinstance(other.channel, AgentContinuation) and not other.releasing(store):
-                    # Only a driver gives way to another; a call keeps its conversation until it ends.
+                gives_way = isinstance(other.channel, AgentContinuation) or other.releasing(store)
+                if not gives_way or other.successor(store) is not None:
+                    # Only a driver gives way to another; a call keeps its conversation until it
+                    # ends, and one it is next in line for (see SessionScheduler.take_over).
                     raise RuntimeError(_OWNED_ELSEWHERE)
                 # A new driver's first run is a root turn like any other (and may be re-chained).
                 await other.admit_foreign(context, store)
