@@ -654,7 +654,13 @@ Implementing it changed these points of earlier revisions of this RFC:
     scheduler, so they still go one at a time onto the head, and a channel
     taking the session over meanwhile (a new driver, a call) waits behind them.
     Another channel's own run admitted there takes the session at once, and
-    turns still queued then ask the new owner.
+    turns still queued then ask the new owner. A call joining meanwhile is
+    next in line (`take_over`): the store and the head pass to it when the
+    last of those turns ends. An admitted turn holds its scheduler strongly
+    until it ends, so a dropped driver still completes its release.
+  - **Stale chat before the call's first turn.** The call's head was unset
+    until its first turn, so a chat naming an older run was admitted without
+    re-chaining. The head now starts at the run the call continues.
   - **Session data read too early.** `Runnable._stream` loaded session data
     before admission, so a turn queued behind the run it names read nothing
     (that run had not saved yet), including session-scoped approval grants. It
@@ -789,7 +795,8 @@ Executable tests in the repository:
   - an enqueued turn waiting out a follow-up, then preempting, re-chained onto
     that follow-up (`parent_run_id`, `requested_parent_id`, what the model saw);
     the same when the driver stops during the follow-up, with a new driver
-    waiting behind that turn; two enqueued turns run
+    waiting behind that turn; a preempted driver collected before the turn it
+    admitted ends, its store still forgotten; two enqueued turns run
     one after the other, each chained onto the one before; an enqueued turn
     naming the in-flight follow-up reading the session data it saved;
   - `RunContext._continue_from` reloading session data from the new parent;
@@ -826,6 +833,9 @@ Executable tests in the repository:
   - a continued call speaking up about an event already in the store it
     inherits; an event posted by the run the call joined before it had a store;
     a call on the run a driver's session joined sharing that session's store;
+    a call joining while a preempted driver releases, taking the store and its
+    head over afterwards; a stale chat before the call's first turn re-chained
+    onto the run the call continues;
   - an event delivered after a parked call turn is resumed over HTTP; an
     `interrupt` event left pending when the turn it would cut asks its caller;
   - the caller's turn ahead of a queued chat turn, both on a barge-in and when

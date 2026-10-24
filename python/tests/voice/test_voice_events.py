@@ -1360,6 +1360,8 @@ class TestOtherChannel:
 
         events = await _run(session, stt, drive)
         assert REPLY in _texts(events)
+        # The call took over the driver's head too: its turn continues from the chat turn.
+        assert _in_order(_seen(model.calls[3]), "from chat", "Desde el chat.")
 
 
 class TestRecordsAndCleanup:

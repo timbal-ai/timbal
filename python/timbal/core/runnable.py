@@ -2670,10 +2670,8 @@ class Runnable(ABC, BaseModel):
                             handoff_control.complete(span.call_id, handoff_result)
             # After the save: a turn queued behind this one reads what it stored.
             if _new_parent_call_id is None and run_context._foreign_turn_of is not None:
-                scheduler = run_context._foreign_turn_of()
-                run_context._foreign_turn_of = None
-                if scheduler is not None:
-                    scheduler.foreign_finished(run_context.id, span.status)
+                scheduler, run_context._foreign_turn_of = run_context._foreign_turn_of, None
+                scheduler.foreign_finished(run_context.id, span.status)
             # Warn about resume values that didn't match any gate or suspend()
             # so callers find typos / stale IDs instead of silently dropping
             # them. Only check the IDs introduced by THIS call; nested children

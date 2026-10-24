@@ -181,6 +181,8 @@ class SessionScheduler:
         self._others_waiting = 0
         # Stores the channel let go of while turns admitted or queued here were still on (see release).
         self._releasing: set[BackgroundTaskStore] = set()
+        # Who takes each of those over once released (see take_over).
+        self._successors: dict[BackgroundTaskStore, weakref.ref[SessionScheduler]] = {}
         # The owner is cutting its own turn to start another: queued turns keep waiting.
         self._holding = 0
         # The session's latest root run, the owner's or an admitted one: where the next turn chains.
@@ -203,7 +205,21 @@ class SessionScheduler:
             except RuntimeError:
                 raise RuntimeError(_OWNED_ELSEWHERE) from None
         self._releasing.discard(store)
+        self._successors.pop(store, None)
         self.store = store
+
+    def take_over(self, store: BackgroundTaskStore) -> None:
+        """Own ``store``, or own it next if the channel owning it is letting go of it.
+
+        Until that channel's admitted and queued turns end, it still decides
+        for the session; then the store passes here, with its head, and
+        :meth:`work_arrived` runs. Raises when another channel keeps it.
+        """
+        owner = store.continuation_owner()
+        if isinstance(owner, SessionScheduler) and owner is not self and owner.releasing(store):
+            owner._successors[store] = weakref.ref(self)
+            return
+        self.bind(store)
 
     def release(self, *stores: BackgroundTaskStore | None) -> None:
         """Stop owning the bound store and ``stores`` (a store a spawn created joins the owner unbound).
@@ -213,6 +229,13 @@ class SessionScheduler:
         another channel's own run admitted here takes it at once.
         """
         targets = {store for store in {self.store, *stores} if store is not None}
+        for store in targets:
+            owner = store.continuation_owner()
+            if isinstance(owner, SessionScheduler) and owner is not self:
+                # Waiting to take it over from a channel letting go: not any more.
+                successor = owner._successors.get(store)
+                if successor is not None and successor() is self:
+                    del owner._successors[store]
         if self._others or self._others_waiting:
             self._releasing |= targets
         else:
@@ -230,8 +253,20 @@ class SessionScheduler:
         released, self._releasing = self._releasing, set()
         for store in released:
             store.release_continuation(self)
-            # The channel's own forget ran while this still owned the store.
-            forget_idle_background_store(store)
+            successor = self._successors.pop(store, None)
+            successor = successor() if successor is not None else None
+            if successor is not None and store.continuation_owner() is None:
+                successor._succeed(self, store)
+            else:
+                # The channel's own forget ran while this still owned the store.
+                forget_idle_background_store(store)
+
+    def _succeed(self, previous: "SessionScheduler", store: BackgroundTaskStore) -> None:
+        """Take ``store`` over from ``previous``, which decided for the session until now."""
+        self.bind(store)
+        if previous.head is not None:
+            self.head, self.head_parked = previous.head, previous.head_parked
+        self.work_arrived()
 
     def mark_own(self, run_context: Any) -> None:
         """Mark ``run_context`` as one of the owner's runs; a store it creates joins the owner."""
@@ -333,7 +368,8 @@ class SessionScheduler:
         # Also when the channel let go while this turn waited (its driver stopped, a turn admitted
         # just before preempted it): it keeps the session until the turns queued here have gone.
         self._others.add(run_context.id)
-        run_context._foreign_turn_of = weakref.ref(self)
+        # Strong: a channel letting go of the session is collectable, and this turn's end is what releases it.
+        run_context._foreign_turn_of = self
         if run_context._bg_store is None:
             # Chained onto a run from before the session had its store: it joins the session now.
             adopt_background_store(run_context, store)
@@ -348,6 +384,9 @@ class SessionScheduler:
             # and turns still queued here ask them.
             self._releasing.discard(store)
             store.release_continuation(self)
+            successor = self._successors.pop(store, None)
+            if successor is not None and successor() is new_owner:
+                new_owner.bind(store)
         self._notify()
         if head is not None and run_context.parent_id != head:
             await run_context._continue_from(head)

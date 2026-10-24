@@ -215,8 +215,9 @@ class RunContext(BaseModel):
     #       inherited across sequential turns via parent_id (see background.py)
     #   _continuation_owner: weakref | None — the SessionScheduler whose own run
     #       this is (see core/session_scheduler.py); None for ordinary runs
-    #   _foreign_turn_of: weakref | None — the SessionScheduler that admitted this
-    #       root run into a session it owns, told when the run ends
+    #   _foreign_turn_of: SessionScheduler | None — the scheduler that admitted this
+    #       root run into a session it owns, told when the run ends (strong until
+    #       then: a release it defers completes there)
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a

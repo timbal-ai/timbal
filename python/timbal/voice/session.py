@@ -829,6 +829,10 @@ class VoiceSession:
             # runnable.py reuse this context.
             await self._seed_call_context()
             self._session_context = contextvars.copy_context()
+            seed = self._seed_run_context()
+            if seed is not None and seed.parent_id is not None and self._scheduler.head is None:
+                # Where turn one chains: another channel's turn admitted before it re-chains onto it.
+                self._scheduler.head = seed.parent_id
             # A conversation this call continues may have a store already: own it from now (its
             # other turns are the call's to admit) and speak up about what it holds or finishes.
             self._watch_for_event_turns()
@@ -1949,7 +1953,8 @@ class VoiceSession:
         if self._scheduler.store is store:
             return
         try:
-            self._scheduler.bind(store)
+            # From a channel letting go of it (a stopped driver's queued turns), once they are done.
+            self._scheduler.take_over(store)
         except RuntimeError as e:
             # Another channel (a text continuation stream) owns this conversation.
             logger.warning("voice_session_store_owned_elsewhere", error=str(e))
@@ -2305,8 +2310,9 @@ class VoiceSession:
                 seed = get_run_context() if self._last_run_context is None else None
                 if seed is not None and not seed._trace:
                     # Turn one reuses the seeded context, which ignores a parent_id kwarg.
-                    await seed._continue_from(head)
-                    (await seed.get_session()).update(self.call_context)
+                    if seed.parent_id != head:
+                        await seed._continue_from(head)
+                        (await seed.get_session()).update(self.call_context)
                 else:
                     agent_kwargs["parent_id"] = head
             # First turn after an opener. The opener was spoken outside any run,

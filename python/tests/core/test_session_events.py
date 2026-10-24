@@ -669,14 +669,14 @@ class TestPlumbing:
         stream = AgentContinuation(agent, admit=admit, prompt="start", parent_id=r0.run_id)
         outputs: list[OutputEvent] = []
 
-        async def consume() -> None:
-            async with aclosing(stream):
-                async for item in stream:
+        async def consume(driver: AgentContinuation) -> None:
+            async with aclosing(driver):
+                async for item in driver:
                     if isinstance(item, OutputEvent) and item.parent_call_id is None:
                         outputs.append(item)
                         post_session_event(item.run_id, "second note")
 
-        consumer = asyncio.create_task(consume())
+        consumer = asyncio.create_task(consume(stream))
         await asyncio.wait_for(admit_entered.wait(), 2)
         chat = asyncio.create_task(agent(prompt="chat", parent_id=outputs[0].run_id).collect())
         await asyncio.wait_for(chat_entered.wait(), 2)
