@@ -1019,6 +1019,43 @@ class TestOtherChannel:
         assert text_results[0].status.code == "success"
         assert "from chat" in [m.collect_text() for m in model.calls[2]]
 
+    async def test_a_call_turn_goes_ahead_of_a_text_turn_queued_behind_a_running_one(self) -> None:
+        model = _GatedModel(REPLY, "Chat 1.", "Te escucho.", "Chat 2.", gate_at=1)
+        session, stt, _tts = _session(model, on_busy="enqueue")
+        chats = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            parent = session._last_run_context.id
+            first = asyncio.create_task(session.agent(prompt="chat 1", parent_id=parent).collect())
+            await asyncio.wait_for(model.entered.wait(), 2)
+            second = asyncio.create_task(session.agent(prompt="chat 2", parent_id=parent).collect())
+            await asyncio.sleep(0.05)
+            assert not second.done()  # queued behind the first chat turn
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await asyncio.sleep(0.1)
+            model.opened.set()
+            chats.extend(await asyncio.wait_for(asyncio.gather(first, second), 3))
+            await _until(lambda: "Te escucho." in _texts(events))
+
+        await _run(session, stt, drive)
+
+        assert [chat.status.code for chat in chats] == ["success", "success"]
+        # The caller spoke before the queued chat turn got in: their turn runs first, and that chat continues it.
+        assert model.calls[2][-1].collect_text() == "Hola"
+        assert _in_order(_seen(model.calls[3]), "Hola", "Te escucho.", "chat 2")
+
+    async def test_a_turn_cut_before_its_first_step_leaves_the_call_idle(self) -> None:
+        session, _stt, _tts = _session(_Model(REPLY))
+        await session._begin_user_turn("Hola", replace_user_entry=False)
+        assert session._scheduler.busy
+        session._current_turn_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await session._current_turn_task
+        assert not session._scheduler.busy
+
     async def test_continued_call_speaks_pending_event_from_inherited_store(self) -> None:
         model = _Model("Antes.", REPLY)
         session, stt, _tts = _session(model)
@@ -1056,7 +1093,8 @@ class TestOtherChannel:
                 ).collect()
             )
             receipts.append(await session.notify(NOTE))
-            await asyncio.sleep(0.25)
+            # The caller committed moments ago: the event turn waits out the quiet-line window first.
+            await _until(lambda: REPLY in _texts(events))
 
         events = await _run(session, stt, drive)
         assert resumed[0].status.code == "success"

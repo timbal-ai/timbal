@@ -539,7 +539,8 @@ def parse_notify(data: dict[str, Any]) -> tuple[str, str | None, str | None] | N
     ``announce`` is ``"when_idle"``, ``"silent"``, ``"interrupt"`` or absent
     (the session's default); the legacy ``policy: "when_idle"`` reads the same.
     ``None`` when the frame is not this event, has no text or more than
-    ``MAX_SESSION_EVENT_CHARS`` of it, a non-string ``key``, or an unknown policy.
+    ``MAX_SESSION_EVENT_CHARS`` of it, a non-string ``key``, or an unknown policy;
+    a ``notify`` frame refused here is answered with :func:`invalid_notify_ack`.
     """
     if data.get("type") != "notify":
         return None
@@ -562,6 +563,12 @@ def notify_ack(key: str | None, *, event: Any = None, reason: str | None = None)
     if event is not None:
         return {"type": "notify_ack", **event.receipt()}
     return {"type": "notify_ack", "key": key, "state": "rejected", "reason": reason}
+
+
+def invalid_notify_ack(data: dict[str, Any]) -> dict[str, Any]:
+    """Reply to a ``notify`` frame :func:`parse_notify` refused, echoing its key when it has a usable one."""
+    key = data.get("key")
+    return notify_ack(key.strip() or None if isinstance(key, str) else None, reason="invalid")
 
 
 async def deliver_notify(
@@ -928,9 +935,8 @@ async def _run_livekit_session(
             except (KeyError, TypeError, ValueError):
                 logger.debug("voice_livekit_bad_playback_ack", data=str(data)[:120])
             return
-        note = parse_notify(data)
-        if note is not None:
-            text, key, announce = note
+        if typ == "notify":
+            note = parse_notify(data)
             sender = getattr(getattr(pkt, "participant", None), "identity", "") or ""
             # No participant: the server API's SendData, i.e. the app's own backend.
             if not sender:
@@ -945,6 +951,10 @@ async def _run_livekit_session(
                 return
 
             async def _notify() -> None:
+                if note is None:
+                    await send_q.put(invalid_notify_ack(data))
+                    return
+                text, key, announce = note
                 try:
                     ack = await deliver_notify(sess, text, key, source=source, announce=announce)
                 except Exception as e:  # noqa: BLE001 — an event must not kill the call

@@ -204,7 +204,8 @@ await event.settled()  # observer; cancelling it does not withdraw the event
 ```
 
 - The event goes to the `BackgroundTaskStore` of `run_id`'s session; any run id
-  of a session that has a store reaches it. A session without one raises
+  of a session that has a store reaches it, and so does a run an owned session
+  continued from before it had one (see "Store lifetime"). A session without one raises
   `LookupError` unless `create=True`, which registers a store under `run_id`.
   Only the turn chained directly on `run_id` finds that store, so a stale run
   id fails loudly instead of posting into a store no turn will read.
@@ -457,8 +458,9 @@ tab that last saw that run is still part of the conversation. So while a
 channel owns the store, admission finds it there (`store_joined_from`, a scan
 of the few owned stores), and the turn is admitted, refused or queued like
 any other. Once admitted it adopts the store and is re-chained onto the head.
-With no owner, nothing changes: a branch from that run does not pick up the
-session's notices.
+`post_session_event` and `continuation_for_run` look there too, and so does a
+new driver's first run. With no owner, nothing changes: a branch from that run
+does not pick up the session's notices.
 
 Known gap, unchanged from today: two root turns on one session that both start
 before either spawns a child are not serialized by anything. The guard above
@@ -643,6 +645,42 @@ Implementing it changed these points of earlier revisions of this RFC:
     The same test exposed a separate bug: `notify()` before turn one of a
     seeded call (`parent_run_id` / `call_context`) hung the store on the seed,
     which the watcher never looked at, so the event waited for the caller.
+- A second review (of `43b4c4aa`) found ten more, each with a test:
+  - **Queued turns after the owner let go.** A turn queued with
+    `on_busy="enqueue"` re-asked the store once its owner released it (a
+    stopped driver, or one a turn just admitted preempted), found no owner, and
+    ran unadmitted: not re-chained, and beside the turn admitted just before it.
+    It now stays queued on the scheduler it waited on, and is handed to another
+    owner only when one took the session over.
+  - **Session data read too early.** `Runnable._stream` loaded session data
+    before admission, so a turn queued behind the run it names read nothing
+    (that run had not saved yet), including session-scoped approval grants. It
+    now loads after admission, and a refused turn reads nothing.
+  - **Inherited store unowned until turn one.** A call continuing a
+    conversation that already had a store did not own or watch it until its
+    first turn or `notify()`, so what that store held or finished waited for the
+    caller, and chat turns on it were not admitted. The call takes it at start.
+  - **Resume over HTTP invisible to the call.** A call turn parked on an
+    approval or `ask_user` before the call had a store: its HTTP resume
+    inherited nothing, so the call never admitted it. Events stayed blocked on
+    the old pause, and the caller's next turn chained onto the resumed run.
+    A turn that asks its caller now makes the store.
+  - **Interrupt onto a parking turn.** An `interrupt` event arriving as a call
+    turn asked its caller cut that turn and started onto it, which resumed it
+    and swallowed the event. A turn counts as parked once it has asked, and the
+    pause is checked again after the cut.
+  - **Chat turns ahead of the caller.** Cutting a reply finished the call's
+    turn before the caller's next one was marked busy, so a queued chat turn
+    slipped in between; and a caller turn waiting out a running chat turn was
+    not busy, so a chat turn queued behind that one went first. Every cut is
+    now held until the caller's turn starts, which is busy from its commit.
+  - **New driver on a call's session.** Its first run went through the call's
+    admission (moving the call's head) and then failed to bind. It now fails
+    before; only another driver gives way to it.
+  - **Join point not searched** by `post_session_event`,
+    `continuation_for_run`, or a new driver's first run.
+  - **Invalid `notify` frames** were dropped instead of answered `invalid`.
+  - **Client event screened past hang-up** re-registered the forgotten store.
 
 `Agent.handler` is unchanged from `main`; `_inject_background_completions` also
 drains posted events and accounts for them. The rest is
@@ -717,7 +755,8 @@ Executable tests in the repository:
     run starts, its memory carries the pending notice before the human prompt,
     nothing is drained twice.
   - A direct turn while a follow-up is in flight: rejected before hooks (per-run
-    hook record) and the follow-up finishes. The same two cases for a new driver.
+    hook record) and the follow-up finishes. The same two cases for a new driver,
+    and a new driver started on the pre-store run the first one started from.
   - `stop()` before iteration, while waiting, and during a follow-up (which
     reaches `OUTPUT`, then no more); `continuation_for_run` finds the driver and
     returns `None` after release.
@@ -745,6 +784,9 @@ Executable tests in the repository:
     still running;
   - an enqueued turn waiting out a follow-up, then preempting, re-chained onto
     that follow-up (`parent_run_id`, `requested_parent_id`, what the model saw);
+    the same when the driver stops during the follow-up; two enqueued turns run
+    one after the other, each chained onto the one before; an enqueued turn
+    naming the in-flight follow-up reading the session data it saved;
   - `RunContext._continue_from` reloading session data from the new parent;
   - an idle store forgotten.
 - `python/tests/voice/test_voice_events.py`: event turns spoken and never the
@@ -776,12 +818,21 @@ Executable tests in the repository:
     run id from outside the call, each starting an event turn;
   - an event `notify()` queued before turn one reaching the store that turn
     inherits;
+  - a continued call speaking up about an event already in the store it
+    inherits; an event posted by the run the call joined before it had a store;
+  - an event delivered after a parked call turn is resumed over HTTP; an
+    `interrupt` event left pending when the turn it would cut asks its caller;
+  - the caller's turn ahead of a queued chat turn, both on a barge-in and when
+    the chat is queued behind another running one; a turn cut before its first
+    step leaving the call idle;
+  - a new driver refused on a call's session without moving the call's head; a
+    client event screened past hang-up refused, its store left forgotten;
   - screening records on the receiving run; a quiet store forgotten at hang-up;
     `EventTurnStarted`.
 - `python/tests/server/test_voice_notify.py` and
   `test_livekit_session.py::TestNotifyFromTheRoom`: frame parsing, acks and
-  rejections, the WebRTC data channel, LiveKit sender attribution, and
-  server-only enabling.
+  rejections (an invalid frame answered `invalid`), the WebRTC data channel,
+  LiveKit sender attribution, and server-only enabling.
 
 These tests were checked against mutations; each mutation fails at least one
 of them. Mutated:
@@ -808,7 +859,12 @@ of them. Mutated:
   one;
 - no lookup of the store a pre-store parent joined, the join point never
   recorded, and the admitted turn not adopting the store;
-- the seeded context not searched for the call's store.
+- the seeded context not searched for the call's store;
+- a new driver's first run not looking up the join point, a call turn's
+  task done callback, and the hold across a caller's cut (each of this
+  round's ten findings also fails its test on the unfixed code). Marking the
+  caller's turn busy before it waits survives on its own: the hold's wakeup
+  already puts the caller ahead; with the hold removed too, it fails.
 
 Existing background, runnable, tracing, guardrail, and voice tests remain
 regression gates.

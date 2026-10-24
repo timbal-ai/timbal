@@ -8,9 +8,16 @@ from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..state import get_call_id, get_run_context, set_call_id, set_parent_call_id, set_run_context
-from ..state.background import forget_idle_background_store, store_for_run
+from ..state.background import forget_idle_background_store, store_for_run, store_joined_from
 from ..types.events import BaseEvent, OutputEvent
-from .session_scheduler import Followup, OnBusy, SessionBusyError, SessionScheduler, take_followup
+from .session_scheduler import (
+    _OWNED_ELSEWHERE,
+    Followup,
+    OnBusy,
+    SessionBusyError,
+    SessionScheduler,
+    take_followup,
+)
 
 if TYPE_CHECKING:
     from ..state.context import RunContext
@@ -55,6 +62,8 @@ def continuation_for_run(run_id: str) -> "AgentContinuation | None":
     spawned a background task or received an event yet has no driver to find.
     """
     store = store_for_run(run_id)
+    if store is None:
+        store = store_joined_from(run_id)
     owner = store.continuation_owner() if store is not None else None
     channel = owner.channel if isinstance(owner, SessionScheduler) else None
     return channel if isinstance(channel, AgentContinuation) else None
@@ -203,9 +212,14 @@ class AgentContinuation:
         self._context = context
         self.last_run_id = context.id
         store = context._bg_store
+        if store is None and context.parent_id is not None:
+            store = store_joined_from(context.parent_id)
         if store is not None:
             other = store.continuation_owner()
             if other is not None and other is not self._scheduler:
+                if not isinstance(other.channel, AgentContinuation):
+                    # Only a driver gives way to another; a call keeps its conversation.
+                    raise RuntimeError(_OWNED_ELSEWHERE)
                 # A new driver's first run is a root turn like any other (and may be re-chained).
                 await other.admit_foreign(context, store)
             self._scheduler.bind(store)

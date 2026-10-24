@@ -2074,9 +2074,6 @@ class Runnable(ABC, BaseModel):
             # produce an orphan parent_call_id that trace validation rejects.
             _parent_call_id = None
             _call_id = None
-        # Session data is loaded once per run; nested calls see it already set.
-        if run_context._session_data is None:
-            await run_context.get_session()
         previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
         if _background_handoff_control is not None:
             run_context._background_handoff_control = _background_handoff_control
@@ -2191,6 +2188,11 @@ class Runnable(ABC, BaseModel):
                 if session_store is not None and session_store._continuation is not None:
                     await session_store.admit_root_turn(run_context)
                     _restore_context()
+            # Session data is loaded once per run, after admission: a queued turn reads what the
+            # turn it waited for saved. Nested calls see it already set.
+            if run_context._session_data is None:
+                await run_context.get_session()
+                _restore_context()
 
             # Resolve input params (merging fixed defaults, runtime defaults, and provided input)
             # We then store the unvalidated input, as sent by the user to ensure full replayability of the run.

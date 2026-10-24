@@ -1611,12 +1611,15 @@ def post_session_event(
     """Post an event to the session ``run_id`` belongs to (process-local, thread-safe).
 
     The next turn of that session receives it, and a scheduler waiting on the
-    session wakes. Any run id of a session that has a store reaches it. A
-    session without one raises ``LookupError`` unless ``create=True``: then a
-    store is registered under ``run_id``, which only the turn chained directly
-    on ``run_id`` will find, so pass the session's latest run.
+    session wakes. Any run id of a session that has a store reaches it, and so
+    does a run an owned session continued from before it had one. A session
+    without one raises ``LookupError`` unless ``create=True``: then a store is
+    registered under ``run_id``, which only the turn chained directly on
+    ``run_id`` will find, so pass the session's latest run.
     """
     store = _STORES_BY_RUN_ID.get(run_id)
+    if store is None:
+        store = store_joined_from(run_id)
     if store is None:
         if not create:
             raise LookupError(

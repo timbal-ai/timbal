@@ -385,6 +385,41 @@ async def test_new_driver_preempts_waiting_driver():
     assert second.stop_reason == "idle"
 
 
+async def test_new_driver_on_the_run_the_first_one_started_from():
+    """That run is from before the session had a store: nothing leads from it but the store's join point."""
+    release = asyncio.Event()
+    entered, opened = asyncio.Event(), asyncio.Event()
+    model = gated_model(
+        ["Before.", tool_calls("work"), "Working.", "Second turn.", "Finished."],
+        at_call=3,
+        entered=entered,
+        opened=opened,
+    )
+    agent, _ = make_agent(release, model=model)
+    earlier = await agent(prompt="earlier").collect()
+    first = agent.stream_until_idle(prompt="start", parent_id=earlier.run_id)
+    initial = await through_output(first)
+    first_consumer = asyncio.create_task(consume(first))
+    await until_waiting(first)
+    assert store_for_run(earlier.run_id) is None
+    second = agent.stream_until_idle(prompt="next", parent_id=earlier.run_id)
+    second_run = asyncio.create_task(through_output(second))
+    await asyncio.wait_for(entered.wait(), 2)
+    # The second driver owns the session from its first run on: a direct turn meanwhile is refused.
+    assert continuation_for_run(earlier.run_id) is second
+    direct = await asyncio.wait_for(agent(prompt="racing user", parent_id=earlier.run_id).collect(), 2)
+    assert direct.status.code == "error" and "in flight" in direct.error["message"]
+    opened.set()
+    second_output = await asyncio.wait_for(second_run, 2)
+    assert second_output.parent_run_id == initial.run_id
+    assert second_output.metadata["requested_parent_id"] == earlier.run_id
+    assert await asyncio.wait_for(first_consumer, 2) == []
+    assert first.stop_reason == "preempted"
+    release.set()
+    events = await asyncio.wait_for(consume(second), 2)
+    assert texts(root_outputs(events)) == ["Finished."]
+
+
 async def test_new_driver_rejected_while_followup_in_flight():
     release = asyncio.Event()
     entered, opened = asyncio.Event(), asyncio.Event()

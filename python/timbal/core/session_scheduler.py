@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 OnBusy = Literal["reject", "enqueue"]
 Urgency = Literal["when_idle", "interrupt"]
 
+_OWNED_ELSEWHERE = "This session's turns are owned by another channel (a continuation stream or a voice call)."
+
 _PARKED_REASONS = frozenset({"approval_required", "input_required"})
 
 
@@ -196,9 +198,7 @@ class SessionScheduler:
             try:
                 store.acquire_continuation(self)
             except RuntimeError:
-                raise RuntimeError(
-                    "This session's turns are owned by another channel (a continuation stream or a voice call)."
-                ) from None
+                raise RuntimeError(_OWNED_ELSEWHERE) from None
         self.store = store
 
     def release(self, *stores: BackgroundTaskStore | None) -> None:
@@ -293,14 +293,16 @@ class SessionScheduler:
                 )
             self._others_waiting += 1
             try:
-                while self._occupied and store.continuation_owner() is self:
+                while self._occupied and not self._taken_over(store):
                     await self._wait_change()
             finally:
                 self._others_waiting -= 1
-            if store.continuation_owner() is not self:
-                # The owner let go while this turn waited: ask whoever owns it now.
+            if self._taken_over(store):
+                # Another channel took the session over while this turn waited: it decides now.
                 await store.admit_root_turn(run_context)
                 return
+        # Also when the owner let go while this turn waited (its driver stopped, a turn admitted
+        # just before preempted it): the turns queued here still go one at a time, onto the head.
         self._others.add(run_context.id)
         run_context._foreign_turn_of = weakref.ref(self)
         if run_context._bg_store is None:
@@ -308,7 +310,7 @@ class SessionScheduler:
             adopt_background_store(run_context, store)
         head, self.head = self.head, run_context.id
         self.head_parked = False
-        if self._on_preempt is not None:
+        if self._on_preempt is not None and store.continuation_owner() is self:
             self._on_preempt()
         self._notify()
         if head is not None and run_context.parent_id != head:
@@ -317,6 +319,10 @@ class SessionScheduler:
     @property
     def _occupied(self) -> bool:
         return self.busy or bool(self._others) or self._holding > 0
+
+    def _taken_over(self, store: BackgroundTaskStore) -> bool:
+        owner = store.continuation_owner()
+        return owner is not None and owner is not self
 
     def foreign_finished(self, run_id: str, status: Any = None) -> None:
         """An admitted turn ended with root ``status``; a parked head holds back turns chaining onto it."""

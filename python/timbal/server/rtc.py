@@ -50,7 +50,7 @@ from fastapi.responses import JSONResponse
 
 from ..voice.config import VoiceConfig
 from .capacity import acquire_session_slot, max_concurrent_sessions, release_session_slot
-from .livekit_session import deliver_notify, parse_interaction_answer, parse_notify
+from .livekit_session import deliver_notify, invalid_notify_ack, parse_interaction_answer, parse_notify
 from .voice import (
     build_voice_session,
     client_call_context,
@@ -225,10 +225,14 @@ def handle_client_message(session: Any, message: str | bytes, send: Callable[[di
                 send({"type": "interaction_answer_ack", "interaction_id": interaction_id})
 
         return asyncio.create_task(_submit_tap(), name="voice-rtc-interaction-answer")
-    if (note := parse_notify(data)) is not None:
-        text, key, announce = note
+    if data.get("type") == "notify":
+        note = parse_notify(data)
 
         async def _notify() -> None:
+            if note is None:
+                send(invalid_notify_ack(data))
+                return
+            text, key, announce = note
             try:
                 ack = await deliver_notify(session, text, key, source="client", announce=announce)
             except Exception as e:  # noqa: BLE001 — an event must not kill the call
