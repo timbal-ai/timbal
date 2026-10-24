@@ -461,6 +461,7 @@ class VoiceSession:
         self._closed = False
         # ``end_call()``: waits for the goodbye to be heard, then closes.
         self._end_call_task: asyncio.Task[None] | None = None
+        self._end_call_commit_at: float = 0.0
         #: STT/TTS connections opened (``prepare()``), so ``run()`` skips them.
         self._prepared = False
         self._held_user_text: str | None = None
@@ -777,10 +778,56 @@ class VoiceSession:
         session closes as when the caller hangs up. The caller saying anything
         new first keeps the call up. Calling it again changes nothing.
         """
-        if self._closed or self._end_call_task is not None:
+        if self._closed:
             return
+        if (
+            self._end_call_task is not None
+            and not self._end_call_task.done()
+            and self._last_commit_at <= self._end_call_commit_at
+        ):
+            return
+        self._stop_end_call()
+        self._end_call_commit_at = self._last_commit_at
+        baseline = max(self._last_commit_at, self._last_partial_at if self._turn_is_event else 0.0)
         logger.info("end_call_requested")
-        self._end_call_task = asyncio.create_task(self._end_call_when_heard(self._last_commit_at))
+        self._end_call_task = self._spawn_session_task(
+            self._end_call_when_heard(baseline),
+            name="voice-end-call",
+        )
+
+    def _stop_end_call(self) -> None:
+        if (
+            self._end_call_task is not None
+            and not self._end_call_task.done()
+            and self._end_call_task is not asyncio.current_task()
+        ):
+            self._end_call_task.cancel()
+        self._end_call_task = None
+
+    def _end_call_busy(self, commit_at: float) -> bool:
+        turn = self._current_turn_task
+        if (turn is not None and not turn.done()) or self._is_speaking or self._tts_tasks or self.playback.is_playing:
+            return True
+        if self._greeting_speaking or self._idle_prompt_speaking or self._greeting_pending_bytes() > 0:
+            return True
+        if self._greeting_task is not None and not self._greeting_task.done():
+            return True
+        if self._held_user_text is not None:
+            return True
+        now = time.monotonic()
+        if (
+            self._last_partial_at > max(commit_at, self._commit_event_at)
+            and now - self._last_partial_at < self.EVENT_TURN_STRANDED_PARTIAL_SECS
+            and not _likely_stt_echo(self._latest_partial_text, self._spoken_assistant_text())
+        ):
+            return True
+        if self._commit_event_at > commit_at and now - self._commit_event_at < self.EVENT_TURN_QUIET_SECS:
+            return True
+        if self._endpointer is not None:
+            speech_secs = self._endpointer.speech_secs_in_window(self.HOLD_VAD_SPEECH_WINDOW_SECS)
+            if speech_secs is not None and speech_secs >= self.MIN_HOLD_VAD_SPEECH_SECS:
+                return True
+        return False
 
     async def _end_call_when_heard(self, commit_at: float) -> None:
         give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
@@ -790,8 +837,7 @@ class VoiceSession:
                 if self._last_commit_at > commit_at:
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
-                turn = self._current_turn_task
-                busy = (turn is not None and not turn.done()) or self._is_speaking or self.playback.is_playing
+                busy = self._end_call_busy(commit_at)
                 if busy and time.monotonic() < give_up_at:
                     continue
                 # The tracker estimates playback; the last words may still be on the wire.
@@ -799,11 +845,15 @@ class VoiceSession:
                 if self._last_commit_at > commit_at:
                     logger.info("end_call_cancelled", reason="caller_spoke")
                     return
+                busy = self._end_call_busy(commit_at)
+                if busy and time.monotonic() < give_up_at:
+                    continue
                 logger.info("end_call_hangup", timed_out=busy)
                 await self.close()
                 return
         finally:
-            self._end_call_task = None
+            if self._end_call_task is asyncio.current_task():
+                self._end_call_task = None
 
     async def prepare(self) -> None:
         """Open the STT and TTS connections ahead of :meth:`run`.
@@ -1066,6 +1116,7 @@ class VoiceSession:
         self._cancel_hold()
         self._held_user_text = None
         self._stop_event_watch()
+        self._stop_end_call()
         # A non-interruptible opener is deliberately outside ``_tts_tasks``, so
         # ``interrupt()`` cannot reach it. The caller has hung up — cut it here
         # (cancelling the flow propagates to its speak task).
@@ -4254,6 +4305,7 @@ class VoiceSession:
         self._cancel_hold()
         self._held_user_text = None
         self._stop_event_watch()
+        self._stop_end_call()
         store = self._session_store()
         if store is not None and (pending := store.pending_events()):
             # Kept for the conversation's next turn (a text turn continuing it),
