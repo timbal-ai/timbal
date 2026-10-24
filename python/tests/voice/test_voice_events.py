@@ -1019,6 +1019,196 @@ class TestOtherChannel:
         assert text_results[0].status.code == "success"
         assert "from chat" in [m.collect_text() for m in model.calls[2]]
 
+    async def test_continued_call_speaks_pending_event_from_inherited_store(self) -> None:
+        model = _Model("Antes.", REPLY)
+        session, stt, _tts = _session(model)
+        earlier = await session.agent(prompt="earlier chat").collect()
+        event = post_session_event(earlier.run_id, NOTE, create=True)
+        set_run_context(None)
+        session.parent_run_id = earlier.run_id
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await asyncio.sleep(0.25)
+
+        events = await _run(session, stt, drive)
+        assert event.state == "delivered"
+        assert REPLY in _texts(events)
+
+    async def test_resuming_a_parked_voice_turn_without_prior_store_unblocks_events(self) -> None:
+        def wire_money() -> str:
+            """Wire money."""
+            return "wired"
+
+        tool = Tool(name="wire_money", handler=wire_money, requires_approval=True)
+        model = _Model(_tool_call("wire_money"), "Hecho.", REPLY)
+        session, stt, _tts = _session(model, tools=[tool])
+        resumed = []
+        receipts = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await stt.inject(TranscriptEvent(type="committed", text="Paga ahora"))
+            await _until(lambda: session._current_turn_task is not None and session._current_turn_task.done())
+            parked_id = session._last_run_context.id
+            approval_id = session._last_run_context.pending_approvals()[0]["approval_id"]
+            resumed.append(
+                await session.agent(
+                    prompt="Paga ahora", parent_id=parked_id, resume={approval_id: True}
+                ).collect()
+            )
+            receipts.append(await session.notify(NOTE))
+            await asyncio.sleep(0.25)
+
+        events = await _run(session, stt, drive)
+        assert resumed[0].status.code == "success"
+        assert receipts[0].state == "delivered"
+        assert REPLY in _texts(events)
+        assert session._last_run_context.parent_id == resumed[0].run_id
+
+    async def test_interrupt_event_does_not_swallow_event_when_voice_turn_parks_on_approval(self) -> None:
+        def wire_money() -> str:
+            """Wire money."""
+            return "wired"
+
+        tool = Tool(name="wire_money", handler=wire_money, requires_approval=True)
+        model = _Model("Hola.", _tool_call("wire_money"), "Hecho.")
+        session, stt, _tts = _session(model, tools=[tool])
+        receipts = []
+        orig_emit = session._emit
+
+        async def emit_and_interrupt_on_approval(ev: VoiceSessionEvent) -> None:
+            if getattr(ev, "type", None) == "agent_approval" and not receipts:
+                receipts.append(await session.notify("URGENT_EVENT", announce="interrupt"))
+            await orig_emit(ev)
+
+        session._emit = emit_and_interrupt_on_approval  # type: ignore[method-assign]
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await _until(lambda: "Hola." in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            await stt.inject(TranscriptEvent(type="committed", text="Paga"))
+            await asyncio.sleep(0.25)
+
+        await _run(session, stt, drive)
+        assert receipts[0].state == "pending"
+
+    async def test_caller_barge_in_goes_ahead_of_a_queued_chat_turn(self) -> None:
+        held = asyncio.Event()
+
+        class HoldsHola(_Model):
+            def __init__(self, *replies: str) -> None:
+                super().__init__(*replies)
+                outer = self
+
+                class Held(TestModel):
+                    async def stream(self, messages: list, **kwargs: Any) -> AsyncIterator[Any]:
+                        if messages[-1].collect_text() == "Hola":
+                            held.set()
+                            await asyncio.Event().wait()
+                        async for message in super().stream(messages, **kwargs):
+                            yield message
+
+                self.model = Held(handler=outer._reply)
+
+        model = HoldsHola(REPLY, "Respuesta a espera.", "Desde el chat.")
+        session, stt, _tts = _session(model, on_busy="enqueue")
+        text_results = []
+        cut = session.interrupt
+
+        async def cut_then_resave(**kwargs: Any) -> None:
+            await cut(**kwargs)
+            await asyncio.sleep(0.05)
+
+        session.interrupt = cut_then_resave  # type: ignore[method-assign]
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await asyncio.wait_for(held.wait(), 2)
+            text_turn = asyncio.create_task(
+                session.agent(prompt="from chat", parent_id=session._last_run_context.id).collect()
+            )
+            await asyncio.sleep(0.05)
+            assert not text_turn.done()
+            await stt.inject(TranscriptEvent(type="committed", text="Espera"))
+            text_results.append(await asyncio.wait_for(text_turn, 3))
+            await _until(lambda: len(_done(events)) == 2)
+
+        await _run(session, stt, drive)
+        assert _in_order(_seen(model.calls[2]), "Respuesta a espera.", "from chat")
+
+    async def test_rejected_continuation_driver_does_not_corrupt_voice_session_head(self) -> None:
+        model = _Model(REPLY, "Unused.")
+        session, stt, _tts = _session(model)
+        heads: list[tuple[str | None, str | None]] = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            voice_head = session._scheduler.head
+            stream = session.agent.stream_until_idle(prompt="from driver", parent_id=voice_head)
+            with pytest.raises(RuntimeError, match="owned by another channel"):
+                async with aclosing(stream):
+                    async for _ in stream:
+                        pass
+            heads.append((voice_head, session._scheduler.head))
+
+        await _run(session, stt, drive)
+        assert heads[0][0] == heads[0][1]
+
+    async def test_post_session_event_on_joined_from_run_reaches_the_session(self) -> None:
+        model = _Model("Antes.", REPLY, "Segundo.")
+        session, stt, _tts = _session(model)
+        earlier = await session.agent(prompt="earlier chat").collect()
+        set_run_context(None)
+        session.parent_run_id = earlier.run_id
+        posted = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            try:
+                posted.append(post_session_event(earlier.run_id, "Second update."))
+            except LookupError as err:
+                posted.append(err)
+                return
+            await _until(lambda: "Segundo." in _texts(events), timeout=0.5)
+
+        await _run(session, stt, drive)
+        assert not isinstance(posted[0], LookupError), f"post_session_event raised {posted[0]!r}"
+        assert "Second update." in model.calls[2][-1].collect_text()
+
+    async def test_client_event_finished_screening_after_close_raises_and_leaves_store_forgotten(self) -> None:
+        screening_started = asyncio.Event()
+        release_screening = asyncio.Event()
+
+        async def slow_rail(_text: str) -> bool:
+            screening_started.set()
+            await release_screening.wait()
+            return True
+
+        rail = guardrail(slow_rail, stages=["input"], name="slow_rail")
+        model = _Model(REPLY)
+        session, stt, _tts = _session(model, client_events=True, agent_kwargs={"guardrails": [rail]})
+        notify_task: list[asyncio.Task] = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            await session.notify(NOTE)
+            await _until(lambda: REPLY in _texts(events))
+            await _until(lambda: session._current_turn_task.done())
+            notify_task.append(asyncio.create_task(session.notify("Client note", source="client")))
+            await asyncio.wait_for(screening_started.wait(), 2)
+
+        await _run(session, stt, drive)
+        release_screening.set()
+        with pytest.raises(RuntimeError, match="ended"):
+            await notify_task[0]
+        assert store_for_run(session._last_run_context.id) is None
+
 
 class TestRecordsAndCleanup:
     async def test_client_event_screening_lands_on_the_receiving_run(self) -> None:

@@ -432,6 +432,119 @@ class TestBusySession:
         assert result.metadata["requested_parent_id"] == outputs[0].run_id
         assert seen[-1][-2:] == ["Finished.", "me now"]
 
+    async def test_an_enqueued_turn_rechains_when_driver_stops_during_followup(self):
+        release = asyncio.Event()
+        entered, opened = asyncio.Event(), asyncio.Event()
+
+        async def work() -> str:
+            await release.wait()
+            return "done"
+
+        class Gated(TestModel):
+            async def stream(self, messages, **kwargs):
+                if messages[-1].is_runtime():
+                    entered.set()
+                    await opened.wait()
+                async for message in super().stream(messages, **kwargs):
+                    yield message
+
+        model = Gated(responses=[_tool_call("work"), "Working.", "Finished.", "Reply to chat."])
+        agent = Agent(name="agent", model=model, tools=[Tool(name="work", handler=work, background_mode="always")])
+        stream = agent.stream_until_idle(prompt="start", on_busy="enqueue")
+        outputs = []
+        consumer = asyncio.create_task(_consume_roots(stream, outputs))
+        await _until(lambda: outputs)
+        release.set()
+        await asyncio.wait_for(entered.wait(), 2)
+        direct = asyncio.create_task(agent(prompt="me now", parent_id=outputs[0].run_id).collect())
+        await asyncio.sleep(0.05)
+        stream.stop()
+        opened.set()
+        result = await asyncio.wait_for(direct, 2)
+        await asyncio.wait_for(consumer, 2)
+        assert result.status.code == "success"
+        assert result.parent_run_id == outputs[1].run_id
+        assert result.metadata["requested_parent_id"] == outputs[0].run_id
+
+    async def test_two_enqueued_turns_serialize_and_chain(self):
+        release = asyncio.Event()
+        entered, opened = asyncio.Event(), asyncio.Event()
+
+        async def work() -> str:
+            await release.wait()
+            return "done"
+
+        class Gated(TestModel):
+            async def stream(self, messages, **kwargs):
+                if messages[-1].is_runtime():
+                    entered.set()
+                    await opened.wait()
+                async for message in super().stream(messages, **kwargs):
+                    yield message
+
+        model = Gated(responses=[_tool_call("work"), "Working.", "Finished.", "Chat 1.", "Chat 2."])
+        agent = Agent(name="agent", model=model, tools=[Tool(name="work", handler=work, background_mode="always")])
+        stream = agent.stream_until_idle(prompt="start", on_busy="enqueue")
+        outputs = []
+        consumer = asyncio.create_task(_consume_roots(stream, outputs))
+        await _until(lambda: outputs)
+        release.set()
+        await asyncio.wait_for(entered.wait(), 2)
+        first_chat = asyncio.create_task(agent(prompt="chat 1", parent_id=outputs[0].run_id).collect())
+        second_chat = asyncio.create_task(agent(prompt="chat 2", parent_id=outputs[0].run_id).collect())
+        await asyncio.sleep(0.05)
+        opened.set()
+        r1, r2 = await asyncio.wait_for(asyncio.gather(first_chat, second_chat), 2)
+        await asyncio.wait_for(consumer, 2)
+        assert r1.parent_run_id == outputs[1].run_id
+        assert r2.parent_run_id == r1.run_id
+
+    async def test_an_enqueued_turn_parented_on_inflight_run_inherits_its_session_data(self):
+        release = asyncio.Event()
+        entered, opened = asyncio.Event(), asyncio.Event()
+        seen_session: list[dict] = []
+
+        async def work() -> str:
+            await release.wait()
+            return "done"
+
+        async def pre() -> None:
+            ctx = get_run_context()
+            sess = await ctx.get_session()
+            if ctx.root_span().metadata.get("trigger"):
+                sess["from_followup"] = "yes"
+            else:
+                seen_session.append(dict(sess))
+
+        class Gated(TestModel):
+            async def stream(self, messages, **kwargs):
+                if messages[-1].is_runtime():
+                    entered.set()
+                    await opened.wait()
+                async for message in super().stream(messages, **kwargs):
+                    yield message
+
+        model = Gated(responses=[_tool_call("work"), "Working.", "Finished.", "Chat."])
+        agent = Agent(
+            name="agent",
+            model=model,
+            tools=[Tool(name="work", handler=work, background_mode="always")],
+            pre_hook=pre,
+        )
+        stream = agent.stream_until_idle(prompt="start", on_busy="enqueue")
+        outputs = []
+        consumer = asyncio.create_task(_consume_roots(stream, outputs))
+        await _until(lambda: outputs)
+        release.set()
+        await asyncio.wait_for(entered.wait(), 2)
+        followup_run_id = stream.last_run_id
+        direct = asyncio.create_task(agent(prompt="chat", parent_id=followup_run_id).collect())
+        await asyncio.sleep(0.05)
+        opened.set()
+        await asyncio.wait_for(direct, 2)
+        await asyncio.wait_for(consumer, 2)
+        assert seen_session[-1] == {"from_followup": "yes"}
+
 
 class TestPlumbing:
     async def test_continue_from_reloads_session_data_from_the_new_parent(self):

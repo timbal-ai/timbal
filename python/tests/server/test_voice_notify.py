@@ -117,6 +117,14 @@ class TestWebRTCDataChannel:
     def test_other_frames_are_ignored(self, message: str) -> None:
         assert handle_client_message(_Session(), message, lambda _payload: None) is None
 
+    async def test_invalid_notify_frame_is_rejected_with_invalid_reason(self) -> None:
+        session = _Session()
+        sent: list[dict] = []
+        task = handle_client_message(session, json.dumps({"type": "notify", "text": "   ", "key": "k"}), sent.append)
+        assert task is not None
+        await asyncio.wait_for(task, 1)
+        assert sent == [{"type": "notify_ack", "key": "k", "state": "rejected", "reason": "invalid"}]
+
 
 class TestWhoEnablesEvents:
     @staticmethod
