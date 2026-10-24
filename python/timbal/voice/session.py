@@ -19,11 +19,13 @@ TTS is scheduled on a chained background task so the agent stream can drain
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import random
 import re
 import time
 import unicodedata
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Coroutine
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -31,7 +33,20 @@ import structlog
 from uuid_extensions import uuid7
 
 from ..core.agent import Agent
+from ..core.session_scheduler import Followup, OnBusy, SessionScheduler, is_parked
+from ..guardrails.types import GuardrailContext, GuardrailStage
 from ..state import get_run_context, set_run_context
+from ..state.background import (
+    Announce,
+    BackgroundTaskStore,
+    SessionEvent,
+    SessionEventSource,
+    adopt_background_store,
+    bind_background_store,
+    ensure_background_store,
+    forget_idle_background_store,
+    store_joined_from,
+)
 from ..state.context import RunContext
 from ..state.tracing.providers import TRACING_UNSET
 from ..types.content import TextContent, ToolUseContent
@@ -56,6 +71,7 @@ from .events import (
     AgentTextDelta,
     AgentTextDone,
     AudioOutput,
+    EventTurnStarted,
     FillerSpoken,
     SessionEnded,
     SessionError,
@@ -102,6 +118,20 @@ DEFAULT_TURN_TIMEOUT_SECS = 60.0
 # Spoken when the turn times out before any audio was produced. Empty / None
 # disables the apology; the session stays open either way.
 DEFAULT_TURN_TIMEOUT_FALLBACK = "Sorry, I lost that for a moment. Could you say that again?"
+
+_current_voice_session: contextvars.ContextVar[VoiceSession | None] = contextvars.ContextVar(
+    "timbal_voice_session", default=None
+)
+
+
+def current_voice_session() -> VoiceSession | None:
+    """The :class:`VoiceSession` running the calling code, or ``None`` outside a call.
+
+    Set for everything a running session starts — its turns, the tools those
+    turns call, and tasks spawned from either — so a tool can hand the live
+    call to work that reports back later through :meth:`VoiceSession.notify`.
+    """
+    return _current_voice_session.get()
 
 
 async def _no_audio_score() -> float | None:
@@ -247,6 +277,16 @@ class VoiceSession:
     ``turn_timeout_fallback`` when no audio has gone out yet, and stays open
     for the next user turn. Set ``turn_timeout_secs <= 0`` to disable.
 
+    Event turns
+    -----------
+    :meth:`notify` (and a finished background task, by its announce policy)
+    starts a turn the caller did not: the agent reads a note that is never
+    recorded as the caller's words, and decides what, if anything, to say.
+    ``when_idle`` waits for a quiet line; ``interrupt`` cuts in like a barge-in.
+    Another channel's turn on the same conversation (a text turn chained on
+    this call) is refused or queued while a call turn runs (``on_busy``), and
+    the call's next turn continues from it.
+
     After the session closes, :attr:`transcript` contains the ordered list of
     committed user/assistant text, and (when ``record_audio=True``)
     :attr:`input_audio` / :attr:`output_audio` hold raw PCM bytes.
@@ -275,6 +315,9 @@ class VoiceSession:
         user_idle: UserIdleConfig | dict[str, Any] | None = None,
         call_context: dict[str, str] | None = None,
         parent_run_id: str | None = None,
+        announce_background_results: bool = False,
+        client_events: bool = False,
+        on_busy: OnBusy = "reject",
     ):
         self.agent = agent
         self.stt = stt
@@ -429,6 +472,36 @@ class VoiceSession:
         # Tracks the RunContext from the last completed turn so the agent's
         # __call__ auto-chains parent_id for multi-turn memory.
         self._last_run_context: RunContext | None = None
+
+        # Event turns (see notify()). announce_background_results is the default
+        # for finished background tasks (a tool's background_announce wins);
+        # events default to when_idle. client_events lets transports pass on
+        # the caller device's notify frames.
+        self.announce_background_results = announce_background_results
+        self.client_events = client_events
+        self._scheduler = SessionScheduler(
+            channel=self,
+            completions="when_idle" if announce_background_results else "silent",
+            events="when_idle",
+            on_busy=on_busy,
+            can_interrupt=True,
+            # Work posted between turns (report_progress, post_session_event) has no notify() to start the watcher.
+            on_work=self._watch_for_event_turns,
+        )
+        self._event_task: asyncio.Task[None] | None = None
+        # The in-flight turn's run, from its first event until the turn ends.
+        self._turn_run_context: RunContext | None = None
+        # A store notify() made before any turn had a run to hang it on; the
+        # first turn's run adopts it.
+        self._unbound_store: BackgroundTaskStore | None = None
+        self._turn_is_event = False
+        # The in-flight turn's run asked the caller (an approval, ask_user): it ends parked on them.
+        self._turn_asked_caller = False
+        # What every turn starts from: call identity seeded, this session
+        # current. Snapshotted in run() because turns are also started by code
+        # outside the session (notify, taps), whose context must not leak in.
+        self._session_context: contextvars.Context | None = None
+        self._current_session_token: contextvars.Token | None = None
 
         # Assistant text accumulated during the in-flight turn (for STT echo suppression).
         self._turn_assistant_text: str = ""
@@ -619,12 +692,80 @@ class VoiceSession:
             self._cancel_hold()
             self._held_user_text = None
             self._hold_armed_timeout_secs = None
-            await self.interrupt()
-            if self._closed:
-                return False
-            self._cancel_turn.clear()
-            await self._begin_user_turn(text, replace_user_entry=False)
+            # Cutting the reply finishes the call's turn: hold the session until the caller's starts.
+            with self._scheduler.holding():
+                await self.interrupt()
+                if self._closed:
+                    return False
+                self._cancel_turn.clear()
+                await self._begin_user_turn(text, replace_user_entry=False)
             return True
+
+    async def notify(
+        self,
+        text: str,
+        *,
+        key: str | None = None,
+        source: SessionEventSource = "app",
+        announce: Announce | None = None,
+    ) -> SessionEvent:
+        """Tell the agent something happened, so it can speak up without waiting for the caller.
+
+        ``text`` is a note for the model ("Background task 'report' finished:
+        …"), not something the caller said. It reaches the model as a runtime
+        message that stays in memory for later turns, never enters the
+        transcript, and the model may decide nothing is worth saying. Events
+        go to the conversation's session, so a later text turn continuing it
+        receives any the call did not deliver.
+
+        Returns the event's receipt as soon as it is queued, without waiting
+        for a turn: ``await event.settled()`` is ``"delivered"`` once a turn's
+        run has it (``event.run_id``), or ``"superseded"`` when a later event
+        with the same ``key`` replaced it first.
+
+        ``announce`` (default ``"when_idle"``): ``when_idle`` gets a turn of
+        its own once the line is quiet — no turn running, the agent's audio
+        finished playing, no greeting or idle prompt pending, no caller
+        fragment held, no recent partial or commit, local VAD silent — and
+        never interrupts; if the caller speaks first, it reaches the model with
+        their turn instead, ahead of what they said. ``silent`` only reaches
+        the next turn. ``interrupt`` cuts in at once like a barge-in (a held
+        caller fragment is dropped). Events waiting together share one turn.
+        While the last run is parked on the caller (``ask_user``, an approval)
+        no event turn starts.
+
+        ``source="client"`` is for text the caller's device sent (transport
+        ``notify`` frames): refused unless the session has ``client_events``,
+        never allowed to ``interrupt``, screened by the agent's input
+        guardrails, and labelled for the model as information rather than
+        instructions. Call on the session's event loop.
+        """
+        if self._closed:
+            raise RuntimeError("The call has ended.")
+        records: list[Any] = []
+        if source == "client":
+            if not self.client_events:
+                raise PermissionError("This session does not accept events from the caller's device.")
+            if announce == "interrupt":
+                raise PermissionError("Events from the caller's device cannot interrupt.")
+            text, records = await self._screen_client_event(text)
+            if self._closed:
+                # Hung up during screening: cleanup already let go of the store and forgot it.
+                raise RuntimeError("The call has ended.")
+        store = self._session_store(create=True)
+        event = store.post_event(text, key=key, source=source, announce=announce)
+        event.guardrails = records
+        logger.info(
+            "voice_event_posted",
+            event_id=event.id,
+            key=event.key,
+            source=source,
+            announce=announce,
+            pending=len(store.pending_events()),
+            text_preview=event.text[:120],
+        )
+        self._ensure_event_watch()
+        return event
 
     async def prepare(self) -> None:
         """Open the STT and TTS connections ahead of :meth:`run`.
@@ -676,6 +817,7 @@ class VoiceSession:
         """Main loop.  Yields events until the session is closed or errors out."""
         try:
             self.started_at = time.time()
+            self._current_session_token = _current_voice_session.set(self)
             self._start_llm_warmup()
             await self.prepare()
             await self.turn_detector.start(self.audio_input)
@@ -686,6 +828,10 @@ class VoiceSession:
             # parent run this call continues. Empty ``_trace`` is what lets
             # runnable.py reuse this context.
             await self._seed_call_context()
+            self._session_context = contextvars.copy_context()
+            # A conversation this call continues may have a store already: own it from now (its
+            # other turns are the call's to admit) and speak up about what it holds or finishes.
+            self._watch_for_event_turns()
             # A task, not an await: the opener's TTS (and, for the LLM-authored
             # variant, its completion) must overlap the reader tasks below —
             # otherwise nothing is consuming mic audio while we speak.
@@ -719,6 +865,12 @@ class VoiceSession:
                 await self._cleanup()
             finally:
                 self._remove_usage_listeners()
+                if self._current_session_token is not None:
+                    # A generator finalized outside its consumer runs in another
+                    # context, where the token cannot be reset.
+                    with contextlib.suppress(ValueError):
+                        _current_voice_session.reset(self._current_session_token)
+                    self._current_session_token = None
             # Closing adapters can report incomplete operations after the stop
             # sentinel. Deliver their accounting before the terminal event.
             while not self._event_queue.empty():
@@ -871,6 +1023,7 @@ class VoiceSession:
         self._closed = True
         self._cancel_hold()
         self._held_user_text = None
+        self._stop_event_watch()
         # A non-interruptible opener is deliberately outside ``_tts_tasks``, so
         # ``interrupt()`` cannot reach it. The caller has hung up — cut it here
         # (cancelling the flow propagates to its speak task).
@@ -1503,11 +1656,12 @@ class VoiceSession:
                     timeout_secs=timeout_secs,
                     **_trace_debug_fields(),
                 )
-                await self.interrupt()
-                if self._closed:
-                    return
-                self._cancel_turn.clear()
-                await self._begin_user_turn(held, replace_user_entry=False)
+                with self._scheduler.holding():
+                    await self.interrupt()
+                    if self._closed:
+                        return
+                    self._cancel_turn.clear()
+                    await self._begin_user_turn(held, replace_user_entry=False)
 
         self._hold_task = asyncio.create_task(_expire())
         logger.info(
@@ -1543,7 +1697,11 @@ class VoiceSession:
         await self._emit(TranscriptCommitted(text=final_text, replace=replace_user_entry))
         self._active_turn_user_text = final_text
         self._turn_eou_at = time.monotonic()
-        self._current_turn_task = asyncio.create_task(self._run_turn(final_text))
+        # Busy from here, not from the task's first step: a turn queued behind a cut one would slip in between.
+        self._scheduler.turn_started()
+        task = self._spawn_session_task(self._run_turn(final_text))
+        task.add_done_callback(self._turn_task_done)
+        self._current_turn_task = task
         logger.debug(
             "stt_turn_task_created",
             text_preview=final_text[:120],
@@ -1714,32 +1872,321 @@ class VoiceSession:
             self._cancel_hold()
             self._held_user_text = None
             self._hold_armed_timeout_secs = None
-            await self.interrupt()
+            # Cutting the reply finishes the call's turn: hold the session until the caller's starts,
+            # or a turn queued behind the cut one slips in (while CONTINUE_TURN rewrites its memory, too).
+            with self._scheduler.holding():
+                await self.interrupt()
+                if self._closed:
+                    return
+                self._cancel_turn.clear()
+
+                replace = False
+                if decision.action is CommitAction.CONTINUE_TURN:
+                    # interrupt() may have recorded the heard fragment of the aborted
+                    # reply right after the fragment's user entry (interruption
+                    # truncation). A continuation merges the fragment into a single
+                    # utterance, so that reply is superseded — drop it so the merge
+                    # below updates the fragment user entry instead of appending a
+                    # duplicate user line around a stray assistant fragment.
+                    if (
+                        len(self._transcript) >= 2
+                        and self._transcript[-1].role == "assistant"
+                        and self._transcript[-2].role == "user"
+                        and self._transcript[-2].text == state.active_user_text
+                    ):
+                        self._transcript.pop()
+                    replace = bool(self._transcript and self._transcript[-1].role == "user")
+                    # Transcript cleanup alone is not enough — parent-chain memory still
+                    # has user:fragment + assistant:heard unless we mirror the rewrite.
+                    await self._align_continue_memory(fragment_user_text=state.active_user_text)
+
+                await self._begin_user_turn(final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed)
+
+    # -- Internal: event turns (notify, background results) ------------------
+
+    # How long the caller must have been quiet (no partial, no commit) before
+    # the agent speaks up on its own. Covers the gap between a commit arriving
+    # and the detector deciding what it is, which nothing else marks as busy.
+    EVENT_TURN_QUIET_SECS = 0.6
+    # An uncommitted partial stops counting as the caller talking after this
+    # long. The stale-partial sweeper rescues real ones well before; what it
+    # leaves stranded (echo it refused) would otherwise hold events all call.
+    EVENT_TURN_STRANDED_PARTIAL_SECS = 5.0
+    EVENT_TURN_POLL_SECS = 0.05
+
+    def _spawn_session_task(self, coro: Coroutine[Any, Any, None], *, name: str | None = None) -> asyncio.Task[None]:
+        """Start a task from the session's own context (see ``_session_context``)."""
+        context = self._session_context.copy() if self._session_context is not None else None
+        return asyncio.create_task(coro, name=name, context=context)
+
+    def _session_store(self, *, create: bool = False) -> BackgroundTaskStore | None:
+        """The background store of this call's conversation; made on demand with ``create``."""
+        store = None
+        # The seed too: notify() before turn one hangs the store on the context that turn will reuse.
+        for ctx in (self._turn_run_context, self._last_run_context, self._seed_run_context()):
+            if ctx is not None and ctx._bg_store is not None:
+                store = ctx._bg_store
+                break
+        if store is None:
+            store = self._unbound_store
+        if store is None:
+            ctx = self._turn_run_context or self._last_run_context or self._seed_run_context()
+            # The run this call continues may be where an owned session joined before it had a store.
+            joined = store_joined_from(ctx.parent_id) if ctx is not None and ctx.parent_id else None
+            if joined is not None:
+                adopt_background_store(ctx, joined)
+                store = joined
+            elif create:
+                if ctx is not None:
+                    store = ensure_background_store(ctx)
+                else:
+                    self._unbound_store = store = BackgroundTaskStore()
+        if store is not None:
+            self._own_store(store)
+        return store
+
+    def _own_store(self, store: BackgroundTaskStore) -> None:
+        if self._scheduler.store is store:
+            return
+        try:
+            self._scheduler.bind(store)
+        except RuntimeError as e:
+            # Another channel (a text continuation stream) owns this conversation.
+            logger.warning("voice_session_store_owned_elsewhere", error=str(e))
+
+    def _seed_run_context(self) -> RunContext | None:
+        """The empty-trace context turn one will reuse, when run() seeded one."""
+        if self._session_context is None:
+            return None
+        ctx = self._session_context.run(get_run_context)
+        return ctx if ctx is not None and not ctx._trace else None
+
+    def _on_turn_run_started(self, followup: Followup | None) -> None:
+        """The turn's run exists: mark it the call's own, hang the call's store on it, stamp an event turn."""
+        ctx = get_run_context()
+        if ctx is None or not ctx._trace:
+            return
+        self._turn_run_context = ctx
+        # Before the run resumes: its session admission check must see it as the call's own.
+        self._scheduler.mark_own(ctx)
+        self._scheduler.note_run(ctx.id)
+        if ctx._bg_store is None:
+            previous = self._last_run_context._bg_store if self._last_run_context is not None else None
+            store = previous or self._unbound_store
+            if store is not None:
+                adopt_background_store(ctx, store)
+                self._unbound_store = None
+        elif self._unbound_store is not None and self._unbound_store is not ctx._bg_store:
+            # The run inherited its conversation's store: what notify() queued before it goes there.
+            unbound, self._unbound_store = self._unbound_store, None
+            self._scheduler.release(unbound)
+            ctx._bg_store.requeue([], unbound.drain_events(settle=False))
+        if ctx._bg_store is not None:
+            self._own_store(ctx._bg_store)
+        if followup is not None:
+            followup.started(ctx)
+
+    def _turn_parks_on_caller(self) -> None:
+        """The turn's run asked the caller (an approval, ``ask_user``) and ends parked on them.
+
+        No event turn starts from here (it would resume that run). The store
+        is made now so the run's resume, sent over HTTP, joins the session:
+        admitted by the call and its head, not invisible to it.
+        """
+        self._turn_asked_caller = True
+        self._session_store(create=True)
+
+    async def _screen_client_event(self, text: str) -> tuple[str, list[Any]]:
+        """Run the agent's input guardrails on event text the caller's device sent.
+
+        Returns the (possibly redacted) text and the rails that fired, for the
+        receiving run's guardrail report. Raises ``PermissionError`` on a block.
+        """
+        runner = getattr(self.agent, "_guardrail_runner", None)
+        if runner is None or not runner.has_stage(GuardrailStage.INPUT):
+            return text, []
+        ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=getattr(self.agent, "_path", None))
+        outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+        if outcome.verdict is not None:
+            # No run exists yet to carry a guardrail report, so the log is the record.
+            logger.warning(
+                "voice_client_event_blocked",
+                rail=outcome.rail.name,
+                reason=outcome.verdict.reason,
+                text_preview=text[:120],
+            )
+            raise PermissionError(f"Blocked by guardrail {outcome.rail.name!r}.")
+        return outcome.text, list(outcome.triggered)
+
+    def _ensure_event_watch(self) -> None:
+        if self._closed or (self._event_task is not None and not self._event_task.done()):
+            return
+        self._event_task = self._spawn_session_task(self._event_watch(), name="voice-event-watch")
+
+    def _stop_event_watch(self) -> None:
+        if self._event_task is not None and not self._event_task.done():
+            self._event_task.cancel()
+        self._event_task = None
+
+    def _watch_for_event_turns(self) -> None:
+        """Watch for an event turn if the store holds anything that could ask for one (after a turn, on new work)."""
+        if self._closed:
+            return
+        store = self._session_store()
+        if store is not None and self._scheduler.may_need_turn():
+            self._ensure_event_watch()
+
+    async def _event_watch(self) -> None:
+        """Start event turns for what the call's store holds, once the line allows it.
+
+        Waiting for work is event-driven (the scheduler waits on the store).
+        Waiting for the line polls, like the user-idle watcher, because "the
+        caller's audio has finished playing" is an estimate with no event.
+        """
+        try:
+            while not self._closed:
+                if self._session_store() is None:
+                    return
+                urgency = await self._scheduler.wait_ready(self._until_line_allows)
+                if urgency is None or self._closed:
+                    return
+                await self._start_event_turn()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Whatever is left still reaches the model with the caller's next turn.
+            logger.warning("voice_event_watch_failed", error=str(e), exc_info=True)
+
+    async def _until_line_allows(self) -> None:
+        while self._event_turn_blocker(urgent=self._scheduler.pending_turn() == "interrupt") is not None:
             if self._closed:
                 return
+            await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
+
+    async def _start_event_turn(self) -> bool:
+        """Start one event turn with everything pending. Returns whether it started.
+
+        Same lock as the caller's turns, so a commit landing meanwhile waits
+        and then barges in on the event turn like on any reply. An ``interrupt``
+        event cuts in the way ``submit_user_text`` does.
+        """
+        async with self._user_turn_lock:
+            urgent = self._scheduler.pending_turn() == "interrupt"
+            if self._event_turn_blocker(urgent=urgent) is not None:
+                return False
+            # Cutting the reply in flight finishes the call's turn: hold the session until
+            # this one starts, or a turn queued behind the cut one slips in first.
+            with self._scheduler.holding() if urgent else contextlib.nullcontext():
+                if urgent:
+                    # Same disarm as submit_user_text: a pending HOLD expiry would
+                    # otherwise interrupt() the event turn with leftover speech.
+                    self._cancel_hold()
+                    self._held_user_text = None
+                    self._hold_armed_timeout_secs = None
+                    await self.interrupt()
+                    # The cut turn may have ended parked on its caller: a turn now would resume it.
+                    if self._event_turn_blocker(urgent=True) is not None:
+                        return False
+                followup = self._scheduler.take()
+                if followup is None:
+                    return False
+                # Busy from here: another channel's turn arriving before the task starts waits or is refused.
+                self._scheduler.turn_started()
             self._cancel_turn.clear()
+            self._turn_vad_endpointed = False
+            self._turn_stt_latency = None
+            self._active_turn_user_text = ""
+            self._turn_eou_at = time.monotonic()
+            keys = [event.key for event in followup.events if event.key]
+            logger.info(
+                "voice_event_turn_started",
+                task_ids=followup.task_ids,
+                event_ids=[event.id for event in followup.events],
+                keys=keys,
+                urgent=followup.urgent,
+                **_trace_debug_fields(),
+            )
+            task = self._spawn_session_task(self._run_turn("", followup=followup))
+            # A task cancelled before its first step never runs _run_turn's
+            # finally: hand the work back and clear busy from here too.
+            task.add_done_callback(lambda _task: self._event_turn_done(followup))
+            self._current_turn_task = task
+        await self._emit(
+            EventTurnStarted(
+                task_ids=followup.task_ids,
+                event_ids=[event.id for event in followup.events],
+                keys=keys,
+                urgent=followup.urgent,
+            )
+        )
+        return True
 
-            replace = False
-            if decision.action is CommitAction.CONTINUE_TURN:
-                # interrupt() may have recorded the heard fragment of the aborted
-                # reply right after the fragment's user entry (interruption
-                # truncation). A continuation merges the fragment into a single
-                # utterance, so that reply is superseded — drop it so the merge
-                # below updates the fragment user entry instead of appending a
-                # duplicate user line around a stray assistant fragment.
-                if (
-                    len(self._transcript) >= 2
-                    and self._transcript[-1].role == "assistant"
-                    and self._transcript[-2].role == "user"
-                    and self._transcript[-2].text == state.active_user_text
-                ):
-                    self._transcript.pop()
-                replace = bool(self._transcript and self._transcript[-1].role == "user")
-                # Transcript cleanup alone is not enough — parent-chain memory still
-                # has user:fragment + assistant:heard unless we mirror the rewrite.
-                await self._align_continue_memory(fragment_user_text=state.active_user_text)
+    def _event_turn_done(self, followup: Followup) -> None:
+        followup.release()
+        self._turn_task_done()
 
-            await self._begin_user_turn(final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed)
+    def _turn_task_done(self, _task: asyncio.Task[None] | None = None) -> None:
+        # A turn task cancelled before its first step never runs _run_turn's finally.
+        if self._current_turn_task is None or self._current_turn_task.done():
+            self._scheduler.turn_finished()
+
+    def _event_turn_blocker(self, *, urgent: bool = False) -> str | None:
+        """Why an event turn cannot start right now, or ``None`` when it can.
+
+        ``urgent`` (an ``interrupt`` event) cuts in on whatever is in flight,
+        so only what no turn may cut through blocks it.
+        """
+        if self._closed:
+            return "closed"
+        if self._session_context is None:
+            # Set by run() once the providers are up and the call identity is seeded.
+            return "not_started"
+        if self._last_run_paused():
+            return "run_awaiting_caller"
+        if self._scheduler.other_turn_first("interrupt" if urgent else None):
+            return "other_channel_turn"
+        if urgent:
+            return None
+        if self._current_turn_task is not None and not self._current_turn_task.done():
+            return "turn_running"
+        if self._is_speaking or self._greeting_speaking or self._idle_prompt_speaking or self._tts_tasks:
+            return "agent_speaking"
+        if self._greeting_task is not None and not self._greeting_task.done():
+            return "greeting_pending"
+        if self.playback.is_playing or self._greeting_pending_bytes() > 0:
+            return "audio_playing"
+        if self._held_user_text is not None:
+            return "user_holding"
+        now = time.monotonic()
+        if (
+            self._last_partial_at > self._last_commit_at
+            and now - self._last_partial_at < self.EVENT_TURN_STRANDED_PARTIAL_SECS
+        ):
+            return "user_speaking"
+        if now - max(self._last_partial_at, self._commit_event_at) < self.EVENT_TURN_QUIET_SECS:
+            return "user_speaking"
+        if self._endpointer is not None:
+            speech_secs = self._endpointer.speech_secs_in_window(self.HOLD_VAD_SPEECH_WINDOW_SECS)
+            if speech_secs is not None and speech_secs >= self.MIN_HOLD_VAD_SPEECH_SECS:
+                return "user_speaking"
+        return None
+
+    def _last_run_paused(self) -> bool:
+        """The run the call's next turn chains onto is parked on its caller (``ask_user``, an approval).
+
+        The next run resumes it, and memory resolution drops that run's prompt,
+        so an event turn would be swallowed whole. That run is the call's own
+        (the one in flight, parked once it asked the caller, or the last one),
+        or another channel's turn that has run since (the head).
+        """
+        if self._turn_run_context is not None and self._turn_asked_caller:
+            return True
+        ctx = self._turn_run_context or self._last_run_context
+        head = self._scheduler.head
+        if head is not None and (ctx is None or head != ctx.id):
+            return self._scheduler.head_parked
+        root = ctx.root_span() if ctx is not None else None
+        return is_parked(getattr(root, "status", None))
 
     # -- Internal: agent turn → TTS ----------------------------------------
 
@@ -1773,8 +2220,17 @@ class VoiceSession:
             # that ``asyncio.timeout`` can surface on some versions.
             raise TimeoutError("agent turn timed out") from None
 
-    async def _run_turn(self, user_text: str) -> None:
+    async def _run_turn(self, user_text: str, *, followup: Followup | None = None) -> None:
+        """One agent turn: the caller's ``user_text``, or an event turn's ``followup`` (``user_text`` "")."""
+        # Busy before waiting: a turn queued behind the running one goes after the call's.
+        # The task's done callback clears it if this is cancelled before the try below.
+        self._scheduler.turn_started()
+        if self._scheduler.other_turn_active:
+            # Another channel's turn on this conversation runs: the call's goes after it.
+            await self._scheduler.until_no_other_turn(include_queued=False)
         self._is_speaking = True
+        self._turn_is_event = followup is not None
+        self._turn_asked_caller = False
         self._turn_assistant_text = ""
         self._turn_started_at = time.monotonic()
         self._turn_deadline = (
@@ -1834,10 +2290,25 @@ class VoiceSession:
             self._turn_tts_scheduled_text = ""
 
             turn_phase = "creating_agent_generator"
-            msg = Message(role="user", content=[TextContent(text=user_text)])
+            if followup is not None:
+                msg = followup.prompt
+            else:
+                msg = Message(role="user", content=[TextContent(text=user_text)])
             agent_kwargs: dict[str, Any] = {"prompt": msg}
             if self.model:
                 agent_kwargs["model"] = self.model
+            # Another channel's turn ran on this conversation since the call's
+            # last one (or before its first): continue from it, not from the
+            # call's own last run or the parent it was started with.
+            head = self._scheduler.head
+            if head is not None and (self._last_run_context is None or head != self._last_run_context.id):
+                seed = get_run_context() if self._last_run_context is None else None
+                if seed is not None and not seed._trace:
+                    # Turn one reuses the seeded context, which ignores a parent_id kwarg.
+                    await seed._continue_from(head)
+                    (await seed.get_session()).update(self.call_context)
+                else:
+                    agent_kwargs["parent_id"] = head
             # First turn after an opener. The opener was spoken outside any run,
             # so it is in no memory the agent can resolve — without telling it,
             # the model opens by greeting a caller it has already greeted. Turn
@@ -1857,9 +2328,15 @@ class VoiceSession:
             agen = self.agent(**agent_kwargs)
             # Armed at turn start rather than at the first tool call: a model
             # that thinks for seconds before calling anything is dead air too.
+            # Never on an event turn: the agent chose to speak, and may choose
+            # to say nothing at all.
             arm_think_filler = (
-                self.filler is not None and self.filler.enabled and self.filler.think_delay_secs is not None
+                self.filler is not None
+                and self.filler.enabled
+                and self.filler.think_delay_secs is not None
+                and not self._turn_is_event
             )
+            run_started = False
             # Timed ``__anext__`` so a hung LLM/tool cannot stall forever. The
             # for-body is unchanged; only the pull is deadline-aware.
             while True:
@@ -1874,6 +2351,10 @@ class VoiceSession:
                         **_trace_debug_fields(),
                     )
                     break
+
+                if not run_started:
+                    run_started = True
+                    self._on_turn_run_started(followup)
 
                 if arm_think_filler:
                     # Not before the run's first event: the flow task copies this
@@ -1915,6 +2396,7 @@ class VoiceSession:
                 # HTTP call against ``run_id``, which is why it is carried.
                 if isinstance(event, InteractionEvent):
                     turn_phase = "emit_agent_interaction"
+                    self._turn_parks_on_caller()
                     await self._emit(
                         AgentInteraction(
                             run_id=event.run_id,
@@ -1929,6 +2411,7 @@ class VoiceSession:
 
                 if isinstance(event, ApprovalEvent):
                     turn_phase = "emit_agent_approval"
+                    self._turn_parks_on_caller()
                     await self._emit(
                         AgentApproval(
                             run_id=event.run_id,
@@ -2290,6 +2773,15 @@ class VoiceSession:
             finally:
                 self._is_speaking = False
                 self._active_turn_user_text = ""
+                self._turn_is_event = False
+                self._turn_asked_caller = False
+                self._turn_run_context = None
+                if followup is not None:
+                    # Cut before its run started (a barge-in right after the
+                    # start): what it carried goes back for the caller's turn.
+                    followup.release()
+                self._scheduler.turn_finished()
+                self._watch_for_event_turns()
 
     # -- Internal: tool-call filler ------------------------------------------
 
@@ -2341,7 +2833,7 @@ class VoiceSession:
         if self._turn_tool_seen_at is None:
             self._turn_tool_seen_at = time.monotonic()
             self._turn_tool_seen.set()
-        if self.filler is None or not self.filler.enabled or self._turn_filler_task is not None:
+        if self.filler is None or not self.filler.enabled or self._turn_filler_task is not None or self._turn_is_event:
             return
         self._turn_filler_task = asyncio.create_task(self._filler_flow())
 
@@ -2627,6 +3119,8 @@ class VoiceSession:
             # wrapper). Point it at the conversation this call joins; a context
             # that already names a parent or carries spans is left alone.
             ctx.parent_id = self.parent_run_id
+            if ctx._bg_store is None:
+                bind_background_store(ctx)
         session_data = await ctx.get_session()
         session_data.update(self.call_context)
         set_run_context(ctx)
@@ -3646,6 +4140,7 @@ class VoiceSession:
             vad_endpointed=self._turn_vad_endpointed,
             filler_spoken=self._turn_filler_count > 0,
             filler_count=self._turn_filler_count,
+            event=self._turn_is_event,
         )
 
     def _attach_metrics_to_trace(self, metrics: TurnMetrics) -> None:
@@ -3711,6 +4206,21 @@ class VoiceSession:
     async def _cleanup(self) -> None:
         self._cancel_hold()
         self._held_user_text = None
+        self._stop_event_watch()
+        store = self._session_store()
+        if store is not None and (pending := store.pending_events()):
+            # Kept for the conversation's next turn (a text turn continuing it),
+            # unless no turn of this call ever ran to hang the store on.
+            logger.warning(
+                "voice_events_undelivered",
+                count=len(pending),
+                event_ids=[event.id for event in pending],
+                keys=[event.key for event in pending if event.key],
+                kept=store is not self._unbound_store,
+            )
+        self._scheduler.release(store)
+        if store is not None:
+            forget_idle_background_store(store)
         if self._llm_warmup_task is not None and not self._llm_warmup_task.done():
             self._llm_warmup_task.cancel()
         self._llm_warmup_task = None

@@ -170,6 +170,19 @@ class FillerSpoken(VoiceSessionEvent):
     text: str
 
 
+class EventTurnStarted(VoiceSessionEvent):
+    """The agent started a turn on its own (finished tasks, posted events), not for the caller.
+
+    Comes before the turn's ``AgentTextDelta``/``AgentTextDone``, so a client
+    can mark the reply as unprompted. ``urgent`` when it cut in (``interrupt``)."""
+
+    type: Literal["event_turn_started"] = "event_turn_started"
+    task_ids: list[str] = []
+    event_ids: list[str] = []
+    keys: list[str] = []
+    urgent: bool = False
+
+
 class AudioOutput(VoiceSessionEvent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     type: Literal["audio_output"] = "audio_output"

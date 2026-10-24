@@ -113,6 +113,177 @@ The summary is deliberately bounded — it's for briefing the user, not for dump
 
 Handlers that yield progress dicts (e.g. `{"stage": "processing", "progress": 50}`) surface as `summary.phase` and `summary.pct`. Agent children also expose `summary.last_tool` and `summary.tools_in_flight` (open tool calls inferred from the event log — a tool drops off when its `OutputEvent` arrives). While running with no explicit stage, `phase` falls back to `streaming`, `tool:{name}`, or `running`; on terminal success `phase` becomes `completed` and `pct` is `100`.
 
+## Opt-in automatic follow-up turns
+
+`Agent.stream_until_idle()` streams the initial turn and starts another turn
+when a background task finishes or a [session event](#posting-events-to-a-session)
+arrives. Ordinary `agent(...)` calls keep their existing single-turn behavior.
+
+```python
+from contextlib import aclosing
+
+stream = agent.stream_until_idle(
+    prompt="Prepare the report in the background, then tell me the result.",
+    max_idle_secs=300,
+    max_continuations=10,
+)
+async with aclosing(stream):
+    async for event in stream:
+        print(event)
+
+print(stream.stop_reason, stream.last_run_id)
+```
+
+Each turn has a fresh `run_id`, the previous turn as its `parent_run_id`, and its
+own root `OUTPUT` event. Consume the whole stream, not just the first output.
+A follow-up's `prompt` is the completion notice itself: a `role="user"` message
+with `metadata.source == "runtime"`, so transcripts that filter with
+`Message.is_runtime()` hide it and input guardrails skip it, as for any notice.
+It is not a human utterance and earlier traces are never rewritten. Follow-up
+outputs carry `metadata.trigger`:
+
+```python
+{"kind": "background_completion", "continuation_index": 1, "task_ids": ["..."]}
+# with posted events: "kind": "session_event" and "event_ids": [...]
+```
+
+The stream ends when no children or pending notices remain, or on an idle
+timeout, continuation limit, unsuccessful run, or approval/input suspension.
+Read `stop_reason` (and `last_status` for the last run's status code) after
+iteration. `max_idle_secs` bounds waiting between turns, not the duration of a
+model call. `max_continuations=0` allows only the initial turn. Tracing must be
+enabled so subsequent turns can read their history.
+
+### Sending another user turn
+
+Just send it: `agent(prompt=..., parent_id=stream.last_run_id)`, or start another
+`stream_until_idle` with that `parent_id`. While the stream is waiting between
+runs, the new turn **preempts** it: the stream ends with `stop_reason ==
+"preempted"`, and any notices that were pending ride along in the new turn's
+memory just before its prompt. While one of the stream's runs is still in flight,
+the new turn raises `SessionBusyError` before hooks or the model run; wait for
+that run's `OUTPUT` first. To queue it instead, create the stream with
+`on_busy="enqueue"`: the new turn waits for the in-flight run to finish, then
+preempts the stream as above.
+
+A turn let into the session always continues from its latest run, even if it
+was sent with an older `parent_id` (one it queued behind, or one a client had
+not caught up with). Its `OUTPUT` carries the run it continued from as
+`parent_run_id`, and its root span keeps the one it asked for as
+`metadata.requested_parent_id`.
+
+### Which results start a turn
+
+By default every finished task and every posted event starts a follow-up. A tool
+or an event can ask for less, or more, attention:
+
+```python
+Tool(handler=refresh_cache, background_mode="always", background_announce="silent")
+```
+
+- `"when_idle"` (default): start a follow-up once the in-flight run, if any, has
+  finished.
+- `"silent"`: start nothing. The result rides the next turn that starts for
+  another reason, like any pending notice. A stream with only silent work left
+  ends with `stop_reason == "idle"`.
+- `"interrupt"`: in a voice call, cut in on the agent's reply (see
+  [Using tools](/voice/tools#report-back-when-slow-work-finishes)). A text run is
+  never cut, so here it behaves like `"when_idle"`.
+
+A follow-up started by an interrupting item records `"announce": "interrupt"` in
+its `metadata.trigger`.
+
+### Stopping, hosting, and gating follow-ups
+
+```python
+from timbal.core.continuation import AgentContinuation, continuation_for_run
+
+stream = AgentContinuation(
+    agent,
+    admit=wait_until_the_line_is_quiet,  # awaited before each follow-up starts
+    prompt="Prepare the report in the background, then tell me the result.",
+)
+
+# Elsewhere, with only a run id (a request handler, say):
+driver = continuation_for_run(run_id)
+if driver is not None:
+    driver.stop()
+```
+
+- `stop()` ends the stream immediately while it waits, or after the current run's
+  `OUTPUT` while one is in flight. `aclose()` also closes the in-flight run.
+- `admit` is an optional parameterless callable (sync or async). The stream calls
+  it once a completion is pending and starts the follow-up as soon as it returns;
+  a preemption, `stop()`, or the idle timeout cancels it. Channel-specific
+  conditions such as voice playback or caller silence belong here.
+- `continuation_for_run(run_id)` finds the stream that owns a session through its
+  background-task store, so it returns `None` before the session's first spawn.
+
+This is a **process-local, caller-driven** stream, not a durable session service.
+Stopping, closing, or cancelling it stops further automatic responses but leaves
+detached children running. Use explicit background-task cancellation to stop
+those too. Close it explicitly when breaking iteration.
+
+Existing HTTP routes do not opt into this behavior; voice sessions run their
+own version of it (see [Using tools](/voice/tools#report-back-when-slow-work-finishes)).
+Restart recovery, cross-worker ownership, and guarantees that a user heard a
+response are outside this API's scope.
+
+## Posting events to a session
+
+Work that is not a background task of the agent (another service, a job queue,
+a webhook) reports into the conversation with a session event:
+
+```python
+from timbal.state import post_session_event
+
+event = post_session_event(run_id, "The nightly export finished: 1,204 rows.", key="export")
+```
+
+The session's next turn receives the event as a runtime message ahead of its
+prompt (never as a user utterance); a `stream_until_idle` stream waiting on the
+session wakes and starts a follow-up unless the event says `announce="silent"`
+(see [Which results start a turn](#which-results-start-a-turn)). A pending event
+with the same `key` is superseded. The returned `SessionEvent` is a receipt:
+`state` is `"pending"`, then `"delivered"` (with `run_id`) once a turn has it,
+or `"superseded"`; `await event.settled()` waits for that. Turns that receive
+events count them in their usage as `session_events:delivered`.
+
+Any run id of a session that has started a background task (or received an
+event) reaches it. For a session with neither, `post_session_event` raises
+`LookupError`; pass `create=True` with the session's **latest** run id, since
+only the turn chained directly on that run will find the event. Posting is safe
+from another thread (a webhook handler, a sync tool). Text is limited to 4,000
+characters. `source="client"` marks text from a user's device, which the model
+is told to treat as information, not instructions. Events are process-local,
+like background tasks.
+
+## Reporting progress into the conversation
+
+[Structured progress](#structured-progress) is for peeking: it updates the
+task's summary and the model sees it only if it polls. To tell the
+conversation while the task runs, call `report_progress` from inside the
+background task:
+
+```python
+from timbal.state import report_progress
+
+
+async def build_site(repo: str) -> str:
+    """Build and deploy the site. Takes a few minutes."""
+    for phase in ("install", "build", "deploy"):
+        await run_phase(repo, phase)
+        report_progress(f"{phase} finished")
+    return "Deployed."
+```
+
+Each report is a session event keyed on the task, so a newer report replaces
+one no turn has read yet, and the task's completion notice replaces any report
+still pending. The model is told the task is still running. A streaming session
+starts a follow-up for a report like for any event; pass `announce="silent"` to
+only let it ride the next turn. Outside a background task, `report_progress`
+raises `RuntimeError`.
+
 ## Timeouts
 
 Set `background_timeout` (seconds) on a tool to hard-cap how long a detached child may run. When the deadline hits, the child is cancelled like a user cancel (Task cancel + handler `aclose` + `on_background_cancel`) but reports status `timed_out` so the next-turn completion notice is unambiguous.

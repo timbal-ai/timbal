@@ -22,6 +22,7 @@ _EMPTY_METADATA: MappingProxyType[str, Any] = MappingProxyType({})
 # chat transcripts should filter ``source == "runtime"`` rather than sniffing text.
 RUNTIME_SOURCE = "runtime"
 BACKGROUND_TASK_COMPLETED_KIND = "background_task_completed"
+SESSION_EVENT_KIND = "session_event"
 
 
 def _append_anthropic_content_blocks(

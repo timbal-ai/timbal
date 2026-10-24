@@ -55,4 +55,86 @@ Replace the mock with an async service call when the basic flow works. For actio
 
 A filler is an acknowledgement of waiting, not confirmation that an action succeeded. Give the final spoken confirmation only after the tool result supports it.
 
+## Report back when slow work finishes
+
+Work that takes minutes should not hold the turn. Start it, let the call continue, and have the agent speak up when it lands.
+
+When the slow work is one of the agent's own tools, run it in the background and turn on `announce_background_results`. The tool returns at once, and when it finishes the agent takes a turn of its own to tell the caller:
+
+```python agent.py
+import asyncio
+
+from timbal import Agent, Tool
+
+
+async def build_report(topic: str) -> str:
+    """Build a sales report on a topic. It takes a while; the caller hears back when it is ready."""
+    await asyncio.sleep(20)  # stands in for the slow job
+    return f"Sales for {topic} are up 4% this quarter."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-4.1-mini",
+    system_prompt="You help callers with sales reports. Reply in one or two short spoken sentences.",
+    tools=[Tool(handler=build_report, background_mode="always")],
+    voice_config={"language": "en", "events": {"announce_background_results": True}},
+)
+```
+
+When the work happens elsewhere (another service, a job queue, a browser tab), report it with `session.notify(text)`. `current_voice_session()` returns the live session to a tool and to any task it starts:
+
+```python
+from timbal.voice import current_voice_session
+
+
+async def on_job_finished(session, job) -> None:
+    event = await session.notify(
+        f"The {job.topic} report is ready: {job.summary}. Tell the caller briefly.",
+        key=f"report:{job.id}",
+    )
+    print(event.state)  # "pending" until a turn takes it
+```
+
+Either way, the result reaches the model as a runtime message, never as something the caller said: it is not in the transcript or the captions, and it stays in memory for later turns. The agent waits for a quiet line (the caller not talking, its own audio finished, no greeting pending). If the caller speaks first, the result comes with their turn instead, ahead of what they said. Results waiting together are spoken in one turn, and a `notify` with the same `key` replaces one that has not been delivered yet. The model may decide there is nothing worth saying; then the agent stays quiet, and no filler plays. While the agent is waiting on the caller (an approval, `ask_user`), it does not speak up.
+
+`notify()` returns a receipt at once: `await event.settled()` reports `"delivered"` once a turn has it (`event.run_id`) or `"superseded"` when a newer event with the same key replaced it. Without `announce_background_results`, a finished background task still reaches the agent, on the caller's next turn. A client can send events over the call's data channel when the server allows it; see [Voice transports](/voice/transports#reporting-events).
+
+### Choosing what speaks up
+
+Each tool and each event can override the call's default with an announce policy:
+
+```python
+Tool(handler=book_table, background_mode="always", background_announce="when_idle")  # speak up when done
+Tool(handler=sync_crm, background_mode="always", background_announce="silent")  # wait for the caller's next turn
+await session.notify("The fire alarm test starts in one minute.", announce="interrupt")
+```
+
+- `"when_idle"`: take a turn once the line is quiet (the default for `notify`).
+- `"silent"`: never take a turn; the result reaches the caller's next turn. This is the default for background tools unless `announce_background_results` is on.
+- `"interrupt"`: speak now. The agent cuts its own reply short, as if the caller had barged in, and what the caller already heard stays in memory. It still waits while the agent is parked on the caller (an approval, `ask_user`). Keep it for things that cannot wait. Events from the caller's device cannot interrupt.
+
+### Progress while the work runs
+
+A background tool can narrate its progress with `report_progress`. Each report is spoken like a `notify` once the line is quiet, a newer report replaces one not yet spoken, and the model is told the work is still running:
+
+```python
+from timbal.state import report_progress
+
+
+async def book_flight(origin: str, destination: str) -> str:
+    """Book a flight. Takes about a minute."""
+    options = await search_flights(origin, destination)
+    report_progress(f"Found {len(options)} options; confirming the cheapest.")
+    return await confirm(options[0])
+```
+
+Pass `announce="silent"` to keep reports for the caller's next turn instead.
+
+### Telling the client
+
+When the agent takes a turn of its own, the client gets an `event_turn_started` event (`task_ids`, `event_ids`, `keys`, `urgent`) before any text or audio, so a UI can show the reply as an announcement rather than an answer. Its `voice_turn_metrics` have `event: true`.
+
+A text turn on the same conversation while the call is live (a chat tab continuing from the call's run) is let in only while the call is not mid-turn. While a call turn runs, the chat turn is refused, or queued with `"events": {"on_busy": "enqueue"}` in the server's `voice_config`. Once let in, the chat turn continues from the call's latest turn, even if the chat sent an older run as its parent, so neither side loses what the other said. A caller who speaks while the chat turn runs is answered after it, and the call continues from what the chat said. An `"interrupt"` event goes ahead of a queued chat turn, but waits for one that is already running.
+
 Continue to [Thinking sounds](/voice/thinking-sounds).
