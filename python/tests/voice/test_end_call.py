@@ -8,7 +8,16 @@ from contextlib import aclosing
 
 from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
-from timbal.voice import SessionStarted, TranscriptEvent, VoiceSessionEvent, current_voice_session
+from timbal.voice import (
+    CommitAction,
+    CommitDecision,
+    HeuristicTurnDetector,
+    SessionStarted,
+    TranscriptEvent,
+    TurnState,
+    VoiceSessionEvent,
+    current_voice_session,
+)
 
 from .test_session import FakePlaybackTracker, _FakeEndpointer
 from .test_voice_events import _Model, _session, _texts, _until
@@ -128,6 +137,61 @@ class TestEndCall:
         assert not session.closed, "hung up while local VAD heard caller speech"
 
         endpointer.speech_secs = 0.0
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+
+    async def test_committed_utterance_awaiting_turn_detector_holds_hangup(self) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class GatedDetector(HeuristicTurnDetector):
+            async def on_committed(self, text: str, state: TurnState) -> CommitDecision:
+                if "Wait" in text or "noise" in text:
+                    entered.set()
+                    await release.wait()
+                if "noise" in text:
+                    return CommitDecision(action=CommitAction.IGNORE, reason="noise")
+                return await super().on_committed(text, state)
+
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE, "Dime.", GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+        )
+        session.turn_detector = GatedDetector()
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
+        await _until(lambda: GOODBYE in _texts(events))
+        await stt.inject(TranscriptEvent(type="partial", text="Wait, one more question"))
+        await stt.inject(TranscriptEvent(type="committed", text="Wait, one more question"))
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        tracker.playing = False
+
+        # Even past the quiet window + hang-up tail, an in-flight detector decision blocks hang-up.
+        await asyncio.sleep(session.EVENT_TURN_QUIET_SECS + session.END_CALL_TAIL_SECS + 0.3)
+        assert not session.closed, "hung up while committed utterance was awaiting turn_detector.on_committed"
+
+        # Accepted speech cancels the hang-up.
+        release.set()
+        await _until(lambda: "Dime." in _texts(events))
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
+        assert not session.closed
+
+        # Now request end_call again, and send an utterance that the detector ignores as noise.
+        entered.clear()
+        release.clear()
+        session.end_call()
+        await stt.inject(TranscriptEvent(type="partial", text="noise"))
+        await stt.inject(TranscriptEvent(type="committed", text="noise"))
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.3)
+        assert not session.closed, "hung up before detector finished evaluating noise"
+
+        release.set()
         await asyncio.wait_for(call, timeout=3.0)
         assert session.closed
 

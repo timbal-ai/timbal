@@ -538,6 +538,9 @@ class VoiceSession:
         # resumed speaking — the committed fragment's own trailing partial
         # refinements must not stretch the hold.
         self._commit_event_at: float = 0.0
+        # Committed STT utterances currently in ``_handle_committed`` (awaiting
+        # ``turn_detector.on_committed`` or starting the turn).
+        self._commits_in_flight: int = 0
         # Watchdog for transcripts the provider never commits: STT can emit a
         # partial (e.g. quiet speech ducked by AEC during assistant playback)
         # whose VAD never registers an utterance — no commit ever fires and the
@@ -812,7 +815,7 @@ class VoiceSession:
             return True
         if self._greeting_task is not None and not self._greeting_task.done():
             return True
-        if self._held_user_text is not None:
+        if self._held_user_text is not None or self._commits_in_flight > 0:
             return True
         now = time.monotonic()
         if (
@@ -820,8 +823,6 @@ class VoiceSession:
             and now - self._last_partial_at < self.EVENT_TURN_STRANDED_PARTIAL_SECS
             and not _likely_stt_echo(self._latest_partial_text, self._spoken_assistant_text())
         ):
-            return True
-        if self._commit_event_at > commit_at and now - self._commit_event_at < self.EVENT_TURN_QUIET_SECS:
             return True
         if self._endpointer is not None:
             speech_secs = self._endpointer.speech_secs_in_window(self.HOLD_VAD_SPEECH_WINDOW_SECS)
@@ -1829,6 +1830,13 @@ class VoiceSession:
     async def _handle_committed(self, text: str) -> None:
         if self._closed:
             return
+        self._commits_in_flight += 1
+        try:
+            await self._handle_committed_inner(text)
+        finally:
+            self._commits_in_flight -= 1
+
+    async def _handle_committed_inner(self, text: str) -> None:
         self._commit_event_at = time.monotonic()
         # Measured now (the VAD / partial stamps are freshest here) but only
         # published once the commit is *accepted* below: a noise commit the
