@@ -1,13 +1,14 @@
 """Session events: posted from outside a run, delivered by the session's next turn."""
 
 import asyncio
+import gc
 import threading
 from contextlib import aclosing
 from types import SimpleNamespace
 
 import pytest
 from timbal import Agent, Tool
-from timbal.core.continuation import take_followup
+from timbal.core.continuation import AgentContinuation, take_followup
 from timbal.core.test_model import TestModel
 from timbal.state import (
     get_run_context,
@@ -645,3 +646,44 @@ class TestPlumbing:
         assert forget_idle_background_store(store) is True
         assert store_for_run("run-a") is None and store_for_run("run-b") is None
         assert event.state == "delivered"
+
+    async def test_preempted_driver_collected_before_admitted_turn_ends_still_forgets_idle_store(self):
+        admit_entered = asyncio.Event()
+        chat_entered, chat_opened = asyncio.Event(), asyncio.Event()
+
+        async def admit() -> None:
+            admit_entered.set()
+            await asyncio.Event().wait()
+
+        class Gated(TestModel):
+            async def stream(self, messages, **kwargs):
+                if messages[-1].collect_text() == "chat":
+                    chat_entered.set()
+                    await chat_opened.wait()
+                async for message in super().stream(messages, **kwargs):
+                    yield message
+
+        agent = Agent(name="agent", model=Gated(responses=["Before.", "Working.", "Chat reply."]))
+        r0 = await agent(prompt="r0").collect()
+        post_session_event(r0.run_id, "note", create=True)
+        stream = AgentContinuation(agent, admit=admit, prompt="start", parent_id=r0.run_id)
+        outputs: list[OutputEvent] = []
+
+        async def consume() -> None:
+            async with aclosing(stream):
+                async for item in stream:
+                    if isinstance(item, OutputEvent) and item.parent_call_id is None:
+                        outputs.append(item)
+                        post_session_event(item.run_id, "second note")
+
+        consumer = asyncio.create_task(consume())
+        await asyncio.wait_for(admit_entered.wait(), 2)
+        chat = asyncio.create_task(agent(prompt="chat", parent_id=outputs[0].run_id).collect())
+        await asyncio.wait_for(chat_entered.wait(), 2)
+        await asyncio.wait_for(consumer, 2)
+        assert stream.stop_reason == "preempted"
+        del stream
+        gc.collect()
+        chat_opened.set()
+        chat_out = await asyncio.wait_for(chat, 2)
+        assert store_for_run(chat_out.run_id) is None

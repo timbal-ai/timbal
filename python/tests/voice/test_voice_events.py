@@ -1286,6 +1286,81 @@ class TestOtherChannel:
             await notify_task[0]
         assert store_for_run(session._last_run_context.id) is None
 
+    async def test_stale_chat_before_first_voice_turn_rechains_onto_call_parent_run_id(self) -> None:
+        model = _Model("R0.", "R1.", "Desde el chat.", "Hola.")
+        session, stt, _tts = _session(model)
+        r0 = await session.agent(prompt="turn 0").collect()
+        post_session_event(r0.run_id, NOTE, create=True, announce="silent")
+        r1 = await session.agent(prompt="turn 1", parent_id=r0.run_id).collect()
+        set_run_context(None)
+        session.parent_run_id = r1.run_id
+        chats = []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            # Stale chat client still names r0, while the call joined at r1.
+            chats.append(await session.agent(prompt="from chat", parent_id=r0.run_id).collect())
+            await stt.inject(TranscriptEvent(type="committed", text="Hola"))
+            await _until(lambda: "Hola." in _texts(events))
+
+        await _run(session, stt, drive)
+        assert chats[0].parent_run_id == r1.run_id
+        assert _in_order(_seen(model.calls[3]), "turn 0", "turn 1", "from chat", "Hola")
+
+    async def test_call_joining_while_preempted_driver_is_releasing_takes_over_store(self) -> None:
+        release = asyncio.Event()
+        chat_entered, chat_opened = asyncio.Event(), asyncio.Event()
+
+        async def work() -> str:
+            await release.wait()
+            return "Sales are up 4%."
+
+        class Gated(_Model):
+            def __init__(self, *replies: str | Message) -> None:
+                super().__init__(*replies)
+                outer = self
+
+                class Inner(TestModel):
+                    async def stream(self, messages: list, **kwargs: Any) -> AsyncIterator[Any]:
+                        if messages[-1].collect_text() == "from chat":
+                            chat_entered.set()
+                            await chat_opened.wait()
+                        async for message in super().stream(messages, **kwargs):
+                            yield message
+
+                self.model = Inner(handler=outer._reply)
+
+        model = Gated(_tool_call("work"), "Trabajando.", "Desde el chat.", REPLY)
+        tool = Tool(name="work", handler=work, background_mode="always")
+        session, stt, _tts = _session(model, tools=[tool], announce_background_results=True)
+        driver = session.agent.stream_until_idle(prompt="start")
+        outputs: list[OutputEvent] = []
+
+        async def consume() -> None:
+            async with aclosing(driver):
+                async for event in driver:
+                    if isinstance(event, OutputEvent) and event.parent_call_id is None:
+                        outputs.append(event)
+
+        consumer = asyncio.create_task(consume())
+        await _until(lambda: outputs and driver._waiter is not None)
+        chat_task = asyncio.create_task(
+            session.agent(prompt="from chat", parent_id=outputs[0].run_id).collect()
+        )
+        await asyncio.wait_for(chat_entered.wait(), 2)
+        await asyncio.wait_for(consumer, 2)
+        assert driver.stop_reason == "preempted"
+        set_run_context(None)
+        session.parent_run_id = outputs[0].run_id
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            chat_opened.set()
+            await asyncio.wait_for(chat_task, 2)
+            release.set()
+            await asyncio.sleep(0.25)
+
+        events = await _run(session, stt, drive)
+        assert REPLY in _texts(events)
+
 
 class TestRecordsAndCleanup:
     async def test_client_event_screening_lands_on_the_receiving_run(self) -> None:
