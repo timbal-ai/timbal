@@ -1,0 +1,4 @@
+8 model calls x 2 tools, 40 KB per result, 0 ms per model call; store 50 ms + 200 ms/MB; flush 500 ms
+mode       run p50  run p95  waited  saves failed  MB sent serialize
+sync         7.65s    7.67s  10.40s     26      0     44.5     0.17s
+buffered     0.98s    0.99s   0.97s      2      0      4.3     0.01s

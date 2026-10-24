@@ -1,0 +1,12 @@
+voice session CPU bench — detector=raw vad=off recording=off 20s/rung
+  ok  n=  8  loop lag p50/p99/max   0.7/   3.4/   35.6 ms  late frames  0.00%  cores  0.04 (0.004/session)  turns  40  eou→llm p95    28  eou→audio p95     56 ms
+
+==============================================================================
+detector=raw vad=off recording=off  |  available_cpus=10.00
+  turn-latency budget: 167 ms (3x the single-session baseline)
+  sessions per event loop (p99 lag <= 20ms): >= 8
+  CPU per session: 0.004 cores  ->  158.4 sessions/cpu at 70% target
+  every rung passed, so 8 is a floor and not a ceiling — re-run with a larger --max-sessions, or under `docker --cpus=1`
+  _PER_CPU lower bound from CPU cost alone: 15.84
+==============================================================================
+wrote /Users/dberges/Desktop/timbal-ai/timbal/benchmarks/langchain/results/pr-222/base_voice_raw.json

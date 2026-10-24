@@ -1,0 +1,11 @@
+# Versions used for the PR #222 performance comparison (2026-10-24).
+langgraph==1.2.17
+langgraph-prebuilt==1.1.1
+langgraph-checkpoint==4.3.0
+langgraph-sdk==0.4.9
+langchain-core==1.7.0
+langsmith==0.14.12
+langchain==1.4.7
+# Shared hot-path serialization/logging versions used in the comparison.
+pydantic==2.14.1
+structlog==25.5.0

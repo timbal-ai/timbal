@@ -1,0 +1,12 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+voice session CPU bench — detector=lexical vad=off recording=off 15s/rung
+  ok  n=  8  loop lag p50/p99/max   0.7/   5.0/   14.3 ms  late frames  0.00%  cores  0.07 (0.008/session)  turns   0  eou→llm p95     -  eou→audio p95      - ms
+
+==============================================================================
+detector=lexical vad=off recording=off  |  available_cpus=10.00
+  sessions per event loop (p99 lag <= 20ms): >= 8
+  CPU per session: 0.008 cores  ->  83.4 sessions/cpu at 70% target
+  every rung passed, so 8 is a floor and not a ceiling — re-run with a larger --max-sessions, or under `docker --cpus=1`
+  _PER_CPU lower bound from CPU cost alone: 8.34
+==============================================================================
+wrote /Users/dberges/Desktop/timbal-ai/timbal/benchmarks/langchain/results/pr-222/pr_voice.json

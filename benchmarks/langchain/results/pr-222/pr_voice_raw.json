@@ -1,0 +1,27 @@
+{
+  "detector": "raw",
+  "vad": false,
+  "recording": false,
+  "available_cpus": 10.0,
+  "lag_budget_ms": 20.0,
+  "sessions_per_loop": 8,
+  "sessions_per_loop_is_a_floor": true,
+  "turn_latency_budget_ms": 106.80000000000001,
+  "cores_per_session": 0.005292496751299135,
+  "sessions_per_cpu_at_target": 132.26271699234826,
+  "rungs": [
+    {
+      "sessions": 8,
+      "loop_lag_p50_ms": 0.69,
+      "loop_lag_p99_ms": 4.17,
+      "loop_lag_max_ms": 21.58,
+      "late_frames_pct": 0.0,
+      "cores_used": 0.042,
+      "cores_per_session": 0.0053,
+      "turns": 40,
+      "eou_to_llm_first_token_p95_ms": 10.8,
+      "eou_to_first_audio_p95_ms": 35.6,
+      "errors": []
+    }
+  ]
+}

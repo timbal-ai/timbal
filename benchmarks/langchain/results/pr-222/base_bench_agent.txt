@@ -1,0 +1,196 @@
+Commit: 49af46e9
+Full mode; corrected isolated-run harness; PYTHONHASHSEED=0
+
+════════════════════════════════════════════════════════════════════════════
+  Timbal vs LangGraph — agent loop benchmark
+  100 iters · burst {1: 20, 2: 10, 3: 15} · 100 mem · 200 throughput
+  LangGraph + LangSmith
+  Agent/graph creation excluded. Traces cleared between batches.
+  Both frameworks: 1 shared instance, native async (ainvoke / .collect()).
+  LLMs faked; step detected from message history — no shared counter state.
+════════════════════════════════════════════════════════════════════════════
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 1: Single tool call  (LLM → add → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     382.0 µs      5.38 ms     10.20 ms
+           p50     325.5 µs      4.02 ms      9.53 ms
+           p95     776.4 µs      9.83 ms     16.41 ms
+           p99     936.0 µs     66.41 ms     23.25 ms
+
+  Memory  (×100 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          43.7 KB         448  B
+  LG (bare)                     1483.6 KB       15193  B
+  LG + LangSmith                1465.2 KB       15004  B
+
+  Burst  (20 concurrent loops)
+  Both use 1 shared instance. LangGraph uses native ainvoke().
+
+  burst [ 1/20]  last    563.7 µs
+  burst [ 2/20]  last    312.3 µs
+  burst [ 3/20]  last    295.3 µs
+  burst [ 4/20]  last    290.2 µs
+  burst [ 5/20]  last    545.5 µs
+  burst [ 6/20]  last    305.7 µs
+  burst [ 7/20]  last    298.8 µs
+  burst [ 8/20]  last    289.7 µs
+  burst [ 9/20]  last    278.7 µs
+  burst [10/20]  last    280.3 µs
+  burst [11/20]  last    277.3 µs
+  burst [12/20]  last    313.4 µs
+  burst [13/20]  last    282.3 µs
+  burst [14/20]  last    277.5 µs
+  burst [15/20]  last    281.2 µs
+  burst [16/20]  last    283.0 µs
+  burst [17/20]  last    274.6 µs
+  burst [18/20]  last    270.8 µs
+  burst [19/20]  last    305.6 µs
+  burst [20/20]  last    276.1 µs
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50     289.7 µs     31.07 ms    104.81 ms
+           p75     305.7 µs     32.11 ms    107.86 ms
+           p95     563.7 µs     33.19 ms    110.72 ms
+           p99     563.7 µs     33.19 ms    110.72 ms
+           max     563.7 µs     33.19 ms    110.72 ms
+
+  max invocation latency: Timbal 0.6 ms  |  LG bare 33.2 ms  |  LG+Smith 110.7 ms
+
+  Throughput  (200 loops)
+  Both use 1 shared instance, semaphore-bounded async.
+   concurrency        Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        3094/s         301/s         121/s
+            10        3171/s         502/s         128/s
+            50        2805/s         474/s         165/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     641.5 µs      7.71 ms     19.63 ms
+           p50     601.1 µs      7.74 ms     18.87 ms
+           p95     919.3 µs      8.40 ms     23.85 ms
+           p99      1.04 ms      9.34 ms     29.78 ms
+
+  Memory  (×100 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          58.9 KB         604  B
+  LG (bare)                     2262.1 KB       23164  B
+  LG + LangSmith                2536.6 KB       25975  B
+
+  Burst  (10 concurrent loops)
+  Both use 1 shared instance. LangGraph uses native ainvoke().
+
+  burst [ 1/10]  last    976.4 µs
+  burst [ 2/10]  last    669.9 µs
+  burst [ 3/10]  last    783.1 µs
+  burst [ 4/10]  last    642.8 µs
+  burst [ 5/10]  last    631.1 µs
+  burst [ 6/10]  last    777.2 µs
+  burst [ 7/10]  last    784.1 µs
+  burst [ 8/10]  last    598.8 µs
+  burst [ 9/10]  last    620.5 µs
+  burst [10/10]  last    574.6 µs
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50     669.9 µs     44.31 ms    128.27 ms
+           p75     783.1 µs     44.77 ms    129.72 ms
+           p95     976.4 µs     45.46 ms    130.72 ms
+           p99     976.4 µs     45.46 ms    130.72 ms
+           max     976.4 µs     45.46 ms    130.72 ms
+
+  max invocation latency: Timbal 1.0 ms  |  LG bare 45.5 ms  |  LG+Smith 130.7 ms
+
+  Throughput  (200 loops)
+  Both use 1 shared instance, semaphore-bounded async.
+   concurrency        Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        1529/s         124/s          53/s
+            10        1471/s         179/s          63/s
+            50        1538/s         217/s          69/s
+
+────────────────────────────────────────────────────────────────────────────
+  Scenario 3: Parallel tools  (LLM → [add, mul, neg] → LLM → answer)
+────────────────────────────────────────────────────────────────────────────
+
+  Latency  (×100)
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean     667.3 µs      5.32 ms     11.75 ms
+           p50     597.4 µs      5.16 ms     11.66 ms
+           p95      1.05 ms      7.10 ms     14.38 ms
+           p99      1.27 ms     15.62 ms     15.73 ms
+
+  Memory  (×100 runs)
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          66.3 KB         679  B
+  LG (bare)                      739.6 KB        7574  B
+  LG + LangSmith                1303.5 KB       13348  B
+
+  Burst  (15 concurrent loops)
+  Both use 1 shared instance. LangGraph uses native ainvoke().
+
+  burst [ 1/15]  last     6.34 ms
+  burst [ 2/15]  last     6.14 ms
+  burst [ 3/15]  last     6.05 ms
+  burst [ 4/15]  last     5.96 ms
+  burst [ 5/15]  last     5.83 ms
+  burst [ 6/15]  last     5.73 ms
+  burst [ 7/15]  last     5.53 ms
+  burst [ 8/15]  last     5.41 ms
+  burst [ 9/15]  last     5.37 ms
+  burst [10/15]  last     5.34 ms
+  burst [11/15]  last     5.30 ms
+  burst [12/15]  last     5.23 ms
+  burst [13/15]  last     5.20 ms
+  burst [14/15]  last     5.17 ms
+  burst [15/15]  last     5.09 ms
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50      5.41 ms     31.07 ms    100.79 ms
+           p75      5.96 ms     32.33 ms    103.51 ms
+           p95      6.34 ms     33.35 ms    104.54 ms
+           p99      6.34 ms     33.35 ms    104.54 ms
+           max      6.34 ms     33.35 ms    104.54 ms
+
+  max invocation latency: Timbal 6.3 ms  |  LG bare 33.3 ms  |  LG+Smith 104.5 ms
+
+  Throughput  (200 loops)
+  Both use 1 shared instance, semaphore-bounded async.
+   concurrency        Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1        1538/s         222/s          98/s
+            10        1894/s         369/s         116/s
+            50        2003/s         374/s         129/s
+
+────────────────────────────────────────────────────────────────────────────
+  AgentExecutor vs create_react_agent vs Timbal  (Scenario 2: 3-tool chain)
+────────────────────────────────────────────────────────────────────────────
+
+  AgentExecutor was removed in LangChain 1.x.
+  LangChain fully deprecated the LCEL agent pattern (AgentExecutor +
+  create_tool_calling_agent) and committed to LangGraph as the sole
+  agent runtime. create_react_agent (langgraph.prebuilt) IS the
+  current official agent API — the benchmark already covers it.
+
+  To test AgentExecutor: install langchain==0.3.x (conflicts with
+  langchain-core>=1.x which langgraph requires).
+
+────────────────────────────────────────────────────────────────────────────
+  All measurements reuse 1 pre-built agent/graph (creation excluded).
+  LLMs faked via message inspection. Timbal traces cleared between batches.
+  Both frameworks run natively async on a single shared instance.
+────────────────────────────────────────────────────────────────────────────
+

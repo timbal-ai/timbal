@@ -12,14 +12,8 @@ Agent/graph creation is excluded from timing — only execution is measured.
 Metrics: latency, memory, burst, throughput.
 
 LangGraph implementation note:
-  Uses langgraph.prebuilt.create_react_agent — the recommended prebuilt agent in the
-  LangGraph docs. This is intentional: it represents the standard path most teams take.
-  A hand-rolled custom StateGraph agent could in principle be marginally faster by
-  skipping the prebuilt abstraction layer, but the fundamental architectural point
-  holds regardless: any LangGraph agent loop is a graph with a conditional back-edge,
-  and the Pregel superstep machinery runs on every iteration whether you use the
-  prebuilt or not. The gap vs Timbal is architectural, not a consequence of using
-  the prebuilt.
+  Retains langgraph.prebuilt.create_react_agent for historical comparability.
+  Use --agent-api current to measure langchain.agents.create_agent instead.
 
 Run:
     uv run python benchmarks/langchain/bench_agent.py
@@ -49,6 +43,8 @@ import tracemalloc  # noqa: E402
 
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("--quick", action="store_true")
+parser.add_argument("--agent-api", choices=("legacy", "current"), default="legacy",
+                    help="legacy=create_react_agent; current=langchain.agents.create_agent")
 parser.add_argument("--timbal-only", action="store_true", help="Skip LangGraph, measure Timbal only")
 _args, _ = parser.parse_known_args()
 
@@ -96,7 +92,18 @@ def pct(samples: list[float], p: float) -> float:
 # Timbal trace cleanup
 # ═══════════════════════════════════════════════════════════════════════════════
 
+from timbal.state import get_run_context, set_run_context  # noqa: E402
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider  # noqa: E402
+
+
+async def _fresh_collect(runnable, **kwargs):
+    """Each sample is a root run; explicit parent_id still links session turns."""
+    previous = get_run_context()
+    set_run_context(None)
+    try:
+        return await runnable(**kwargs).collect()
+    finally:
+        set_run_context(previous)
 
 
 def _clear_traces():
@@ -178,13 +185,20 @@ from langchain_core.tools import StructuredTool  # noqa: E402
 from langgraph.prebuilt import create_react_agent  # noqa: E402
 
 try:
-    from unittest.mock import MagicMock
     from langchain_core.tracers.langchain import LangChainTracer
 
-    def _make_ls_tracer() -> LangChainTracer:
-        tracer = LangChainTracer()
-        tracer._persist_run_single = MagicMock(return_value=None)
-        return tracer
+    class _OfflineTracer(LangChainTracer):
+        # LangChain clones tracers when inheriting metadata. Class overrides
+        # survive that copy; patching one instance silently enables uploads.
+        def _persist_run_single(self, run):
+            pass
+
+        @staticmethod
+        def _update_run_single(run):
+            pass
+
+    def _make_ls_tracer():
+        return _OfflineTracer()
 
     HAS_LANGSMITH = True
 except (ImportError, Exception):
@@ -272,6 +286,9 @@ def _make_lc_graph(scenario: int):
     tools = {1: [td["add"]], 2: [td["add"], td["multiply"], td["subtract"]], 3: [td["add"], td["multiply"], td["negate"]]}[scenario]
     resps = _lc_responses(scenario)
     llm = _FakeLLM(responses=list(resps))
+    if _args.agent_api == "current":
+        from langchain.agents import create_agent
+        return create_agent(llm, tools)
     return create_react_agent(llm, tools)
 
 
@@ -287,11 +304,6 @@ try:
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder  # noqa: E402
     HAS_AGENT_EXECUTOR = True
 except ImportError:
-    # AgentExecutor was removed in LangChain 1.x. LangChain fully deprecated the
-    # LCEL-based agent pattern (AgentExecutor + create_tool_calling_agent) and
-    # committed to LangGraph as the sole agent runtime. If you need to benchmark
-    # AgentExecutor, install langchain==0.3.x — but note it conflicts with
-    # langchain-core>=1.x which langgraph requires.
     HAS_AGENT_EXECUTOR = False
 
 
@@ -337,13 +349,7 @@ async def bench_executor_comparison() -> None:
     """
     if not HAS_AGENT_EXECUTOR:
         section("AgentExecutor vs create_react_agent vs Timbal  (Scenario 2: 3-tool chain)")
-        print(f"\n  {DIM}AgentExecutor was removed in LangChain 1.x.{RESET}")
-        print(f"  {DIM}LangChain fully deprecated the LCEL agent pattern (AgentExecutor +{RESET}")
-        print(f"  {DIM}create_tool_calling_agent) and committed to LangGraph as the sole{RESET}")
-        print(f"  {DIM}agent runtime. create_react_agent (langgraph.prebuilt) IS the{RESET}")
-        print(f"  {DIM}current official agent API — the benchmark already covers it.{RESET}")
-        print(f"\n  {DIM}To test AgentExecutor: install langchain==0.3.x (conflicts with{RESET}")
-        print(f"  {DIM}langchain-core>=1.x which langgraph requires).{RESET}")
+        print(f"\n  {DIM}Optional legacy AgentExecutor is not installed; skipping.{RESET}")
         return
 
     section("AgentExecutor vs create_react_agent vs Timbal  (Scenario 2: 3-tool chain)")
@@ -356,7 +362,7 @@ async def bench_executor_comparison() -> None:
     ae_exec  = _make_agent_executor(SCENARIO)
     ls_tracer = _make_ls_tracer() if HAS_LANGSMITH else None
 
-    async def t_run():   await t_agent(prompt="go").collect()
+    async def t_run():   await _fresh_collect(t_agent, prompt="go")
     async def lg_run():  await lg_graph.ainvoke(_LG_INPUT)
     async def ae_run():  await ae_exec.ainvoke(_AE_INPUT)
     async def lg_run_traced(): await lg_graph.ainvoke(_LG_INPUT, config={"callbacks": [ls_tracer]})
@@ -436,7 +442,7 @@ async def bench_executor_comparison() -> None:
         vals = [pct(s, p) for s in burst_results]
         print(f"  {label:>{COL_W}}" + "".join(f"  {fmt_us(v):>{COL_W}}" for v in vals))
     wall_parts = [f"{c}: {max(s)/1e3:.1f} ms" for c, s in zip(cols, burst_results)]
-    print(f"\n  {DIM}wall: {' | '.join(wall_parts)}{RESET}")
+    print(f"\n  {DIM}max invocation latency: {' | '.join(wall_parts)}{RESET}")
 
     # ── Throughput ─────────────────────────────────────────────────────────────
     subsection(f"Throughput  ({THROUGHPUT_OPS} loops)")
@@ -482,7 +488,7 @@ async def bench_scenario(scenario: int) -> None:
     # ── helpers ──────────────────────────────────────────────────────────────
 
     async def t_run():
-        await t_agent(prompt="go").collect()
+        await _fresh_collect(t_agent, prompt="go")
 
     async def lg_run():
         await lg_graph.ainvoke(_LG_INPUT)
@@ -659,7 +665,7 @@ async def bench_scenario(scenario: int) -> None:
         if ls_burst:
             line += f"  {fmt_us(pct(ls_burst, p))}"
         print(line)
-    wall = f"\n  {DIM}wall: Timbal {max(t_burst)/1e3:.1f} ms"
+    wall = f"\n  {DIM}max invocation latency: Timbal {max(t_burst)/1e3:.1f} ms"
     if lg_burst:
         wall += f"  |  LG bare {max(lg_burst)/1e3:.1f} ms"
     if ls_burst:
@@ -728,7 +734,34 @@ async def bench_scenario(scenario: int) -> None:
             print(line)
 
 
+async def _verify_agent_loops():
+    """Reject shortcuts caused by leaked history before measuring anything."""
+    for scenario, calls, answer in ((1, 2, "3"), (2, 4, "9"), (3, 2, "done")):
+        agent = _make_timbal_agent(scenario)
+        for _ in range(2):
+            before = agent.model.call_count
+            out = await _fresh_collect(agent, prompt="go")
+            assert out.status.code == "success", out.status
+            assert out.output.collect_text() == answer, out.output
+            assert agent.model.call_count - before == calls, "Agent skipped tool steps"
+        before = agent.model.call_count
+        outputs = await asyncio.gather(*[_fresh_collect(agent, prompt="go") for _ in range(4)])
+        assert agent.model.call_count - before == 4 * calls, "Concurrent runs shared history"
+        assert all(out.status.code == "success" and out.output.collect_text() == answer for out in outputs)
+    if not _args.timbal_only:
+        for scenario, count, answer in ((1, 1, "3"), (2, 3, "9"), (3, 3, "done")):
+            graph = _make_lc_graph(scenario)
+            for _ in range(2):
+                result = await graph.ainvoke(_LG_INPUT)
+                messages = result["messages"]
+                assert messages[-1].content == answer, messages[-1]
+                assert sum(isinstance(m, ToolMessage) for m in messages) == count
+    _clear_traces()
+
+
 async def main() -> None:
+    await _verify_agent_loops()
+    print(f"  Agent API: {_args.agent_api}")
     print()
     print(f"{BOLD}{'═' * WIDTH}{RESET}")
     print(f"{BOLD}  Timbal vs LangGraph — agent loop benchmark{RESET}")

@@ -14,9 +14,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Line length**: 120 chars (configured in `pyproject.toml`)
 
 ### Benchmarks
-- **Langchain benchmarks**: `cd benchmarks/langchain && uv pip install langchain-core langsmith langgraph && uv run pytest bench_*.py`
-- **Quick mode** (faster, fewer iterations): default
-- **Full mode**: set env `TIMBAL_BENCH_MODE=full`
+- **LangGraph benchmarks**: `uv pip install -r benchmarks/langchain/requirements.txt`, then `uv run --no-sync python benchmarks/langchain/bench_agent.py` (or the other standalone `bench_*.py` scripts). JavaScript dependencies: `npm ci --prefix benchmarks/langgraph_js`.
+- **Quick mode**: pass `--quick`; full mode is the default. `bench_revision.py` emits repeated-comparison samples as JSON.
+- **Current agent API**: `bench_agent.py --agent-api current` benchmarks `langchain.agents.create_agent`; the default retains legacy `create_react_agent` for historical comparisons. Keep the same environment/harness and switch only `PYTHONPATH` when comparing Timbal revisions.
 
 ---
 
