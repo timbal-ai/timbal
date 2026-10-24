@@ -466,6 +466,53 @@ class TestBusySession:
         assert result.parent_run_id == outputs[1].run_id
         assert result.metadata["requested_parent_id"] == outputs[0].run_id
 
+    async def test_a_new_driver_waits_for_a_turn_the_stopped_driver_queued(self):
+        release = asyncio.Event()
+        entered, opened = asyncio.Event(), asyncio.Event()
+        chat_entered, chat_opened = asyncio.Event(), asyncio.Event()
+
+        async def work() -> str:
+            await release.wait()
+            return "done"
+
+        class Gated(TestModel):
+            async def stream(self, messages, **kwargs):
+                if messages[-1].is_runtime():
+                    entered.set()
+                    await opened.wait()
+                elif messages[-1].collect_text() == "me now":
+                    chat_entered.set()
+                    await chat_opened.wait()
+                async for message in super().stream(messages, **kwargs):
+                    yield message
+
+        model = Gated(responses=[_tool_call("work"), "Working.", "Finished.", "Reply to chat.", "Second driver."])
+        agent = Agent(name="agent", model=model, tools=[Tool(name="work", handler=work, background_mode="always")])
+        stream = agent.stream_until_idle(prompt="start", on_busy="enqueue")
+        outputs = []
+        consumer = asyncio.create_task(_consume_roots(stream, outputs))
+        await _until(lambda: outputs)
+        release.set()
+        await asyncio.wait_for(entered.wait(), 2)
+        direct = asyncio.create_task(agent(prompt="me now", parent_id=outputs[0].run_id).collect())
+        await asyncio.sleep(0.05)
+        stream.stop()
+        opened.set()
+        await asyncio.wait_for(chat_entered.wait(), 2)
+        await asyncio.wait_for(consumer, 2)
+        # The stopped driver still holds the session for the turn it queued: a new driver waits behind it.
+        second = agent.stream_until_idle(prompt="next", parent_id=outputs[1].run_id)
+        second_outputs = []
+        second_consumer = asyncio.create_task(_consume_roots(second, second_outputs))
+        await asyncio.sleep(0.05)
+        assert not second_outputs and model.call_count == 3
+        chat_opened.set()
+        result = await asyncio.wait_for(direct, 2)
+        await asyncio.wait_for(second_consumer, 2)
+        assert result.parent_run_id == outputs[1].run_id
+        assert second_outputs[0].parent_run_id == result.run_id
+        assert second_outputs[0].output.collect_text() == "Second driver."
+
     async def test_two_enqueued_turns_serialize_and_chain(self):
         release = asyncio.Event()
         entered, opened = asyncio.Event(), asyncio.Event()

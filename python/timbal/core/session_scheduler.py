@@ -22,6 +22,7 @@ from ..state.background import (
     SessionEvent,
     _check_announce,
     adopt_background_store,
+    forget_idle_background_store,
     format_session_notice,
 )
 
@@ -178,6 +179,8 @@ class SessionScheduler:
         # Other root turns admitted and still running, and those queued behind the owner.
         self._others: set[str] = set()
         self._others_waiting = 0
+        # Stores the channel let go of while turns admitted or queued here were still on (see release).
+        self._releasing: set[BackgroundTaskStore] = set()
         # The owner is cutting its own turn to start another: queued turns keep waiting.
         self._holding = 0
         # The session's latest root run, the owner's or an admitted one: where the next turn chains.
@@ -199,14 +202,36 @@ class SessionScheduler:
                 store.acquire_continuation(self)
             except RuntimeError:
                 raise RuntimeError(_OWNED_ELSEWHERE) from None
+        self._releasing.discard(store)
         self.store = store
 
     def release(self, *stores: BackgroundTaskStore | None) -> None:
-        """Stop owning the bound store and ``stores`` (a store a spawn created joins the owner unbound)."""
-        for store in {self.store, *stores}:
-            if store is not None:
+        """Stop owning the bound store and ``stores`` (a store a spawn created joins the owner unbound).
+
+        Turns admitted or queued here keep the session until they end, so a
+        channel taking it over meanwhile waits behind them like any turn;
+        another channel's own run admitted here takes it at once.
+        """
+        targets = {store for store in {self.store, *stores} if store is not None}
+        if self._others or self._others_waiting:
+            self._releasing |= targets
+        else:
+            for store in targets:
                 store.release_continuation(self)
         self._notify()
+
+    def releasing(self, store: BackgroundTaskStore) -> bool:
+        """The channel let go of ``store``; turns admitted or queued here still hold it."""
+        return store in self._releasing
+
+    def _release_deferred(self) -> None:
+        if self._others or self._others_waiting or not self._releasing:
+            return
+        released, self._releasing = self._releasing, set()
+        for store in released:
+            store.release_continuation(self)
+            # The channel's own forget ran while this still owned the store.
+            forget_idle_background_store(store)
 
     def mark_own(self, run_context: Any) -> None:
         """Mark ``run_context`` as one of the owner's runs; a store it creates joins the owner."""
@@ -295,14 +320,18 @@ class SessionScheduler:
             try:
                 while self._occupied and not self._taken_over(store):
                     await self._wait_change()
-            finally:
+            except BaseException:
                 self._others_waiting -= 1
+                self._release_deferred()
+                raise
+            self._others_waiting -= 1
             if self._taken_over(store):
                 # Another channel took the session over while this turn waited: it decides now.
+                self._release_deferred()
                 await store.admit_root_turn(run_context)
                 return
-        # Also when the owner let go while this turn waited (its driver stopped, a turn admitted
-        # just before preempted it): the turns queued here still go one at a time, onto the head.
+        # Also when the channel let go while this turn waited (its driver stopped, a turn admitted
+        # just before preempted it): it keeps the session until the turns queued here have gone.
         self._others.add(run_context.id)
         run_context._foreign_turn_of = weakref.ref(self)
         if run_context._bg_store is None:
@@ -310,8 +339,15 @@ class SessionScheduler:
             adopt_background_store(run_context, store)
         head, self.head = self.head, run_context.id
         self.head_parked = False
-        if self._on_preempt is not None and store.continuation_owner() is self:
+        if self._on_preempt is not None and store.continuation_owner() is self and store not in self._releasing:
             self._on_preempt()
+        marker = run_context._continuation_owner
+        new_owner = marker() if marker is not None else None
+        if store in self._releasing and new_owner is not None and new_owner is not self:
+            # Another channel's own run (a new driver's first): the session is theirs from here,
+            # and turns still queued here ask them.
+            self._releasing.discard(store)
+            store.release_continuation(self)
         self._notify()
         if head is not None and run_context.parent_id != head:
             await run_context._continue_from(head)
@@ -329,6 +365,7 @@ class SessionScheduler:
         self._others.discard(run_id)
         if run_id == self.head:
             self.head_parked = is_parked(status)
+        self._release_deferred()
         self._notify()
 
     # -- Turns the session starts itself -----------------------------------------

@@ -1197,6 +1197,45 @@ class TestOtherChannel:
         await _run(session, stt, drive)
         assert heads[0][0] == heads[0][1]
 
+    async def test_a_call_on_the_run_a_driver_continued_from_shares_its_store(self) -> None:
+        release = asyncio.Event()
+
+        async def work() -> str:
+            await release.wait()
+            return "done"
+
+        tool = Tool(name="work", handler=work, background_mode="always")
+        session, stt, _tts = _session(_Model("Antes.", _tool_call("work"), "Trabajando."), tools=[tool])
+        earlier = await session.agent(prompt="earlier chat").collect()
+        set_run_context(None)
+        driver = session.agent.stream_until_idle(prompt="start", parent_id=earlier.run_id)
+        outputs: list[OutputEvent] = []
+
+        async def consume() -> None:
+            async with aclosing(driver):
+                async for event in driver:
+                    if isinstance(event, OutputEvent) and event.parent_call_id is None:
+                        outputs.append(event)
+
+        consumer = asyncio.create_task(consume())
+        await _until(lambda: outputs and driver._waiter is not None)
+        store = store_for_run(outputs[0].run_id)
+        assert store_for_run(earlier.run_id) is None  # the driver's store came after that run
+        session.parent_run_id = earlier.run_id
+        seen, notes = [], []
+
+        async def drive(events: list[VoiceSessionEvent]) -> None:
+            seen.append(session._session_store())
+            notes.append(await session.notify("ping", announce="silent"))
+
+        await _run(session, stt, drive)
+        driver.stop()
+        await asyncio.wait_for(consumer, 2)
+        release.set()
+        # One conversation, one store: the call's event went to the driver's session, not a second store.
+        assert seen == [store]
+        assert store.pending_events() == notes
+
     async def test_post_session_event_on_joined_from_run_reaches_the_session(self) -> None:
         model = _Model("Antes.", REPLY, "Segundo.")
         session, stt, _tts = _session(model)

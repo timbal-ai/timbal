@@ -66,7 +66,8 @@ def continuation_for_run(run_id: str) -> "AgentContinuation | None":
         store = store_joined_from(run_id)
     owner = store.continuation_owner() if store is not None else None
     channel = owner.channel if isinstance(owner, SessionScheduler) else None
-    return channel if isinstance(channel, AgentContinuation) else None
+    # A stopped driver still holds the session for turns it queued, but drives nothing.
+    return channel if isinstance(channel, AgentContinuation) and channel.stop_reason is None else None
 
 
 class AgentContinuation:
@@ -217,8 +218,8 @@ class AgentContinuation:
         if store is not None:
             other = store.continuation_owner()
             if other is not None and other is not self._scheduler:
-                if not isinstance(other.channel, AgentContinuation):
-                    # Only a driver gives way to another; a call keeps its conversation.
+                if not isinstance(other.channel, AgentContinuation) and not other.releasing(store):
+                    # Only a driver gives way to another; a call keeps its conversation until it ends.
                     raise RuntimeError(_OWNED_ELSEWHERE)
                 # A new driver's first run is a root turn like any other (and may be re-chained).
                 await other.admit_foreign(context, store)

@@ -650,8 +650,11 @@ Implementing it changed these points of earlier revisions of this RFC:
     `on_busy="enqueue"` re-asked the store once its owner released it (a
     stopped driver, or one a turn just admitted preempted), found no owner, and
     ran unadmitted: not re-chained, and beside the turn admitted just before it.
-    It now stays queued on the scheduler it waited on, and is handed to another
-    owner only when one took the session over.
+    A channel's release now waits for the turns admitted or queued on its
+    scheduler, so they still go one at a time onto the head, and a channel
+    taking the session over meanwhile (a new driver, a call) waits behind them.
+    Another channel's own run admitted there takes the session at once, and
+    turns still queued then ask the new owner.
   - **Session data read too early.** `Runnable._stream` loaded session data
     before admission, so a turn queued behind the run it names read nothing
     (that run had not saved yet), including session-scoped approval grants. It
@@ -678,7 +681,8 @@ Implementing it changed these points of earlier revisions of this RFC:
     admission (moving the call's head) and then failed to bind. It now fails
     before; only another driver gives way to it.
   - **Join point not searched** by `post_session_event`,
-    `continuation_for_run`, or a new driver's first run.
+    `continuation_for_run`, a new driver's first run, or a call continuing from
+    it (whose `notify()` then made a second store).
   - **Invalid `notify` frames** were dropped instead of answered `invalid`.
   - **Client event screened past hang-up** re-registered the forgotten store.
 
@@ -784,7 +788,8 @@ Executable tests in the repository:
     still running;
   - an enqueued turn waiting out a follow-up, then preempting, re-chained onto
     that follow-up (`parent_run_id`, `requested_parent_id`, what the model saw);
-    the same when the driver stops during the follow-up; two enqueued turns run
+    the same when the driver stops during the follow-up, with a new driver
+    waiting behind that turn; two enqueued turns run
     one after the other, each chained onto the one before; an enqueued turn
     naming the in-flight follow-up reading the session data it saved;
   - `RunContext._continue_from` reloading session data from the new parent;
@@ -820,6 +825,7 @@ Executable tests in the repository:
     inherits;
   - a continued call speaking up about an event already in the store it
     inherits; an event posted by the run the call joined before it had a store;
+    a call on the run a driver's session joined sharing that session's store;
   - an event delivered after a parked call turn is resumed over HTTP; an
     `interrupt` event left pending when the turn it would cut asks its caller;
   - the caller's turn ahead of a queued chat turn, both on a barge-in and when

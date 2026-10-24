@@ -45,6 +45,7 @@ from ..state.background import (
     bind_background_store,
     ensure_background_store,
     forget_idle_background_store,
+    store_joined_from,
 )
 from ..state.context import RunContext
 from ..state.tracing.providers import TRACING_UNSET
@@ -1928,12 +1929,18 @@ class VoiceSession:
                 break
         if store is None:
             store = self._unbound_store
-        if store is None and create:
+        if store is None:
             ctx = self._turn_run_context or self._last_run_context or self._seed_run_context()
-            if ctx is not None:
-                store = ensure_background_store(ctx)
-            else:
-                self._unbound_store = store = BackgroundTaskStore()
+            # The run this call continues may be where an owned session joined before it had a store.
+            joined = store_joined_from(ctx.parent_id) if ctx is not None and ctx.parent_id else None
+            if joined is not None:
+                adopt_background_store(ctx, joined)
+                store = joined
+            elif create:
+                if ctx is not None:
+                    store = ensure_background_store(ctx)
+                else:
+                    self._unbound_store = store = BackgroundTaskStore()
         if store is not None:
             self._own_store(store)
         return store
