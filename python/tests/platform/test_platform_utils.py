@@ -47,7 +47,7 @@ def _run_context_with_config(cfg: PlatformConfig | None = None) -> RunContext:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_env(monkeypatch):
+def _isolated_env(monkeypatch, tmp_path):
     """Strip all relevant env vars and reset the run-context before each test."""
     for var in (
         "TIMBAL_PROJECT_ENV_ID",
@@ -58,6 +58,11 @@ def _isolated_env(monkeypatch):
         "TIMBAL_START_WORKFORCE",
         "TIMBAL_WORKFORCE",
         "TIMBAL_API_KEY",
+        "TIMBAL_API_TOKEN",
+        "TIMBAL_APP_ID",
+        "TIMBAL_PROJECT_ID",
+        "TIMBAL_REV",
+        "TIMBAL_PROFILE",
         "TIMBAL_API_HOST",
         "TIMBAL_ORG_ID",
         "TIMBAL_HTTP_TIMEOUT",
@@ -65,6 +70,9 @@ def _isolated_env(monkeypatch):
         "TIMBAL_HTTP_READ_TIMEOUT",
     ):
         monkeypatch.delenv(var, raising=False)
+    # Resolve against an empty config directory, never the developer's credentials.
+    monkeypatch.setattr("timbal.state.config_loader.TIMBAL_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("timbal.state.config_loader._file_config_cache", {})
     # Reset config-loader cache so RunContext() doesn't pick up a stale hit
     monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
     monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", False)

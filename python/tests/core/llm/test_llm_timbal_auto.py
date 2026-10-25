@@ -44,14 +44,12 @@ def clean_context():
 def _platform_config(org_id="org_42", app_id="app_7"):
     from timbal.state.config import PlatformConfig
 
-    pc = MagicMock(spec=PlatformConfig)
-    pc.host = "api.timbal.ai"
-    pc.subject = MagicMock()
-    pc.subject.org_id = org_id
-    pc.subject.app_id = app_id
-    pc.subject.project_id = None
-    pc.auth = MagicMock()
-    pc.auth.header_value = "Bearer platform_token"
+    pc = PlatformConfig(
+        host="api.timbal.ai",
+        auth={"type": "bearer", "token": "platform_token"},
+        subject={"org_id": org_id, "app_id": app_id},
+    )
+    pc._fully_resolved = True  # keep routing tests independent of local config
     return pc
 
 
