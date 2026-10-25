@@ -242,6 +242,7 @@ def resolve_platform_config(
         )
         logger.debug("Built platform config from scratch.", host=host)
     else:
+        platform_config = platform_config.model_copy()
         logger.debug("Using existing platform config.", host=platform_config.host)
 
     # Resolve subject fields: explicit > env > file

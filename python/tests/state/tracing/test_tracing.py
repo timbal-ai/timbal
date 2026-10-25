@@ -592,6 +592,8 @@ class TestPlatformTracingProvider:
     @pytest.fixture(autouse=True)
     def _reset_config_cache(self, monkeypatch):
         """Isolate config-loader cache so no real credentials bleed in."""
+        for var in ("TIMBAL_ORG_ID", "TIMBAL_APP_ID", "TIMBAL_PROJECT_ID", "TIMBAL_REV"):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
         monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", True)
 
@@ -608,6 +610,7 @@ class TestPlatformTracingProvider:
             auth=PlatformAuth(type=PlatformAuthType.BEARER, token="tok"),
             subject=PlatformSubject(org_id="org_123", app_id=app_id, rev=rev),
         )
+        cfg._fully_resolved = True
         return RunContext(id="run_abc", parent_id="run_parent", platform_config=cfg, tracing_provider=None)
 
     def _mock_response(self, json_data: dict) -> MagicMock:

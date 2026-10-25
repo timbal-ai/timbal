@@ -117,13 +117,12 @@ class TestResolveClient:
     def test_platform_proxy_used_when_no_api_key(self):
         from timbal.state.config import PlatformConfig
 
-        platform_config = MagicMock(spec=PlatformConfig)
-        platform_config.subject = MagicMock()
-        platform_config.subject.org_id = "org_123"
-        platform_config.subject.app_id = "app_456"
-        platform_config.host = "api.timbal.ai"
-        platform_config.auth = MagicMock()
-        platform_config.auth.header_value = "Bearer platform_token"
+        platform_config = PlatformConfig(
+            host="api.timbal.ai",
+            auth={"type": "bearer", "token": "platform_token"},
+            subject={"org_id": "org_123", "app_id": "app_456"},
+        )
+        platform_config._fully_resolved = True  # keep routing tests independent of local config
 
         ctx = _make_run_context(platform_config=platform_config)
         config = _PROVIDERS["openai"]
@@ -854,16 +853,12 @@ class TestLlmRouterPlatformHeaders:
     def _make_platform_context(self, app_id=None, project_id=None):
         from timbal.state.config import PlatformConfig
 
-        platform_config = MagicMock(spec=PlatformConfig)
-        platform_config.subject = MagicMock()
-        platform_config.subject.org_id = "org_999"
-        # Explicit None — MagicMock attributes are truthy by default and would
-        # otherwise leak a mock object into the header value.
-        platform_config.subject.app_id = app_id
-        platform_config.subject.project_id = project_id
-        platform_config.host = "api.timbal.ai"
-        platform_config.auth = MagicMock()
-        platform_config.auth.header_value = "Bearer tok"
+        platform_config = PlatformConfig(
+            host="api.timbal.ai",
+            auth={"type": "bearer", "token": "tok"},
+            subject={"org_id": "org_999", "app_id": app_id, "project_id": project_id},
+        )
+        platform_config._fully_resolved = True  # preserve explicit None fields in header tests
         return _make_run_context(platform_config=platform_config)
 
     async def _capture_headers(self, **platform_kwargs):

@@ -15,8 +15,13 @@ def pytest_configure(config):
     load_dotenv(override=True)
 
 
+@pytest.fixture(scope="session")
+def _isolated_timbal_config_dir(tmp_path_factory):
+    return tmp_path_factory.mktemp("timbal_isolated_config")
+
+
 @pytest.fixture(autouse=True)
-def reset_platform_config_cache(request):
+def reset_platform_config_cache(request, _isolated_timbal_config_dir):
     """Force platform config to resolve as None for unit tests only.
 
     Setting _default_config_resolved=True with _cached_default_config=None tells
@@ -24,27 +29,34 @@ def reset_platform_config_cache(request):
     Any RunContext() without an explicit tracing_provider then falls back to
     InMemoryTracingProvider instead of PlatformTracingProvider, preventing HTTP
     calls on every _save_trace() / get_session() across the suite.
+    TIMBAL_CONFIG_DIR is also pointed at an empty temp directory so unit tests
+    that pass an explicit PlatformConfig or reset _default_config_resolved never
+    read the developer's real ~/.timbal credentials.
 
     Integration tests opt out so they can use ~/.timbal credentials and the
     platform LLM proxy when provider API keys are not in the environment.
     """
     import timbal.state.config_loader as _cl
 
+    saved_config_dir = _cl.TIMBAL_CONFIG_DIR
     is_integration = request.node.get_closest_marker("integration") is not None
     if is_integration:
         _cl._cached_default_config = None
         _cl._default_config_resolved = False
         _cl._file_config_cache.clear()
         yield
+        _cl.TIMBAL_CONFIG_DIR = saved_config_dir
         _cl._cached_default_config = None
         _cl._default_config_resolved = False
         _cl._file_config_cache.clear()
         return
 
+    _cl.TIMBAL_CONFIG_DIR = _isolated_timbal_config_dir
     _cl._cached_default_config = None
     _cl._default_config_resolved = True
     _cl._file_config_cache.clear()
     yield
+    _cl.TIMBAL_CONFIG_DIR = saved_config_dir
     _cl._cached_default_config = None
     _cl._default_config_resolved = True
     _cl._file_config_cache.clear()

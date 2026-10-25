@@ -68,9 +68,6 @@ def test_build_tool_proxy_headers_from_subject():
 
 
 def test_build_tool_proxy_headers_env_fallback(monkeypatch):
-    monkeypatch.setenv("TIMBAL_APP_ID", "env-app")
-    monkeypatch.setenv("TIMBAL_PROJECT_ID", "env-project")
-
     run_context = RunContext(
         platform_config=PlatformConfig(
             host="api.example.com",
@@ -80,6 +77,8 @@ def test_build_tool_proxy_headers_env_fallback(monkeypatch):
         tracing_provider=None,
     )
     set_run_context(run_context)
+    monkeypatch.setenv("TIMBAL_APP_ID", "env-app")
+    monkeypatch.setenv("TIMBAL_PROJECT_ID", "env-project")
 
     headers = build_tool_proxy_headers()
     assert headers["x-timbal-app-id"] == "env-app"
@@ -123,7 +122,10 @@ async def test_execute_tool_proxy_resolves_platform_config_from_env(monkeypatch)
 
     run_context = RunContext(tracing_provider=None)
     set_run_context(run_context)
-    assert run_context.platform_config is None
+    assert run_context.platform_config is not None
+    assert run_context.platform_config.host == "api.env.test"
+    assert run_context.platform_config.subject is not None
+    assert run_context.platform_config.subject.org_id == "org-from-env"
 
     mock_response = MagicMock()
     mock_response.json.return_value = {"ok": True}

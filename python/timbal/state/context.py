@@ -336,7 +336,7 @@ class RunContext(BaseModel):
         # Allocates nothing unless this session actually has children.
         bind_background_store(self)
 
-        # Explicit provider set on the runnable — skip auto-detection entirely.
+        # Explicit provider set on the runnable — skip tracing auto-detection.
         # None means tracing is disabled; a class means use that provider.
         if not isinstance(self.tracing_provider, _TracingProviderUnset):
             if self.tracing_provider is not None and (
@@ -348,9 +348,14 @@ class RunContext(BaseModel):
                     f"Pass the class itself (e.g. MyProvider), not an instance. "
                     f"Use MyProvider.configured(...) to set provider-specific options."
                 )
+            if self.platform_config is None and self.tracing_provider is not None:
+                self.platform_config = getattr(self.tracing_provider, "platform_config", None)
+            self.platform_config = resolve_platform_config(self.platform_config)
             self._tracing_provider = self.tracing_provider
             return
 
+        # Platform credentials are also used by model proxies and tools, even
+        # when traces are local or disabled.
         self.platform_config = resolve_platform_config(self.platform_config)
 
         if self.platform_config:
