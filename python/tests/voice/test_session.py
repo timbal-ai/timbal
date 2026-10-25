@@ -2876,3 +2876,355 @@ class TestToolSpeech:
         await asyncio.wait_for(session.interrupt(), 1)
         assert "Must not be heard." not in tts.synthesized_texts
         assert not any(not task.done() for task in session._tts_tasks)
+
+
+class TestEmptyCallerTurnRecovery:
+    @pytest.mark.parametrize("empty_text", ["", "   "])
+    async def test_retries_once_with_the_same_messages_and_keeps_history(self, empty_text):
+        from timbal.types.content import TextContent
+        from timbal.types.message import Message
+
+        calls = []
+
+        def reply(messages):
+            from copy import deepcopy
+
+            calls.append(deepcopy(messages))
+            if len(calls) == 2:
+                return Message(role="assistant", content=[TextContent(text=empty_text)])
+            return "First reply." if len(calls) == 1 else "Recovered reply."
+
+        tts = MockTTS()
+        session = VoiceSession(
+            agent=Agent(name="desk", model=TestModel(handler=reply)), stt=MockSTT(), tts=tts, turn_detector="heuristic"
+        )
+        await session._run_turn("Remember order 101.")
+        await session._run_turn("Where is it?")
+        assert len(calls) == 3
+        assert [m.collect_text() for m in calls[1]] == [m.collect_text() for m in calls[2]]
+        assert [m.collect_text() for m in calls[2]] == ["Remember order 101.", "First reply.", "Where is it?"]
+        memory = session._last_run_context.root_span().memory
+        assert [m.collect_text() for m in memory] == [
+            "Remember order 101.",
+            "First reply.",
+            "Where is it?",
+            "Recovered reply.",
+        ]
+        assert len(session._metrics) == 2
+        assert tts.synthesized_texts == ["First reply.", "Recovered reply."]
+
+    async def test_two_empty_results_stop_after_one_retry(self):
+        from timbal.types.message import Message
+
+        model = TestModel(responses=[Message(role="assistant", content=[])])
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model), stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic"
+        )
+        await session._run_turn("Hello")
+        assert model.call_count == 2
+        assert len(session._metrics) == 1
+
+    async def test_silent_event_is_not_retried(self):
+        from timbal.core.session_scheduler import Followup
+        from timbal.state.background import BackgroundTaskStore
+        from timbal.types.message import Message
+
+        model = TestModel(responses=[Message(role="assistant", content=[])])
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model), stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic"
+        )
+        followup = Followup(
+            prompt=Message.validate("Nothing worth announcing"), store=BackgroundTaskStore(), completions=[], events=[]
+        )
+        await session._run_turn("", followup=followup)
+        assert model.call_count == 1
+
+    async def test_empty_post_tool_response_does_not_repeat_tool(self):
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
+
+        executions = []
+
+        def place_order():
+            executions.append("placed")
+            return "Order placed"
+
+        model = TestModel(
+            responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="order", name="place_order", input={})],
+                    stop_reason="tool_use",
+                ),
+                Message(role="assistant", content=[]),
+            ]
+        )
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model, tools=[place_order]),
+            stt=MockSTT(),
+            tts=MockTTS(),
+            turn_detector="heuristic",
+        )
+        await session._run_turn("Place the order")
+        assert executions == ["placed"]
+        assert model.call_count == 2
+
+    async def test_retry_preserves_notifications_and_session_state(self):
+        from copy import deepcopy
+
+        from timbal.types.message import Message
+
+        calls = []
+        session_values = []
+
+        async def remember():
+            data = await get_run_context().get_session()
+            session_values.append(data.get("ticket"))
+            data["ticket"] = 101
+
+        def reply(messages):
+            calls.append(deepcopy(messages))
+            return Message(role="assistant", content=[]) if len(calls) == 1 else "Got the update."
+
+        session = VoiceSession(
+            agent=Agent(name="desk", model=TestModel(handler=reply), pre_hook=remember),
+            stt=MockSTT(),
+            tts=MockTTS(),
+            turn_detector="heuristic",
+        )
+        await session.notify("Order 101 shipped", announce="silent")
+        await session._run_turn("Any news?")
+        assert len(calls) == 2
+        assert session_values == [None, 101]
+        assert [m.collect_text() for m in calls[0]] == [m.collect_text() for m in calls[1]]
+        assert any("Order 101 shipped" in m.collect_text() for m in calls[1])
+        assert len([m for m in calls[1] if m.is_runtime()]) == 1
+        await session.close()
+
+    @pytest.mark.parametrize("reason", ["refusal", "content_filter", "max_tokens"])
+    async def test_empty_non_completed_response_is_not_retried(self, reason):
+        from timbal.types.message import Message
+
+        model = TestModel(responses=[Message(role="assistant", content=[], stop_reason=reason)])
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model), stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic"
+        )
+        await session._run_turn("Hello")
+        assert model.call_count == 1
+
+    async def test_barge_in_after_empty_response_prevents_retry(self):
+        from timbal.types.message import Message
+
+        def reply(_messages):
+            session._cancel_turn.set()
+            return Message(role="assistant", content=[])
+
+        model = TestModel(handler=reply)
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model), stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic"
+        )
+        await session._run_turn("Hello")
+        assert model.call_count == 1
+
+    async def test_retry_keeps_original_deadline(self):
+        from timbal.types.message import Message
+
+        deadlines = []
+        replies = iter([Message(role="assistant", content=[]), "Too late"])
+
+        async def delay():
+            deadlines.append(session._turn_deadline)
+            if len(deadlines) == 2:
+                await asyncio.Event().wait()
+
+        model = TestModel(handler=lambda _messages: next(replies))
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model, pre_hook=delay),
+            stt=MockSTT(),
+            tts=MockTTS(),
+            turn_detector="heuristic",
+            turn_timeout_secs=0.1,
+            turn_timeout_fallback=None,
+        )
+        await asyncio.wait_for(session._run_turn("Hello"), 2)
+        assert len(deadlines) == 2
+        assert deadlines[0] == deadlines[1]
+        assert model.call_count == 1
+        assert len(session._metrics) == 1
+
+    @pytest.mark.parametrize("park", [False, True])
+    async def test_empty_reply_does_not_retry_failed_or_parked_run(self, park):
+        from timbal.state import suspend
+        from timbal.types.message import Message
+
+        def after():
+            if park:
+                suspend({"question": "Continue?"})
+            raise RuntimeError("post-hook failed")
+
+        model = TestModel(responses=[Message(role="assistant", content=[])])
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model, post_hook=after),
+            stt=MockSTT(),
+            tts=MockTTS(),
+            turn_detector="heuristic",
+        )
+        await session._run_turn("Hello")
+        assert model.call_count == 1
+        assert session._last_run_context.root_span().status.code != "success"
+
+    async def test_retry_is_interruptible(self):
+        from timbal.types.message import Message
+
+        attempts = []
+        retry_started = asyncio.Event()
+
+        async def before():
+            attempts.append(True)
+            if len(attempts) == 2:
+                retry_started.set()
+                await asyncio.Event().wait()
+
+        model = TestModel(responses=[Message(role="assistant", content=[])])
+        session = VoiceSession(
+            agent=Agent(name="desk", model=model, pre_hook=before),
+            stt=MockSTT(),
+            tts=MockTTS(),
+            turn_detector="heuristic",
+        )
+        task = asyncio.create_task(session._run_turn("Hello"))
+        session._current_turn_task = task
+        try:
+            await asyncio.wait_for(retry_started.wait(), 1)
+            await asyncio.wait_for(session.interrupt(), 1)
+            assert task.done()
+            assert model.call_count == 1
+            assert not session.tts.synthesized_texts
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_input_redaction_and_warn_guardrails_do_not_block_empty_retry(self):
+        from timbal.guardrails import DetectPII, Verdict, guardrail
+        from timbal.types.message import Message
+
+        calls = []
+
+        def reply(messages):
+            calls.append([m.collect_text() for m in messages])
+            return Message(role="assistant", content=[]) if len(calls) == 1 else "Recovered safely."
+
+        agent = Agent(
+            name="desk",
+            model=TestModel(handler=reply),
+            guardrails=[
+                DetectPII(on_input="redact", types=["email"]),
+                guardrail(lambda _t: Verdict.warn("audit"), stages=["model_output"]),
+            ],
+        )
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
+        await session._run_turn("Reach me at alice@example.com")
+        assert len(calls) == 2
+        assert calls[0] == calls[1]
+        assert "alice@example.com" not in calls[1][0]
+        assert tts.synthesized_texts == ["Recovered safely."]
+
+    async def test_output_replace_guardrail_suppresses_empty_retry(self):
+        from timbal.guardrails import guardrail
+
+        model = TestModel(responses=["secret"])
+        agent = Agent(
+            name="desk",
+            model=model,
+            guardrails=[guardrail(lambda _t: "", stages=["model_output"])],
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
+        await session._run_turn("Tell me")
+        assert model.call_count == 1
+
+
+class TestLeakedVoiceDigits:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("Let me pull that up for you...10000213197600868032", "Let me pull that up for you..."),
+            ("Checking.10000213197600868032 Done.", "Checking. Done."),
+            ("Checking…10000213197600868032", "Checking…"),
+            ("ID:10000213197600868032", "ID:"),
+            ("Call +341234567890", "Call +341234567890"),
+            ("Call +1 (212) 555-0123", "Call +1 (212) 555-0123"),
+            ("ID: 10000213197600868032", "ID: 10000213197600868032"),
+            ("ID.12345678901", "ID.12345678901"),
+            ("Value 1.12345678901234", "Value 1.12345678901234"),
+            ("Grouped 1234-5678-9012-3456", "Grouped 1234-5678-9012-3456"),
+        ],
+    )
+    def test_sanitizer_preserves_legitimate_numbers(self, text, expected):
+        assert _strip_markdown(text) == expected
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.parametrize("digits", ["10000213197600868032", "1" * 250])
+    async def test_digits_split_from_punctuation_never_reach_tts(self, streaming, digits):
+        tts = StreamingMockTTS() if streaming else MockTTS()
+        session = VoiceSession(
+            agent=Agent(name="desk", model=TestModel()), stt=MockSTT(), tts=tts, turn_detector="heuristic"
+        )
+        pending = ""
+        for chunk in ["Let me check.", *digits, " Done."]:
+            pending += chunk
+            segment = _flush_segment(pending, first_segment=not session._turn_tts_scheduled_text)
+            if segment:
+                session._schedule_tts(segment)
+                pending = pending[len(segment) :]
+        if pending:
+            session._schedule_tts(pending)
+        await session._await_tts_chain()
+        spoken = "".join(tts.streams[0].fed if streaming else tts.synthesized_texts)
+        assert spoken == "Let me check. Done."
+        assert "".join(record[0] for record in session._turn_tts_segment_records) == spoken
+
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_markdown_is_sanitized_only_once(self, streaming):
+        tts = StreamingMockTTS() if streaming else MockTTS()
+        session = VoiceSession(
+            agent=Agent(name="desk", model=TestModel()), stt=MockSTT(), tts=tts, turn_detector="heuristic"
+        )
+        session._schedule_tts("[1. Sample](https://example.com)")
+        await session._await_tts_chain()
+        spoken = "".join(tts.streams[0].fed if streaming else tts.synthesized_texts)
+        assert spoken == "1. Sample"
+
+    async def test_digits_split_between_stream_delta_and_final_message_never_reach_tts(self):
+        from contextlib import aclosing
+
+        from timbal.types.events.delta import DeltaEvent, TextDelta
+        from timbal.types.events.output import OutputEvent
+        from timbal.types.message import Message
+
+        class PartialStreamAgent(Agent):
+            def __call__(self, **kwargs):
+                source = super().__call__(**kwargs)
+
+                async def events():
+                    async with aclosing(source):
+                        async for event in source:
+                            if isinstance(event, OutputEvent) and event.path == "desk.llm":
+                                yield DeltaEvent(
+                                    run_id=event.run_id,
+                                    path=event.path,
+                                    call_id=event.call_id,
+                                    item=TextDelta(id="t", text_delta="Let me check.100002"),
+                                )
+                            yield event
+
+                return events()
+
+        tts = MockTTS()
+        agent = PartialStreamAgent(
+            name="desk",
+            model=TestModel(responses=[Message.validate("Let me check.10000213197600868032 Done.")]),
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
+        await session._run_turn("check")
+        assert "".join(tts.synthesized_texts) == "Let me check. Done."

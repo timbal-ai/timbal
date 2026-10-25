@@ -41,10 +41,17 @@ def _tool_call_message(tool: str = "lookup") -> Message:
 def _make_session(
     *,
     tool_sleep: float = 0.2,
+    wait_for_fillers: int = 0,
     filler: dict | FillerConfig | None = None,
     responses: list | None = None,
 ) -> VoiceSession:
+    session: VoiceSession | None = None
+
     async def lookup(q: str) -> str:
+        if wait_for_fillers and session is not None:
+            deadline = time.monotonic() + max(tool_sleep, 2.0)
+            while session._turn_filler_count < wait_for_fillers and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
         await asyncio.sleep(tool_sleep)
         return "42"
 
@@ -53,13 +60,14 @@ def _make_session(
         model=TestModel(responses=responses or [_tool_call_message(), "The answer is 42."]),
         tools=[lookup],
     )
-    return VoiceSession(
+    session = VoiceSession(
         agent,
         _make_stt_class()(),
         _make_tts_class()(),
         turn_detector="heuristic",
         filler=filler,
     )
+    return session
 
 
 def _default_filler(**overrides) -> dict:
@@ -245,7 +253,8 @@ class TestFillerRepeat:
 
     async def test_repeats_on_prolonged_silence(self) -> None:
         session = _make_session(
-            tool_sleep=0.6,
+            tool_sleep=0.05,
+            wait_for_fillers=2,
             filler={"model": self._counting_model(), "delay_secs": 0.0, "repeat_secs": 0.08},
         )
         await session._run_turn("what is the answer?")
@@ -259,13 +268,14 @@ class TestFillerRepeat:
         assert replies == ["The answer is 42."]
 
     async def test_single_filler_without_repeat(self) -> None:
-        session = _make_session(tool_sleep=0.4, filler=_default_filler())
+        session = _make_session(tool_sleep=0.1, wait_for_fillers=1, filler=_default_filler())
         await session._run_turn("what is the answer?")
         assert session.metrics[-1].filler_count == 1
 
     async def test_max_per_turn_cap(self) -> None:
         session = _make_session(
-            tool_sleep=0.9,
+            tool_sleep=0.15,
+            wait_for_fillers=2,
             filler={"model": self._counting_model(), "delay_secs": 0.0, "repeat_secs": 0.05, "max_per_turn": 2},
         )
         await session._run_turn("what is the answer?")
@@ -286,11 +296,9 @@ class TestFillerRepeat:
             prompts.append(messages[-1].collect_text())
             return f"Filler {len(prompts)}."
 
-        # Generous tool time: the follow-up only fires after ``repeat_secs`` of
-        # silence *since the first filler finished*, and a loaded CI runner can
-        # take most of 0.5s just to produce that first one (seen: 1 >= 2).
         session = _make_session(
-            tool_sleep=1.5,
+            tool_sleep=0.05,
+            wait_for_fillers=2,
             filler={"model": TestModel(handler=handler), "delay_secs": 0.0, "repeat_secs": 0.08},
         )
         await session._run_turn("what is the answer?")
@@ -303,29 +311,51 @@ class TestFillerRepeat:
 class _SlowStartModel(TestModel):
     """A model that thinks before its first token — the silence a tool filler never covered."""
 
-    def __init__(self, think_secs: float, **kwargs) -> None:
+    def __init__(self, think_secs: float, *, wait_fn=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.think_secs = think_secs
+        self.wait_fn = wait_fn
 
     async def stream(self, messages: list, **kwargs):
+        if self.wait_fn is not None and self.call_count == 0:
+            await self.wait_fn()
         await asyncio.sleep(self.think_secs)
         async for chunk in super().stream(messages, **kwargs):
             yield chunk
 
 
 def _thinking_session(
-    *, think_secs: float, filler: dict, responses: list | None = None, tool_sleep: float | None = None
+    *,
+    think_secs: float,
+    filler: dict,
+    responses: list | None = None,
+    tool_sleep: float | None = None,
+    wait_for_think_filler: bool = False,
+    wait_for_tool_fillers: int = 0,
 ) -> VoiceSession:
+    session: VoiceSession | None = None
+
+    async def wait_think() -> None:
+        if wait_for_think_filler and session is not None:
+            deadline = time.monotonic() + max(think_secs, 2.0)
+            while session._turn_filler_count < 1 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+
     async def lookup(q: str) -> str:
+        if wait_for_tool_fillers and session is not None:
+            deadline = time.monotonic() + max(tool_sleep or 0.0, 2.0)
+            while session._turn_filler_count < wait_for_tool_fillers and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
         await asyncio.sleep(tool_sleep or 0.0)
         return "42"
 
     agent = Agent(
         name="voice_test",
-        model=_SlowStartModel(think_secs, responses=responses or ["The answer is 42."]),
+        model=_SlowStartModel(think_secs, wait_fn=wait_think, responses=responses or ["The answer is 42."]),
         tools=[lookup] if tool_sleep is not None else [],
     )
-    return VoiceSession(agent, _make_stt_class()(), _make_tts_class()(), turn_detector="heuristic", filler=filler)
+    session = VoiceSession(agent, _make_stt_class()(), _make_tts_class()(), turn_detector="heuristic", filler=filler)
+    return session
 
 
 class _ScriptedAgent:
@@ -423,8 +453,10 @@ class TestThinkingFiller:
             return f"Filler {len(prompts)}."
 
         session = _thinking_session(
-            think_secs=0.3,
-            tool_sleep=0.6,
+            think_secs=0.05,
+            tool_sleep=0.05,
+            wait_for_think_filler=True,
+            wait_for_tool_fillers=2,
             filler={"model": TestModel(handler=handler), "delay_secs": 0.0, "think_delay_secs": 0.05},
             responses=[_tool_call_message(), "The answer is 42."],
         )
@@ -850,3 +882,186 @@ class TestFillerOverWs:
         )
         messages = self._run(monkeypatch, tmp_path, module_body=module_body)
         assert "filler" not in [m["type"] for m in messages]
+
+
+class TestEmptyRetryFiller:
+    @pytest.mark.parametrize("with_tool", [False, True])
+    async def test_retry_keeps_filler_available(self, with_tool, monkeypatch):
+        spoken = asyncio.Event()
+        contexts = []
+
+        async def wait_for_filler():
+            try:
+                await asyncio.wait_for(spoken.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+
+        replies = iter(
+            [Message(role="assistant", content=[]), _tool_call_message(), "Recovered."]
+            if with_tool
+            else [Message(role="assistant", content=[]), "Recovered."]
+        )
+
+        class RetryModel(TestModel):
+            async def stream(self, messages, **kwargs):
+                if self.call_count == 1 and not with_tool:
+                    await wait_for_filler()
+                async for chunk in super().stream(messages, **kwargs):
+                    yield chunk
+
+        async def lookup(q: str) -> str:
+            await wait_for_filler()
+            return "42"
+
+        session = VoiceSession(
+            Agent(name="voice_test", model=RetryModel(handler=lambda _: next(replies)), tools=[lookup]),
+            _make_stt_class()(),
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            filler=_default_filler(think_delay_secs=30.0 if with_tool else 0.05, max_per_turn=1),
+        )
+        original = session._speak_filler
+
+        async def observe(phrase, tool_name):
+            contexts.append(get_run_context().id)
+            await original(phrase, tool_name)
+            spoken.set()
+
+        monkeypatch.setattr(session, "_speak_filler", observe)
+        await session._run_turn("Help me.")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+        assert contexts == [session._last_run_context.id]
+        assert session._metrics[-1].filler_count == 1
+
+    @pytest.mark.parametrize("max_per_turn,repeat_secs", [(1, None), (2, None), (2, 0.05)])
+    async def test_retry_preserves_spoken_fillers_and_budget(self, max_per_turn, repeat_secs, monkeypatch):
+        first = asyncio.Event()
+        second = asyncio.Event()
+        previous_phrases = []
+        replies = iter([Message(role="assistant", content=[]), _tool_call_message(), "Recovered."])
+
+        class RetryModel(TestModel):
+            async def stream(self, messages, **kwargs):
+                if self.call_count == 0:
+                    await asyncio.wait_for(first.wait(), timeout=1.0)
+                async for chunk in super().stream(messages, **kwargs):
+                    yield chunk
+
+        async def lookup(q: str) -> str:
+            try:
+                await asyncio.wait_for(second.wait(), timeout=0.2 if max_per_turn == 1 else 1.0)
+            except TimeoutError:
+                pass
+            return "42"
+
+        session = VoiceSession(
+            Agent(name="voice_test", model=RetryModel(handler=lambda _: next(replies)), tools=[lookup]),
+            _make_stt_class()(),
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            filler=_default_filler(
+                phrases=[PHRASE], think_delay_secs=0.0, max_per_turn=max_per_turn, repeat_secs=repeat_secs
+            ),
+        )
+        original = session._speak_filler
+
+        async def generate(tool_name, previous=None):
+            previous_phrases.append(list(previous or []))
+            return "Still working."
+
+        async def observe(phrase, tool_name):
+            await original(phrase, tool_name)
+            (first if session._turn_filler_count == 1 else second).set()
+
+        monkeypatch.setattr(session, "_generate_filler", generate)
+        monkeypatch.setattr(session, "_speak_filler", observe)
+        await session._run_turn("Help me.")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE, "Still working."][:max_per_turn]
+        assert previous_phrases == ([] if max_per_turn == 1 else [[PHRASE]])
+        assert session._metrics[-1].filler_count == max_per_turn
+
+    @pytest.mark.parametrize("partial_audio", [False, True])
+    @pytest.mark.parametrize("with_tool", [False, True])
+    async def test_retry_after_cancelling_filler_synthesis(self, partial_audio, with_tool, monkeypatch):
+        finishing = asyncio.Event()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        recovered = asyncio.Event()
+        replies = iter(
+            [Message(role="assistant", content=[]), _tool_call_message(), "Recovered."]
+            if with_tool
+            else [Message(role="assistant", content=[]), "Recovered."]
+        )
+
+        async def wait_for_recovery():
+            try:
+                await asyncio.wait_for(recovered.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+
+        class RetryModel(TestModel):
+            async def stream(self, messages, **kwargs):
+                if self.call_count == 1 and not with_tool:
+                    await wait_for_recovery()
+                async for chunk in super().stream(messages, **kwargs):
+                    yield chunk
+
+        class PartialTTS(_make_tts_class()):
+            async def synthesize(self, text):
+                if not started.is_set():
+                    if partial_audio:
+                        yield b"F" * 32
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        await asyncio.sleep(0)
+                        cancelled.set()
+                else:
+                    async for chunk in super().synthesize(text):
+                        yield chunk
+
+        async def lookup(q: str) -> str:
+            await wait_for_recovery()
+            return "42"
+
+        model = RetryModel(handler=lambda _: next(replies))
+
+        async def after():
+            if model.call_count == 1:
+                # Let the think filler start during root finalization, after the
+                # empty LLM output has already drained the earlier TTS chain.
+                finishing.set()
+                await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        session = VoiceSession(
+            Agent(name="voice_test", model=model, tools=[lookup], post_hook=after),
+            _make_stt_class()(),
+            PartialTTS(),
+            turn_detector="heuristic",
+            filler=_default_filler(phrases=[PHRASE], think_delay_secs=0.0, max_per_turn=1),
+        )
+        original = session._speak_filler
+        until_due = session._until_first_filler_due
+
+        async def during_finalization():
+            await until_due()
+            await finishing.wait()
+
+        monkeypatch.setattr(session, "_until_first_filler_due", during_finalization)
+
+        async def observe(phrase, tool_name):
+            await original(phrase, tool_name)
+            recovered.set()
+
+        monkeypatch.setattr(session, "_speak_filler", observe)
+        await session._run_turn("Help me.")
+        assert cancelled.is_set()
+        assert recovered.is_set()
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+        assert [e.text for e in session.transcript if e.role == "assistant" and not e.filler] == ["Recovered."]
+        # Aborted speech contributes real audio/segments, but is not reported as
+        # a completed filler and does not consume the completed-phrase budget.
+        assert session.metrics[-1].filler_count == 1
+        assert session.metrics[-1].tts_segments == 3
+        assert session.metrics[-1].audio_bytes == 128 + (32 if partial_audio else 0)

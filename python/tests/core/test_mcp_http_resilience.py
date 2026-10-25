@@ -222,7 +222,9 @@ class TestHttpResilience:
             assert ping.output == "pong"
             assert slow.status.code == "success", slow.error
             assert slow.output == "slept 6.0"
-            assert 6 <= elapsed < 12, elapsed
+            # Windows time.monotonic() has ~15.6ms tick granularity (GetTickCount64),
+            # so a 6.0s sleep can measure ~5.984s.
+            assert 5.8 <= elapsed < 15, elapsed
             # The session is still the same one and still serves.
             assert (await _ping(client)).output == "pong"
         finally:

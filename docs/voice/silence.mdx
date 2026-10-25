@@ -34,6 +34,12 @@ agent.voice_config["user_idle"] = {
 
 The assistant's own prompts do not reset the user-silence hangup clock. Omit `hangup_after_secs` to keep waiting after the prompts. `instructions` can generate a check-in instead of using fixed text; this adds model generation and speech usage. Empty optional blocks mean unset and preserve server inheritance.
 
+## Recover an empty reply
+
+If the first model step finishes successfully with no speech or tool call on a caller turn, the session retries once using the same input messages. The retry shares the original voice-turn deadline and does not add another copy of the caller's prompt or the empty reply to conversation memory.
+
+Event turns may deliberately stay silent and are never retried. Turns that invoked a tool, were interrupted, failed, or paused for input or approval are also excluded. If the retry is empty too, the session returns to listening.
+
 ## A slow agent turn
 
 The voice turn timeout defaults to 60 seconds. To change it and its spoken fallback:

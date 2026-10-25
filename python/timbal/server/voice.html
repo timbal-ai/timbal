@@ -2044,10 +2044,33 @@ function stopAssistantAudio() {
   nextPlayTime = 0;
 }
 
+// Only delivery directions are hidden. Literal brackets (IDs, citations,
+// markdown link labels) remain visible, and user speech is never sanitized.
+const VOICE_ACTING_TAGS = new Set([
+  'relieved', 'laughs', 'laughing', 'chuckles', 'giggles', 'sighs', 'gasps',
+  'curious', 'excited', 'sad', 'angry', 'happy', 'nervous', 'calm', 'warm',
+  'whispers', 'whispering', 'shouts', 'shouting', 'crying', 'sobbing',
+  'sarcastic', 'thoughtful', 'hesitant', 'confident', 'serious', 'playful',
+  'short pause', 'long pause', 'pause', 'clears throat', 'inhales', 'exhales',
+]);
+
+function assistantTranscriptText(raw, final = true) {
+  let text = raw.replace(/\[([^\[\]\r\n]{1,60})\][ \t]*/g,
+    (match, tag, offset) => VOICE_ACTING_TAGS.has(tag.trim().toLowerCase())
+      && raw[offset + match.trimEnd().length] !== '(' ? '' : match);
+  if (!final) {
+    const pending = /\[([^\[\]\r\n]{0,60})$/.exec(text);
+    if (pending && [...VOICE_ACTING_TAGS].some(tag => tag.startsWith(pending[1].trimStart().toLowerCase()))) {
+      text = text.slice(0, pending.index);
+    }
+  }
+  return text;
+}
+
 function log(cls, text) {
   const d = document.createElement('div');
   d.className = 'msg ' + cls;
-  d.textContent = text;
+  d.textContent = cls.split(' ').includes('assistant') ? assistantTranscriptText(text) : text;
   transcriptEl.appendChild(d);
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   updateEmptyState();
@@ -2788,13 +2811,18 @@ function handleServerMessage(msg) {
           window._assistantEl = log(window._sawUserCommit ? 'assistant' : 'assistant greeting', '');
           (window._turnBubbles = window._turnBubbles || []).push(window._assistantEl);
         }
-        window._assistantEl.textContent += msg.text;
+        window._assistantEl._voiceRawText = (window._assistantEl._voiceRawText || '') + msg.text;
+        window._assistantEl.textContent = assistantTranscriptText(window._assistantEl._voiceRawText, false);
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
         updateEmptyState();
         break;
       case 'agent_text_done':
         // Keep a handle on the finished bubble: a barge-in while its TTS is
         // still playing sends `interrupted.heard_text` after this point.
+        if (window._assistantEl) {
+          const raw = typeof msg.text === 'string' ? msg.text : (window._assistantEl._voiceRawText || '');
+          window._assistantEl.textContent = assistantTranscriptText(raw);
+        }
         window._lastAssistantEl = window._assistantEl;
         window._assistantEl = null;
         window._replyDone = true;
@@ -2823,7 +2851,8 @@ function handleServerMessage(msg) {
           for (const el of bubbles.slice(1)) el.remove();
           const first = bubbles[0];
           if (first) {
-            if (msg.heard_text) first.textContent = msg.heard_text;
+            const heard = msg.heard_text ? assistantTranscriptText(msg.heard_text) : '';
+            if (heard.trim()) first.textContent = heard;
             else first.remove();
           }
         }
