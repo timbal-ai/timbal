@@ -12,9 +12,9 @@ from timbal.state.tracing.providers import InMemoryTracingProvider
 from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.message import Message
 
-# Explicit path allows sharing credentials with your main checkout. Exported
-# shell values take precedence; never copy credentials into this example.
-load_dotenv(os.environ.get("VOICE_DEMO_ENV", ".env"), override=False)
+# Explicit path allows sharing credentials with your main checkout. Prefer
+# this file over stale provider keys inherited from the launching shell.
+load_dotenv(os.environ.get("VOICE_DEMO_ENV", ".env"), override=True)
 logger = structlog.get_logger("voice_tool_demo")
 beat = float(os.environ.get("VOICE_DEMO_BEAT", "0"))
 mode = os.environ.get("VOICE_DEMO_MODE", "live").lower()

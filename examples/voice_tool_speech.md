@@ -8,7 +8,8 @@ export PYTHONPATH="$PWD/python"
 export VOICE_DEMO_ENV=/Users/dberges/Desktop/timbal-ai/timbal/.env
 ```
 
-The example loads that dotenv file without overriding exported shell variables.
+The example loads that dotenv file with precedence over inherited shell variables,
+so stale exported provider keys do not override its credentials.
 You need `DEEPGRAM_API_KEY` and `ELEVENLABS_API_KEY`; live LLM mode also needs
 `OPENAI_API_KEY`. Set `ELEVENLABS_VOICE_ID` if you want a particular voice.
 No credentials are included in the example. Tools return simulated order data.
