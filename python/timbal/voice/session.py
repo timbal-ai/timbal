@@ -2549,7 +2549,9 @@ class VoiceSession:
                         full_response = text_buffer = iteration_text = iteration_prefix = ""
                         self._turn_assistant_text = self._turn_iteration_prefix = ""
                         self._turn_tts_scheduled_text = ""
+                        self._turn_tts_boundary_chars = 0
                         self._turn_completed_replies = []
+                        self._turn_first_token_at = None
                         self._turn_llm_done_at = None
                         set_run_context(ctx)
                         agen = self.agent(**retry_kwargs)
@@ -2579,7 +2581,12 @@ class VoiceSession:
                     elif event.path != getattr(self.agent, "_path", None):
                         # Includes tools resumed before the first LLM step.
                         retry_blocked = True
-                elif isinstance(event, GuardrailEvent):
+                elif (
+                    isinstance(event, GuardrailEvent)
+                    and not event.shadow
+                    and event.action not in ("warn", "error")
+                    and (event.stage != "input" or event.action != "replace")
+                ):
                     # A deliberately suppressed/blocked answer is not dead air to retry.
                     retry_blocked = True
 
@@ -2676,7 +2683,7 @@ class VoiceSession:
                     chunk = event.item.text if isinstance(event.item, Text) else event.item.text_delta
                     if not chunk:
                         continue
-                    if self._turn_first_token_at is None:
+                    if self._turn_first_token_at is None and chunk.strip():
                         self._turn_first_token_at = time.monotonic()
                     if not iteration_text:
                         separator = (
@@ -2765,14 +2772,6 @@ class VoiceSession:
                             # the TTS drain below so llm_total_ms excludes synthesis time.
                             # Multi-iteration agents overwrite — the last iteration wins.
                             self._turn_llm_done_at = time.monotonic()
-                            # Anything still buffered from deltas must hit TTS before we ``anext``
-                            # again: the next event pull runs the outer Runnable's post-hook,
-                            # ``dump(output)``, and trace save — and the loop would not flush
-                            # ``text_buffer`` until after the outer Agent OUTPUT is consumed.
-                            if text_buffer and not self._cancel_turn.is_set():
-                                turn_phase = "tts_flush_buffer_on_llm_output"
-                                self._schedule_tts(text_buffer)
-                                text_buffer = ""
                             if msg_text:
                                 merged, suffix = _reconcile_final_assistant_text(iteration_text, msg_text)
                                 if suffix is not None and merged != iteration_text:
@@ -2792,9 +2791,16 @@ class VoiceSession:
                                     self._turn_assistant_text = full_response
                                     turn_phase = "emit_agent_text_delta_from_output"
                                     await self._emit(AgentTextDelta(text=suffix))
-                                    if not self._cancel_turn.is_set():
-                                        turn_phase = "tts_synthesize_from_output"
-                                        self._schedule_tts(suffix)
+                                    text_buffer += suffix
+                            # Anything still buffered from deltas (plus any reconciled
+                            # suffix above) must hit TTS before we ``anext`` again: the
+                            # next event pull runs the outer Runnable's post-hook,
+                            # ``dump(output)``, and trace save — and the loop would not
+                            # flush ``text_buffer`` until after the outer Agent OUTPUT.
+                            if text_buffer and not self._cancel_turn.is_set():
+                                turn_phase = "tts_flush_buffer_on_llm_output"
+                                self._schedule_tts(text_buffer)
+                                text_buffer = ""
                             # Non-streaming providers (and TestModel) surface
                             # tool calls only here, on the final Message — the
                             # second filler hook point, after the text handling
@@ -3184,7 +3190,7 @@ class VoiceSession:
         return (
             not self._cancel_turn.is_set()
             and not self._turn_finalized_ok
-            and not self._turn_assistant_text
+            and not self._turn_assistant_text.strip()
             and not self._turn_tts_scheduled_text
             and self._turn_tts_segments == self._turn_filler_segments_baseline
             and self._turn_audio_bytes == self._turn_filler_audio_baseline
@@ -3322,6 +3328,8 @@ class VoiceSession:
             await speak_task
         except asyncio.CancelledError:
             speak_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await speak_task
             raise
 
     async def _speak_filler_task(self, phrase: str, tool_name: str) -> None:
@@ -3331,6 +3339,10 @@ class VoiceSession:
         self._turn_filler_text = f"{self._turn_filler_text} {phrase}".strip()
         logger.info("filler_speak", phrase=phrase, tool=tool_name, **_trace_debug_fields())
         await self._speak(phrase, filler=True)
+        if self._cancel_turn.is_set() or (
+            (task := asyncio.current_task()) is not None and task.cancelling()
+        ):
+            return
         # Everything below commits only after synthesis finishes: a turn
         # cancelled mid-speak must not count a filler that never reached the
         # transcript or the client.

@@ -2851,7 +2851,8 @@ function handleServerMessage(msg) {
           for (const el of bubbles.slice(1)) el.remove();
           const first = bubbles[0];
           if (first) {
-            if (msg.heard_text) first.textContent = assistantTranscriptText(msg.heard_text);
+            const heard = msg.heard_text ? assistantTranscriptText(msg.heard_text) : '';
+            if (heard.trim()) first.textContent = heard;
             else first.remove();
           }
         }

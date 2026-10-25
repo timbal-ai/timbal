@@ -3104,6 +3104,45 @@ class TestEmptyCallerTurnRecovery:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    async def test_input_redaction_and_warn_guardrails_do_not_block_empty_retry(self):
+        from timbal.guardrails import DetectPII, Verdict, guardrail
+        from timbal.types.message import Message
+
+        calls = []
+
+        def reply(messages):
+            calls.append([m.collect_text() for m in messages])
+            return Message(role="assistant", content=[]) if len(calls) == 1 else "Recovered safely."
+
+        agent = Agent(
+            name="desk",
+            model=TestModel(handler=reply),
+            guardrails=[
+                DetectPII(on_input="redact", types=["email"]),
+                guardrail(lambda _t: Verdict.warn("audit"), stages=["model_output"]),
+            ],
+        )
+        tts = MockTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
+        await session._run_turn("Reach me at alice@example.com")
+        assert len(calls) == 2
+        assert calls[0] == calls[1]
+        assert "alice@example.com" not in calls[1][0]
+        assert tts.synthesized_texts == ["Recovered safely."]
+
+    async def test_output_replace_guardrail_suppresses_empty_retry(self):
+        from timbal.guardrails import guardrail
+
+        model = TestModel(responses=["secret"])
+        agent = Agent(
+            name="desk",
+            model=model,
+            guardrails=[guardrail(lambda _t: "", stages=["model_output"])],
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=MockTTS(), turn_detector="heuristic")
+        await session._run_turn("Tell me")
+        assert model.call_count == 1
+
 
 class TestLeakedVoiceDigits:
     @pytest.mark.parametrize(
@@ -3155,3 +3194,37 @@ class TestLeakedVoiceDigits:
         await session._await_tts_chain()
         spoken = "".join(tts.streams[0].fed if streaming else tts.synthesized_texts)
         assert spoken == "1. Sample"
+
+    async def test_digits_split_between_stream_delta_and_final_message_never_reach_tts(self):
+        from contextlib import aclosing
+
+        from timbal.types.events.delta import DeltaEvent, TextDelta
+        from timbal.types.events.output import OutputEvent
+        from timbal.types.message import Message
+
+        class PartialStreamAgent(Agent):
+            def __call__(self, **kwargs):
+                source = super().__call__(**kwargs)
+
+                async def events():
+                    async with aclosing(source):
+                        async for event in source:
+                            if isinstance(event, OutputEvent) and event.path == "desk.llm":
+                                yield DeltaEvent(
+                                    run_id=event.run_id,
+                                    path=event.path,
+                                    call_id=event.call_id,
+                                    item=TextDelta(id="t", text_delta="Let me check.100002"),
+                                )
+                            yield event
+
+                return events()
+
+        tts = MockTTS()
+        agent = PartialStreamAgent(
+            name="desk",
+            model=TestModel(responses=[Message.validate("Let me check.10000213197600868032 Done.")]),
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
+        await session._run_turn("check")
+        assert "".join(tts.synthesized_texts) == "Let me check. Done."

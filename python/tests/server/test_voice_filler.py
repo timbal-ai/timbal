@@ -983,6 +983,7 @@ class TestEmptyRetryFiller:
                     try:
                         await asyncio.Event().wait()
                     finally:
+                        await asyncio.sleep(0)
                         cancelled.set()
                 else:
                     async for chunk in super().synthesize(text):

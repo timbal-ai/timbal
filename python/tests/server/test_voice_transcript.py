@@ -54,6 +54,10 @@ handleServerMessage({type: 'agent_text_delta', text: '[relieved] Hello there.'})
 handleServerMessage({type: 'interrupted', heard_text: '[relieved] Hello'});
 assert.equal(transcriptEl.children.at(-1).textContent, 'Hello');
 window._replyDone = true;
+handleServerMessage({type: 'agent_text_delta', text: '[relieved] Hello there.'});
+handleServerMessage({type: 'interrupted', heard_text: '[relieved]'});
+assert.equal(transcriptEl.children.at(-1).removed, true);
+window._replyDone = true;
 handleServerMessage({type: 'agent_text_delta', text: '[laugh'});
 handleServerMessage({type: 'interrupted', heard_text: ''});
 handleServerMessage({type: 'agent_text_delta', text: 'A fresh reply.'});
