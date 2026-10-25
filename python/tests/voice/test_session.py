@@ -2786,7 +2786,7 @@ class TestToolSpeech:
             # a 0.1s playback + 0.1s beat sleep can measure ~0.184s.
             assert times["post"] - times["pre"] >= 0.18
         if tool_delay or not pretext:
-            assert times["post"] - times["tool_done"] < 0.2
+            assert times["post"] - times["tool_done"] < 0.08
 
     async def test_stream_without_flush_finishes_pre_tool_context_and_keeps_post_text(self):
         from timbal.types.content import TextContent, ToolUseContent
