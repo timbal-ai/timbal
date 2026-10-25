@@ -947,3 +947,88 @@ class TestEmptyRetryFiller:
         assert [e.text for e in session.transcript if e.filler] == [PHRASE, "Still working."][:max_per_turn]
         assert previous_phrases == ([] if max_per_turn == 1 else [[PHRASE]])
         assert session._metrics[-1].filler_count == max_per_turn
+
+    @pytest.mark.parametrize("partial_audio", [False, True])
+    @pytest.mark.parametrize("with_tool", [False, True])
+    async def test_retry_after_cancelling_filler_synthesis(self, partial_audio, with_tool, monkeypatch):
+        finishing = asyncio.Event()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        recovered = asyncio.Event()
+        replies = iter(
+            [Message(role="assistant", content=[]), _tool_call_message(), "Recovered."]
+            if with_tool
+            else [Message(role="assistant", content=[]), "Recovered."]
+        )
+
+        async def wait_for_recovery():
+            try:
+                await asyncio.wait_for(recovered.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+
+        class RetryModel(TestModel):
+            async def stream(self, messages, **kwargs):
+                if self.call_count == 1 and not with_tool:
+                    await wait_for_recovery()
+                async for chunk in super().stream(messages, **kwargs):
+                    yield chunk
+
+        class PartialTTS(_make_tts_class()):
+            async def synthesize(self, text):
+                if not started.is_set():
+                    if partial_audio:
+                        yield b"F" * 32
+                    started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+                else:
+                    async for chunk in super().synthesize(text):
+                        yield chunk
+
+        async def lookup(q: str) -> str:
+            await wait_for_recovery()
+            return "42"
+
+        model = RetryModel(handler=lambda _: next(replies))
+
+        async def after():
+            if model.call_count == 1:
+                # Let the think filler start during root finalization, after the
+                # empty LLM output has already drained the earlier TTS chain.
+                finishing.set()
+                await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        session = VoiceSession(
+            Agent(name="voice_test", model=model, tools=[lookup], post_hook=after),
+            _make_stt_class()(),
+            PartialTTS(),
+            turn_detector="heuristic",
+            filler=_default_filler(phrases=[PHRASE], think_delay_secs=0.0, max_per_turn=1),
+        )
+        original = session._speak_filler
+        until_due = session._until_first_filler_due
+
+        async def during_finalization():
+            await until_due()
+            await finishing.wait()
+
+        monkeypatch.setattr(session, "_until_first_filler_due", during_finalization)
+
+        async def observe(phrase, tool_name):
+            await original(phrase, tool_name)
+            recovered.set()
+
+        monkeypatch.setattr(session, "_speak_filler", observe)
+        await session._run_turn("Help me.")
+        assert cancelled.is_set()
+        assert recovered.is_set()
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+        assert [e.text for e in session.transcript if e.role == "assistant" and not e.filler] == ["Recovered."]
+        # Aborted speech contributes real audio/segments, but is not reported as
+        # a completed filler and does not consume the completed-phrase budget.
+        assert session.metrics[-1].filler_count == 1
+        assert session.metrics[-1].tts_segments == 3
+        assert session.metrics[-1].audio_bytes == 128 + (32 if partial_audio else 0)

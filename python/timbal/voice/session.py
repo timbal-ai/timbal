@@ -2527,6 +2527,12 @@ class VoiceSession:
                             await self._await_turn_deadline(
                                 asyncio.gather(self._turn_filler_task, return_exceptions=True)
                             )
+                        # The empty attempt emitted no reply audio. A cancelled
+                        # filler may still have emitted a partial segment: retain
+                        # those counters, but do not mistake it for reply speech
+                        # that should suppress the retry's fillers.
+                        self._turn_filler_segments_baseline = self._turn_tts_segments
+                        self._turn_filler_audio_baseline = self._turn_audio_bytes
                         self._turn_filler_task = None
                         # Re-arm after the retry's first event so filler work uses
                         # its live run context. Keep the caller turn's grace period,
