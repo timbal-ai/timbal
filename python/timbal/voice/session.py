@@ -516,6 +516,7 @@ class VoiceSession:
         self._turn_assistant_text: str = ""
         self._turn_iteration_prefix = ""
         self._turn_completed_replies: list[tuple[Message, str]] = []
+        self._turn_memory_baseline = 0
         self._turn_tts_boundary_chars = 0
         # Last time the assistant was observed speaking, for the echo grace window.
         # Sampled rather than hooked because `_assistant_active` is derived from
@@ -2359,6 +2360,7 @@ class VoiceSession:
         self._turn_assistant_text = ""
         self._turn_iteration_prefix = ""
         self._turn_completed_replies = []
+        self._turn_memory_baseline = 0
         self._turn_tts_boundary_chars = 0
         self._turn_started_at = time.monotonic()
         self._turn_deadline = (
@@ -2732,7 +2734,13 @@ class VoiceSession:
                                         self._schedule_tts(pending)
                                         break
                             if msg_text:
-                                self._turn_completed_replies.append((out, iteration_prefix))
+                                if not self._turn_completed_replies:
+                                    ctx = get_run_context()
+                                    root = ctx.root_span() if ctx is not None else None
+                                    if root is not None and isinstance(root.memory, list):
+                                        self._turn_memory_baseline = max(0, len(root.memory) - 1)
+                                cleaned_out = out.without_empty_text_blocks() or out
+                                self._turn_completed_replies.append((cleaned_out, iteration_prefix))
                             calls_tool = out.stop_reason == "tool_use" or any(
                                 isinstance(block, ToolUseContent) for block in out.content
                             )
@@ -4315,12 +4323,18 @@ class VoiceSession:
         if root is None or not isinstance(root.memory, list) or not root.memory:
             return False
         # Completed iterations may contain tool_use blocks and must stay in
-        # memory, but only their heard text may survive. The last iteration can
-        # also be salvaged by Agent during cancellation before its OutputEvent.
+        # memory, but only their heard text may survive. ``_append_memory`` runs
+        # ``without_empty_text_blocks()``, which returns a new ``Message`` copy
+        # whenever empty ``TextContent`` blocks were stripped, so match by
+        # identity first and fall back to a reverse text+role cursor over this
+        # turn's slice of ``root.memory``. The last iteration can also be
+        # salvaged by Agent during cancellation before its OutputEvent.
         completed = {id(message): prefix for message, prefix in self._turn_completed_replies}
+        remaining_completed = list(self._turn_completed_replies)
         rewritten = False
         last_index = len(root.memory) - 1
-        for index in range(last_index, -1, -1):
+        start_index = min(max(0, self._turn_memory_baseline), len(root.memory))
+        for index in range(last_index, start_index - 1, -1):
             message = root.memory[index]
             if getattr(message, "role", None) != "assistant":
                 continue
@@ -4329,13 +4343,28 @@ class VoiceSession:
                 continue
             if id(message) in completed:
                 prefix = completed[id(message)]
-            elif index == last_index:
+                for comp_idx in range(len(remaining_completed) - 1, -1, -1):
+                    if remaining_completed[comp_idx][0] is message:
+                        remaining_completed.pop(comp_idx)
+                        break
+            elif index == last_index and (
+                not remaining_completed or remaining_completed[-1][1] != self._turn_iteration_prefix
+            ):
                 prefix = self._turn_iteration_prefix
                 iteration_text = self._turn_assistant_text[len(prefix):]
                 if not iteration_text or not (text.startswith(iteration_text) or iteration_text.startswith(text)):
                     continue
             else:
-                continue
+                matched_prefix = None
+                for comp_idx in range(len(remaining_completed) - 1, -1, -1):
+                    comp_msg, comp_prefix = remaining_completed[comp_idx]
+                    if comp_msg.collect_text() == text:
+                        matched_prefix = comp_prefix
+                        remaining_completed.pop(comp_idx)
+                        break
+                if matched_prefix is None:
+                    continue
+                prefix = matched_prefix
             spoken_prefix = _strip_markdown(prefix).strip()
             spoken_text = _strip_markdown(text).strip()
             remaining = heard_text

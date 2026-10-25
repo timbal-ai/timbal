@@ -116,6 +116,51 @@ async def test_multistep_memory_keeps_only_heard_text_per_iteration(heard_post):
     assert post.collect_text() == "Order has shipped tomorrow.", "LLM span must retain its original output"
 
 
+async def test_multistep_memory_truncates_cleaned_message_copy_on_barge_in():
+    """Agent._append_memory stores message.without_empty_text_blocks(), which
+    allocates a new Message when empty TextContent blocks exist."""
+    tool_entered = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    async def lookup() -> str:
+        tool_entered.set()
+        await release_tool.wait()
+        return "shipped"
+
+    pre_with_empty = Message(
+        role="assistant",
+        content=[
+            TextContent(text=""),
+            TextContent(text="Okay, let me check that order for you right now."),
+            ToolUseContent(id="lookup", name="lookup", input={}),
+        ],
+        stop_reason="tool_use",
+    )
+    agent = Agent(name="desk", tools=[lookup], model=TestModel(responses=[pre_with_empty, "Done."]))
+    tts = MockTTS(chunk=b"\x00" * 3200, num_chunks=4)
+    session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
+    turn = asyncio.create_task(session._run_turn("check order"))
+    try:
+        await asyncio.wait_for(tool_entered.wait(), 1)
+        # Wait until TTS has emitted the pre-tool audio, then simulate only a prefix played.
+        while session._turn_audio_bytes == 0:
+            await asyncio.sleep(0)
+        session._turn_heard_bytes = session._turn_audio_bytes // 4
+        session._cancel_turn.set()
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+    finally:
+        release_tool.set()
+        await asyncio.gather(turn, return_exceptions=True)
+
+    root = session._last_run_context.root_span()
+    assistant_msgs = [m for m in root.memory if m.role == "assistant"]
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0].collect_text() == "Okay, let"
+    assert assistant_msgs[0].metadata.get("interrupted") is True
+    assert any(isinstance(c, ToolUseContent) for c in assistant_msgs[0].content)
+
+
 class FlushStream(MockTTSStream):
     def __init__(self):
         super().__init__()
