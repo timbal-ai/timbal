@@ -515,6 +515,63 @@ class TestFilePersist:
         assert result == "https://timbalusercontent.com/tmp/019f/my%20file.bin"
         assert file.__persisted__ == result
 
+    async def test_persist_anonymous_bytes_with_platform_config_synthesizes_filename(self) -> None:
+        """Anonymous bytes File has no initial BytesIO.name; persist() must synthesize one."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from timbal.state import set_run_context
+
+        set_run_context(self._platform_ctx())
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content_length": 4,
+            "content_type": "image/png",
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": None,
+            "name": "generated.png",
+            "url": "https://timbalusercontent.com/tmp/019f/generated.png",
+        }
+
+        file = File.validate(b"data", {"extension": ".png"})
+        with patch("timbal.platform.utils._request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = mock_response
+            result = await file.persist()
+
+        assert result == "https://timbalusercontent.com/tmp/019f/generated.png"
+        uploaded_name, uploaded_bytes, uploaded_mime = mock_request.await_args.kwargs["files"]["file"]
+        assert uploaded_name.endswith(".png")
+        assert uploaded_bytes == b"data"
+        assert uploaded_mime == "image/png"
+
+    async def test_persist_bytes_with_file_content_name_uses_display_name(self) -> None:
+        """FileContent(..., name='company_logo.png') propagates its name to an unnamed bytes File."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from timbal.state import set_run_context
+        from timbal.types.content import FileContent
+
+        set_run_context(self._platform_ctx())
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content_length": 4,
+            "content_type": "image/png",
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": None,
+            "name": "company_logo.png",
+            "url": "https://timbalusercontent.com/tmp/019f/company_logo.png",
+        }
+
+        fc = FileContent(file=File.validate(b"data", {"extension": ".png"}), name="company_logo.png")
+        with patch("timbal.platform.utils._request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = mock_response
+            result = await fc.file.persist()
+
+        assert result == "https://timbalusercontent.com/tmp/019f/company_logo.png"
+        uploaded_name, uploaded_bytes, uploaded_mime = mock_request.await_args.kwargs["files"]["file"]
+        assert uploaded_name == "company_logo.png"
+        assert uploaded_bytes == b"data"
+        assert uploaded_mime == "image/png"
+
 
 # ---------------------------------------------------------------------------
 # TestFileSerialize — serialize() with persisted value
