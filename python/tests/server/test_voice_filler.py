@@ -41,10 +41,17 @@ def _tool_call_message(tool: str = "lookup") -> Message:
 def _make_session(
     *,
     tool_sleep: float = 0.2,
+    wait_for_fillers: int = 0,
     filler: dict | FillerConfig | None = None,
     responses: list | None = None,
 ) -> VoiceSession:
+    session: VoiceSession | None = None
+
     async def lookup(q: str) -> str:
+        if wait_for_fillers and session is not None:
+            deadline = time.monotonic() + max(tool_sleep, 2.0)
+            while session._turn_filler_count < wait_for_fillers and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
         await asyncio.sleep(tool_sleep)
         return "42"
 
@@ -53,13 +60,14 @@ def _make_session(
         model=TestModel(responses=responses or [_tool_call_message(), "The answer is 42."]),
         tools=[lookup],
     )
-    return VoiceSession(
+    session = VoiceSession(
         agent,
         _make_stt_class()(),
         _make_tts_class()(),
         turn_detector="heuristic",
         filler=filler,
     )
+    return session
 
 
 def _default_filler(**overrides) -> dict:
@@ -245,7 +253,8 @@ class TestFillerRepeat:
 
     async def test_repeats_on_prolonged_silence(self) -> None:
         session = _make_session(
-            tool_sleep=0.6,
+            tool_sleep=0.05,
+            wait_for_fillers=2,
             filler={"model": self._counting_model(), "delay_secs": 0.0, "repeat_secs": 0.08},
         )
         await session._run_turn("what is the answer?")
@@ -259,13 +268,14 @@ class TestFillerRepeat:
         assert replies == ["The answer is 42."]
 
     async def test_single_filler_without_repeat(self) -> None:
-        session = _make_session(tool_sleep=0.4, filler=_default_filler())
+        session = _make_session(tool_sleep=0.1, wait_for_fillers=1, filler=_default_filler())
         await session._run_turn("what is the answer?")
         assert session.metrics[-1].filler_count == 1
 
     async def test_max_per_turn_cap(self) -> None:
         session = _make_session(
-            tool_sleep=0.9,
+            tool_sleep=0.15,
+            wait_for_fillers=2,
             filler={"model": self._counting_model(), "delay_secs": 0.0, "repeat_secs": 0.05, "max_per_turn": 2},
         )
         await session._run_turn("what is the answer?")
@@ -286,11 +296,9 @@ class TestFillerRepeat:
             prompts.append(messages[-1].collect_text())
             return f"Filler {len(prompts)}."
 
-        # Generous tool time: the follow-up only fires after ``repeat_secs`` of
-        # silence *since the first filler finished*, and a loaded CI runner can
-        # take most of 0.5s just to produce that first one (seen: 1 >= 2).
         session = _make_session(
-            tool_sleep=1.5,
+            tool_sleep=0.05,
+            wait_for_fillers=2,
             filler={"model": TestModel(handler=handler), "delay_secs": 0.0, "repeat_secs": 0.08},
         )
         await session._run_turn("what is the answer?")
@@ -303,29 +311,51 @@ class TestFillerRepeat:
 class _SlowStartModel(TestModel):
     """A model that thinks before its first token — the silence a tool filler never covered."""
 
-    def __init__(self, think_secs: float, **kwargs) -> None:
+    def __init__(self, think_secs: float, *, wait_fn=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.think_secs = think_secs
+        self.wait_fn = wait_fn
 
     async def stream(self, messages: list, **kwargs):
+        if self.wait_fn is not None and self.call_count == 0:
+            await self.wait_fn()
         await asyncio.sleep(self.think_secs)
         async for chunk in super().stream(messages, **kwargs):
             yield chunk
 
 
 def _thinking_session(
-    *, think_secs: float, filler: dict, responses: list | None = None, tool_sleep: float | None = None
+    *,
+    think_secs: float,
+    filler: dict,
+    responses: list | None = None,
+    tool_sleep: float | None = None,
+    wait_for_think_filler: bool = False,
+    wait_for_tool_fillers: int = 0,
 ) -> VoiceSession:
+    session: VoiceSession | None = None
+
+    async def wait_think() -> None:
+        if wait_for_think_filler and session is not None:
+            deadline = time.monotonic() + max(think_secs, 2.0)
+            while session._turn_filler_count < 1 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+
     async def lookup(q: str) -> str:
+        if wait_for_tool_fillers and session is not None:
+            deadline = time.monotonic() + max(tool_sleep or 0.0, 2.0)
+            while session._turn_filler_count < wait_for_tool_fillers and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
         await asyncio.sleep(tool_sleep or 0.0)
         return "42"
 
     agent = Agent(
         name="voice_test",
-        model=_SlowStartModel(think_secs, responses=responses or ["The answer is 42."]),
+        model=_SlowStartModel(think_secs, wait_fn=wait_think, responses=responses or ["The answer is 42."]),
         tools=[lookup] if tool_sleep is not None else [],
     )
-    return VoiceSession(agent, _make_stt_class()(), _make_tts_class()(), turn_detector="heuristic", filler=filler)
+    session = VoiceSession(agent, _make_stt_class()(), _make_tts_class()(), turn_detector="heuristic", filler=filler)
+    return session
 
 
 class _ScriptedAgent:
@@ -423,8 +453,10 @@ class TestThinkingFiller:
             return f"Filler {len(prompts)}."
 
         session = _thinking_session(
-            think_secs=0.3,
-            tool_sleep=0.6,
+            think_secs=0.05,
+            tool_sleep=0.05,
+            wait_for_think_filler=True,
+            wait_for_tool_fillers=2,
             filler={"model": TestModel(handler=handler), "delay_secs": 0.0, "think_delay_secs": 0.05},
             responses=[_tool_call_message(), "The answer is 42."],
         )
