@@ -441,3 +441,32 @@ async def test_end_prevents_pending_feed_from_reopening_context(tts_factory, mon
     await p._send_keepalive()
     assert ws.sent == sent_at_end
     assert not p._dialogue_contexts
+
+
+@pytest.mark.parametrize("model", ["eleven_v4", "eleven_v4_turbo"])
+async def test_dialogue_voice_settings_register_each_context_not_url(tts_factory, model):
+    p, ws, seen = await tts_factory(model, stability=0, similarity_boost=0.8)
+    query = parse_qs(urlsplit(seen["uri"]).query)
+    assert "stability" not in query
+    assert "similarity_boost" not in query
+    for _ in range(2):
+        stream = p.open_stream()
+        await stream.feed("Checking…")
+        assert await stream.flush() is True
+        await stream.feed("Done.")
+        await stream.end()
+    registrations = [m for m in ws.sent if "voices" in m]
+    assert len(registrations) == 2
+    assert all(m["voice_settings"] == {"stability": 0, "similarity_boost": 0.8} for m in registrations)
+    assert all("voice_settings" not in m for m in ws.sent if "voices" not in m)
+    first = [m for m in ws.sent if m["context_id"] == "ctx_1"]
+    assert first[2] == {"context_id": "ctx_1", "flush": True}
+    assert "Done." == first[3]["inputs"][0]["text"]
+
+
+async def test_dialogue_omits_unset_voice_settings(tts_factory):
+    p, ws, _ = await tts_factory(stability=None, similarity_boost=None)
+    stream = p.open_stream()
+    await stream.feed("Hello")
+    assert "voice_settings" not in ws.sent[0]
+    await stream.end()

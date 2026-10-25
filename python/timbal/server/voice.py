@@ -318,6 +318,7 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "tts_extra",
     "vad_endpointing",
     "model",
+    "tool_beat_secs",
     "turn_timeout_secs",
     "turn_timeout_fallback",
     "filler",
@@ -1140,6 +1141,8 @@ def build_voice_session(
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
         session_kwargs["user_idle"] = merged.user_idle
+    if merged.tool_beat_secs is not None:
+        session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import math
 import random
 import re
 import time
@@ -306,6 +307,7 @@ class VoiceSession:
         recorder: CallRecorder | None = None,
         session_id: str | None = None,
         hold_timeout_secs: float = 1.5,
+        tool_beat_secs: float | None = None,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
         vad_endpointing: bool | VadEndpointer | None = None,
@@ -340,6 +342,10 @@ class VoiceSession:
         # a per-decision override. Heuristic/provider never HOLD, so this is inert
         # unless an opt-in detector (local / lexical) is used.
         self.hold_timeout_secs = hold_timeout_secs
+        if tool_beat_secs is not None and (not math.isfinite(tool_beat_secs) or tool_beat_secs < 0):
+            raise ValueError("tool_beat_secs must be finite and non-negative")
+        self.tool_beat_secs = tool_beat_secs
+        self._turn_audio_playing_until = 0.0
         # Wall-clock cap for one agent turn. ``<= 0`` disables. On expiry the
         # session emits SessionError, speaks ``turn_timeout_fallback`` if no
         # audio has gone out yet, and stays open for the next user turn.
@@ -2349,6 +2355,7 @@ class VoiceSession:
         self._turn_tts_ended_at = None
         self._turn_tts_segments = 0
         self._turn_audio_bytes = 0
+        self._turn_audio_playing_until = 0.0
         self._turn_played_baseline = self.playback.played_bytes
         self._turn_tts_segment_records = []
         # A greeting still draining when this turn starts (deferred barge-in)
@@ -2377,6 +2384,9 @@ class VoiceSession:
         # CancelledError inside ``await _speak`` left the old code stuck at "not_started").
         turn_phase = "init"
         full_response = ""
+        # LLM OutputEvent text is per iteration, not cumulative across tools.
+        iteration_text = ""
+        iteration_prefix = ""
         try:
             if self._last_run_context is not None:
                 set_run_context(self._last_run_context)
@@ -2490,6 +2500,9 @@ class VoiceSession:
                     # called as a tool reports its own tools here too; those are
                     # not what the caller asked for, so fillers never name them.
                     if own_llm_path is None or event.path == own_llm_path:
+                        if text_buffer and not self._cancel_turn.is_set():
+                            self._schedule_tts(text_buffer, flush=True)
+                            text_buffer = ""
                         self._maybe_schedule_filler(event.item.name)
                     continue
 
@@ -2551,6 +2564,15 @@ class VoiceSession:
                         continue
                     if self._turn_first_token_at is None:
                         self._turn_first_token_at = time.monotonic()
+                    if not iteration_text:
+                        separator = (
+                            " " if full_response and not full_response[-1].isspace() and not chunk[0].isspace() else ""
+                        )
+                        iteration_prefix = full_response + separator
+                        iteration_text = chunk
+                        chunk = separator + chunk
+                    else:
+                        iteration_text += chunk
                     full_response += chunk
                     text_buffer += chunk
                     self._turn_assistant_text += chunk
@@ -2632,9 +2654,20 @@ class VoiceSession:
                                 self._schedule_tts(text_buffer)
                                 text_buffer = ""
                             if msg_text:
-                                merged, suffix = _reconcile_final_assistant_text(full_response, msg_text)
-                                if suffix is not None and merged != full_response:
-                                    full_response = merged
+                                merged, suffix = _reconcile_final_assistant_text(iteration_text, msg_text)
+                                if suffix is not None and merged != iteration_text:
+                                    if not iteration_text:
+                                        separator = (
+                                            " "
+                                            if full_response
+                                            and not full_response[-1].isspace()
+                                            and not msg_text[0].isspace()
+                                            else ""
+                                        )
+                                        iteration_prefix = full_response + separator
+                                        suffix = separator + suffix
+                                    iteration_text = merged
+                                    full_response = iteration_prefix + merged
                                     self._turn_assistant_text = full_response
                                     turn_phase = "emit_agent_text_delta_from_output"
                                     await self._emit(AgentTextDelta(text=suffix))
@@ -2657,7 +2690,7 @@ class VoiceSession:
                                 # Unicode/stream mismatch does not drop ``_pending_tts_after_scheduled``.
                                 pending_sources: list[str] = []
                                 if msg_text and msg_text.strip():
-                                    pending_sources.append(msg_text)
+                                    pending_sources.append(iteration_prefix + msg_text)
                                 pending_sources.append(full_response)
                                 for assistant_final in pending_sources:
                                     if not str(assistant_final).strip():
@@ -2676,9 +2709,18 @@ class VoiceSession:
                                         turn_phase = "tts_synthesize_pending_final_tail"
                                         self._schedule_tts(pending)
                                         break
-                            # Drain streaming TTS before the outer Agent OUTPUT (``anext``),
-                            # so all PCM is queued before post-hook / trace save / finally.
-                            if not self._cancel_turn.is_set():
+                            calls_tool = out.stop_reason == "tool_use" or any(
+                                isinstance(block, ToolUseContent) for block in out.content
+                            )
+                            iteration_text = ""
+                            iteration_prefix = full_response
+                            if calls_tool and not self._cancel_turn.is_set():
+                                # Synthesis and any optional beat run on the TTS chain,
+                                # concurrently with the tool, never on the agent's pull path.
+                                self._schedule_tool_boundary()
+                                await asyncio.sleep(0)
+                            # Only the final LLM iteration drains before trace persistence.
+                            elif not self._cancel_turn.is_set():
                                 turn_phase = "await_tts_after_llm_output"
                                 await self._await_turn_deadline(self._await_tts_chain())
                                 # Attach provisional metrics: the outer Agent's trace is first
@@ -3801,7 +3843,7 @@ class VoiceSession:
 
     # -- Internal: TTS ------------------------------------------------------
 
-    def _schedule_tts(self, text: str) -> None:
+    def _schedule_tts(self, text: str, *, flush: bool = False) -> None:
         """Queue ``text`` for serial synthesis without blocking the agent event loop.
 
         If we ``await`` synthesis inside ``async for event in agen``, the LLM cannot
@@ -3811,23 +3853,6 @@ class VoiceSession:
         if not text:
             return
         self._turn_tts_scheduled_text += text
-        # First flush of the turn: providers with a streaming context (ElevenLabs
-        # multi-context WS) get ONE context per reply — every subsequent flush is
-        # *fed* into it instead of synthesized as an independent segment. Separate
-        # segments each get final-sentence intonation and an audible seam between
-        # them ("choppy" speech); one context keeps prosody continuous.
-        if self._turn_tts_stream is None and self._turn_tts_pump is None and not self._cancel_turn.is_set():
-            stream = self.tts.open_stream()
-            if stream is not None:
-                self._turn_tts_stream = stream
-                record: list = ["", 0]
-                self._turn_stream_record = record
-                self._turn_tts_segment_records.append(record)
-                if self._turn_tts_started_at is None:
-                    self._turn_tts_started_at = time.monotonic()
-                self._turn_tts_pump = asyncio.create_task(self._pump_tts_stream(stream, record))
-        stream = self._turn_tts_stream
-        record = self._turn_stream_record
         prev = self._tts_tail
 
         async def chain() -> None:
@@ -3852,6 +3877,20 @@ class VoiceSession:
             await self._await_greeting_drain()
             if self._cancel_turn.is_set():
                 return
+            # Resolve the context after the preceding boundary: an enabled beat
+            # may have finished it. Otherwise reuse it to keep prosody continuous.
+            if self._turn_tts_stream is None and self._turn_tts_pump is None and not self._cancel_turn.is_set():
+                stream = self.tts.open_stream()
+                if stream is not None:
+                    self._turn_tts_stream = stream
+                    record: list = ["", 0]
+                    self._turn_stream_record = record
+                    self._turn_tts_segment_records.append(record)
+                    if self._turn_tts_started_at is None:
+                        self._turn_tts_started_at = time.monotonic()
+                    self._turn_tts_pump = asyncio.create_task(self._pump_tts_stream(stream, record))
+            stream = self._turn_tts_stream
+            record = self._turn_stream_record
             if stream is not None:
                 clean = _strip_markdown(text)
                 if not clean.strip():
@@ -3861,6 +3900,8 @@ class VoiceSession:
                     record[0] += clean
                 try:
                     await stream.feed(clean)
+                    if flush:
+                        await stream.flush()
                 except Exception as e:
                     logger.error("tts_feed_error", error=str(e), text_preview=clean[:80], exc_info=True)
                     await self._emit(SessionError(message=f"TTS failed: {e}"))
@@ -3871,6 +3912,49 @@ class VoiceSession:
         self._tts_tasks.add(t)
         t.add_done_callback(lambda _t: self._tts_tasks.discard(_t))
         self._tts_tail = t
+
+    def _schedule_tool_boundary(self) -> None:
+        """Flush speech before a tool; optionally finish its context for a measured beat.
+
+        The barrier is queued behind existing feeds and ahead of post-tool speech.
+        It starts while the tool runs, so slow tools consume the beat naturally.
+        """
+        if not self._turn_tts_scheduled_text.strip():
+            return
+        prev = self._tts_tail
+
+        async def boundary() -> None:
+            if prev is not None:
+                await asyncio.shield(prev)
+            if self._cancel_turn.is_set():
+                return
+            stream = self._turn_tts_stream
+            beat = self.tool_beat_secs or 0.0
+            # Opt-in beats need a known end of synthesis, so they use a new
+            # context after the tool. Otherwise retain contexts that can flush.
+            if stream is not None and (beat > 0 or not await stream.flush()):
+                await self._finish_tts_stream()
+            if self._cancel_turn.is_set():
+                return
+            if beat > 0 and self._turn_audio_bytes:
+                quiet_since = self._turn_audio_playing_until
+                while self.playback.is_playing:
+                    await asyncio.sleep(self.EVENT_TURN_POLL_SECS)
+                    quiet_since = max(quiet_since, time.monotonic())
+                remaining = quiet_since + beat - time.monotonic()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+
+        task = asyncio.create_task(boundary())
+        self._tts_tasks.add(task)
+        task.add_done_callback(lambda done: self._tts_tasks.discard(done))
+        self._tts_tail = task
+
+    def _note_turn_audio(self, num_bytes: int) -> None:
+        self._turn_audio_bytes += num_bytes
+        self._turn_audio_playing_until = max(time.monotonic(), self._turn_audio_playing_until) + (
+            num_bytes / (self.audio_output.sample_rate * 2)
+        )
 
     async def _await_tts_chain(self) -> None:
         """Wait for all segments scheduled with :meth:`_schedule_tts` for this turn.
@@ -3885,6 +3969,10 @@ class VoiceSession:
             except (asyncio.CancelledError, Exception):
                 pass
         self._tts_tail = None
+        await self._finish_tts_stream()
+
+    async def _finish_tts_stream(self) -> None:
+        """Finish the current context after its feeds, without awaiting the chain itself."""
         stream = self._turn_tts_stream
         if stream is not None:
             try:
@@ -3927,7 +4015,7 @@ class VoiceSession:
                 total_bytes += len(chunk)
                 if self._turn_first_audio_at is None:
                     self._turn_first_audio_at = time.monotonic()
-                self._turn_audio_bytes += len(chunk)
+                self._note_turn_audio(len(chunk))
                 if self._record_audio:
                     self._output_audio_chunks.append(chunk)
                 if self._recorder is not None:
@@ -4034,7 +4122,7 @@ class VoiceSession:
                 if not turnless:
                     if self._turn_first_audio_at is None:
                         self._turn_first_audio_at = time.monotonic()
-                    self._turn_audio_bytes += len(chunk)
+                    self._note_turn_audio(len(chunk))
                 if self._record_audio:
                     self._output_audio_chunks.append(chunk)
                 if self._recorder is not None:

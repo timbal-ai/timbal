@@ -127,6 +127,14 @@ class TTSStream(ABC):
     @abstractmethod
     async def feed(self, text: str) -> None: ...
 
+    async def flush(self) -> bool:
+        """Request audio for buffered text without ending the context.
+
+        Return True when supported. False lets the session end/drain this
+        context at a tool boundary and open a new one for post-tool text.
+        """
+        return False
+
     @abstractmethod
     async def end(self) -> None: ...
 

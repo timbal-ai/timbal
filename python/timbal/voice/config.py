@@ -412,6 +412,13 @@ class VoiceConfig(BaseModel):
     """None → auto: on when the turn detector exposes an audio EOU model."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
+    tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    """Minimum silence after pre-tool audio before post-tool synthesis.
+
+    None or zero disables. Tool execution overlaps the speech and the beat;
+    tools with no preceding speech never delay the first spoken word.
+    """
+
     turn_timeout_secs: float | None = None
     """None → ``VoiceSession`` default."""
     hello_wait_secs: float | None = Field(default=None, ge=0.0)

@@ -382,6 +382,9 @@ class ElevenLabsStreamTTS(TextToSpeech):
             keepalive_interval = min(keepalive_interval, _DIALOGUE_KEEPALIVE_INTERVAL_SEC)
         elif auto_mode:
             params["auto_mode"] = "true"
+        if self._dialogue:
+            extra.pop("stability", None)
+            extra.pop("similarity_boost", None)
         for k, v in extra.items():
             if v is not None and not str(k).startswith("_"):
                 params[k] = v
@@ -439,7 +442,15 @@ class ElevenLabsStreamTTS(TextToSpeech):
             msg: dict[str, Any] = {"context_id": context_id}
             if self._dialogue:
                 if context_id not in self._dialogue_contexts:
-                    await self._ws.send(json.dumps({"context_id": context_id, "voices": [self._out.voice]}))
+                    init: dict[str, Any] = {"context_id": context_id, "voices": [self._out.voice]}
+                    settings = {
+                        key: self._out.extra[key]
+                        for key in ("stability", "similarity_boost")
+                        if self._out.extra.get(key) is not None
+                    }
+                    if settings:
+                        init["voice_settings"] = settings
+                    await self._ws.send(json.dumps(init))
                     self._dialogue_contexts.add(context_id)
                     # abort() can invalidate input while registration awaits
                     # the socket; it will close the registration under this lock.
@@ -642,6 +653,11 @@ class _ElevenLabsTTSStream(TTSStream):
         # list item, a paragraph) ends a clause too.
         flush = self._tts._dialogue and text.rstrip(" \t")[-1:] in _DIALOGUE_FLUSH_END_CHARS
         await self._tts._send_text(self._ctx_id, text, flush=flush)
+
+    async def flush(self) -> bool:
+        if not self._ended and not self._aborted and self._ctx_id is not None:
+            await self._tts._send_text(self._ctx_id, " ", flush=True)
+        return True
 
     async def end(self) -> None:
         if self._ended or self._aborted:
