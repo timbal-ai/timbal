@@ -2782,9 +2782,11 @@ class TestToolSpeech:
         await asyncio.wait_for(session._run_turn("check"), 3)
         assert "post" in times
         if pretext:
-            assert times["post"] - times["pre"] >= 0.2
+            # Windows time.monotonic() has ~15.6ms (1/64s) tick resolution, so
+            # a 0.1s playback + 0.1s beat sleep can measure ~0.184s.
+            assert times["post"] - times["pre"] >= 0.18
         if tool_delay or not pretext:
-            assert times["post"] - times["tool_done"] < 0.08
+            assert times["post"] - times["tool_done"] < 0.2
 
     async def test_stream_without_flush_finishes_pre_tool_context_and_keeps_post_text(self):
         from timbal.types.content import TextContent, ToolUseContent
