@@ -258,6 +258,12 @@ class File(io.IOBase):
             return object.__getattribute__(self, "__source_extension__")
         elif name == "persisted":
             return object.__getattribute__(self, "__persisted__")
+        elif name == "name":
+            wrapped = self.__wrapped__
+            if not hasattr(wrapped, "name"):
+                fileext = object.__getattribute__(self, "__source_extension__") or ""
+                wrapped.name = f"{uuid7()}{fileext}"
+            return wrapped.name
         # TODO Add more aliases here
         else:
             return getattr(self.__wrapped__, name)

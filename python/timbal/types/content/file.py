@@ -355,6 +355,10 @@ class FileContent(BaseContent):
     def _default_name(self) -> Self:
         if self.name is None:
             self.name = _safe_file_name(self.file)
+        elif object.__getattribute__(self.file, "__source_scheme__") == "bytes":
+            fileobj = object.__getattribute__(self.file, "__fileobj__")
+            if fileobj is not None and not hasattr(fileobj, "name"):
+                fileobj.name = self.name
         return self
 
     @override
