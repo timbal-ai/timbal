@@ -111,3 +111,23 @@ def test_explicit_platform_config_keeps_precedence():
     assert ctx.platform_config.auth.token.get_secret_value() == "explicit-key"
     assert ctx.platform_config.subject.org_id == "test-org"
     assert ctx._tracing_provider is None
+    # Passing a PlatformConfig into RunContext must not mutate the caller's instance.
+    assert config.subject is None
+    assert not config._fully_resolved
+
+
+@pytest.mark.usefixtures("credentials")
+def test_configured_platform_tracing_provider_seeds_platform_config():
+    provider_config = PlatformConfig(
+        host="provider.example.test",
+        auth={"type": "bearer", "token": "provider-key"},
+        subject={"org_id": "provider-org", "app_id": "provider-app"},
+    )
+    provider = PlatformTracingProvider.configured(platform_config=provider_config)
+    ctx = RunContext(tracing_provider=provider)
+    assert ctx._tracing_provider is provider
+    assert ctx.platform_config is not None
+    assert ctx.platform_config.host == "provider.example.test"
+    assert ctx.platform_config.auth.token.get_secret_value() == "provider-key"
+    assert ctx.platform_config.subject.org_id == "provider-org"
+    assert ctx.platform_config.subject.app_id == "provider-app"

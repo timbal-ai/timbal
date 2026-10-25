@@ -70,10 +70,9 @@ async def execute_tool_proxy(tool_name: str, params: dict[str, Any]) -> Any:
     run_context = get_or_create_run_context()
     platform_config = run_context.platform_config
     if platform_config is None or platform_config.subject is None:
-        # The run context may have skipped platform_config resolution (e.g. tracing was
-        # explicitly disabled). Resolve it on demand — the proxy needs the org subject.
-        # force_refresh bypasses a stale cached default (a default call could have cached
-        # None before TIMBAL_API_KEY / TIMBAL_ORG_ID were set in this process).
+        # Credentials or subject may have been populated in the environment after
+        # the RunContext was created. Resolve on demand — the proxy needs the org
+        # subject. force_refresh bypasses a stale cached default.
         from ..state.config_loader import resolve_platform_config
 
         platform_config = resolve_platform_config(platform_config, force_refresh=True)

@@ -11,8 +11,17 @@ from timbal.state.context import RunContext
 
 @pytest.fixture(autouse=True)
 def _ctx(monkeypatch):
-    monkeypatch.delenv("TIMBAL_ORG_ID", raising=False)
-    monkeypatch.delenv("TIMBAL_KB_ID", raising=False)
+    for var in (
+        "TIMBAL_API_HOST",
+        "TIMBAL_API_KEY",
+        "TIMBAL_API_TOKEN",
+        "TIMBAL_ORG_ID",
+        "TIMBAL_APP_ID",
+        "TIMBAL_PROJECT_ID",
+        "TIMBAL_REV",
+        "TIMBAL_KB_ID",
+    ):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
     monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", False)
     cfg = PlatformConfig(
