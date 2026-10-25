@@ -396,6 +396,8 @@ class VoiceSession:
         self._filler_agent: Agent | None = None
         self._turn_filler_task: asyncio.Task[None] | None = None
         self._turn_filler_count = 0
+        self._turn_filler_spoken: list[str] = []
+        self._turn_filler_spoke_at = 0.0
         self._turn_filler_text = ""
         # Segments/bytes as of the last filler — "spoken since then" checks.
         self._turn_filler_segments_baseline = 0
@@ -2402,6 +2404,8 @@ class VoiceSession:
         self._turn_stream_record = None
         self._turn_filler_task = None
         self._turn_filler_count = 0
+        self._turn_filler_spoken = []
+        self._turn_filler_spoke_at = 0.0
         self._turn_filler_text = ""
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
@@ -2523,6 +2527,15 @@ class VoiceSession:
                             await self._await_turn_deadline(
                                 asyncio.gather(self._turn_filler_task, return_exceptions=True)
                             )
+                        self._turn_filler_task = None
+                        # Re-arm after the retry's first event so filler work uses
+                        # its live run context. Keep the caller turn's grace period,
+                        # spoken phrases, repeat cadence, and remaining budget.
+                        arm_think_filler = (
+                            self.filler is not None
+                            and self.filler.enabled
+                            and self.filler.think_delay_secs is not None
+                        )
                         retry_kwargs = dict(agent_kwargs)
                         retry_kwargs.pop("prompt", None)
                         retry_kwargs.pop("parent_id", None)
@@ -3182,8 +3195,13 @@ class VoiceSession:
         only on continued silence and generate on demand — no speculative
         LLM call per window.
         """
-        spoken: list[str] = []
+        spoken = self._turn_filler_spoken
         try:
+            if spoken:
+                # An empty retry is only allowed before any tool call, so
+                # earlier phrases covered thinking and may still need a tool filler.
+                await self._followup_fillers(spoken, covered_tool=False)
+                return
             phrase = self._instant_filler_phrase()
             ready_made = phrase is not None
             gen: asyncio.Task[str | None] | None = None
@@ -3222,32 +3240,34 @@ class VoiceSession:
                 self._record_filler_phrase(phrase)
             covered_tool = self._turn_tool_seen_at is not None
             await self._speak_filler(phrase, self._turn_tool_name or "")
-            spoken.append(phrase)
-
-            if not covered_tool and self.filler.repeat_secs is None and len(spoken) < self.filler.max_per_turn:
-                await self._tool_filler_after_think(spoken)
-                return
-
-            while self.filler.repeat_secs is not None and len(spoken) < self.filler.max_per_turn:
-                await asyncio.sleep(self.filler.repeat_secs)
-                if not self._filler_ok_to_speak():
-                    return
-                try:
-                    async with asyncio.timeout(self.filler.timeout_secs):
-                        phrase = await self._generate_filler(self._turn_tool_name, spoken)
-                except TimeoutError:
-                    logger.debug("filler_generation_timeout", tool=self._turn_tool_name, **_trace_debug_fields())
-                    return
-                if not phrase or not self._filler_ok_to_speak():
-                    return
-                await self._speak_filler(phrase, self._turn_tool_name or "")
-                spoken.append(phrase)
+            await self._followup_fillers(spoken, covered_tool)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             # Dead air is the status quo — a broken filler must never surface
             # to the caller as an error.
             logger.warning("filler_failed", error=str(e), tool=self._turn_tool_name, **_trace_debug_fields())
+
+    async def _followup_fillers(self, spoken: list[str], covered_tool: bool) -> None:
+        """Continue the caller turn's filler budget, including across an empty retry."""
+        if not covered_tool and self.filler.repeat_secs is None and len(spoken) < self.filler.max_per_turn:
+            await self._tool_filler_after_think(spoken)
+            return
+
+        while self.filler.repeat_secs is not None and len(spoken) < self.filler.max_per_turn:
+            due = self._turn_filler_spoke_at + self.filler.repeat_secs
+            await asyncio.sleep(max(0.0, due - time.monotonic()))
+            if not self._filler_ok_to_speak():
+                return
+            try:
+                async with asyncio.timeout(self.filler.timeout_secs):
+                    phrase = await self._generate_filler(self._turn_tool_name, spoken)
+            except TimeoutError:
+                logger.debug("filler_generation_timeout", tool=self._turn_tool_name, **_trace_debug_fields())
+                return
+            if not phrase or not self._filler_ok_to_speak():
+                return
+            await self._speak_filler(phrase, self._turn_tool_name or "")
 
     async def _tool_filler_after_think(self, spoken: list[str]) -> None:
         """The filler for a tool called after a ``think_delay_secs`` filler went out.
@@ -3258,7 +3278,7 @@ class VoiceSession:
         filler plays does not get a second line straight after it. Generation
         overlaps the wait, as it does for a tool's first filler.
         """
-        spoke_at = time.monotonic()
+        spoke_at = self._turn_filler_spoke_at
         await self._turn_tool_seen.wait()
         if not self._filler_ok_to_speak():
             return
@@ -3279,7 +3299,6 @@ class VoiceSession:
         if not phrase or not self._filler_ok_to_speak():
             return
         await self._speak_filler(phrase, self._turn_tool_name or "")
-        spoken.append(phrase)
 
     async def _speak_filler(self, phrase: str, tool_name: str) -> None:
         """Synthesize one filler phrase as a dedicated task on the TTS chain.
@@ -3310,6 +3329,8 @@ class VoiceSession:
         # cancelled mid-speak must not count a filler that never reached the
         # transcript or the client.
         self._turn_filler_count += 1
+        self._turn_filler_spoken.append(phrase)
+        self._turn_filler_spoke_at = time.monotonic()
         # Follow-up condition is "nothing spoken since this filler" — snapshot
         # what the filler itself contributed.
         self._turn_filler_segments_baseline = self._turn_tts_segments

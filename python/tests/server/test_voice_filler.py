@@ -850,3 +850,100 @@ class TestFillerOverWs:
         )
         messages = self._run(monkeypatch, tmp_path, module_body=module_body)
         assert "filler" not in [m["type"] for m in messages]
+
+
+class TestEmptyRetryFiller:
+    @pytest.mark.parametrize("with_tool", [False, True])
+    async def test_retry_keeps_filler_available(self, with_tool, monkeypatch):
+        spoken = asyncio.Event()
+        contexts = []
+
+        async def wait_for_filler():
+            try:
+                await asyncio.wait_for(spoken.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+
+        replies = iter(
+            [Message(role="assistant", content=[]), _tool_call_message(), "Recovered."]
+            if with_tool
+            else [Message(role="assistant", content=[]), "Recovered."]
+        )
+
+        class RetryModel(TestModel):
+            async def stream(self, messages, **kwargs):
+                if self.call_count == 1 and not with_tool:
+                    await wait_for_filler()
+                async for chunk in super().stream(messages, **kwargs):
+                    yield chunk
+
+        async def lookup(q: str) -> str:
+            await wait_for_filler()
+            return "42"
+
+        session = VoiceSession(
+            Agent(name="voice_test", model=RetryModel(handler=lambda _: next(replies)), tools=[lookup]),
+            _make_stt_class()(),
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            filler=_default_filler(think_delay_secs=30.0 if with_tool else 0.05, max_per_turn=1),
+        )
+        original = session._speak_filler
+
+        async def observe(phrase, tool_name):
+            contexts.append(get_run_context().id)
+            await original(phrase, tool_name)
+            spoken.set()
+
+        monkeypatch.setattr(session, "_speak_filler", observe)
+        await session._run_turn("Help me.")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE]
+        assert contexts == [session._last_run_context.id]
+        assert session._metrics[-1].filler_count == 1
+
+    @pytest.mark.parametrize("max_per_turn,repeat_secs", [(1, None), (2, None), (2, 0.05)])
+    async def test_retry_preserves_spoken_fillers_and_budget(self, max_per_turn, repeat_secs, monkeypatch):
+        first = asyncio.Event()
+        second = asyncio.Event()
+        previous_phrases = []
+        replies = iter([Message(role="assistant", content=[]), _tool_call_message(), "Recovered."])
+
+        class RetryModel(TestModel):
+            async def stream(self, messages, **kwargs):
+                if self.call_count == 0:
+                    await asyncio.wait_for(first.wait(), timeout=1.0)
+                async for chunk in super().stream(messages, **kwargs):
+                    yield chunk
+
+        async def lookup(q: str) -> str:
+            try:
+                await asyncio.wait_for(second.wait(), timeout=0.2 if max_per_turn == 1 else 1.0)
+            except TimeoutError:
+                pass
+            return "42"
+
+        session = VoiceSession(
+            Agent(name="voice_test", model=RetryModel(handler=lambda _: next(replies)), tools=[lookup]),
+            _make_stt_class()(),
+            _make_tts_class()(),
+            turn_detector="heuristic",
+            filler=_default_filler(
+                phrases=[PHRASE], think_delay_secs=0.0, max_per_turn=max_per_turn, repeat_secs=repeat_secs
+            ),
+        )
+        original = session._speak_filler
+
+        async def generate(tool_name, previous=None):
+            previous_phrases.append(list(previous or []))
+            return "Still working."
+
+        async def observe(phrase, tool_name):
+            await original(phrase, tool_name)
+            (first if session._turn_filler_count == 1 else second).set()
+
+        monkeypatch.setattr(session, "_generate_filler", generate)
+        monkeypatch.setattr(session, "_speak_filler", observe)
+        await session._run_turn("Help me.")
+        assert [e.text for e in session.transcript if e.filler] == [PHRASE, "Still working."][:max_per_turn]
+        assert previous_phrases == ([] if max_per_turn == 1 else [[PHRASE]])
+        assert session._metrics[-1].filler_count == max_per_turn
