@@ -42,3 +42,36 @@ def test_explicit_client_voice_wins_over_empty_platform_voice():
     defaults = VoiceConfig(turn_detector="heuristic").model_copy(update={"voice": ""})
     session, _ = build_voice_session(agent, defaults, {"voice": "chosen"})
     assert session.audio_output.voice == "chosen"
+
+
+@pytest.mark.parametrize("beat", [None, 0, 0.25])
+def test_tool_beat_reaches_voice_session(beat):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(agent, VoiceConfig(turn_detector="heuristic"), {"tool_beat_secs": beat})
+    assert session.tool_beat_secs == beat
+
+
+@pytest.mark.parametrize("beat", [-1, float("nan"), float("inf")])
+def test_invalid_tool_beat_is_rejected(beat):
+    with pytest.raises(ValueError):
+        VoiceConfig(tool_beat_secs=beat)
+
+
+@pytest.mark.parametrize("beat", ["0.6", "0", " 0.25 "])
+def test_numeric_client_tool_beat_is_coerced(beat):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", tool_beat_secs=0.4)
+    merged = merge_client_voice_overrides(defaults, {"tool_beat_secs": beat})
+    assert merged.tool_beat_secs == float(beat)
+    session, _ = build_voice_session(agent, defaults, {"tool_beat_secs": beat})
+    assert session.tool_beat_secs == float(beat)
+
+
+@pytest.mark.parametrize(
+    "beat", [-1, "-1", "oops", "", "nan", "inf", float("nan"), float("inf"), [], {}, True]
+)
+def test_invalid_client_tool_beat_preserves_server_default(beat):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", tool_beat_secs=0.4)
+    session, _ = build_voice_session(agent, defaults, {"tool_beat_secs": beat})
+    assert session.tool_beat_secs == 0.4

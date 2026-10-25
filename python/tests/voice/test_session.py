@@ -2673,3 +2673,206 @@ class TestStalePartialSweeper:
         """
         stt, _ = await self._run_churn_scenario(_FakeEndpointer(0.5))
         assert stt.commit_calls == 0, "sweeper force-committed while the user was still speaking"
+
+
+class TestToolSpeech:
+    @pytest.mark.parametrize("streamed", [False, True])
+    @pytest.mark.parametrize("prefix", ["Checking...", "Checking…", "Let me check that for you."])
+    async def test_tool_runs_before_pre_tool_synthesis_finishes(self, streamed, prefix):
+        from timbal.types.content import TextContent, ToolUseContent
+        from timbal.types.events.delta import DeltaEvent, TextDelta, ToolUse
+        from timbal.types.events.output import OutputEvent
+        from timbal.types.message import Message
+
+        tool_started = asyncio.Event()
+        speech_started = asyncio.Event()
+
+        async def lookup() -> str:
+            await asyncio.wait_for(speech_started.wait(), 1)
+            tool_started.set()
+            return "shipped"
+
+        class GatedTTS(MockTTS):
+            async def synthesize(self, text):
+                speech_started.set()
+                # If the agent waits for TTS before calling the tool this deadlocks.
+                await asyncio.wait_for(tool_started.wait(), 1)
+                async for chunk in super().synthesize(text):
+                    yield chunk
+
+        class StreamingAgent(Agent):
+            def __call__(self, **kwargs):
+                source = super().__call__(**kwargs)
+
+                async def events():
+                    async with aclosing(source):
+                        async for event in source:
+                            if isinstance(event, OutputEvent) and event.path == "desk.llm":
+                                for block in event.output.content:
+                                    item = (
+                                        TextDelta(id="text", text_delta=block.text)
+                                        if isinstance(block, TextContent)
+                                        else ToolUse(id=block.id, name=block.name)
+                                    )
+                                    yield DeltaEvent(
+                                        run_id=event.run_id, path=event.path, call_id=event.call_id, item=item
+                                    )
+                                    if isinstance(item, ToolUse):
+                                        # The delta itself must flush, before final LLM output.
+                                        await asyncio.wait_for(speech_started.wait(), 1)
+                            yield event
+
+                return events()
+
+        agent = (StreamingAgent if streamed else Agent)(
+            name="desk",
+            tools=[lookup],
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[TextContent(text=prefix), ToolUseContent(id="lookup", name="lookup", input={})],
+                        stop_reason="tool_use",
+                    ),
+                    "It shipped.",
+                ]
+            ),
+        )
+        tts = GatedTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
+        await asyncio.wait_for(session._run_turn("check it"), 3)
+        assert tool_started.is_set()
+        assert "".join(tts.synthesized_texts) == prefix + " It shipped."
+        assert [e.text for e in session.transcript if e.role == "assistant"] == [prefix + " It shipped."]
+
+    @pytest.mark.parametrize("tool_delay,pretext", [(0, True), (0.4, True), (0, False)])
+    async def test_beat_is_measured_from_pre_tool_audio_not_tool_completion(self, tool_delay, pretext):
+        import time
+
+        from timbal.types.content import TextContent, ToolUseContent
+        from timbal.types.message import Message
+
+        times = {}
+
+        async def lookup() -> str:
+            await asyncio.sleep(tool_delay)
+            times["tool_done"] = time.monotonic()
+            return "done"
+
+        class TimedTTS(MockTTS):
+            async def synthesize(self, text):
+                times["pre" if "Checking" in text else "post"] = time.monotonic()
+                async for chunk in super().synthesize(text):
+                    yield chunk
+
+        content = [TextContent(text="Checking…")] if pretext else []
+        content.append(ToolUseContent(id="c1", name="lookup", input={}))
+        agent = Agent(
+            name="desk",
+            tools=[lookup],
+            model=TestModel(responses=[Message(role="assistant", content=content, stop_reason="tool_use"), "Done."]),
+        )
+        session = VoiceSession(
+            agent=agent,
+            stt=MockSTT(),
+            tts=TimedTTS(chunk=b"\x00" * 3200, num_chunks=1),
+            turn_detector="heuristic",
+            tool_beat_secs=0.1,
+        )
+        await asyncio.wait_for(session._run_turn("check"), 3)
+        assert "post" in times
+        if pretext:
+            assert times["post"] - times["pre"] >= 0.2
+        if tool_delay or not pretext:
+            assert times["post"] - times["tool_done"] < 0.08
+
+    async def test_stream_without_flush_finishes_pre_tool_context_and_keeps_post_text(self):
+        from timbal.types.content import TextContent, ToolUseContent
+        from timbal.types.message import Message
+
+        async def lookup() -> str:
+            return "done"
+
+        agent = Agent(
+            name="desk",
+            tools=[lookup],
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[TextContent(text="Checking…"), ToolUseContent(id="c1", name="lookup", input={})],
+                        stop_reason="tool_use",
+                    ),
+                    "Done.",
+                ]
+            ),
+        )
+        tts = StreamingMockTTS()
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic")
+        await session._run_turn("check")
+        assert ["".join(s.fed) for s in tts.streams] == ["Checking…", " Done."]
+        assert all(s.ended for s in tts.streams)
+
+    @pytest.mark.parametrize("beat", [None, 0])
+    async def test_flush_capable_context_stays_open_across_tool(self, beat):
+        from timbal.types.content import TextContent, ToolUseContent
+        from timbal.types.message import Message
+
+        class FlushStream(MockTTSStream):
+            flush_count = 0
+
+            async def flush(self):
+                self.flush_count += 1
+                return True
+
+            async def drain(self):
+                while not self._queue.empty():
+                    await asyncio.sleep(0)
+                return True
+
+        class FlushTTS(StreamingMockTTS):
+            def open_stream(self):
+                stream = FlushStream()
+                self.streams.append(stream)
+                return stream
+
+        tts = FlushTTS()
+
+        async def lookup() -> str:
+            await asyncio.sleep(0)
+            assert len(tts.streams) == 1
+            assert not tts.streams[0].ended
+            return "done"
+
+        agent = Agent(
+            name="desk",
+            tools=[lookup],
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[TextContent(text="Checking…"), ToolUseContent(id="c1", name="lookup", input={})],
+                        stop_reason="tool_use",
+                    ),
+                    "Done.",
+                ]
+            ),
+        )
+        session = VoiceSession(agent=agent, stt=MockSTT(), tts=tts, turn_detector="heuristic", tool_beat_secs=beat)
+        await session._run_turn("check")
+        assert len(tts.streams) == 1
+        assert tts.streams[0].fed == ["Checking…", " Done."]
+        assert tts.streams[0].flush_count >= 1
+        assert tts.streams[0].ended
+
+    async def test_interrupt_cancels_tool_beat_and_post_tool_speech(self):
+        session, _, tts = _make_session()
+        session.tool_beat_secs = 60
+        session._schedule_tts("Checking…")
+        session._schedule_tool_boundary()
+        session._schedule_tts("Must not be heard.")
+        session._current_turn_task = asyncio.create_task(session._await_tts_chain())
+        await asyncio.sleep(0.02)
+        await asyncio.wait_for(session.interrupt(), 1)
+        assert "Must not be heard." not in tts.synthesized_texts
+        assert not any(not task.done() for task in session._tts_tasks)

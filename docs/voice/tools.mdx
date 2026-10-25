@@ -49,6 +49,30 @@ Restart the server and start a new session. Say "Check order 101." You should se
 
 With the thinking sound off and no filler configured, a tool call can leave a quiet gap. This is a good baseline: first verify that the tool is called and its result is used. The next lessons add a [thinking sound](/voice/thinking-sounds) or a [spoken filler](/voice/fillers) to that gap.
 
+## Speak before a tool call
+
+You can ask the model to say a short acknowledgement before calling a tool, such as
+"Let me check that…". Timbal flushes that text to speech while the tool runs,
+including phrases ending in an ellipsis. The tool does not wait for synthesis to
+finish. The final answer follows the acknowledgement in the same turn.
+
+For a short pause between the acknowledgement and the result, set:
+
+```python
+agent.voice_config["tool_beat_secs"] = 0.6
+```
+
+The default is `None` (disabled); `0` also disables the pause. A positive value
+sets the minimum silence after pre-tool playback and before post-tool synthesis.
+Tool execution continues during playback and the pause, so a sufficiently slow
+tool adds no extra wait. There is no pause before the first spoken response when
+the model called the tool without an acknowledgement.
+
+An enabled pause finishes the pre-tool streaming TTS context and uses a new
+context for the result. With the pause disabled, providers that support flushing and confirming delivery of each audio segment
+keep their context open across the tool call. Other providers finish the context
+at the boundary so interruption tracking never counts unspoken result text as heard.
+
 ## Add real actions carefully
 
 Replace the mock with an async service call when the basic flow works. For actions requiring approval, wrap the function in `Tool(handler=..., requires_approval=True)` and implement the approval UI and HTTP resume flow. The playground displays a pending request; it does not resolve approval from spoken words. See [Approval gates](/human-in-the-loop/approval-gates) and [Voice approval events](/voice/transports#approval-and-input-requests).

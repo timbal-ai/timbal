@@ -12,6 +12,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
+import pytest
 from timbal import Agent
 from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
@@ -370,3 +371,55 @@ class TestTimeoutFallbackRunId:
         assert done.text == "Sorry, try again."
         assert done.run_id is not None
         assert done.run_id == session._last_run_context.id
+
+
+@pytest.mark.parametrize("ends_stream", [False, True])
+async def test_turn_deadline_detects_swallowed_cancellation_before_clock_deadline(monkeypatch, ends_stream):
+    """An early timer wakeup must not turn a cancelled pull into successful EOF."""
+    import time
+
+    real_timeout = asyncio.timeout
+    # Model a timer firing before the wall-clock deadline (coarse event-loop clock).
+    monkeypatch.setattr(asyncio, "timeout", lambda _delay: real_timeout(0.001))
+    session = VoiceSession(
+        agent=Agent(name="deadline", model=TestModel(responses=["hi"])),
+        stt=DelayedMockSTT(),
+        tts=MockTTS(),
+        turn_detector="heuristic",
+    )
+    session._turn_deadline = time.monotonic() + 60
+
+    async def swallowed_cancel():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if ends_stream:
+                raise StopAsyncIteration from None
+            return "cancelled output"
+
+    with pytest.raises(TimeoutError):
+        await session._await_turn_deadline(swallowed_cancel())
+
+
+async def test_expired_turn_deadline_closes_unawaited_coroutine():
+    import inspect
+    import time
+
+    session = VoiceSession(
+        agent=Agent(name="deadline", model=TestModel(responses=["hi"])),
+        stt=DelayedMockSTT(),
+        tts=MockTTS(),
+        turn_detector="heuristic",
+    )
+    session._turn_deadline = time.monotonic() - 1
+
+    async def never_started():
+        return "unexpected"
+
+    pending = never_started()
+    try:
+        with pytest.raises(TimeoutError):
+            await session._await_turn_deadline(pending)
+        assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
+    finally:
+        pending.close()

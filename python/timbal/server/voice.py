@@ -318,6 +318,7 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "tts_extra",
     "vad_endpointing",
     "model",
+    "tool_beat_secs",
     "turn_timeout_secs",
     "turn_timeout_fallback",
     "filler",
@@ -447,6 +448,17 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     updates = omit_empty_voice_blocks(
         {k: v for k, v in client.items() if k in CLIENT_SETTABLE_VOICE_FIELDS and v is not None}
     )
+    if "tool_beat_secs" in updates:
+        # model_copy below deliberately skips validation. Telephony parameters
+        # arrive as strings; accept numeric strings but retain the operator's
+        # value when this individual knob is malformed.
+        try:
+            if isinstance(updates["tool_beat_secs"], bool):
+                raise TypeError("a boolean is not a pause duration")
+            updates["tool_beat_secs"] = VoiceConfig(tool_beat_secs=updates["tool_beat_secs"]).tool_beat_secs
+        except (ValueError, TypeError):
+            logger.info("voice_client_tool_beat_invalid")
+            del updates["tool_beat_secs"]
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
@@ -1140,6 +1152,8 @@ def build_voice_session(
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
         session_kwargs["user_idle"] = merged.user_idle
+    if merged.tool_beat_secs is not None:
+        session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
