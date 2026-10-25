@@ -2321,15 +2321,26 @@ class VoiceSession:
             return await awaitable
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            # The caller already created this coroutine, but it will never be
+            # awaited. Close it to avoid a RuntimeWarning on the timeout path.
+            if asyncio.iscoroutine(awaitable):
+                awaitable.close()
             raise TimeoutError("agent turn timed out")
+        timeout = asyncio.timeout(remaining)
         try:
-            async with asyncio.timeout(remaining):
-                return await awaitable
-        except TimeoutError:
-            # Re-raise as a bare TimeoutError so the turn's ``except TimeoutError``
-            # path stays distinct from an inner CancelledError / BaseExceptionGroup
-            # that ``asyncio.timeout`` can surface on some versions.
-            raise TimeoutError("agent turn timed out") from None
+            async with timeout:
+                result = await awaitable
+        except Exception:
+            if timeout.expired():
+                raise TimeoutError("agent turn timed out") from None
+            raise
+        # Runnable/TTS cleanup can swallow cancellation and return a result or
+        # EOF instead. The timer may fire before the wall-clock deadline on a
+        # coarse event-loop clock, so checking monotonic() on the next pull is
+        # insufficient. Preserve the timeout even when its cancellation was caught.
+        if timeout.expired():
+            raise TimeoutError("agent turn timed out")
+        return result
 
     async def _run_turn(self, user_text: str, *, followup: Followup | None = None) -> None:
         """One agent turn: the caller's ``user_text``, or an event turn's ``followup`` (``user_text`` "")."""

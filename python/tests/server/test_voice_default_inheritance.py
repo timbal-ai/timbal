@@ -55,3 +55,23 @@ def test_tool_beat_reaches_voice_session(beat):
 def test_invalid_tool_beat_is_rejected(beat):
     with pytest.raises(ValueError):
         VoiceConfig(tool_beat_secs=beat)
+
+
+@pytest.mark.parametrize("beat", ["0.6", "0", " 0.25 "])
+def test_numeric_client_tool_beat_is_coerced(beat):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", tool_beat_secs=0.4)
+    merged = merge_client_voice_overrides(defaults, {"tool_beat_secs": beat})
+    assert merged.tool_beat_secs == float(beat)
+    session, _ = build_voice_session(agent, defaults, {"tool_beat_secs": beat})
+    assert session.tool_beat_secs == float(beat)
+
+
+@pytest.mark.parametrize(
+    "beat", [-1, "-1", "oops", "", "nan", "inf", float("nan"), float("inf"), [], {}, True]
+)
+def test_invalid_client_tool_beat_preserves_server_default(beat):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", tool_beat_secs=0.4)
+    session, _ = build_voice_session(agent, defaults, {"tool_beat_secs": beat})
+    assert session.tool_beat_secs == 0.4

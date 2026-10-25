@@ -1,11 +1,11 @@
 # Live tool-speech test
 
-Run from the **PR #231 worktree**, so you exercise the patched code:
+Run from the repository root, using a checkout containing the tool-speech changes:
 
 ```bash
-cd /Users/dberges/.codex/worktrees/voice-tool-speech/timbal
+uv sync --extra server --extra voice
 export PYTHONPATH="$PWD/python"
-export VOICE_DEMO_ENV=/Users/dberges/Desktop/timbal-ai/timbal/.env
+export VOICE_DEMO_ENV="$PWD/.env"
 ```
 
 The example loads that dotenv file with precedence over inherited shell variables,
@@ -14,13 +14,19 @@ You need `DEEPGRAM_API_KEY` and `ELEVENLABS_API_KEY`; live LLM mode also needs
 `OPENAI_API_KEY`. Set `ELEVENLABS_VOICE_ID` if you want a particular voice.
 No credentials are included in the example. Tools return simulated order data.
 
-Use the existing environment from your main checkout:
+Start the server with the checkout’s environment:
 
 ```bash
 VOICE_DEMO_MODE=live VOICE_DEMO_BEAT=0 \
-  /Users/dberges/Desktop/timbal-ai/timbal/.venv/bin/python -m timbal.server.http \
+  uv run --no-sync python -m timbal.server.http \
   --import_spec examples/voice_tool_speech.py::agent --port 4444
 ```
+
+For PowerShell, use `$env:PYTHONPATH="$PWD/python"`,
+`$env:VOICE_DEMO_ENV="$PWD/.env"`, `$env:VOICE_DEMO_MODE="live"`, and
+`$env:VOICE_DEMO_BEAT="0"`, then run the `uv run --no-sync python` command on one line
+without the Bash environment prefixes or backslashes. Change the beat variable
+to `"0.6"` before the second run.
 
 Open http://localhost:4444/voice/ in **one tab** and connect once. If another server
 already uses port 4444, stop it first. Keep the microphone permission enabled;
@@ -43,7 +49,7 @@ Disconnect, stop the server with Ctrl-C, then repeat with a 0.6-second beat:
 
 ```bash
 VOICE_DEMO_MODE=live VOICE_DEMO_BEAT=0.6 \
-  /Users/dberges/Desktop/timbal-ai/timbal/.venv/bin/python -m timbal.server.http \
+  uv run --no-sync python -m timbal.server.http \
   --import_spec examples/voice_tool_speech.py::agent --port 4444
 ```
 
@@ -62,7 +68,7 @@ repeat with this control (real microphone and TTS, scripted non-streaming model)
 
 ```bash
 VOICE_DEMO_MODE=scripted VOICE_DEMO_BEAT=0.6 \
-  /Users/dberges/Desktop/timbal-ai/timbal/.venv/bin/python -m timbal.server.http \
+  uv run --no-sync python -m timbal.server.http \
   --import_spec examples/voice_tool_speech.py::agent --port 4444
 ```
 
