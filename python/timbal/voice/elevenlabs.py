@@ -618,6 +618,11 @@ class _ElevenLabsTTSStream(TTSStream):
         self._ended = False
         self._aborted = False
         self._chunks = 0
+        self._unflushed = False
+        self._flushes_sent = 0
+        self._flushes_completed = 0
+        self._audio_finished = False
+        self._audio_progress = asyncio.Event()
 
     async def _open_context(self) -> None:
         tts = self._tts
@@ -652,11 +657,28 @@ class _ElevenLabsTTSStream(TTSStream):
         # Spaces and tabs only: a segment the session cut at a bare newline (a
         # list item, a paragraph) ends a clause too.
         flush = self._tts._dialogue and text.rstrip(" \t")[-1:] in _DIALOGUE_FLUSH_END_CHARS
+        self._unflushed = not flush
+        if flush:
+            self._flushes_sent += 1
         await self._tts._send_text(self._ctx_id, text, flush=flush)
 
     async def flush(self) -> bool:
-        if not self._ended and not self._aborted and self._ctx_id is not None:
+        if self._unflushed and not self._ended and not self._aborted and self._ctx_id is not None:
+            self._unflushed = False
+            self._flushes_sent += 1
             await self._tts._send_text(self._ctx_id, " ", flush=True)
+        return True
+
+    async def drain(self) -> bool:
+        if not self._tts._dialogue:
+            return False  # legacy endpoint has no per-generation completion marker
+        await self.flush()
+        target = self._flushes_sent
+        while self._flushes_completed < target:
+            self._audio_progress.clear()
+            if self._audio_finished:
+                raise RuntimeError("ElevenLabs audio ended before the flushed segment completed")
+            await self._audio_progress.wait()
         return True
 
     async def end(self) -> None:
@@ -670,10 +692,12 @@ class _ElevenLabsTTSStream(TTSStream):
         tts = self._tts
         try:
             assert tts._ws is not None
-            # close_context finishes generating audio for buffered text and
-            # then emits is_final, which terminates audio(). Flush first for
-            # parity with synthesize (harmless if auto_mode already flushed).
-            await tts._send_text(self._ctx_id, " ", flush=True)
+            # close_context flushes any remaining generation and ends audio().
+            # Only send an explicit flush when the previous feed left text buffered.
+            if self._unflushed:
+                self._unflushed = False
+                self._flushes_sent += 1
+                await tts._send_text(self._ctx_id, " ", flush=True)
             await tts._close_context(self._ctx_id)
         except Exception as e:
             logger.warning("el_tts_stream_end_failed", context_id=self._ctx_id, error=str(e))
@@ -708,9 +732,14 @@ class _ElevenLabsTTSStream(TTSStream):
                 if msg.get("audio"):
                     self._chunks += 1
                     yield base64.b64decode(msg["audio"])
+                if msg.get("is_final_audio_for_turn"):
+                    self._flushes_completed += 1
+                    self._audio_progress.set()
                 if msg.get("is_final") or msg.get("isFinal"):
                     return
         finally:
+            self._audio_finished = True
+            self._audio_progress.set()
             if self._ctx_id is not None:
                 self._tts._audio_queues.pop(self._ctx_id, None)
                 self._tts._active_contexts.discard(self._ctx_id)

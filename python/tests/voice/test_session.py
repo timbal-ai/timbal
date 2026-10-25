@@ -2677,7 +2677,7 @@ class TestStalePartialSweeper:
 
 class TestToolSpeech:
     @pytest.mark.parametrize("streamed", [False, True])
-    @pytest.mark.parametrize("prefix", ["Checking...", "Checking…"])
+    @pytest.mark.parametrize("prefix", ["Checking...", "Checking…", "Let me check that for you."])
     async def test_tool_runs_before_pre_tool_synthesis_finishes(self, streamed, prefix):
         from timbal.types.content import TextContent, ToolUseContent
         from timbal.types.events.delta import DeltaEvent, TextDelta, ToolUse
@@ -2823,6 +2823,11 @@ class TestToolSpeech:
 
             async def flush(self):
                 self.flush_count += 1
+                return True
+
+            async def drain(self):
+                while not self._queue.empty():
+                    await asyncio.sleep(0)
                 return True
 
         class FlushTTS(StreamingMockTTS):

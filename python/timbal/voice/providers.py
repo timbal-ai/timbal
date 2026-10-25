@@ -135,6 +135,15 @@ class TTSStream(ABC):
         """
         return False
 
+    async def drain(self) -> bool:
+        """Wait until all text fed so far has passed through ``audio()``.
+
+        Return True only when a provider completion marker guarantees a clean
+        PCM boundary. The audio consumer must run concurrently. False requires
+        ending the context before attributing audio to a new text segment.
+        """
+        return False
+
     @abstractmethod
     async def end(self) -> None: ...
 

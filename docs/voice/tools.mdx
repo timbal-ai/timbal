@@ -69,8 +69,9 @@ tool adds no extra wait. There is no pause before the first spoken response when
 the model called the tool without an acknowledgement.
 
 An enabled pause finishes the pre-tool streaming TTS context and uses a new
-context for the result. With the pause disabled, providers that support flushing
-keep their context open across the tool call.
+context for the result. With the pause disabled, providers that support flushing and confirming delivery of each audio segment
+keep their context open across the tool call. Other providers finish the context
+at the boundary so interruption tracking never counts unspoken result text as heard.
 
 ## Add real actions carefully
 

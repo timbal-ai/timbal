@@ -159,7 +159,6 @@ async def test_dialogue_stream_registers_once_and_routes_audio(tts_factory, mode
         {"context_id": "ctx_1", "voices": ["test-voice"]},
         {"context_id": "ctx_1", "inputs": [{"text": "Hello ", "voice_id": "test-voice"}]},
         {"context_id": "ctx_1", "inputs": [{"text": "world.", "voice_id": "test-voice"}], "flush": True},
-        {"context_id": "ctx_1", "flush": True},
         {"context_id": "ctx_1", "close_context": True},
     ]
     ws.incoming.put_nowait({"context_id": "ctx_1", "audio": base64.b64encode(b"\x01\x02").decode()})
@@ -314,7 +313,7 @@ async def test_unscoped_server_error_fails_all_streams_even_after_audio(tts_fact
 async def test_abort_prevents_pending_text_from_reopening_context(tts_factory, monkeypatch, operation):
     p, ws, _ = await tts_factory()
     stream = p.open_stream()
-    await stream.feed("First sentence.")
+    await stream.feed("First sentence")  # leave buffered text for end() to flush
     entered, resume = asyncio.Event(), asyncio.Event()
     original_send = p._send_text
 
@@ -421,7 +420,7 @@ async def test_abort_during_registration_closes_without_sending_text(tts_factory
 async def test_end_prevents_pending_feed_from_reopening_context(tts_factory, monkeypatch):
     p, ws, _ = await tts_factory()
     stream = p.open_stream()
-    await stream.feed("First sentence.")
+    await stream.feed("First sentence")  # leave buffered text for end() to flush
     entered, resume = asyncio.Event(), asyncio.Event()
     original_send = p._send_text
 
@@ -460,8 +459,9 @@ async def test_dialogue_voice_settings_register_each_context_not_url(tts_factory
     assert all(m["voice_settings"] == {"stability": 0, "similarity_boost": 0.8} for m in registrations)
     assert all("voice_settings" not in m for m in ws.sent if "voices" not in m)
     first = [m for m in ws.sent if m["context_id"] == "ctx_1"]
-    assert first[2] == {"context_id": "ctx_1", "flush": True}
-    assert "Done." == first[3]["inputs"][0]["text"]
+    assert first[1]["flush"] is True
+    assert "Done." == first[2]["inputs"][0]["text"]
+    assert first[3] == {"context_id": "ctx_1", "close_context": True}
 
 
 async def test_dialogue_omits_unset_voice_settings(tts_factory):
@@ -470,3 +470,62 @@ async def test_dialogue_omits_unset_voice_settings(tts_factory):
     await stream.feed("Hello")
     assert "voice_settings" not in ws.sent[0]
     await stream.end()
+
+
+async def test_stream_flush_is_idempotent_until_more_text_is_fed(tts_factory):
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    await stream.feed("Checking…")
+    sent = list(ws.sent)
+    await stream.flush()
+    await stream.flush()
+    assert ws.sent == sent
+    await stream.feed("More text")
+    await stream.flush()
+    assert ws.sent[-1] == {"context_id": "ctx_1", "flush": True}
+    sent = list(ws.sent)
+    await stream.flush()
+    assert ws.sent == sent
+    await stream.end()
+    assert ws.sent[len(sent):] == [{"context_id": "ctx_1", "close_context": True}]
+
+
+async def test_stream_drain_waits_for_all_flushed_audio_to_reach_consumer(tts_factory):
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    await stream.feed("First.")
+    await stream.feed("Second.")
+    audio = stream.audio()
+    drain = asyncio.create_task(stream.drain())
+    ws.incoming.put_nowait({"context_id": "ctx_1", "audio": base64.b64encode(b"first").decode()})
+    ws.incoming.put_nowait({"context_id": "ctx_1", "is_final_audio_for_turn": True})
+    ws.incoming.put_nowait({"context_id": "ctx_1", "audio": base64.b64encode(b"second").decode()})
+    assert await anext(audio) == b"first"
+    assert not drain.done()
+    assert await anext(audio) == b"second"
+    assert not drain.done()
+    ws.incoming.put_nowait({"context_id": "ctx_1", "is_final_audio_for_turn": True})
+    pending = asyncio.create_task(anext(audio))
+    try:
+        assert await asyncio.wait_for(drain, 1)
+        assert not pending.done(), "draining must not close the context"
+        await stream.feed("Third.")
+        ws.incoming.put_nowait({"context_id": "ctx_1", "audio": base64.b64encode(b"third").decode()})
+        assert await asyncio.wait_for(pending, 1) == b"third"
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await audio.aclose()
+        await stream.abort()
+
+
+async def test_stream_drain_wakes_when_audio_ends_without_completion(tts_factory):
+    p, ws, _ = await tts_factory()
+    stream = p.open_stream()
+    await stream.feed("Checking.")
+    pump = asyncio.create_task(_collect(stream))
+    drain = asyncio.create_task(stream.drain())
+    ws.incoming.put_nowait({"context_id": "ctx_1", "is_final": True})
+    await pump
+    with pytest.raises(RuntimeError, match="before the flushed segment completed"):
+        await asyncio.wait_for(drain, 1)
