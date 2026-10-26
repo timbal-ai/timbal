@@ -1253,18 +1253,34 @@ fn startServices(
     return services;
 }
 
-/// Check if a port can be bound on the wildcard interface.
-/// Binding 0.0.0.0 catches both wildcard and 127.0.0.1 listeners — a process
-/// already bound to 0.0.0.0:N or 127.0.0.1:N will make this fail with AddrInUse.
+/// Check if a port can be bound on both the IPv4 wildcard and IPv6 loopback.
+/// Binding 0.0.0.0 catches wildcard and 127.0.0.1 listeners. Binding ::1
+/// catches listeners on [::1] or [::], which don't conflict with 0.0.0.0 but
+/// still win `http://localhost:N` on systems where localhost resolves to ::1
+/// first (macOS, Node/Vite dev servers).
 ///
 /// NOTE: This is racy by design (TOCTOU): the port is freed before any caller
 /// can use it, so another process can grab it in between. For long-running
 /// reservations use `tryReservePort` instead, which holds the listener open.
 fn isPortFree(port: u16) bool {
-    const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-    var server = addr.listen(.{ .reuse_address = false }) catch return false;
-    server.deinit();
+    var r = tryReservePort(port) orelse return false;
+    r.release();
     return true;
+}
+
+/// Bind [::1]:port. Returns error.InUse if taken; hosts without IPv6 report
+/// the family/address as unavailable (null), which counts as free since
+/// nothing can listen there.
+fn bindIp6Loopback(port: u16) error{InUse}!?std.net.Server {
+    const addr = std.net.Address.initIp6(.{0} ** 15 ++ .{1}, port, 0, 0);
+    return addr.listen(.{ .reuse_address = false }) catch |err| switch (err) {
+        error.AddressFamilyNotSupported,
+        error.AddressNotAvailable,
+        error.ProtocolFamilyNotAvailable,
+        error.ProtocolNotSupported,
+        => null,
+        else => error.InUse,
+    };
 }
 
 /// A reserved port — i.e. one we successfully bound and are *holding* in this
@@ -1279,21 +1295,28 @@ fn isPortFree(port: u16) bool {
 const PortReservation = struct {
     port: u16,
     server: std.net.Server,
+    server6: ?std.net.Server,
     released: bool = false,
 
     fn release(self: *PortReservation) void {
         if (!self.released) {
             self.released = true;
             self.server.deinit();
+            if (self.server6) |*s| s.deinit();
         }
     }
 };
 
-/// Try to bind and hold a specific port. Returns null on EADDRINUSE/EACCES/etc.
+/// Try to bind and hold a specific port on 0.0.0.0 and [::1].
+/// Returns null on EADDRINUSE/EACCES/etc. on either address.
 fn tryReservePort(port: u16) ?PortReservation {
     const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-    const server = addr.listen(.{ .reuse_address = false }) catch return null;
-    return .{ .port = port, .server = server };
+    var server = addr.listen(.{ .reuse_address = false }) catch return null;
+    const server6 = bindIp6Loopback(port) catch {
+        server.deinit();
+        return null;
+    };
+    return .{ .port = port, .server = server, .server6 = server6 };
 }
 
 /// Reserve the next available port starting from `start`, scanning up to
@@ -2482,6 +2505,23 @@ test "reserveAvailablePort skips a port that's actually in use" {
     var next = reserveAvailablePort(taken, 50) orelse return error.NoFreePort;
     defer next.release();
     try std.testing.expect(next.port != taken);
+    try std.testing.expect(next.port > taken);
+}
+
+test "reserveAvailablePort skips a port held only on IPv6 loopback" {
+    // Dev servers like Vite bind only [::1] when `localhost` resolves to IPv6
+    // (macOS default). Browsers open http://localhost:N on ::1 first, so the
+    // port must count as taken even though 0.0.0.0:N is still bindable.
+    const addr = std.net.Address.initIp6(.{0} ** 15 ++ .{1}, 0, 0, 0);
+    var server = addr.listen(.{ .reuse_address = false }) catch return error.SkipZigTest;
+    defer server.deinit();
+
+    const taken: u16 = server.listen_address.in6.getPort();
+    if (taken == 65535) return;
+
+    try std.testing.expect(!isPortFree(taken));
+    var next = reserveAvailablePort(taken, 50) orelse return error.NoFreePort;
+    defer next.release();
     try std.testing.expect(next.port > taken);
 }
 
