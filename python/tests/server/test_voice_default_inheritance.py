@@ -75,3 +75,42 @@ def test_invalid_client_tool_beat_preserves_server_default(beat):
     defaults = VoiceConfig(turn_detector="heuristic", tool_beat_secs=0.4)
     session, _ = build_voice_session(agent, defaults, {"tool_beat_secs": beat})
     assert session.tool_beat_secs == 0.4
+
+
+def test_resumed_window_is_server_only_and_reaches_native_provider(monkeypatch):
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "test-not-a-real-key")
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(merge_resumed_secs=2)
+    session, _ = build_voice_session(agent, defaults, {"merge_resumed_secs": 30})
+    assert session.turn_detector.merge_resumed_secs == 2
+    assert session._vad_endpointing is False
+
+
+def test_resumed_window_does_not_mutate_shared_detector():
+    from timbal.voice.turn_detection import ProviderTurnDetector
+
+    detector = ProviderTurnDetector()
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(agent, VoiceConfig(turn_detector=detector, merge_resumed_secs=2), {})
+    assert session.turn_detector.merge_resumed_secs == 2
+    assert detector.merge_resumed_secs is None
+
+
+def test_resumed_window_is_ignored_when_resolved_detector_is_not_provider(monkeypatch):
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    # Fallback STT (ElevenLabs Scribe) with default turn_detector=None resolves to local/lexical.
+    session_fallback, _ = build_voice_session(agent, VoiceConfig(merge_resumed_secs=2), {})
+    assert getattr(session_fallback.turn_detector, "merge_resumed_secs", None) is None
+    # Client playground detector override ("heuristic") on a server config with merge_resumed_secs.
+    defaults = VoiceConfig(turn_detector="provider", merge_resumed_secs=2)
+    session_override, _ = build_voice_session(agent, defaults, {"turn_detector": "heuristic"})
+    assert getattr(session_override.turn_detector, "merge_resumed_secs", None) is None
+
+
+def test_resumed_window_env_default_and_agent_override(monkeypatch):
+    monkeypatch.setenv("TIMBAL_VOICE_MERGE_RESUMED_SECS", "2.0")
+    assert merge_voice_config(SimpleNamespace(voice_config={})).merge_resumed_secs == 2.0
+    assert merge_voice_config(SimpleNamespace(voice_config={"merge_resumed_secs": 1.5})).merge_resumed_secs == 1.5
+
+

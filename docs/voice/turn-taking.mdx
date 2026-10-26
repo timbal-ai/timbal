@@ -42,6 +42,40 @@ Available modes are:
 
 `vad_endpointing=None` enables the local fast path when supported. Set it to `False` to disable it. A Python declaration may also supply a `TurnDetector` instance or zero-argument factory; clients may send supported mode names, and sessions own detector clones.
 
+## Opt-in resumed requests
+
+For provider endpointing, a short pause can split one request into two committed
+transcripts. You can opt into merging a resumed request while the first response
+is still running:
+
+```python
+agent.voice_config["turn_detector"] = "provider"
+agent.voice_config["merge_resumed_secs"] = 2.0
+```
+
+The window is measured from the previous accepted commit (extending through an
+utterance whose partials started inside the window) and defaults to `None` (off).
+This setting is server-controlled (`voice_config["merge_resumed_secs"]` or
+`TIMBAL_VOICE_MERGE_RESUMED_SECS`) and requires provider mode (the server ignores
+it when another turn detector is active). It merges only a
+live caller turn with no tool-call evidence and known zero played reply bytes.
+Filler speech does not count as a reply. Once any non-filler speech is heard,
+a tool call is observed, playback is unknown, or the first turn finishes, the
+next commit remains a separate turn. Even a spoken pre-tool phrase counts as
+reply speech; this policy does not guess whether a phrase was substantive.
+
+Merging rewrites the original caller entry in transcript and conversation memory.
+It handles cumulative transcript revisions without repeating the original words.
+The tool and playback guards are checked again after detector work and cancellation,
+since tools may start while those operations are awaiting completion. If an input
+guardrail rewrites the original prompt so memory cleanup cannot identify it, the
+new words become a separate turn and the existing history is preserved.
+
+This window is a timing policy, not a semantic intent classifier: two unrelated
+requests inside it can be combined. It does not suppress acknowledgments or add
+an unfinished-sentence hold. Keep it off unless this tradeoff fits your application,
+and test your actual transcription and transport configuration.
+
 ## Custom clients
 
 WebSocket clients must report cumulative milliseconds of audio actually played and discard queued audio on `interrupted`. Reporting received bytes as played can preserve words the caller never heard. WebRTC and LiveKit use the server's paced media clock. See [Transports](/voice/transports) for the wire contract and [Events and usage](/voice/observability) for interruption metrics.

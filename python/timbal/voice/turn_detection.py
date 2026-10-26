@@ -32,6 +32,7 @@ deprecated text-classifier ONNX models.
 from __future__ import annotations
 
 import copy
+import math
 import re
 from abc import ABC, abstractmethod
 from collections import deque
@@ -91,6 +92,19 @@ class TurnState(BaseModel):
     """Partial transcripts seen since the previous committed transcript."""
     holding: bool = False
     """Session is debouncing an incomplete commit (:attr:`CommitAction.HOLD`)."""
+
+    user_turn_active: bool = False
+    """A caller-initiated agent task is still running (not an event/greeting)."""
+    reply_heard_bytes: int | None = None
+    """Played non-filler reply bytes. None means playback is not known."""
+    tool_started: bool | None = None
+    """Any tool-call evidence in the current run; None means unknown."""
+    caller_partial_started_during_playback: bool | None = None
+    """Playback at the first observed STT partial, retained until commit.
+
+    This is an observation, not acoustic speech onset: provider latency can
+    shift it. Commit-only transcripts leave it unknown. It never suppresses speech.
+    """
 
 
 class PartialDecision(StrEnum):
@@ -745,18 +759,75 @@ class ProviderTurnDetector(TurnDetector):
     ``VoiceSession(..., turn_detector=ProviderTurnDetector())``.
     """
 
-    async def on_partial(self, text: str, state: TurnState) -> PartialDecision:
-        # Provider already endpointed; partials are captions only unless clearly
-        # a barge-in while audio is playing.
+    def __init__(self, *, merge_resumed_secs: float | None = None) -> None:
+        if merge_resumed_secs is not None and (not math.isfinite(merge_resumed_secs) or merge_resumed_secs <= 0):
+            raise ValueError("merge_resumed_secs must be finite and positive")
+        self.merge_resumed_secs = merge_resumed_secs
+        self._resumed_active_user_text: str | None = None
+
+    def clone(self) -> TurnDetector:
+        cloned = super().clone()
+        if isinstance(cloned, ProviderTurnDetector):
+            cloned._resumed_active_user_text = None
+        return cloned
+
+    def _in_resumed_window(self, state: TurnState) -> bool:
+        if self.merge_resumed_secs is None:
+            return False
+        if 0 <= state.seconds_since_last_commit < self.merge_resumed_secs:
+            return True
+        return (
+            self._resumed_active_user_text is not None
+            and state.active_user_text == self._resumed_active_user_text
+            and state.partials_since_last_commit > 0
+            and state.seconds_since_last_commit >= 0
+        )
+
+    def can_merge_resumed(self, state: TurnState) -> bool:
+        """Only rewind a live caller turn with known unheard reply and no tools."""
+        return (
+            self.merge_resumed_secs is not None
+            and state.user_turn_active
+            and not state.holding
+            and bool(state.active_user_text)
+            and self._in_resumed_window(state)
+            and state.reply_heard_bytes == 0
+            and state.tool_started is False
+            and state.mic_speech_since_last_commit is not False
+        )
+
+    def _is_barge_in_partial(self, text: str, state: TurnState) -> bool:
         if not state.audio_playing or not text:
-            return PartialDecision.IGNORE
+            return False
         if _is_noise(text) or _is_garbage_commit(text) or _is_hesitation_only(text):
-            return PartialDecision.IGNORE
+            return False
         if self.echo_verdict(text, state):
-            return PartialDecision.IGNORE
+            return False
         # Same min-words gate as HeuristicTurnDetector: one short partial while
         # the assistant is speaking is more often a mic blip than a barge-in.
-        if len(text.strip()) < 4 or len(text.split()) < HeuristicTurnDetector.MIN_BARGE_IN_PARTIAL_WORDS:
+        return len(text.strip()) >= 4 and len(text.split()) >= HeuristicTurnDetector.MIN_BARGE_IN_PARTIAL_WORDS
+
+    async def on_partial(self, text: str, state: TurnState) -> PartialDecision:
+        if (
+            text
+            and not (_is_noise(text) or _is_garbage_commit(text) or _is_hesitation_only(text))
+            and not self.echo_verdict(text, state)
+        ):
+            if (
+                self.merge_resumed_secs is not None
+                and 0 <= state.seconds_since_last_commit < self.merge_resumed_secs
+                and self.can_merge_resumed(state)
+            ):
+                self._resumed_active_user_text = state.active_user_text
+            elif state.partials_since_last_commit <= 1 or state.active_user_text != self._resumed_active_user_text:
+                self._resumed_active_user_text = None
+        # Provider already endpointed; partials are captions only unless clearly
+        # a barge-in while audio is playing.
+        if not self._is_barge_in_partial(text, state):
+            return PartialDecision.IGNORE
+        if self.can_merge_resumed(state):
+            # Keep the candidate alive until the commit; the session rechecks
+            # tool/playback state before cancellation and history replacement.
             return PartialDecision.IGNORE
         return PartialDecision.BARGE_IN
 
@@ -773,6 +844,18 @@ class ProviderTurnDetector(TurnDetector):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="echo")
         if _is_unvoiced_hallucination(text, state):
             return CommitDecision(action=CommitAction.IGNORE, text=text, reason="hallucination_no_vad")
+        can_merge = self.can_merge_resumed(state)
+        self._resumed_active_user_text = None
+        if can_merge:
+            active = state.active_user_text.strip()
+            # A provider may send cumulative transcripts, not just appended words.
+            active_tokens = re.findall(r"\w+(?:['’]\w+)*", active.casefold())
+            new_tokens = re.findall(r"\w+(?:['’]\w+)*", text.casefold())
+            cumulative = bool(active_tokens) and new_tokens[:len(active_tokens)] == active_tokens
+            merged = text if cumulative else _join_held(active, text)
+            if new_tokens == active_tokens:
+                return CommitDecision(action=CommitAction.IGNORE, text=text, reason="resumed_duplicate")
+            return CommitDecision(action=CommitAction.CONTINUE_TURN, text=merged, reason="resumed_unheard")
         return CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="provider")
 
 
