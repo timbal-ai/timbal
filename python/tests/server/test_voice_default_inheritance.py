@@ -75,3 +75,22 @@ def test_invalid_client_tool_beat_preserves_server_default(beat):
     defaults = VoiceConfig(turn_detector="heuristic", tool_beat_secs=0.4)
     session, _ = build_voice_session(agent, defaults, {"tool_beat_secs": beat})
     assert session.tool_beat_secs == 0.4
+
+
+def test_resumed_window_is_server_only_and_reaches_native_provider(monkeypatch):
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "test-not-a-real-key")
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(merge_resumed_secs=2)
+    session, _ = build_voice_session(agent, defaults, {"merge_resumed_secs": 30})
+    assert session.turn_detector.merge_resumed_secs == 2
+    assert session._vad_endpointing is False
+
+
+def test_resumed_window_does_not_mutate_shared_detector():
+    from timbal.voice.turn_detection import ProviderTurnDetector
+
+    detector = ProviderTurnDetector()
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(agent, VoiceConfig(turn_detector=detector, merge_resumed_secs=2), {})
+    assert session.turn_detector.merge_resumed_secs == 2
+    assert detector.merge_resumed_secs is None

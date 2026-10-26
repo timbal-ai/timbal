@@ -96,7 +96,9 @@ from .providers import (
 )
 from .turn_detection import (
     CommitAction,
+    CommitDecision,
     PartialDecision,
+    ProviderTurnDetector,
     TurnDetector,
     TurnState,
     _is_same_user_utterance_refinement,
@@ -318,6 +320,7 @@ class VoiceSession:
         recorder: CallRecorder | None = None,
         session_id: str | None = None,
         hold_timeout_secs: float = 1.5,
+        merge_resumed_secs: float | None = None,
         tool_beat_secs: float | None = None,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
@@ -343,6 +346,13 @@ class VoiceSession:
         # or a factory returning a singleton. Inspect ``session.turn_detector``,
         # not the object you passed in.
         self.turn_detector = resolve_turn_detector(turn_detector).clone()
+        if merge_resumed_secs is not None:
+            if not isinstance(self.turn_detector, ProviderTurnDetector):
+                raise ValueError("merge_resumed_secs requires the provider turn detector")
+            # Validate direct session construction as well as VoiceConfig.
+            self.turn_detector.merge_resumed_secs = ProviderTurnDetector(
+                merge_resumed_secs=merge_resumed_secs
+            ).merge_resumed_secs
         self.audio_input = audio_input or AudioInputConfig()
         self.audio_output = audio_output or AudioOutputConfig()
         # PCM16 mono: 2 bytes per sample.
@@ -405,6 +415,8 @@ class VoiceSession:
         # The turn's first tool call (when, and the latest tool's name): the
         # flow armed at turn start (``think_delay_secs``) waits on it too.
         self._turn_tool_seen = asyncio.Event()
+        self._turn_tool_call_observed = False
+        self._turn_resume_memory_start: int | None = None
         self._turn_tool_seen_at: float | None = None
         self._turn_tool_name: str | None = None
         # The ready-made lines said this call, each once, by when it was last
@@ -547,6 +559,7 @@ class VoiceSession:
         self._last_commit_at: float = 0.0
         self._partials_since_last_commit: int = 0
         self._last_partial_at: float = 0.0
+        self._caller_partial_started_during_playback: bool | None = None
         # Latest non-empty STT partial text — fed to the VAD endpointer's
         # optional text_score so a mid-thought hedge can bump the delay even
         # before the provider commits.
@@ -1607,6 +1620,8 @@ class VoiceSession:
                             stranded_preview=self._latest_partial_text[:80],
                         )
                     elif text:
+                        if self._caller_partial_started_during_playback is None:
+                            self._caller_partial_started_during_playback = self._assistant_audio_playing
                         self._last_partial_at = time.monotonic()
                         self._latest_partial_text = text
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
@@ -1644,6 +1659,54 @@ class VoiceSession:
                 pass
         await self.close()
 
+    def _reply_heard_bytes(self) -> int | None:
+        records = self._turn_tts_segment_records
+        if not any(text and size > 0 for text, size in records):
+            return 0
+        if not self.playback.ack_received:
+            return None
+        position = self.playback.played_bytes
+        if position < self._turn_played_baseline:
+            return None  # A late correction invalidated the saved played-axis origin.
+        played = self._turn_heard_bytes
+        if played is None:
+            played = position - self._turn_played_baseline
+        reply = 0
+        for text, size in records:
+            count = min(max(0, played), size)
+            if text:
+                reply += count
+            played -= size
+        return reply
+
+    def _turn_has_tool_work(self, ctx: RunContext | None = None) -> bool | None:
+        if self._turn_tool_seen.is_set() or self._turn_tool_call_observed:
+            return True
+        ctx = ctx or self._turn_run_context
+        if ctx is None:
+            return None  # No current trace is not proof that the turn is tool-free.
+        # Tools can execute before their buffered events reach the voice loop.
+        # Inspect the live trace as well as ToolUse events. No parent-run history
+        # is scanned: an earlier completed turn's tools do not block this turn.
+        own_paths = {getattr(self.agent, "_path", None), self._own_llm_path()}
+        spans = list(ctx._trace.data.values())
+        if any(span.path not in own_paths for span in spans):
+            return True
+        # Provider-side tools can appear only in a Message, without a child
+        # span. Cancellation can also salvage their output before event delivery.
+        messages = [span.output for span in spans if isinstance(span.output, Message)]
+        if self._turn_resume_memory_start is None:
+            return None
+        root = ctx.root_span()
+        if root is not None and isinstance(root.memory, list):
+            messages.extend(root.memory[self._turn_resume_memory_start:])
+        return any(
+            isinstance(block, ToolUseContent)
+            for message in messages
+            if isinstance(message, Message)
+            for block in message.content
+        )
+
     def _turn_state(self) -> TurnState:
         """Snapshot of session state for :class:`TurnDetector` decisions."""
         now = time.monotonic()
@@ -1668,6 +1731,15 @@ class VoiceSession:
             mic_speech_since_last_commit=self._mic_speech_since_last_commit(),
             partials_since_last_commit=self._partials_since_last_commit,
             holding=holding,
+            user_turn_active=(
+                not self._turn_is_event
+                and not self._turn_asked_caller
+                and self._current_turn_task is not None
+                and not self._current_turn_task.done()
+            ),
+            reply_heard_bytes=self._reply_heard_bytes(),
+            tool_started=self._turn_has_tool_work(),
+            caller_partial_started_during_playback=self._caller_partial_started_during_playback,
         )
 
     def _cancel_hold(self) -> None:
@@ -1789,7 +1861,8 @@ class VoiceSession:
         )
 
     async def _begin_user_turn(
-        self, final_text: str, *, replace_user_entry: bool, vad_endpointed: bool = False
+        self, final_text: str, *, replace_user_entry: bool, vad_endpointed: bool = False,
+        replace_user_index: int | None = None,
     ) -> None:
         """Record ``final_text`` and start an agent turn.
 
@@ -1806,7 +1879,10 @@ class VoiceSession:
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
         self._last_commit_at = time.monotonic()
-        if replace_user_entry and self._transcript and self._transcript[-1].role == "user":
+        if replace_user_index is not None:
+            self._transcript[replace_user_index] = TranscriptEntry(role="user", text=final_text)
+            replace_user_entry = True
+        elif replace_user_entry and self._transcript and self._transcript[-1].role == "user":
             self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
         else:
             self._transcript.append(TranscriptEntry(role="user", text=final_text))
@@ -1858,6 +1934,7 @@ class VoiceSession:
             await self._handle_committed_inner(text)
         finally:
             self._commits_in_flight -= 1
+            self._caller_partial_started_during_playback = None
 
     async def _handle_committed_inner(self, text: str) -> None:
         self._commit_event_at = time.monotonic()
@@ -1925,6 +2002,7 @@ class VoiceSession:
             holding=self._held_user_text is not None,
             **_trace_debug_fields(),
         )
+        decision_turn = self._current_turn_task
         decision = await self.turn_detector.on_committed(text, state)
         # The detector await yields to the event loop (local audio EOU runs on
         # the executor; a cold model load can take seconds) and close() may land
@@ -1999,13 +2077,49 @@ class VoiceSession:
             # Cutting the reply finishes the call's turn: hold the session until the caller's starts,
             # or a turn queued behind the cut one slips in (while CONTINUE_TURN rewrites its memory, too).
             with self._scheduler.holding():
+                resumed = decision.reason == "resumed_unheard"
+                resume_ctx = self._turn_run_context
+                resume_index = (
+                    next(
+                        (i for i in range(len(self._transcript) - 1, -1, -1) if self._transcript[i].role == "user"),
+                        None,
+                    )
+                    if resumed else None
+                )
+                if resumed and (
+                    resume_index is None
+                    or self._transcript[resume_index].text != state.active_user_text
+                    or self._current_turn_task is not decision_turn
+                    or not isinstance(self.turn_detector, ProviderTurnDetector)
+                    or not self.turn_detector.can_merge_resumed(self._turn_state())
+                ):
+                    decision = CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="resume_no_longer_safe")
+                    final_text = text
+                    resumed = False
                 await self.interrupt()
                 if self._closed:
                     return
                 self._cancel_turn.clear()
+                # Cancellation awaits TTS cleanup before the agent task ends. A
+                # tool may start in that window: keep its history, never rewind it.
+                if resumed and (self._turn_has_tool_work(resume_ctx) is not False or self._reply_heard_bytes() != 0):
+                    decision = CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="resume_no_longer_safe")
+                    final_text = text
+                    resumed = False
 
                 replace = False
-                if decision.action is CommitAction.CONTINUE_TURN:
+                if resumed:
+                    # Keep spoken fillers in their original order; update the
+                    # caller entry by identity/index rather than assuming it is
+                    # the last entry after one (or several) thinking fillers.
+                    replace = await self._align_continue_memory(fragment_user_text=state.active_user_text)
+                    if not replace:
+                        # A guardrail may have rewritten the original prompt.
+                        # If it cannot be identified safely, keep that history
+                        # and accept only the new words as a separate request.
+                        resumed = False
+                        final_text = text
+                elif decision.action is CommitAction.CONTINUE_TURN:
                     # interrupt() may have recorded the heard fragment of the aborted
                     # reply right after the fragment's user entry (interruption
                     # truncation). A continuation merges the fragment into a single
@@ -2024,7 +2138,10 @@ class VoiceSession:
                     # has user:fragment + assistant:heard unless we mirror the rewrite.
                     await self._align_continue_memory(fragment_user_text=state.active_user_text)
 
-                await self._begin_user_turn(final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed)
+                await self._begin_user_turn(
+                    final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed,
+                    replace_user_index=resume_index if resumed else None,
+                )
 
     # -- Internal: event turns (notify, background results) ------------------
 
@@ -2410,6 +2527,8 @@ class VoiceSession:
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
         self._turn_tool_seen = asyncio.Event()
+        self._turn_tool_call_observed = False
+        self._turn_resume_memory_start = None
         self._turn_tool_seen_at = None
         self._turn_tool_name = None
         own_llm_path = self._own_llm_path()
@@ -2578,6 +2697,7 @@ class VoiceSession:
                             root = ctx.root_span() if ctx is not None else None
                             if root is not None and isinstance(root.memory, list):
                                 first_llm_memory = list(root.memory)
+                                self._turn_resume_memory_start = len(root.memory)
                     elif event.path != getattr(self.agent, "_path", None):
                         # Includes tools resumed before the first LLM step.
                         retry_blocked = True
@@ -2598,6 +2718,15 @@ class VoiceSession:
                     # lands on it. The deadline still counts from turn start.
                     arm_think_filler = False
                     self._turn_filler_task = asyncio.create_task(self._filler_flow())
+
+                if isinstance(event, DeltaEvent) and isinstance(event.item, ToolUse):
+                    self._turn_tool_call_observed = True
+                if (
+                    isinstance(event, OutputEvent)
+                    and isinstance(event.output, Message)
+                    and any(isinstance(block, ToolUseContent) for block in event.output.content)
+                ):
+                    self._turn_tool_call_observed = True
 
                 turn_phase = "awaiting_agent_event"
                 if self._cancel_turn.is_set():
@@ -4346,7 +4475,7 @@ class VoiceSession:
 
     # -- Internal: interruption truncation ------------------------------------
 
-    async def _align_continue_memory(self, *, fragment_user_text: str) -> None:
+    async def _align_continue_memory(self, *, fragment_user_text: str) -> bool:
         """Mirror CONTINUE_TURN transcript cleanup onto parent-chain memory.
 
         ``interrupt()`` truncation writes ``assistant:heard`` into
@@ -4360,13 +4489,13 @@ class VoiceSession:
         utterance in the LLM input twice.
         """
         if not fragment_user_text:
-            return
+            return False
         ctx = self._last_run_context
         if ctx is None:
-            return
+            return False
         root = ctx.root_span()
         if root is None or not isinstance(root.memory, list) or len(root.memory) < 1:
-            return
+            return False
         last = root.memory[-1]
         popped = False
         if getattr(last, "role", None) == "assistant":
@@ -4386,6 +4515,7 @@ class VoiceSession:
             pass
         except Exception as e:
             logger.debug("continue_memory_resave_failed", error=str(e))
+        return popped
 
     def _apply_interruption_truncation(self, ctx: RunContext | None, *, replace_last: bool = False) -> bool:
         """Align transcript and agent memory with what the user actually *heard*.

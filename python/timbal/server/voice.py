@@ -1152,6 +1152,8 @@ def build_voice_session(
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
         session_kwargs["user_idle"] = merged.user_idle
+    if merged.merge_resumed_secs is not None:
+        session_kwargs["merge_resumed_secs"] = merged.merge_resumed_secs
     if merged.tool_beat_secs is not None:
         session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
     if merged.turn_timeout_secs is not None:

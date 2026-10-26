@@ -1,0 +1,1612 @@
+{
+  "schema_version": 1,
+  "state_defaults": {
+    "assistant_active": false,
+    "audio_playing": false,
+    "assistant_text": "",
+    "active_user_text": "",
+    "seconds_since_turn_start": 10.0,
+    "seconds_since_last_commit": 10.0,
+    "mic_speech_since_last_commit": true,
+    "seconds_since_assistant_active": null,
+    "partials_since_last_commit": 0,
+    "holding": false,
+    "user_turn_active": false,
+    "reply_heard_bytes": null,
+    "tool_started": null,
+    "caller_partial_started_during_playback": null
+  },
+  "cases": [
+    {
+      "id": "ca_ack",
+      "language": "ca",
+      "category": "acknowledgment",
+      "rationale": "Listener acknowledgment during an explanation, not an answer to a question.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "D'acord.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "D'acord.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "D'acord."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_ack_long",
+      "language": "ca",
+      "category": "acknowledgment",
+      "rationale": "A longer listener acknowledgment must not become an interruption just by word count.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Mhm, d'acord, t'escolto.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Mhm, d'acord, t'escolto.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Mhm, d'acord, t'escolto."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_ack_late",
+      "language": "ca",
+      "category": "acknowledgment",
+      "rationale": "Partial overlaps playback; commit arrives 600 ms after playback ends. Follow-up policy work.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "D'acord.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 850,
+          "kind": "committed",
+          "text": "D'acord.",
+          "state": {
+            "assistant_active": false,
+            "audio_playing": false,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "seconds_since_assistant_active": 0.6,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "D'acord."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_answer_ack",
+      "language": "ca",
+      "category": "answer",
+      "rationale": "Same words as the acknowledgment case, now an explicit answer to a question. Must survive.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "D'acord.",
+          "state": {
+            "assistant_text": "Vols que consulti les hores lliures per a demà?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "D'acord.",
+          "state": {
+            "assistant_text": "Vols que consulti les hores lliures per a demà?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "D'acord."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_answer_no",
+      "language": "ca",
+      "category": "answer",
+      "rationale": "A short negative answer is meaningful user speech.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "No.",
+          "state": {
+            "assistant_text": "Vols que consulti les hores lliures per a demà?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "No.",
+          "state": {
+            "assistant_text": "Vols que consulti les hores lliures per a demà?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "No."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_interrupt_short",
+      "language": "ca",
+      "category": "interruption",
+      "rationale": "An explicit one-word request to wait should interrupt immediately; test partial and commit separately.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Espera.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "barge_in"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Espera.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Espera."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_interrupt_correction",
+      "language": "ca",
+      "category": "interruption",
+      "rationale": "Affirmative opening followed by a correction must not be filtered as acknowledgment.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Sí, però espera, vull canviar la data.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "barge_in"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Sí, però espera, vull canviar la data.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "Per a una revisió comprovem els frens i la pressió de les rodes.",
+            "active_user_text": "Explica què inclou una revisió.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Sí, però espera, vull canviar la data."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_incomplete",
+      "language": "ca",
+      "category": "incomplete",
+      "rationale": "Provider prematurely commits a trailing conjunction; desired HOLD is follow-up work, not part of the first PR.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Voldria una revisió perquè",
+          "state": {},
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 400,
+          "kind": "committed",
+          "text": "Voldria una revisió perquè",
+          "state": {
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "hold",
+            "text": "Voldria una revisió perquè"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ca_resumed",
+      "language": "ca",
+      "category": "resumed_request",
+      "rationale": "The caller resumes a complete clause before any reply is heard or any tool starts. Desired merge must preserve both fragments.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "committed",
+          "text": "La bicicleta blava, em sembla.",
+          "state": {},
+          "expected": {
+            "action": "new_turn",
+            "text": "La bicicleta blava, em sembla."
+          }
+        },
+        {
+          "at_ms": 600,
+          "kind": "partial",
+          "text": "La que té el fre del darrere trencat.",
+          "state": {
+            "assistant_active": true,
+            "active_user_text": "La bicicleta blava, em sembla.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "caller_partial_started_during_playback": false,
+            "seconds_since_turn_start": 0.6,
+            "seconds_since_last_commit": 0.6
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "La que té el fre del darrere trencat.",
+          "state": {
+            "assistant_active": true,
+            "active_user_text": "La bicicleta blava, em sembla.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "caller_partial_started_during_playback": false,
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "continue",
+            "text": "La bicicleta blava, em sembla. La que té el fre del darrere trencat."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_ack",
+      "language": "es",
+      "category": "acknowledgment",
+      "rationale": "Listener acknowledgment during an explanation, not an answer to a question.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Vale.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Vale.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Vale."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_ack_long",
+      "language": "es",
+      "category": "acknowledgment",
+      "rationale": "A longer listener acknowledgment must not become an interruption just by word count.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Ajá, vale, te escucho.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Ajá, vale, te escucho.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Ajá, vale, te escucho."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_ack_late",
+      "language": "es",
+      "category": "acknowledgment",
+      "rationale": "Partial overlaps playback; commit arrives 600 ms after playback ends. Follow-up policy work.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Vale.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 850,
+          "kind": "committed",
+          "text": "Vale.",
+          "state": {
+            "assistant_active": false,
+            "audio_playing": false,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "seconds_since_assistant_active": 0.6,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Vale."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_answer_ack",
+      "language": "es",
+      "category": "answer",
+      "rationale": "Same words as the acknowledgment case, now an explicit answer to a question. Must survive.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Vale.",
+          "state": {
+            "assistant_text": "¿Quieres que consulte las horas libres para mañana?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Vale.",
+          "state": {
+            "assistant_text": "¿Quieres que consulte las horas libres para mañana?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Vale."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_answer_no",
+      "language": "es",
+      "category": "answer",
+      "rationale": "A short negative answer is meaningful user speech.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "No.",
+          "state": {
+            "assistant_text": "¿Quieres que consulte las horas libres para mañana?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "No.",
+          "state": {
+            "assistant_text": "¿Quieres que consulte las horas libres para mañana?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "No."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_interrupt_short",
+      "language": "es",
+      "category": "interruption",
+      "rationale": "An explicit one-word request to wait should interrupt immediately; test partial and commit separately.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Espera.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "barge_in"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Espera.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Espera."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_interrupt_correction",
+      "language": "es",
+      "category": "interruption",
+      "rationale": "Affirmative opening followed by a correction must not be filtered as acknowledgment.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Sí, pero espera, quiero cambiar la fecha.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "barge_in"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Sí, pero espera, quiero cambiar la fecha.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "En una revisión comprobamos los frenos y la presión de las ruedas.",
+            "active_user_text": "Explica qué incluye una revisión.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Sí, pero espera, quiero cambiar la fecha."
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_incomplete",
+      "language": "es",
+      "category": "incomplete",
+      "rationale": "Provider prematurely commits a trailing conjunction; desired HOLD is follow-up work, not part of the first PR.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Necesito una revisión, es que",
+          "state": {},
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 400,
+          "kind": "committed",
+          "text": "Necesito una revisión, es que",
+          "state": {
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "hold",
+            "text": "Necesito una revisión, es que"
+          }
+        }
+      ]
+    },
+    {
+      "id": "es_resumed",
+      "language": "es",
+      "category": "resumed_request",
+      "rationale": "The caller resumes a complete clause before any reply is heard or any tool starts. Desired merge must preserve both fragments.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "committed",
+          "text": "La bicicleta azul, creo.",
+          "state": {},
+          "expected": {
+            "action": "new_turn",
+            "text": "La bicicleta azul, creo."
+          }
+        },
+        {
+          "at_ms": 600,
+          "kind": "partial",
+          "text": "La que tiene el freno trasero roto.",
+          "state": {
+            "assistant_active": true,
+            "active_user_text": "La bicicleta azul, creo.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "caller_partial_started_during_playback": false,
+            "seconds_since_turn_start": 0.6,
+            "seconds_since_last_commit": 0.6
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "La que tiene el freno trasero roto.",
+          "state": {
+            "assistant_active": true,
+            "active_user_text": "La bicicleta azul, creo.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "caller_partial_started_during_playback": false,
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "continue",
+            "text": "La bicicleta azul, creo. La que tiene el freno trasero roto."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_ack",
+      "language": "en",
+      "category": "acknowledgment",
+      "rationale": "Listener acknowledgment during an explanation, not an answer to a question.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Okay.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Okay.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Okay."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_ack_long",
+      "language": "en",
+      "category": "acknowledgment",
+      "rationale": "A longer listener acknowledgment must not become an interruption just by word count.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Mhm, okay, I am listening.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Mhm, okay, I am listening.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Mhm, okay, I am listening."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_ack_late",
+      "language": "en",
+      "category": "acknowledgment",
+      "rationale": "Partial overlaps playback; commit arrives 600 ms after playback ends. Follow-up policy work.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Okay.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 850,
+          "kind": "committed",
+          "text": "Okay.",
+          "state": {
+            "assistant_active": false,
+            "audio_playing": false,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "seconds_since_assistant_active": 0.6,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Okay."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_answer_ack",
+      "language": "en",
+      "category": "answer",
+      "rationale": "Same words as the acknowledgment case, now an explicit answer to a question. Must survive.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Okay.",
+          "state": {
+            "assistant_text": "Would you like me to check available times for tomorrow?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Okay.",
+          "state": {
+            "assistant_text": "Would you like me to check available times for tomorrow?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Okay."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_answer_no",
+      "language": "en",
+      "category": "answer",
+      "rationale": "A short negative answer is meaningful user speech.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "No.",
+          "state": {
+            "assistant_text": "Would you like me to check available times for tomorrow?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "No.",
+          "state": {
+            "assistant_text": "Would you like me to check available times for tomorrow?",
+            "seconds_since_assistant_active": 0.6,
+            "caller_partial_started_during_playback": false,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "No."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_interrupt_short",
+      "language": "en",
+      "category": "interruption",
+      "rationale": "An explicit one-word request to wait should interrupt immediately; test partial and commit separately.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Wait.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "barge_in"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Wait.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Wait."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_interrupt_correction",
+      "language": "en",
+      "category": "interruption",
+      "rationale": "Affirmative opening followed by a correction must not be filtered as acknowledgment.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "Yes, but wait, I want to change the date.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0
+          },
+          "expected": {
+            "action": "barge_in"
+          }
+        },
+        {
+          "at_ms": 250,
+          "kind": "committed",
+          "text": "Yes, but wait, I want to change the date.",
+          "state": {
+            "assistant_active": true,
+            "audio_playing": true,
+            "assistant_text": "During a service we inspect the brakes and the tyre pressure.",
+            "active_user_text": "Explain what a service includes.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 32000,
+            "tool_started": false,
+            "caller_partial_started_during_playback": true,
+            "seconds_since_turn_start": 3.0,
+            "seconds_since_last_commit": 3.0,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "Yes, but wait, I want to change the date."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_incomplete",
+      "language": "en",
+      "category": "incomplete",
+      "rationale": "Provider prematurely commits a trailing conjunction; desired HOLD is follow-up work, not part of the first PR.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "partial",
+          "text": "I need a service because",
+          "state": {},
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 400,
+          "kind": "committed",
+          "text": "I need a service because",
+          "state": {
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "hold",
+            "text": "I need a service because"
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_resumed",
+      "language": "en",
+      "category": "resumed_request",
+      "rationale": "The caller resumes a complete clause before any reply is heard or any tool starts. Desired merge must preserve both fragments.",
+      "events": [
+        {
+          "at_ms": 0,
+          "kind": "committed",
+          "text": "Pump three, I think.",
+          "state": {},
+          "expected": {
+            "action": "new_turn",
+            "text": "Pump three, I think."
+          }
+        },
+        {
+          "at_ms": 600,
+          "kind": "partial",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "active_user_text": "Pump three, I think.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "caller_partial_started_during_playback": false,
+            "seconds_since_turn_start": 0.6,
+            "seconds_since_last_commit": 0.6
+          },
+          "expected": {
+            "action": "ignore"
+          }
+        },
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "active_user_text": "Pump three, I think.",
+            "user_turn_active": true,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "caller_partial_started_during_playback": false,
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "partials_since_last_commit": 1
+          },
+          "expected": {
+            "action": "continue",
+            "text": "Pump three, I think. The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_reply_heard",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "Even one heard reply byte prevents rewinding.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 1,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_unknown_playback",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "Unknown is not known zero playback.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": null,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_tool_started",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "Never rewind a turn after tool work starts.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": true,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_unknown_tool",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "Missing tool evidence is not proof that no tool has started.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": null,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_at_window",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "The two-second window is strict: equality must not merge.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 2.0,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_outside_window",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "Expired continuation windows must not merge.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 2.1,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_holding",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "HOLD behavior remains separate; this option must not merge held fragments.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": false,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false,
+            "holding": true
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_no_live_user",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "A greeting/event task is not a live caller turn.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": false,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_empty_request",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "There must be an active user request to resume.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_guard_pretool_speech_heard",
+      "language": "en",
+      "category": "merge_guard",
+      "rationale": "Non-filler pre-tool speech counts as heard reply, even before the tool starts.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 1600,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false,
+            "assistant_text": "Let me check that."
+          },
+          "expected": {
+            "action": "new_turn",
+            "text": "The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_resumed_cumulative",
+      "language": "en",
+      "category": "resumed_request",
+      "rationale": "Resumed request variant: cumulative. Filler-only playback has zero non-filler reply bytes.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "Pump three, I think. The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "continue",
+            "text": "Pump three, I think. The one next to the cooling unit."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_resumed_duplicate",
+      "language": "en",
+      "category": "resumed_request",
+      "rationale": "Resumed request variant: duplicate. Filler-only playback has zero non-filler reply bytes.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "Pump three, I think.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false
+          },
+          "expected": {
+            "action": "ignore",
+            "text": "Pump three, I think."
+          }
+        }
+      ]
+    },
+    {
+      "id": "en_resumed_filler_only",
+      "language": "en",
+      "category": "resumed_request",
+      "rationale": "Resumed request variant: filler_only. Filler-only playback has zero non-filler reply bytes.",
+      "events": [
+        {
+          "at_ms": 900,
+          "kind": "committed",
+          "text": "The one next to the cooling unit.",
+          "state": {
+            "assistant_active": true,
+            "user_turn_active": true,
+            "active_user_text": "Pump three, I think.",
+            "seconds_since_turn_start": 0.9,
+            "seconds_since_last_commit": 0.9,
+            "reply_heard_bytes": 0,
+            "tool_started": false,
+            "partials_since_last_commit": 1,
+            "caller_partial_started_during_playback": false,
+            "audio_playing": true
+          },
+          "expected": {
+            "action": "continue",
+            "text": "Pump three, I think. The one next to the cooling unit."
+          }
+        }
+      ]
+    }
+  ]
+}

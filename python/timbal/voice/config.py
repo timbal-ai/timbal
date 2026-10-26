@@ -412,6 +412,10 @@ class VoiceConfig(BaseModel):
     """None → auto: on when the turn detector exposes an audio EOU model."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
+    merge_resumed_secs: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    """Opt-in provider-only continuation window. Merge while the caller turn is
+    running, no tool call has begun, and no non-filler reply has been heard.
+    Unknown playback prevents merging. Server-side only; None leaves behavior unchanged."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     """Minimum silence after pre-tool audio before post-tool synthesis.
 
