@@ -1000,7 +1000,7 @@ def build_voice_session(
         stt_provider_id,
     )
     from ..voice.providers import AudioInputConfig, AudioOutputConfig, resolve_tts
-    from ..voice.turn_detection import resolve_turn_detector
+    from ..voice.turn_detection import ProviderTurnDetector, resolve_turn_detector
 
     merged = merge_client_voice_overrides(defaults, client_config)
 
@@ -1153,7 +1153,14 @@ def build_voice_session(
     if merged.user_idle is not None:
         session_kwargs["user_idle"] = merged.user_idle
     if merged.merge_resumed_secs is not None:
-        session_kwargs["merge_resumed_secs"] = merged.merge_resumed_secs
+        if isinstance(turn_detector, ProviderTurnDetector):
+            session_kwargs["merge_resumed_secs"] = merged.merge_resumed_secs
+        else:
+            logger.info(
+                "voice_merge_resumed_ignored",
+                reason="turn_detector_not_provider",
+                turn_detector=turn_detector_label,
+            )
     if merged.tool_beat_secs is not None:
         session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
     if merged.turn_timeout_secs is not None:

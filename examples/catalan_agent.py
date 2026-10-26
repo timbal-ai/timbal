@@ -6,7 +6,7 @@ From the repository root (live STT/LLM/TTS calls are billable):
 
 Use WebSocket, click "Use agent settings", and keep language ca. The provider
 baseline trusts Scribe commits and loads no local acoustic classifier.
-See docs/voice-turn-taking-lab.md for the free deterministic replay first.
+See benchmarks/voice/voice-turn-taking-lab.md for the free deterministic replay first.
 """
 
 from __future__ import annotations

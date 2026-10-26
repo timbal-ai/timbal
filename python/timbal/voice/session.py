@@ -101,6 +101,8 @@ from .turn_detection import (
     ProviderTurnDetector,
     TurnDetector,
     TurnState,
+    _is_garbage_commit,
+    _is_noise,
     _is_same_user_utterance_refinement,
     _likely_stt_echo,
     resolve_turn_detector,
@@ -1572,6 +1574,7 @@ class VoiceSession:
                 # outside its leak latch, and rescuing is the last chance a stranded
                 # utterance gets. The traced case was an exact substring anyway.
                 if _likely_stt_echo(self._latest_partial_text, self._spoken_assistant_text()):
+                    self._caller_partial_started_during_playback = None
                     logger.debug("stt_stale_partial_echo_skipped", text_preview=self._latest_partial_text[:80])
                     continue
                 self._stale_commit_sent_at = time.monotonic()
@@ -1620,16 +1623,38 @@ class VoiceSession:
                             stranded_preview=self._latest_partial_text[:80],
                         )
                     elif text:
-                        if self._caller_partial_started_during_playback is None:
+                        now = time.monotonic()
+                        if (
+                            self._last_partial_at > 0
+                            and now - self._last_partial_at >= self._stale_partial_commit_secs
+                        ):
+                            self._caller_partial_started_during_playback = None
+                        if self._caller_partial_started_during_playback is None and not (
+                            _is_noise(text)
+                            or _is_garbage_commit(text)
+                            or _likely_stt_echo(text, self._spoken_assistant_text())
+                        ):
                             self._caller_partial_started_during_playback = self._assistant_audio_playing
-                        self._last_partial_at = time.monotonic()
+                        self._last_partial_at = now
                         self._latest_partial_text = text
-                    decision = await self.turn_detector.on_partial(text, self._turn_state())
-                    if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
+                    state = self._turn_state()
+                    decision = await self.turn_detector.on_partial(text, state)
+                    resumed_partial_barge_in = (
+                        decision is PartialDecision.IGNORE
+                        and isinstance(self.turn_detector, ProviderTurnDetector)
+                        and self.turn_detector.can_merge_resumed(state)
+                        and self.turn_detector._is_barge_in_partial(text, state)
+                    )
+                    if (decision is PartialDecision.BARGE_IN or resumed_partial_barge_in) and self._vad_vetoes_barge_in(
+                        text
+                    ):
                         # Hallucinated multi-word partials during TTS (no mic
                         # energy) — do not flash them in the playground caption.
                         # (_vad_vetoes_barge_in already logs stt_partial_barge_in_vetoed.)
                         decision = PartialDecision.IGNORE
+                        resumed_partial_barge_in = False
+                        if self._partials_since_last_commit == 1:
+                            self._caller_partial_started_during_playback = None
                     else:
                         await self._emit(TranscriptPartial(text=text))
                     if decision is PartialDecision.BARGE_IN:
@@ -1643,6 +1668,8 @@ class VoiceSession:
                             audio_playing=self._assistant_audio_playing,
                         )
                         await self.interrupt()
+                    elif resumed_partial_barge_in:
+                        await self._silence_unheard_playback_for_resumed_partial(text)
                 elif event.type == "committed" and event.text.strip():
                     await self._handle_committed(event.text.strip())
         except asyncio.CancelledError:
@@ -1658,6 +1685,44 @@ class VoiceSession:
             except (asyncio.CancelledError, Exception):
                 pass
         await self.close()
+
+    async def _silence_unheard_playback_for_resumed_partial(self, text: str) -> None:
+        """Stop filler / unheard playback on a resumed partial without cancelling the turn task."""
+        if self._greeting_holds_interrupt() or not self._assistant_audio_playing:
+            return
+        if self._reply_heard_bytes() != 0:
+            return
+        logger.info(
+            "stt_partial_resumed_silence_playback",
+            text_preview=text[:80],
+            audio_playing=self._assistant_audio_playing,
+            **_trace_debug_fields(),
+        )
+        if self._turn_filler_task is not None and not self._turn_filler_task.done():
+            self._turn_filler_task.cancel()
+        self.playback.on_interrupted()
+        for t in list(self._tts_tasks):
+            if not t.done():
+                t.cancel()
+        if self._tts_tasks:
+            await asyncio.gather(*self._tts_tasks, return_exceptions=True)
+        self._tts_tasks.clear()
+        self._tts_tail = None
+        await self._abort_tts_stream()
+        # Any non-filler segment was still at 0 heard bytes when playback was
+        # stopped; drop its unplayed record so _reply_heard_bytes() stays 0.
+        self._turn_tts_segment_records = [r for r in self._turn_tts_segment_records if not r[0]]
+        self._turn_stream_record = None
+        self._turn_audio_playing_until = 0.0
+        dropped_audio = self._drop_queued_audio_output()
+        await self._emit(SessionInterrupted(heard_text=None))
+        logger.info(
+            "session_interrupt_emitted",
+            heard_text_preview=None,
+            heard_bytes=0,
+            dropped_queued_audio=dropped_audio,
+            **_trace_debug_fields(),
+        )
 
     def _reply_heard_bytes(self) -> int | None:
         records = self._turn_tts_segment_records
@@ -1739,7 +1804,11 @@ class VoiceSession:
             ),
             reply_heard_bytes=self._reply_heard_bytes(),
             tool_started=self._turn_has_tool_work(),
-            caller_partial_started_during_playback=self._caller_partial_started_during_playback,
+            caller_partial_started_during_playback=(
+                None
+                if self._last_partial_at > 0 and now - self._last_partial_at >= self._stale_partial_commit_secs
+                else self._caller_partial_started_during_playback
+            ),
         )
 
     def _cancel_hold(self) -> None:
@@ -2091,7 +2160,9 @@ class VoiceSession:
                     or self._transcript[resume_index].text != state.active_user_text
                     or self._current_turn_task is not decision_turn
                     or not isinstance(self.turn_detector, ProviderTurnDetector)
-                    or not self.turn_detector.can_merge_resumed(self._turn_state())
+                    or not self.turn_detector.can_merge_resumed(
+                        self._turn_state().model_copy(update={"seconds_since_last_commit": 0.0})
+                    )
                 ):
                     decision = CommitDecision(action=CommitAction.NEW_TURN, text=text, reason="resume_no_longer_safe")
                     final_text = text
@@ -2672,6 +2743,7 @@ class VoiceSession:
                         self._turn_completed_replies = []
                         self._turn_first_token_at = None
                         self._turn_llm_done_at = None
+                        self._turn_resume_memory_start = None
                         set_run_context(ctx)
                         agen = self.agent(**retry_kwargs)
                         run_started = False
@@ -2692,11 +2764,12 @@ class VoiceSession:
                 if isinstance(event, StartEvent):
                     if event.path == own_llm_path:
                         llm_steps += 1
-                        if llm_steps == 1:
+                        if self._turn_resume_memory_start is None:
                             ctx = get_run_context()
                             root = ctx.root_span() if ctx is not None else None
                             if root is not None and isinstance(root.memory, list):
-                                first_llm_memory = list(root.memory)
+                                if llm_steps == 1:
+                                    first_llm_memory = list(root.memory)
                                 self._turn_resume_memory_start = len(root.memory)
                     elif event.path != getattr(self.agent, "_path", None):
                         # Includes tools resumed before the first LLM step.

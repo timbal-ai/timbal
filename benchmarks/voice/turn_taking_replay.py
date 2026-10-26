@@ -1,7 +1,7 @@
 """Offline detector snapshot replay for #228; no speech/model/network calls.
 
 Run from the repository root with PYTHONPATH=python. Expectations describe
-caller intent, not fixes. See docs/voice-turn-taking-lab.md for interpretation.
+caller intent, not fixes. See benchmarks/voice/voice-turn-taking-lab.md for interpretation.
 """
 
 # ruff: noqa: T201

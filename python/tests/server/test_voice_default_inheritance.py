@@ -94,3 +94,16 @@ def test_resumed_window_does_not_mutate_shared_detector():
     session, _ = build_voice_session(agent, VoiceConfig(turn_detector=detector, merge_resumed_secs=2), {})
     assert session.turn_detector.merge_resumed_secs == 2
     assert detector.merge_resumed_secs is None
+
+
+def test_resumed_window_is_ignored_when_resolved_detector_is_not_provider(monkeypatch):
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    # Fallback STT (ElevenLabs Scribe) with default turn_detector=None resolves to local/lexical.
+    session_fallback, _ = build_voice_session(agent, VoiceConfig(merge_resumed_secs=2), {})
+    assert getattr(session_fallback.turn_detector, "merge_resumed_secs", None) is None
+    # Client playground detector override ("heuristic") on a server config with merge_resumed_secs.
+    defaults = VoiceConfig(turn_detector="provider", merge_resumed_secs=2)
+    session_override, _ = build_voice_session(agent, defaults, {"turn_detector": "heuristic"})
+    assert getattr(session_override.turn_detector, "merge_resumed_secs", None) is None
+
