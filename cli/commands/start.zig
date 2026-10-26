@@ -1268,12 +1268,17 @@ fn isPortFree(port: u16) bool {
     return true;
 }
 
-/// Bind [::1]:port. Returns null if taken; hosts without IPv6 report the
-/// family as unavailable, which counts as free since nothing can listen there.
+/// Bind [::1]:port. Returns error.InUse if taken; hosts without IPv6 report
+/// the family/address as unavailable (null), which counts as free since
+/// nothing can listen there.
 fn bindIp6Loopback(port: u16) error{InUse}!?std.net.Server {
     const addr = std.net.Address.initIp6(.{0} ** 15 ++ .{1}, port, 0, 0);
     return addr.listen(.{ .reuse_address = false }) catch |err| switch (err) {
-        error.AddressFamilyNotSupported, error.AddressNotAvailable => null,
+        error.AddressFamilyNotSupported,
+        error.AddressNotAvailable,
+        error.ProtocolFamilyNotAvailable,
+        error.ProtocolNotSupported,
+        => null,
         else => error.InUse,
     };
 }
