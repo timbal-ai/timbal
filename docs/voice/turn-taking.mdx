@@ -55,7 +55,8 @@ agent.voice_config["merge_resumed_secs"] = 2.0
 
 The window is measured from the previous accepted commit (extending through an
 utterance whose partials started inside the window) and defaults to `None` (off).
-This setting is server-controlled and requires provider mode (the server ignores
+This setting is server-controlled (`voice_config["merge_resumed_secs"]` or
+`TIMBAL_VOICE_MERGE_RESUMED_SECS`) and requires provider mode (the server ignores
 it when another turn detector is active). It merges only a
 live caller turn with no tool-call evidence and known zero played reply bytes.
 Filler speech does not count as a reply. Once any non-filler speech is heard,

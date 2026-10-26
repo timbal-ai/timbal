@@ -63,6 +63,8 @@ def default_voice_config_from_env() -> VoiceConfig:
         kwargs["voice"] = v
     if v := os.environ.get("TIMBAL_VOICE_LANGUAGE"):
         kwargs["language"] = v
+    if v := os.environ.get("TIMBAL_VOICE_MERGE_RESUMED_SECS", "").strip():
+        kwargs["merge_resumed_secs"] = v
     # Plain text only: the env channel cannot express the rest of
     # GreetingConfig, and a fixed opener is the path worth having here (the
     # platform injects the line it wants a deployed number answered with).

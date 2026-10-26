@@ -107,3 +107,10 @@ def test_resumed_window_is_ignored_when_resolved_detector_is_not_provider(monkey
     session_override, _ = build_voice_session(agent, defaults, {"turn_detector": "heuristic"})
     assert getattr(session_override.turn_detector, "merge_resumed_secs", None) is None
 
+
+def test_resumed_window_env_default_and_agent_override(monkeypatch):
+    monkeypatch.setenv("TIMBAL_VOICE_MERGE_RESUMED_SECS", "2.0")
+    assert merge_voice_config(SimpleNamespace(voice_config={})).merge_resumed_secs == 2.0
+    assert merge_voice_config(SimpleNamespace(voice_config={"merge_resumed_secs": 1.5})).merge_resumed_secs == 1.5
+
+

@@ -5,14 +5,9 @@ state evidence and opt-in safe resumed-request merging on `ProviderTurnDetector`
 It does **not** close the issue. HOLD for unfinished speech and production
 acknowledgment/interruption policy remain follow-up work.
 
-There are two separate entry points:
-
-- `benchmarks/voice/turn_taking_replay.py` replays synthetic CA/ES/EN transcripts
-  against the real detector, with explicit state snapshots. It is deterministic,
-  requires no API keys, and blocks Python socket connections and DNS.
-- `examples/catalan_agent.py` is a Catalan microphone demo with a simulated bicycle
-  workshop availability tool. Its STT, LLM, and TTS use live, billable services.
-  The tool itself makes no network calls and cannot reserve an appointment.
+`benchmarks/voice/turn_taking_replay.py` replays synthetic CA/ES/EN transcripts
+against the real detector, with explicit state snapshots. It is deterministic,
+requires no API keys, and blocks Python socket connections and DNS.
 
 ## Offline replay
 
@@ -107,55 +102,21 @@ marked as passing or counted as fixes. Full-corpus strict mode should therefore
 still fail with merging enabled. Expectations are frozen for the documented
 2-second comparison; another window can intentionally change the result.
 
-## Catalan microphone demo (optional, billable)
+## Live playground testing (optional, billable)
 
-The demo preserves the prior choices: Catalan `ca`, `openai/gpt-6-luna` with low
-reasoning effort, ElevenLabs `scribe_v2_realtime`, `eleven_v4_turbo`, and voice
-`dNjJKg63Fr5AXwIdkATa`. It uses supported `provider` mode with local VAD endpointing
-disabled; Scribe owns endpointing. The prior `local_shadow` mode and experimental
-runtime imports are not reused. No acoustic classifier is enabled. Its dynamic
-Madrid-date prompt, simulated availability, spoken Catalan/Spanish times,
-Catalan greeting, fillers, idle handling and timeout response are preserved.
-
-Provide `OPENAI_API_KEY` and `ELEVENLABS_API_KEY` through the normal server
-environment or a private local `.env`. No separate checkout's credentials are
-loaded by the example. With dependencies already installed, from the repo root:
+Set `TIMBAL_VOICE_MERGE_RESUMED_SECS` (or `voice_config={"merge_resumed_secs": 2.0}`)
+with any of the standard playground agents in `examples/voice_playground_agents.py`
+or `examples/voice_turn_modes.py`:
 
 ```bash
-uv run --offline --no-sync python -m timbal.server.playground \
-  --import_spec examples/catalan_agent.py::agent
+TIMBAL_VOICE_MERGE_RESUMED_SECS=2 uv run --extra server python -m timbal.server.playground \
+  --import_spec examples/voice_playground_agents.py::tools
 ```
 
-For initial dependency setup instead (may require network):
-
-```bash
-uv run --extra server python -m timbal.server.playground \
-  --import_spec examples/catalan_agent.py::agent
-```
-
-Open http://localhost:7777,
-select WebSocket, and click **Use agent settings** to clear stale browser
-choices. Keep ElevenLabs Scribe, Catalan and provider mode. Local VAD endpointing
-should be off. Stop and restart the child server after changes. WebSocket needs
-no LiveKit credentials; optional LiveKit transport requires its own credentials
-and `--extra voice-livekit` installation.
-
-Environment overrides are `TIMBAL_CATALAN_MODEL`, `TIMBAL_CATALAN_VOICE`, and
-`TIMBAL_CATALAN_MERGE_RESUMED_SECS`. Provider-specific reasoning parameters are
-only applied to the original default model. Leave the merge variable unset for
-the baseline; set it to a positive finite number for the opt-in comparison:
-
-```bash
-TIMBAL_CATALAN_MERGE_RESUMED_SECS=2 uv run --offline --no-sync python -m timbal.server.playground \
-  --import_spec examples/catalan_agent.py::agent
-```
-
-Try “Voldria una revisió demà a la tarda” for the simulated tool. Compare
-“D'acord” while listening with “D'acord” as an answer to a question; try
-“Espera, vull canviar la data” as an interruption. To investigate resumed
-requests, pause before adding a detail, and observe whether a tool or audible
-reply already started: either condition should prevent merging. Live pauses,
-provider commits and playback acknowledgments are not deterministic.
+Open http://localhost:7777 and keep `provider` mode (the default on Deepgram Flux,
+or select `provider` in the Turn detection dropdown on ElevenLabs Scribe). To test
+resumed requests, pause briefly mid-request before adding a detail, and observe
+whether a tool or audible reply already started: either condition prevents merging.
 
 ## Validation limits
 

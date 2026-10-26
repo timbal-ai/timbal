@@ -64,6 +64,6 @@ See [Spoken fillers](/voice/fillers) to enable a waiting phrase, tune generation
 
 ## Operator defaults
 
-The server reads `TIMBAL_STT_PROVIDER`, `TIMBAL_STT_MODEL`, `TIMBAL_TTS_MODEL`, `ELEVENLABS_VOICE_ID` (before `TIMBAL_VOICE_ID`), `TIMBAL_VOICE_LANGUAGE`, and `TIMBAL_VOICE_GREETING`. Use `voice_config.tts_provider` to select the output provider; there is no `TIMBAL_TTS_PROVIDER` reader in the server.
+The server reads `TIMBAL_STT_PROVIDER`, `TIMBAL_STT_MODEL`, `TIMBAL_TTS_MODEL`, `ELEVENLABS_VOICE_ID` (before `TIMBAL_VOICE_ID`), `TIMBAL_VOICE_LANGUAGE`, `TIMBAL_VOICE_GREETING`, and `TIMBAL_VOICE_MERGE_RESUMED_SECS`. Use `voice_config.tts_provider` to select the output provider; there is no `TIMBAL_TTS_PROVIDER` reader in the server.
 
 `TIMBAL_VOICE_FILLER=1` enables default fillers. The `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, `TIMBAL_VOICE_FILLER_REPEAT_SECS`, and `TIMBAL_VOICE_FILLER_THINK_DELAY_SECS` variables customize them. See [Recording calls](/voice/recording) and [Background audio](/voice/background-audio) for their operator settings and transport limits.
