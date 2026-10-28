@@ -13,7 +13,7 @@ This guide shows how to:
   <Accordion title="Installing Packages">
     Install the required Google API client libraries:
     
-    ```python 
+    ```python fragment 
     google-api-core 
     google-api-python-client
     google-auth
@@ -51,7 +51,7 @@ This guide shows how to:
         
         **2. Configure OAuth Scopes**
         The following scopes are required:
-        ```python
+        ```python fragment
         SCOPES = [
           "https://www.googleapis.com/auth/gmail.readonly",
           "https://www.googleapis.com/auth/gmail.compose"
@@ -60,7 +60,7 @@ This guide shows how to:
         
         **3. Generate Access Token**
         Run this script once to generate `token.json`:
-        ```python
+        ```python fragment
         from google_auth_oauthlib.flow import InstalledAppFlow
 
         SCOPES = [
@@ -79,7 +79,7 @@ This guide shows how to:
         This will open a browser window for Google sign-in.
         
         **4. Initialize in Code**
-        ```python
+        ```python fragment
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
@@ -167,7 +167,7 @@ This guide shows how to:
         6. Click **Authorize**
         
         **4. Initialize Service Account in Code**
-        ```python
+        ```python fragment
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
 
@@ -214,7 +214,7 @@ Establish a connection to the Gmail API using your credentials. Choose the metho
 
 <Tabs>
   <Tab title="OAuth 2.0">
-```python
+```python fragment
 def initialize_gmail(self):
     """Initialize Gmail API connection with OAuth"""
     try:
@@ -253,7 +253,7 @@ def initialize_gmail(self):
 ```
   </Tab>
   <Tab title="Service Account">
-```python
+```python fragment
 def initialize_gmail(self):
     """Initialize Gmail API connection with Service Account"""
     try:
@@ -291,7 +291,7 @@ def initialize_gmail(self):
 ### Email monitoring
 Monitor the Gmail inbox for new messages using polling:
 
-```python
+```python fragment
 async def check_for_new_messages(self):
     """Check for new messages since last check"""
     try:           
@@ -336,7 +336,7 @@ async def start_monitoring(self):
 
 ### Create a Timbal Agent for intelligent email responses
 Create an Agent to generate emails responses:
-```python
+```python fragment
 agent = Agent(
     name="email_response_generator", 
     model="openai/gpt-4o-mini",
@@ -349,7 +349,7 @@ agent = Agent(
 ### Call a Timbal Agent to generate the draft
 Process incoming emails by creating the prompt and invoking the Agent to generate a response:
 
-```python
+```python fragment
 def _create_email_prompt(self, email):
     # Extract email information
     subject = email.get('subject', 'No Subject')
@@ -407,7 +407,7 @@ async def generate_draft(self, message):
 ### Save the draft to the emails thread
 Define the post-hook function that automatically saves the AI-generated response as a draft reply in the original email thread:
 
-```python
+```python fragment
 def save_draft(self):
     """Create a draft response to the original message"""
     span = get_run_context().current_span()

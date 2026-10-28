@@ -1,13 +1,12 @@
 ---
-title: "Overview"
-description: "Specs, pricing, and capabilities for every supported model"
+title: "Model reference"
+sidebarTitle: "Overview"
+description: "Specs, pricing, and capabilities for every model Timbal can call."
 ---
 
 Model specifications, availability, and pricing reviewed October 3, 2026, with Haiku 5.5 and Sonnet 5.5 cache pricing updated October 7, 2026. **Price** means USD per 1M text tokens (input / output) at the provider's Standard short-context tier, preferring published post-promotion rates. Where only promotional rates are published, those rates are retained and explicitly labeled. Long-context thresholds vary by model: Anthropic Haiku 5.5 &gt;100K, OpenAI &gt;272K, Google Pro &gt;200K, xAI ≥200K, and selected BytePlus models &gt;128K input tokens. These models reprice the whole request; Timbal reports distinct `<unit>_long_context` usage keys — see the [OpenAI page](/models/openai#how-long-context-and-cache-pricing-is-tracked).
 
 Dedicated deployments, restricted access, unknown prices, conflicting sources, and future retirement dates are noted on each provider page. Unknown prices are not free. Audio, image generation, tool calls, cache storage, regional premiums, and time-dependent pricing need separate billing. Model capabilities do not imply every provider-native endpoint is available through `Agent`.
-
-`scripts/generate_costs_sql.py` generates catalog token rates, including published cache, long-context, and supported service-tier rates. It omits unknown prices and dedicated deployments instead of estimating them. It also omits ambiguous OpenAI search fees because the current usage metric does not distinguish standard search from the more expensive non-reasoning preview search. Generated SQL updates matching rates but does not delete existing rows for retired or omitted models; review those rows before applying a billing update.
 
 <CardGroup cols={3}>
   <Card title="Anthropic" icon="https://timbalusercontent.com/assets/claude_favicon.svg" href="/models/anthropic">

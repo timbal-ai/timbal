@@ -18,6 +18,10 @@ The `background_mode` parameter controls when a runnable executes asynchronously
 ```python
 from timbal import Tool
 
+async def slow_operation() -> str:
+    """Long-running work."""
+    return "done"
+
 long_running_tool = Tool(
     handler=slow_operation,
     background_mode="always",
@@ -178,6 +182,12 @@ By default every finished task and every posted event starts a follow-up. A tool
 or an event can ask for less, or more, attention:
 
 ```python
+from timbal import Tool
+
+def refresh_cache() -> str:
+    """Refresh a cached value."""
+    return "refreshed"
+
 Tool(handler=refresh_cache, background_mode="always", background_announce="silent")
 ```
 
@@ -198,6 +208,9 @@ its `metadata.trigger`.
 ```python
 from timbal.core.continuation import AgentContinuation, continuation_for_run
 
+async def wait_until_the_line_is_quiet() -> None:
+    return None
+
 stream = AgentContinuation(
     agent,
     admit=wait_until_the_line_is_quiet,  # awaited before each follow-up starts
@@ -205,6 +218,7 @@ stream = AgentContinuation(
 )
 
 # Elsewhere, with only a run id (a request handler, say):
+run_id = "not-a-live-session"
 driver = continuation_for_run(run_id)
 if driver is not None:
     driver.stop()
@@ -237,7 +251,14 @@ a webhook) reports into the conversation with a session event:
 ```python
 from timbal.state import post_session_event
 
-event = post_session_event(run_id, "The nightly export finished: 1,204 rows.", key="export")
+# create=True registers a store when this run does not have one yet.
+run_id = "session-run"
+event = post_session_event(
+    run_id,
+    "The nightly export finished: 1,204 rows.",
+    key="export",
+    create=True,
+)
 ```
 
 The session's next turn receives the event as a runtime message ahead of its
@@ -289,6 +310,12 @@ raises `RuntimeError`.
 Set `background_timeout` (seconds) on a tool to hard-cap how long a detached child may run. When the deadline hits, the child is cancelled like a user cancel (Task cancel + handler `aclose` + `on_background_cancel`) but reports status `timed_out` so the next-turn completion notice is unambiguous.
 
 ```python
+from timbal import Tool
+
+async def slow_operation() -> str:
+    """Long-running work."""
+    return "done"
+
 long_running_tool = Tool(
     handler=slow_operation,
     background_mode="always",
@@ -303,6 +330,12 @@ long_running_tool = Tool(
 Set `background_stall_timeout` (seconds) to cancel a child that stops emitting log events — distinct from wall-clock `background_timeout`. The idle timer **resets on every event** (streaming chunks, tool calls, progress dicts), so a long but chatty build stays alive while a hung subprocess does not.
 
 ```python
+from timbal import Tool
+
+async def slow_operation() -> str:
+    """Long-running work."""
+    return "done"
+
 long_running_tool = Tool(
     handler=slow_operation,
     background_mode="always",
@@ -322,9 +355,12 @@ Each session bag bounds fan-out so one turn cannot detach unbounded work:
 Hitting a cap raises `BackgroundLimitError` (surfaced as a tool error to the LLM) instead of spawning.
 
 ```python
+from timbal import Agent
+from timbal.tools import Bash
+
 agent = Agent(
     name="orchestrator",
-    model="...",
+    model="openai/gpt-5-mini",
     tools=[Bash("*")],
     max_background_concurrent=4,
     max_background_depth=1,
@@ -338,10 +374,13 @@ For the full event stream, read from a logical cursor. This does not drain eithe
 **Python / app code** — always available via `timbal.state.read_background_transcript`. **LLM tool** — opt in with `background_transcript_tool=True` on the Agent (registered alongside the other session background tools once a child exists).
 
 ```python
+from timbal import Agent
+from timbal.tools import Bash
+
 agent = Agent(
     name="debugger",
-    model="...",
-    tools=[...],
+    model="openai/gpt-5-mini",
+    tools=[Bash("*")],
     background_transcript_tool=True,
 )
 ```
@@ -366,10 +405,12 @@ For app code or frontends that want to block instead of polling the agent loop, 
 ```python
 from timbal.state import wait_for_background
 
+cursor = 0
+
 # Block until terminal (or timeout)
 snap = await wait_for_background("k4d9x2mq7c1a", timeout=30.0)
 if snap["status"] == "running":
-    ...  # timeout — poll again
+    pass  # timeout — poll again
 
 # Long-poll until new events land past a cursor (or terminal / timeout)
 snap = await wait_for_background("k4d9x2mq7c1a", after=cursor, timeout=5.0)
@@ -384,8 +425,11 @@ Each child's event log is a **ring buffer** (defaults: 50k events / 32 MiB — s
 Override per Agent:
 
 ```python
+from timbal import Agent
+
 agent = Agent(
-    ...,
+    name="logger",
+    model="openai/gpt-5-mini",
     max_background_log_events=10_000,
     max_background_log_bytes=None,  # unlimited bytes
     background_task_retention_secs=600,
@@ -399,9 +443,11 @@ To follow a child live instead of polling, subscribe to its log. `subscribe` rep
 ```python
 from timbal.state.background import current_background_store
 
-record = current_background_store().get("k4d9x2mq7c1a")
-async for event in record.log.subscribe():
-    print(event)
+store = current_background_store()
+record = store.get("k4d9x2mq7c1a") if store is not None else None
+if record is not None:
+    async for event in record.log.subscribe():
+        print(event)
 ```
 
 A streaming handler can yield either form and both reach the log. Raw delta items are wrapped into `DeltaEvent`s under the parent's run. Already-formed Timbal events (`StartEvent`, `DeltaEvent`, `OutputEvent`) are logged as they are — which is how a child that runs its own agent, such as a coding harness or a remote worker, keeps its own `run_id` and metadata on the task record. Those are the ids `on_background_cancel` and resume need.
@@ -433,8 +479,20 @@ The task store is bound to the `RunContext` and inherited across sequential turn
 Cancelling an `asyncio.Task` can only reach work the event loop owns. If a child drives something outside the process, use `on_background_cancel` to tear it down. The hook receives the task record, whose `metadata` carries the child's ids once its events have arrived.
 
 ```python
+from timbal import Tool
+
+def start_remote_build() -> str:
+    """Start a build outside this process."""
+    return "started"
+
+class RemoteApi:
+    def stop(self, run_id: str | None) -> None:
+        return None
+
+remote_api = RemoteApi()
+
 def stop_remote_build(record):
-    remote_api.stop(record.metadata["run_id"])
+    remote_api.stop(record.metadata.get("run_id"))
 
 Tool(
     name="build_site",

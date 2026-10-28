@@ -5,7 +5,41 @@ description: "Build your first AI Agent with Timbal in a few lines of code"
 
 In this quickstart guide we're going to see how to build an AI agent with Timbal. We'll start from scratch and gradually enhance it with advanced features. Let's dive in!
 
-Before moving forward, ensure you've completed the [installation steps](/installation).
+Before moving forward, complete the [installation steps](/installation). You need Python 3.11 or newer, the Timbal CLI, [uv](https://docs.astral.sh/uv/), and [Bun](https://bun.sh). `timbal start` runs `uv` for each workforce member and `bun` for the API and UI, and it stops if either tool is missing.
+
+## Run without an API key
+
+`TestModel` answers from a list you provide. It does not call a provider and does not need a key. Import it from `timbal.core`.
+
+```python
+import asyncio
+
+from timbal import Agent
+from timbal.core import TestModel
+
+
+async def main() -> None:
+    agent = Agent(
+        name="my_agent",
+        model=TestModel(responses=["Hello from Timbal."]),
+    )
+    result = await agent(prompt="Say hello").collect()
+    print(result.status.code)
+    print(result.output.collect_text())
+
+
+asyncio.run(main())
+```
+
+```
+[info] Using in-memory tracing provider. event_name=tracing_setup run_id=<run id>
+success
+Hello from Timbal.
+```
+
+The tracing line is logged before the prints. The run id changes every execution. Debug lines about platform config only show when debug logging is on.
+
+`collect()` is a method of the object `agent(...)` returns, not of `Agent`. Pass `responses` or a `handler(messages)`; do not pass both. `model.call_count` increments once per model call. Swap the same agent to a string model (`openai/gpt-5-mini` and an `OPENAI_API_KEY`, or platform auth from `timbal configure`) when you want a live answer. A voice session cannot use `TestModel` for speech; see [Your first voice agent](/voice/quickstart).
 
 ## Create a Timbal Project
 
@@ -88,9 +122,9 @@ You can learn more about the Agent class and all the available options in the [A
 ## Adding Tools
 
 Agents become powerful with tools.
-In Timbal, you can use both **baked-in tools** (pre-built and ready to use) and **custom tools** (functions you write yourself).
+In Timbal, you can use both **built-in tools** and **custom tools** (functions you write yourself).
 
-### Baked-in Tools
+### Built-in tools
 
 Timbal includes several ready-to-use tools. For example, the `WebSearch` tool allows your agent to search the internet for real-time information:
 

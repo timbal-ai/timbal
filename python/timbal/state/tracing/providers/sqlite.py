@@ -26,7 +26,7 @@ class SqliteTracingProvider(TracingProvider):
 
     Configure via the base-class ``configured()`` method::
 
-        provider = SqliteTracingProvider.configured(_path=Path("traces.db"))
+        provider = SqliteTracingProvider.configured(path=Path("traces.db"))
         agent = Agent(name="my_agent", model=..., tracing_provider=provider)
 
     Class-level attributes:
@@ -136,7 +136,7 @@ class SqliteTracingProvider(TracingProvider):
         if cls._path is None:
             raise RuntimeError(
                 "SqliteTracingProvider._path is not set. "
-                "Use SqliteTracingProvider.configured(_path=Path(...)) to create a configured provider."
+                "Use SqliteTracingProvider.configured(path=Path(...)) to create a configured provider."
             )
 
         def _claim() -> bool:
@@ -180,7 +180,7 @@ class SqliteTracingProvider(TracingProvider):
         if cls._path is None:
             raise RuntimeError(
                 "SqliteTracingProvider._path is not set. "
-                "Use SqliteTracingProvider.configured(_path=Path(...)) to create a configured provider."
+                "Use SqliteTracingProvider.configured(path=Path(...)) to create a configured provider."
             )
 
         run_id = str(run_context.id)

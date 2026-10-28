@@ -34,6 +34,8 @@ The built-in server serves the same agent through text and voice endpoints. Open
 
 Keep replies concise and ask one question at a time. Tables, URLs, and long lists are difficult to follow aloud. Start with a conversation you can understand and measure before adding optional behavior.
 
+The same process serves text at `POST /run` and `POST /stream` and voice at `/voice`. Deploy it like any other workforce member ([self-hosted](/deployment/self-hosted) or the [platform](/deployment/platform)); the voice routes are part of `python -m timbal.server`, not a separate binary. Failures you will actually see are listed on [Transports](/voice/transports#websocket-clients).
+
 ## Scope of the built-in pipeline
 
 The shipped provider adapters use a transcription → text agent → speech pipeline. `OpenAIRealtimeSTT` is a transcription-only adapter; it does not run the conversation model or synthesize responses.

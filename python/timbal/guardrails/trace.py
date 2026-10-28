@@ -11,7 +11,7 @@ from timbal.guardrails import trace_redactor
 from timbal.state.tracing.providers import JsonlTracingProvider
 
 provider = JsonlTracingProvider.configured(
-    _path=Path("traces.jsonl"),
+    path=Path("traces.jsonl"),
     _trace_redactor=trace_redactor(),          # PII + secrets, deterministic
     # _trace_redactor=trace_redactor("pii:redact", DetectPII(types=["ssn"])),
 )

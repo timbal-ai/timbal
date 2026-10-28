@@ -19,7 +19,7 @@ def greet(name: str) -> str:
 
 agent = Agent(
     name="support_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[Tool(handler=greet, command="greet")],
 )
 
@@ -54,14 +54,14 @@ Any runnable in `tools` can expose a command — including nested agents and wor
 ```python
 search_agent = Agent(
     name="search_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     command="search",
     description="Search and summarize",
 )
 
 main_agent = Agent(
     name="main_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[search_agent],
 )
 
@@ -72,13 +72,19 @@ await main_agent(prompt='/search "python tutorials"').collect()
 Workflows work the same way — arguments map to the workflow's combined parameter model (all step inputs in signature order):
 
 ```python
-from timbal import Workflow
+from timbal import Agent, Workflow
+
+def fetch_data(report: str) -> str:
+    return report
+
+def process_data() -> str:
+    return "processed"
 
 workflow = Workflow(name="pipeline", command="pipeline")
 workflow.step(fetch_data)
 workflow.step(process_data, depends_on=["fetch_data"])
 
-agent = Agent(name="agent", model="openai/gpt-4o-mini", tools=[workflow])
+agent = Agent(name="agent", model="openai/gpt-5-mini", tools=[workflow])
 
 await agent(prompt='/pipeline "quarterly report"').collect()
 ```

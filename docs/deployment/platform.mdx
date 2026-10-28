@@ -3,7 +3,7 @@ title: "Timbal Platform"
 description: "Deploy Timbal projects to managed hosting"
 ---
 
-The [Timbal Platform](https://app.timbal.ai) runs your project's UI, API, and workforce components for you. There is no local `timbal build` or Docker workflow — you push code with `timbal push` and deploy from the platform.
+The [Timbal Platform](https://app.timbal.ai) runs your project's UI, API, and workforce components for you. There is no local image build or Docker workflow — you push code with `timbal push` and deploy from the platform.
 
 ## Prerequisites
 
@@ -118,9 +118,11 @@ Once live, the environment gateway exposes:
 For programmatic access outside the gateway, the platform also exposes run endpoints:
 
 ```http
-POST https://api.timbal.ai/orgs/{org_id}/apps/{app_id}/runs/collect
-POST https://api.timbal.ai/orgs/{org_id}/apps/{app_id}/runs/stream
+POST /orgs/{org_id}/projects/{project_id}/workforce/{workforce}/run
+POST /orgs/{org_id}/projects/{project_id}/workforce/{workforce}/stream
 ```
+
+Those paths are the workforce gateway (`{*path}` on the workforce resource). A self-hosted process exposes the same calls as `POST /run` and `POST /stream`.
 
 See the [API Reference](/api-reference/introduction) for auth, request shapes, and SDK usage.
 

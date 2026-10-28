@@ -8,6 +8,18 @@ description: "Conditional step execution with the `when` parameter"
 The `when` parameter controls whether a step runs based on runtime conditions:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def classify(text: str) -> str:
+    return "urgent" if "Urgent" in text else "normal"
+
+def handle_urgent(text: str) -> str:
+    return text
+
+def handle_normal(text: str) -> str:
+    return text
+
 workflow = (
     Workflow(name="router")
     .step(classify, text="Urgent: server down")
@@ -27,9 +39,21 @@ Both `handle_urgent` and `handle_normal` wait for `classify` to complete. Only t
 If a step's condition is not met, it is skipped along with all its dependents:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def validate_input(data: str) -> str:
+    return "invalid"
+
+def process() -> str:
+    return "processed"
+
+def save_results(data: str) -> str:
+    return data
+
 workflow = (
     Workflow(name="pipeline")
-    .step(validate_input, data="...")
+    .step(validate_input, data="payload")
     .step(process,
         when=lambda: get_run_context().step_span("validate_input").output == "valid")
     .step(save_results,
@@ -42,6 +66,21 @@ If `validate_input` returns `"invalid"`, both `process` and `save_results` are s
 Not all dependents of a skipped step are skipped. When a step uses `depends_on`, it only waits for the referenced steps to **resolve** (either complete or be skipped) — it doesn't need their data. This is useful when you don't know which branch will run:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def classify(text: str) -> str:
+    return "new"
+
+def handle_new(data: str) -> str:
+    return data
+
+def handle_existing(data: str) -> str:
+    return data
+
+def finalize() -> str:
+    return "done"
+
 workflow = (
     Workflow(name="pipeline")
     .step(classify, text="new customer signup")
@@ -62,6 +101,9 @@ workflow = (
 Use an LLM to make routing decisions:
 
 ```python
+from timbal import Agent, Workflow
+from timbal.state import get_run_context
+
 classifier = Agent(
     name="classifier",
     model="openai/gpt-5-mini",

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..span import Span
@@ -71,7 +72,7 @@ class Exporter(ABC):
     Exporters are attached via ``configured()``::
 
         provider = JsonlTracingProvider.configured(
-            _path=Path("traces.jsonl"),
+            path=Path("traces.jsonl"),
             _exporters=[OTelExporter(endpoint="http://...")],
         )
 
@@ -132,8 +133,8 @@ class TracingProvider(ABC):
     overridden — the original class is never mutated::
 
         # Each call returns a new, independent subclass:
-        provider_a = JsonlTracingProvider.configured(_path=Path("a.jsonl"))
-        provider_b = JsonlTracingProvider.configured(_path=Path("b.jsonl"))
+        provider_a = JsonlTracingProvider.configured(path=Path("a.jsonl"))
+        provider_b = JsonlTracingProvider.configured(path=Path("b.jsonl"))
 
         # provider_a._path and provider_b._path are independent.
         # JsonlTracingProvider._path is still None (unchanged).
@@ -160,7 +161,7 @@ class TracingProvider(ABC):
     primary storage has been written::
 
         provider = JsonlTracingProvider.configured(
-            _path=Path("traces.jsonl"),
+            path=Path("traces.jsonl"),
             _exporters=[OTelExporter(endpoint="http://...")],
         )
 
@@ -211,7 +212,7 @@ class TracingProvider(ABC):
     (uploads failing or falling behind). ``None`` reads ``TIMBAL_TRACE_MAX_LAG_S``, else 30 s."""
 
     @classmethod
-    def configured(cls, **kwargs) -> type["TracingProvider"]:
+    def configured(cls, **kwargs: Any) -> type["TracingProvider"]:
         """Return a configured subclass with the given class-level attributes.
 
         Creates a new subclass with the specified attributes set at the class
@@ -222,11 +223,17 @@ class TracingProvider(ABC):
             **kwargs: Class-level attributes to set on the new subclass.
                       What attributes are valid depends on the provider — see
                       the provider's class docstring for the full list.
-                      Pass ``_exporters=[...]`` to attach write-only sinks.
+                      ``path`` is the public alias of ``_path`` for file-backed
+                      providers. Pass ``_exporters=[...]`` to attach write-only sinks.
 
         Returns:
             A new subclass of this provider with the given attributes applied.
         """
+        if "path" in kwargs:
+            if "_path" in kwargs:
+                raise TypeError(f"{cls.__name__}.configured() received both path and _path")
+            path = kwargs.pop("path")
+            kwargs["_path"] = path if isinstance(path, Path) else Path(path)
         return type(cls.__name__, (cls,), kwargs)
 
     @classmethod

@@ -13,10 +13,13 @@ from timbal.state import get_run_context
 
 
 def fetch_content(url: str) -> str:
-    """Fetch raw content from a URL."""
-    import urllib.request
-    with urllib.request.urlopen(url) as response:
-        return response.read().decode("utf-8")
+    """Fetch raw content from a URL.
+
+    This sample returns a fixed page so the workflow runs offline. Replace the
+    body with urllib or httpx when you want the live document.
+    """
+    _ = url
+    return "<title>Example Domain</title><p>An illustrative example.</p>"
 
 
 def extract_metadata(html: str) -> dict:
@@ -76,12 +79,4 @@ result = await pipeline().collect()
 print(result.output)
 ```
 
-The output will be similar to:
-
-```
-# Example Domain
-
-- The page serves as an illustrative example for documentation purposes
-- It can be used freely without permission or coordination
-- More information is available through IANA at the referenced link
-```
+With the offline fetcher above and a test model, the report is the page title plus the model's summary text. A live model replaces that summary with the three bullets you asked for.

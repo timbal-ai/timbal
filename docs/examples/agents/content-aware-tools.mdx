@@ -6,6 +6,8 @@ description: "Use ToolSet to resolve tools dynamically based on content type - a
 Use `ToolSet` to resolve tools dynamically at runtime. This example shows how tools automatically adapt based on the content type:
 
 ```python
+from pathlib import Path
+
 from timbal import Agent, Tool
 from timbal.core.tool_set import ToolSet
 from timbal.state import get_run_context
@@ -57,14 +59,19 @@ result1 = await agent(
     prompt="What is Python?",
 ).collect()
 
+image = Path("image.jpg")
+image.write_bytes(b"\x89PNG\r\n\x1a\n")
+document = Path("document.pdf")
+document.write_bytes(b"%PDF-1.1\n")
+
 # Image analysis tool added
 result2 = await agent(
-    prompt=File.validate('/path/to/image.jpg')
+    prompt=File.validate(str(image))
 ).collect()
 
 # PDF analysis tool added
 result3 = await agent(
-    prompt=File.validate('/path/to/document.pdf'),
+    prompt=File.validate(str(document)),
 ).collect()
 ```
 

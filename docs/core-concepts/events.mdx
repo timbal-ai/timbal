@@ -10,6 +10,13 @@ In the previous [examples](./runnables#parameter-handling-and-basic-execution), 
 You can iterate through the async generator to process events in real-time:
 
 ```python
+from timbal import Tool
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+add_tool = Tool(handler=add)
+
 async for event in add_tool(a=5, b=3):
     print(event)
 
@@ -131,6 +138,8 @@ ToolUse(
 
 **ToolUseDelta** - Streaming tool input parameters:
 ```python
+from timbal.types.events.delta import ToolUseDelta
+
 ToolUseDelta(
     id="call_abc123",
     input_delta='{"query'  # Partial JSON
@@ -140,6 +149,8 @@ LLMs stream tool input parameters incrementally. Multiple `ToolUseDelta` events 
 
 **Thinking** - Start of LLM reasoning block:
 ```python
+from timbal.types.events.delta import Thinking
+
 Thinking(
     id="thinking_0",
     thinking="Let me analyze this problem..."
@@ -148,6 +159,8 @@ Thinking(
 
 **ThinkingDelta** - Streaming thinking increments:
 ```python
+from timbal.types.events.delta import ThinkingDelta
+
 ThinkingDelta(
     id="thinking_0",
     thinking_delta="First, I'll consider..."
@@ -156,6 +169,8 @@ ThinkingDelta(
 
 **Custom** - Arbitrary custom content:
 ```python
+from timbal.types.events.delta import Custom
+
 Custom(
     id="custom_0",
     data={"type": "image_progress", "percent": 45}
@@ -165,6 +180,8 @@ Use `Custom` for streaming content that doesn't fit standard types (e.g., multim
 
 **ContentBlockStop** - Signals end of a content block:
 ```python
+from timbal.types.events.delta import ContentBlockStop
+
 ContentBlockStop(id="text_0")
 ```
 This event signals that a content block (text, tool use, thinking) has finished streaming. Use it to finalize processing of accumulated deltas.
@@ -172,11 +189,14 @@ This event signals that a content block (text, tool use, thinking) has finished 
 #### Using Delta Events
 
 ```python
+from timbal import Agent
 from timbal.types.events import DeltaEvent
 from timbal.types.events.delta import (
     Text, TextDelta, ToolUse, ToolUseDelta,
     Thinking, ThinkingDelta, Custom, ContentBlockStop
 )
+
+agent = Agent(name="agent", model="openai/gpt-5-mini")
 
 async for event in agent(prompt="Hello"):
     if isinstance(event, DeltaEvent):
@@ -248,7 +268,13 @@ output_event = OutputEvent(
 Handler errors are recorded in the runnable's final `OutputEvent`. Check the root result's `status` and `error`; a nested tool can fail while its agent recovers successfully. Construction errors, errors in your own event consumer, and task cancellation can still propagate outside this result contract.
 
 ```python
-result = await runnable(**kwargs).collect()
+from timbal import Tool
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+runnable = Tool(handler=add)
+result = await runnable(a=5, b=3).collect()
 if result.error:
     print(f"Error: {result.error['message']}")
 elif result.status.code == "cancelled":

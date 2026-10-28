@@ -15,7 +15,7 @@ Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech 
 - **`elevenlabs`**: defaults to `scribe_v2_realtime`; requires `ELEVENLABS_API_KEY`.
 - **`deepgram-nova`**: defaults to `nova-3`; requires `DEEPGRAM_API_KEY`. Select Nova explicitly or supply a `nova-*` model.
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
-- **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD.
+- **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD. It does not report native end-of-turn, so the session uses local turn detection when `timbal[voice]` is installed and lexical detection otherwise. Flux and Munsit are the adapters that force `provider` mode.
 
 Set `language` to a provider-supported language hint or omit it for automatic detection. Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
 
@@ -33,11 +33,27 @@ Use the chosen provider's voice ID. `language` controls transcription; it does n
 
 The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate=16000`, `encoding="pcm_s16le"`). Transports convert their wire formats where needed. OpenAI uses 24 kHz on the provider connection and requires the voice extra to resample other session rates.
 
+`stt_extra` defaults to ElevenLabs-oriented VAD keys (`commit_strategy`, `min_speech_duration_ms`, `vad_silence_threshold_secs`, `vad_threshold`). The server strips those keys for adapters that own end-of-turn. `tts_extra` defaults to `{"auto_mode": true}`. `VoiceConfig.model` is a per-session text-model override (`provider/model`), separate from `stt_model` and `tts_model`.
+
+## What a client may override
+
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `model`, `tool_beat_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+
+Recording, ambient audio, `events`, `hello_wait_secs`, and `sip_hello_wait_secs` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`) are treated as unset so they do not wipe an inherited value.
+
 ## Mix providers
 
 With `OPENAI_API_KEY` configured, this selects OpenAI for transcription and speech while keeping `agent.model` as the conversation model:
 
 ```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "en"},
+)
 agent.voice_config = {
     "stt_provider": "openai",
     "stt_model": "gpt-transcribe",
@@ -64,6 +80,6 @@ See [Spoken fillers](/voice/fillers) to enable a waiting phrase, tune generation
 
 ## Operator defaults
 
-The server reads `TIMBAL_STT_PROVIDER`, `TIMBAL_STT_MODEL`, `TIMBAL_TTS_MODEL`, `ELEVENLABS_VOICE_ID` (before `TIMBAL_VOICE_ID`), `TIMBAL_VOICE_LANGUAGE`, and `TIMBAL_VOICE_GREETING`. Use `voice_config.tts_provider` to select the output provider; there is no `TIMBAL_TTS_PROVIDER` reader in the server.
+The server reads `TIMBAL_STT_PROVIDER`, `TIMBAL_STT_MODEL`, `TIMBAL_TTS_MODEL`, `ELEVENLABS_VOICE_ID` (before `TIMBAL_VOICE_ID`), `TIMBAL_VOICE_LANGUAGE`, and `TIMBAL_VOICE_GREETING`. `TIMBAL_VOICE_ID` alone also sets the default ElevenLabs voice. Use `voice_config.tts_provider` to select the output provider; there is no `TIMBAL_TTS_PROVIDER` reader in the server. An unknown STT or TTS provider id falls back to ElevenLabs for that session rather than refusing to boot.
 
 `TIMBAL_VOICE_FILLER=1` enables default fillers. The `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, `TIMBAL_VOICE_FILLER_REPEAT_SECS`, and `TIMBAL_VOICE_FILLER_THINK_DELAY_SECS` variables customize them. See [Recording calls](/voice/recording) and [Background audio](/voice/background-audio) for their operator settings and transport limits.

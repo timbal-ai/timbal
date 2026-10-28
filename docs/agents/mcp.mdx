@@ -23,7 +23,7 @@ from timbal.core import MCPServer
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[
         # stdio: spawn a local server process
         MCPServer(
@@ -91,6 +91,9 @@ For servers that require auth, pass headers (http) or environment variables (std
 ```python
 import os
 
+os.environ.setdefault("TIMBAL_API_KEY", "test-key")
+os.environ.setdefault("GITHUB_TOKEN", "test-token")
+
 timbal_mcp = MCPServer(
     name="timbal",
     transport="http",
@@ -150,18 +153,26 @@ Gated tools emit an `ApprovalEvent` with `kind="mcp_tool"`, the server's input s
 Servers can ask the user a question mid tool call ([elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation)) — for example, "Swap KB 1069 → 1586 (562 agents → 3)?" before a destructive operation. Timbal advertises the capability by default and bridges each request to [`suspend()`](/human-in-the-loop/suspend): the run ends with status `input_required` and an `InteractionEvent` of `kind="mcp_elicitation"`.
 
 ```python
+from timbal import Agent
+from timbal.types.events import InteractionEvent
+
+agent = Agent(name="my_agent", model="openai/gpt-5-mini")
+paused_run_id = None
+interaction_id = None
 async for event in agent(prompt="Swap the KB to 1586"):
     if isinstance(event, InteractionEvent) and event.kind == "mcp_elicitation":
         print(event.payload["message"])            # the server's question
         print(event.payload["requested_schema"])   # flat JSON schema of primitives
         interaction_id = event.interaction_id
+        paused_run_id = event.run_id
 
 # Render the form, then resume with the answer:
-result = await agent(
-    prompt="Swap the KB to 1586",
-    parent_id=paused_run_id,
-    resume={interaction_id: {"confirm": True}},
-).collect()
+if interaction_id is not None:
+    result = await agent(
+        prompt="Swap the KB to 1586",
+        parent_id=paused_run_id,
+        resume={interaction_id: {"confirm": True}},
+    ).collect()
 ```
 
 Resume values:
@@ -195,12 +206,22 @@ Connections are **lazy**: nothing is spawned or contacted until the agent first 
 Close the connection when you're done:
 
 ```python
-server = MCPServer(transport="stdio", command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "."])
-agent = Agent(name="my_agent", model="openai/gpt-4o-mini", tools=[server])
+from timbal import Agent
+from timbal.core import MCPServer
 
-result = await agent(prompt="List the files in the current directory").collect()
+server = MCPServer(
+    transport="stdio",
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", "."],
+)
+agent = Agent(name="my_agent", model="openai/gpt-5-mini", tools=[server])
 
-await server.close()
+
+async def ask() -> None:
+    # Spawns npx on the first call. Close the server when the process is done.
+    result = await agent(prompt="List the files in the current directory").collect()
+    print(result.output.collect_text())
+    await server.close()
 ```
 
 <Warning>

@@ -46,7 +46,7 @@ def get_system_prompt() -> str:
 
 agent = Agent(
     name="dynamic_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     system_prompt=get_system_prompt,  # Pass the function directly
 )
 ```
@@ -68,72 +68,34 @@ response = await agent(
 ).collect()
 ```
 
-### Using Template Syntax
+### String placeholders are not resolved
 
-<Warning>
-Template syntax will be deprecated in a future release. We recommend using callable functions instead.
-</Warning>
+A string `system_prompt` is sent as written. `{module::function}` is not implemented: `{datetime::datetime.now}` and `{my_functions::get_server_status}` stay as literal text. The callable form above is the way to build the prompt at runtime.
 
-For simpler cases, you can use `{module::function}` syntax to embed dynamic values:
+Read the current call from `span.input` inside that callable. Passed as `language="catalan"`, this prompt tells the model to answer in Catalan:
 
 ```python
-agent = Agent(
-    name="dynamic_agent",
-    model="openai/gpt-4o-mini",
-    system_prompt="""You are a time-aware assistant.
-    Current time: {datetime::datetime.now}."""
-)
-```
-
-The previous example used a built-in function (datetime). You can also create your own custom functions:
-
-```python title="my_functions.py"
-def get_server_status():
-    """Get server status."""
-    status = check_server()  # Calls external function
-    return f"Server: {status}"
-
-agent = Agent(
-    name="custom_agent", 
-    model="openai/gpt-4o-mini",
-    system_prompt="""You are a helpful assistant.
-    Status: {my_functions::get_server_status}."""
-)
-```
-
-You can also pass dynamic parameters to these functions using `RunContext` data that you previously set in the context.
-
-```python title="my_functions.py"
-from timbal import Agent, Tool
+from timbal import Agent
 from timbal.state import get_run_context
 
-def get_user_language():
-    span = get_run_context().current_span()
-    return span.input["language"]
-
-def set_user_language(l):
-    span = get_run_context().current_span()
-    span.input["language"] = "catalan"
+def system_prompt() -> str:
+    language = get_run_context().current_span().input.get("language", "English")
+    return f"Answer in {language}."
 
 agent = Agent(
     name="multilang_agent",
-    model="openai/gpt-4o-mini",
-    pre_hook=set_user_language,
-    system_prompt="Answer in {my_functions::get_user_language}."
+    model="openai/gpt-5-mini",
+    system_prompt=system_prompt,
 )
 
-await agent(prompt="Which is the capital of Germany?").collect()
+await agent(prompt="Which is the capital of Germany?", language="catalan").collect()
 ```
-
-The response will be in Catalan.
 
 **Benefits:**
 
-- Real-time context: System prompts reflect current state
-- Dynamic behavior: Agent adapts to changing conditions
-- Automatic execution: Functions run on each conversation
-- Performance: Template resolution is fast and cached
-- Sync/Async: Handles both sync and async functions automatically
+- Real-time context: the callable runs on every turn and sees that call's input
+- Dynamic behavior: the prompt can follow language, user, or instructions passed into the call
+- Sync or async: the callable can be either
 
 
 ## Dynamic Tools
@@ -157,11 +119,23 @@ from timbal import Agent, Tool
 from timbal.core.tool_set import ToolSet
 from timbal.state import get_run_context
 
+def view_profile() -> str:
+    """View the current user profile."""
+    return "profile"
+
+def delete_user(user_id: str) -> str:
+    """Delete a user by id."""
+    return f"deleted {user_id}"
+
+def modify_permissions(user_id: str, role: str) -> str:
+    """Change a user's role."""
+    return f"{user_id} -> {role}"
+
 class RoleBasedToolSet(ToolSet):
     async def resolve(self) -> list[Tool]:
         span = get_run_context().current_span()
         role = span.input.get("role", "user")
-        
+
         if role == "admin":
             return [
                 Tool(handler=view_profile),
@@ -174,7 +148,7 @@ class RoleBasedToolSet(ToolSet):
 
 admin_agent = Agent(
     name="admin_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[RoleBasedToolSet()]
 )
 

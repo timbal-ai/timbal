@@ -6,6 +6,8 @@ description: "AI agents can analyze and process CSV data files for insights and 
 Agents automatically handle CSV files when included in prompts. First validate your CSV file with Timbal's `File` type, then pass it alongside text in a list:
 
 ```python
+from pathlib import Path
+
 from timbal import Agent
 from timbal.types.file import File
 
@@ -15,8 +17,11 @@ agent = Agent(
     system_prompt="Analyze CSV data and provide insights."
 )
 
+data = Path("data.csv")
+data.write_text("name,score\nAda,10\n", encoding="utf-8")
+
 # Validate CSV file and analyze
-csv_file = File.validate("path/to/data.csv")
+csv_file = File.validate(str(data))
 result = await agent(
     prompt=["What insights can you find in this data?", csv_file]
 ).collect()

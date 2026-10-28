@@ -44,82 +44,81 @@ api_tool = Tool(
 ```
 
 <Note>
-Beyond `current_span()`, the RunContext provides methods like `.parent_span()` and `.step_span()` to access parent or neighbor spans. We'll explore these methods in future sections when working with multi-step workflows and nested executions.
+Beyond `current_span()`, the RunContext provides `.parent_span()` and `.step_span()` for the parent runnable and for workflow steps. Workflow wiring is on [Control flow](/workflows/control-flow).
 </Note>
 
 ## Lifecycle Hooks
 
 Beyond the main handler, Runnables support lifecycle hooks - functions that run at specific points during execution. These provide structured access points for context interaction and enable powerful data transformation patterns.
 
-Every Runnable supports two optional hooks:
+Every Runnable supports two optional hooks. Both are parameterless.
 
-- **`pre_hook`**: A function that runs before the main handler
-- **`post_hook`**: A function that runs after the main handler completes
+- **`pre_hook`**: Runs after Pydantic has validated the call and after the approval gate, and only when the handler is actually going to run.
+- **`post_hook`**: Runs after the handler completes.
 
-Hooks can modify inputs, store custom data, and transform outputs - all while sharing the same RunContext.
+Hooks share the RunContext with the handler. They can store custom data on the span, and a post-hook can replace the output.
 
-### Pre-hooks: Modifying Input and Adding Context
+### What a pre-hook can change
 
-A `pre_hook` runs before your handler and can both modify input parameters and store additional context data:
+A tool handler receives the kwargs that already passed validation. Those kwargs are fixed before the hook runs. Writing to `span.input` inside the hook updates the span record, and the handler still receives the validated kwargs. A required parameter the caller omitted fails validation, so the hook never runs. Supply defaults with `default_params` (applied before validation) and normalize values inside the handler.
 
-```python highlight={19}
+An agent is different. `Agent.resolve_memory` reads `span.input` after the pre-hook, so an agent pre-hook that sets `span.input["prompt"]` changes the user message for that turn.
+
+```python highlight={8}
 from datetime import datetime
 
+from timbal import Tool
 from timbal.state import get_run_context
 
 def pre_hook():
     span = get_run_context().current_span()
-    # Modify input parameters that will be passed to the handler
-    span.input["name"] = span.input["name"].capitalize()
-    # Add a new parameter
-    span.input["location"] = "Barcelona"
-    # Store custom data for later use
     span.greet_time = datetime.now()
 
 def greet(name: str, location: str) -> str:
-    return f"Hello {name} from {location}!"
+    return f"Hello {name.capitalize()} from {location}!"
 
 greet_tool = Tool(
     name="greet",
-    pre_hook=pre_hook,
     handler=greet,
+    default_params={"location": "Barcelona"},
+    pre_hook=pre_hook,
 )
 
-result = await greet_tool(name="alice").collect() # "Hello Alice from Barcelona!"
+result = await greet_tool(name="alice").collect()  # "Hello Alice from Barcelona!"
 ```
 
-Pre-hooks are perfect for:
-- **Data Preparation**: Process raw webhook payloads, parse JSON, or normalize input formats
-- **Input Enhancement**: Enrich data with additional context from databases or APIs
-- **Request Preprocessing**: Extract headers, validate signatures, or decode authentication tokens
-- **State Initialization**: Set up execution context, timestamps, or tracking metadata
+Pre-hooks are a fit for:
+- **State initialization**: timestamps, request ids, and other metadata stored on the span
+- **Observation**: record the validated input for logging before the handler runs
+- **Agent prompts**: adjust `span.input["prompt"]` before `resolve_memory` builds the user message
 
 ### Post-hooks: Processing Output After Completion
 
-A `post_hook` runs after your handler and can access both input and output. You can also **modify or completely replace the output** by assigning a new value to `span.output`:
+A `post_hook` runs after the handler and can read the input and the output. Assigning `span.output` replaces the handler's return value. `collect()` returns that assigned value.
 
-```python highlight={8}
+```python highlight={6}
+from timbal import Tool
+from timbal.state import get_run_context
+
 def post_hook():
     span = get_run_context().current_span()
-    # Retrieve custom data stored in pre_hook
     greet_time = span.greet_time
     print(f"Greeting at {greet_time}")
-    # Modify the output before it's returned
-    # You can assign any value to completely replace the handler's output
-    span.output = "Greeting overridden!"
+    span.output = "Greeting overridden"
 
 greet_tool = Tool(
     name="greet",
-    pre_hook=pre_hook,
     handler=greet,
+    default_params={"location": "Barcelona"},
+    pre_hook=pre_hook,
     post_hook=post_hook,
 )
 
-result = await greet_tool(name="alice").collect() # "Greeting overridden!"
+result = await greet_tool(name="alice").collect()  # "Greeting overridden"
 ```
 
 <Note>
-**Output Modification**: You can completely replace the output in a post-hook by assigning to `span.output`. The assigned value will be returned instead of the handler's original output. This is useful for transforming results, adding metadata, or implementing custom response formatting.
+**Output replacement**: Assigning `span.output` in a post-hook replaces the handler's return value. `collect()` returns the assigned value. Use this to transform results or apply a fixed response shape.
 </Note>
 
 Post-hooks are perfect for:
@@ -131,8 +130,8 @@ Post-hooks are perfect for:
 <Tip>
 These simple examples show the basics. In practice, hooks excel at:
 
-- **Input manipulation**: Processing webhooks where we don't control the shape of the incoming data.
-- **Agent adaptation**: Converting between modalities (audio ↔ text) for different models.
+- **Agent prompts**: rewrite `span.input["prompt"]` before the agent resolves memory (a webhook body, a transcript).
+- **Tool kwargs**: put omitted values in `default_params`, and normalize values inside the handler. The pre-hook cannot change those kwargs.
 
 More advanced patterns in the [Agents](../agents) section.
 </Tip>

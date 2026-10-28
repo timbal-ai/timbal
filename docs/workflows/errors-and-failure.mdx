@@ -20,6 +20,12 @@ Skipped is intentional (branch not taken). Failed is an error you should handle 
 When a step handler raises, Timbal records the error on that step's span and marks the workflow failed:
 
 ```python
+from timbal import Workflow
+
+def raises_error() -> None:
+    raise ValueError("step failed")
+
+workflow = Workflow(name="pipeline").step(raises_error)
 result = await workflow().collect()
 # result.status.code == "error"
 # result.status.reason == "step_failed"
@@ -35,6 +41,15 @@ An agent step can handle errors from its own tools or sub-agents. Those descenda
 A downstream step is blocked when any prerequisite fails. This applies to explicit `depends_on` links and dependencies inferred from `step_span()` calls, and propagates through the dependency chain. Conditions and input resolvers are not evaluated for blocked steps:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def raises_error() -> None:
+    raise ValueError("step failed")
+
+def process(data: str | None = None) -> str:
+    return "processed"
+
 workflow = (
     Workflow(name="pipeline")
     .step(raises_error)   # fails
@@ -58,9 +73,21 @@ A `timeout` on the workflow instead bounds the entire foreground run. It cancels
 When `when` is false, the step is skipped and dependents that **require its output** are skipped too:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def validate_input(data: str) -> str:
+    return "invalid"
+
+def process() -> str:
+    return "processed"
+
+def save_results(data: str) -> str:
+    return data
+
 workflow = (
     Workflow(name="pipeline")
-    .step(validate_input, data="...")
+    .step(validate_input, data="payload")
     .step(process, when=lambda: get_run_context().step_span("validate_input").output == "valid")
     .step(save_results, data=lambda: get_run_context().step_span("process").output)
 )
@@ -71,6 +98,21 @@ If validation fails, both `process` and `save_results` are skipped.
 Steps that only need ordering (not data) can use `depends_on` to run after a branch resolves:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def route() -> str:
+    return "new"
+
+def handle_new() -> str:
+    return "new"
+
+def handle_existing() -> str:
+    return "existing"
+
+def finalize() -> str:
+    return "done"
+
 workflow = (
     Workflow(name="pipeline")
     .step(route)

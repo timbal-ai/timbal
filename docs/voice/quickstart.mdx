@@ -30,7 +30,7 @@ ELEVENLABS_API_KEY=your_elevenlabs_key
 ELEVENLABS_VOICE_ID=your_accessible_voice_id
 ```
 
-The example uses OpenAI for the text agent, Deepgram for transcription, and ElevenLabs for speech. Without `DEEPGRAM_API_KEY`, the server transcribes with ElevenLabs instead. Choose a voice accessible to your ElevenLabs account. Credentials remain on the server.
+The example uses OpenAI for the text agent, Deepgram for transcription, and ElevenLabs for speech. Without `DEEPGRAM_API_KEY`, the server transcribes with ElevenLabs instead. Choose a voice accessible to your ElevenLabs account; `ELEVENLABS_VOICE_ID` wins over `TIMBAL_VOICE_ID`. Credentials remain on the server. A live call needs those keys. To exercise an `Agent` with no provider key at all, use [TestModel in the quickstart](/quickstart#run-without-an-api-key) — that path is text-only and does not open a voice session.
 
 ## Create the agent
 
@@ -40,7 +40,7 @@ from timbal import Agent
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-5-mini",
     system_prompt=(
         "You are a helpful voice assistant. Reply in one or two short spoken "
         "sentences. Ask one question at a time."

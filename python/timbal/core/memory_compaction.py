@@ -653,7 +653,7 @@ def summarize(
         threshold: Trigger summarization when message count exceeds this.
         model: Model for summarization. Defaults to None, which uses the
             agent's own model. Override with a cheaper model like
-            'openai/gpt-5.4-nano' to reduce cost.
+            'openai/gpt-5-mini' to reduce cost.
         keep_last_n: Number of recent messages to keep unsummarized.
         max_summary_tokens: Maximum tokens for the summary response.
         preserve_user_messages: Carry the user's messages from the summarized region

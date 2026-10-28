@@ -3,7 +3,7 @@ title: "Client integration (HTTP)"
 description: "The full contract for a frontend talking to the /stream SSE endpoint: pause, render, resume"
 ---
 
-This is the full contract for a frontend talking to `timbal serve` (the `/stream` SSE endpoint). Two phases: **pause** (server → client) and **resume** (client → server). The example uses `ask_user`; an approval gate is identical except the pause event is an `APPROVAL` event and you resume with `true`/`false`.
+This is the full contract for a frontend talking to the Timbal HTTP server (`python -m timbal.server`, or the workforce process `timbal start` launches) on `POST /stream`. The CLI has no serve subcommand. Two phases: **pause** (server → client) and **resume** (client → server). The example uses `ask_user`; an approval gate is identical except the pause event is an `APPROVAL` event and you resume with `true`/`false`.
 
 ## 1. Start the run
 

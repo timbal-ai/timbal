@@ -23,7 +23,7 @@ from timbal.voice import (
 async def converse(microphone_chunks, playback):
     agent = Agent(
         name="voice_assistant",
-        model="openai/gpt-4.1-mini",
+        model="openai/gpt-5-mini",
         system_prompt="Reply in short spoken sentences.",
     )
     session = VoiceSession(
@@ -55,11 +55,13 @@ Use a `PlaybackTracker` to report the position actually played by your transport
 
 ## Implement speech adapters
 
-Implement `SpeechToText` with `connect(AudioInputConfig)`, `push_audio(bytes)`, `commit()`, `events()`, and `close()`. Its event iterator yields `TranscriptEvent` values with `type="partial"`, `"committed"`, or `"error"`. Set `native_eou=True` only when committed transcripts represent provider-decided utterance boundaries.
+Implement `SpeechToText` with `connect(AudioInputConfig)`, `push_audio(bytes)`, `commit()`, `events()`, and `close()`. `events()` is an async iterator: consume it with `async for event in stt.events()`. It yields `TranscriptEvent` values with `type="partial"`, `"committed"`, or `"error"`. Set `native_eou=True` only when committed transcripts represent provider-decided utterance boundaries.
 
 Implement `TextToSpeech` with `connect(AudioOutputConfig)`, `synthesize(text)`, and `close()`. `synthesize` is an async iterator of output PCM bytes. A provider supporting incremental text can implement `open_stream()` and return a `TTSStream` with `feed`, `end`, `abort`, and `audio`. Aborting must unblock the audio iterator so interruption does not leave a turn waiting for synthesis.
 
 Keep provider options in each audio config's `extra` mapping. These interfaces define the session seam; adding a custom adapter does not automatically add it to the server's provider selectors. Instantiate it directly or extend server resolution.
+
+`OpenAIRealtimeSTT` and `OpenAIStreamTTS` are lazy exports of `timbal.voice`. ElevenLabs speech output is `from timbal.voice.elevenlabs import ElevenLabsStreamTTS` (or `resolve_tts("elevenlabs")`); it is not on the package root. Pass session behavior as `VoiceSession` arguments (`greeting`, `filler`, `user_idle`, `announce_background_results`, `client_events`, `on_busy`), not as an `events={...}` dict — that dict is the server's `VoiceConfig.events` block, which the server unpacks before constructing the session. `run()` calls `prepare()` if you have not. `prepare()` already registers a usage listener on the adapters; adding the same listener again delivers each usage event twice.
 
 ## Speech-to-speech extension interface
 

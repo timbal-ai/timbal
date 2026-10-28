@@ -10,6 +10,14 @@ After a reply, the basic voice agent waits for the caller indefinitely. Add an i
 Keep the dict-based configuration from the earlier lessons and add:
 
 ```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={"language": "en"},
+)
 agent.voice_config["user_idle"] = {
     "timeout_secs": 8.0,
     "text": "Are you still there?",

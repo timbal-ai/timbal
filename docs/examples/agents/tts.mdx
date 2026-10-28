@@ -14,7 +14,7 @@ from timbal import Agent
 
 agent = Agent(
     name="VoiceAgent",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-5-mini",
     voice_config={
         "stt_provider": "openai",
         "stt_model": "gpt-transcribe",
@@ -76,18 +76,27 @@ clients cannot override the host. Credentials stay on the server.
 
 For file transcription or standalone audio generation, use the built-in tools:
 
-```python
+```python fragment
+import asyncio
+
 from timbal.tools import OpenAISpeechToText, OpenAITextToSpeech
 
-transcript = await OpenAISpeechToText()(
-    audio_file_path="recording.wav",
-    language="en",
-).collect()
-audio = await OpenAITextToSpeech()(
-    text="Hello from Timbal!",
-    voice="coral",
-    response_format="mp3",
-).collect()
+
+async def main() -> None:
+    # Needs OPENAI_API_KEY and a local audio file.
+    transcript = await OpenAISpeechToText()(
+        audio_file_path="recording.wav",
+        language="en",
+    ).collect()
+    audio = await OpenAITextToSpeech()(
+        text="Hello from Timbal!",
+        voice="coral",
+        response_format="mp3",
+    ).collect()
+    print(transcript.output, audio.output)
+
+
+asyncio.run(main())
 ```
 
 Both tools also work in `Agent(tools=[...])` and accept explicit `api_key`,
@@ -111,7 +120,7 @@ from timbal import Agent
 
 agent = Agent(
     name="VoiceAgent",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-5-mini",
     voice_config={
         "stt_provider": "deepgram-flux",
         "tts_provider": "deepgram",
@@ -152,17 +161,30 @@ from timbal.tools import DeepgramListVoices, DeepgramTextToSpeech
 
 agent = Agent(
     name="Narrator",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-5-mini",
     tools=[DeepgramListVoices(), DeepgramTextToSpeech()],
 )
+```
 
-# Tools also work directly, without an agent:
-voices = await DeepgramListVoices()(language="es").collect()
-audio = await DeepgramTextToSpeech()(
-    text="Hello from Timbal!",
-    model="aura-2-thalia-en",
-    encoding="mp3",
-).collect()
+Calling the tools directly needs `DEEPGRAM_API_KEY`:
+
+```python fragment
+import asyncio
+
+from timbal.tools import DeepgramListVoices, DeepgramTextToSpeech
+
+
+async def main() -> None:
+    voices = await DeepgramListVoices()(language="es").collect()
+    audio = await DeepgramTextToSpeech()(
+        text="Hello from Timbal!",
+        model="aura-2-thalia-en",
+        encoding="mp3",
+    ).collect()
+    print(voices.output, audio.output)
+
+
+asyncio.run(main())
 ```
 
 `DeepgramListVoices` returns Aura model ids, languages and provider metadata
@@ -217,14 +239,12 @@ async def post_hook():
 
 agent = Agent(
     name="VoiceAgent",
-    model="openai/gpt-4.1-mini",
-    post_hook=post_hook
+    model="openai/gpt-5-mini",
+    post_hook=post_hook,
 )
 
-# Agent will generate audio files
-await agent(
-    prompt="What is the capital of France?"
-).collect()
+# With OPENAI_API_KEY set, `await agent(prompt="What is the capital of France?").collect()`
+# writes audio.mp3 from the reply. The hook calls the speech API, so it is not run here.
 ```
 
 ## Key Features

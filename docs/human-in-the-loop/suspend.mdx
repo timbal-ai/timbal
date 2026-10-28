@@ -32,11 +32,12 @@ async for event in agent(prompt="set up my database"):
 # pending[0].payload == {"question": "Which database?", "options": [...]}
 
 # Resume with the user's answer.
-result = await agent(
-    prompt="set up my database",
-    parent_id=final.run_id,
-    resume={pending[0].interaction_id: "postgres"},
-).collect()
+if pending and final is not None:
+    result = await agent(
+        prompt="set up my database",
+        parent_id=final.run_id,
+        resume={pending[0].interaction_id: "postgres"},
+    ).collect()
 ```
 
 ## Writing an interaction tool
@@ -62,7 +63,7 @@ Because the handler **re-executes from the top** on resume, `suspend()` must com
 
 ## `InteractionEvent`
 
-```python
+```python fragment
 class InteractionEvent(BaseEvent):
     type: Literal["INTERACTION"]
     t0: int                       # Unix-ms timestamp at which the run suspended

@@ -8,13 +8,15 @@ description: "Give your agents the ability to interact with the outside world th
 Add functions directly as tools:
 
 ```python
+from timbal import Agent
+
 def get_weather(location: str) -> str:
     """Get weather for a location."""
     return f"Weather in {location}: 22°C"
 
 agent = Agent(
     name="weather_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[get_weather]  # Function automatically becomes a tool
 )
 ```
@@ -24,11 +26,11 @@ agent = Agent(
 Use the `Tool` type for custom descriptions and parameter control. The `handler` parameter is required and must be the function:
 
 ```python
-from timbal import Tool
+from timbal import Agent, Tool
 
 agent = Agent(
     name="weather_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[Tool(handler=get_weather)]
 )
 ```
@@ -49,6 +51,12 @@ Tool(
 When a tool has many parameters, reduce tokens and avoid overwhelming the LLM by showing only required parameters:
 
 ```python
+from timbal import Tool
+
+def search(query: str, limit: int = 10) -> str:
+    """Search documents."""
+    return query
+
 Tool(
     handler=search,
     schema_params_mode="required"  # Only show required params (default: "all")
@@ -58,6 +66,16 @@ Tool(
 You can also include or exclude specific parameters to fine-tune what the LLM sees:
 
 ```python
+from timbal import Tool
+
+def search_function(query: str, model: str | None = None) -> str:
+    """Search with an optional model hint."""
+    return query
+
+def api_function(query: str, api_key: str = "", debug_mode: bool = False) -> str:
+    """Call an API."""
+    return query
+
 # Include extra parameters even in "required" mode
 Tool(
     handler=search_function,
@@ -77,6 +95,12 @@ Tool(
 Set default values that are automatically applied when the tool is called. These values are used when not specified by the LLM:
 
 ```python
+from timbal import Tool
+
+def database_query(sql: str, timeout: int = 5) -> str:
+    """Run a query."""
+    return sql
+
 Tool(
     handler=database_query,
     default_params={
@@ -88,6 +112,10 @@ Tool(
 You can also use functions or environment variables as default parameters:
 
 ```python
+from datetime import datetime
+
+from timbal import Tool
+
 def get_current_timestamp():
     return datetime.now().isoformat()
 
@@ -123,7 +151,7 @@ from timbal.tools import WebSearch
 
 agent = Agent(
     name="research_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[
         WebSearch(
             allowed_domains=["wikipedia.org", "github.com"],  # Restrict to specific domains
@@ -159,7 +187,7 @@ domain_search.description = "Search only within example.com domain."
 
 agent = Agent(
     name="research_agent",
-    model="anthropic/claude-opus-4-6",
+    model="openai/gpt-5-mini",
     tools=[general_search, domain_search]
 )
 ```
@@ -181,7 +209,7 @@ def calculate_cost(days: int, hotel_rate: float, flights: float = 0) -> float:
 pricing_agent = Agent(
     name="pricing_calculator",
     description="Calculate travel costs",  # Tool description for other agents
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     system_prompt="Answer only with the price. Any text",
     tools=[calculate_cost]
 )
@@ -189,7 +217,7 @@ pricing_agent = Agent(
 # Main travel agent
 travel_agent = Agent(
     name="travel_assistant", 
-    model="openai/gpt-4o",
+    model="openai/gpt-5-mini",
     system_prompt="Help plan trips and provide travel advice.",
     tools=[pricing_agent]
 )
@@ -204,6 +232,12 @@ travel_agent = Agent(
 Some tool results are durable context the model must keep referencing (loaded policy docs, skill guidance). Opt in with `pin_result=True` — [memory compaction](/agents/memory-compaction) never drops or truncates those results, and [tool result offloading](/agents/memory-compaction#tool-result-offloading) skips them too:
 
 ```python
+from timbal import Tool
+
+def load_policy() -> str:
+    """Load the durable policy document."""
+    return "policy"
+
 Tool(
     handler=load_policy,
     pin_result=True,  # survive compaction for the life of the conversation
@@ -217,7 +251,16 @@ The built-in `read_skill` tool sets this automatically. See [Pinned results](/ag
 When a tool can return huge payloads, set a per-tool size limit. Results over the threshold are spilled to a store (or truncated) **once, when produced**, before they enter memory:
 
 ```python
+from timbal import Tool
 from timbal.core import ToolResultLimit, Truncate
+
+def run_tests() -> str:
+    """Run the test suite."""
+    return "ok"
+
+def load_policy() -> str:
+    """Load the durable policy document."""
+    return "policy"
 
 Tool(
     handler=run_tests,
@@ -255,7 +298,7 @@ from timbal.core import MCPServer
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[
         MCPServer(
             name="filesystem",

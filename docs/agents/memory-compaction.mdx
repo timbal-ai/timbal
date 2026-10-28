@@ -19,9 +19,17 @@ Tool result offloading intercepts a result when it is produced. If it exceeds a 
 ```python
 from timbal import Agent
 
+def search_docs(query: str) -> str:
+    """Search the docs."""
+    return query
+
+def run_query(sql: str) -> str:
+    """Run a query."""
+    return sql
+
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[search_docs, run_query],
     tool_result_limit=20_000,  # offload results over 20,000 chars
 )
@@ -53,7 +61,7 @@ from timbal.core import LocalOffloadStore, Spill, ToolResultLimit, Truncate
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tool_result_limit=ToolResultLimit(
         threshold=20_000,                  # chars of text content (default 20,000)
         action=Spill(preview_chars=1_000), # what to do when the threshold is reached
@@ -81,11 +89,20 @@ Truncate(strategy="head_tail")  # keep both ends, elide the middle (default)
 `Tool(result_limit=...)` overrides the agent default. `None` exempts a tool entirely:
 
 ```python
+from timbal import Agent
 from timbal.core import Tool, ToolResultLimit, Truncate
+
+def run_tests() -> str:
+    """Run the test suite."""
+    return "ok"
+
+def load_policy() -> str:
+    """Load the durable policy document."""
+    return "policy"
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tool_result_limit=20_000,  # agent-wide default: spill over 20k
     tools=[
         Tool(name="run_tests", handler=run_tests,
@@ -105,7 +122,7 @@ Some results are never reduced, regardless of configuration:
 
 When offloading is active, the agent auto-registers a `read_offloaded` tool. It reads everything behind a handle: offloaded tool results, [offloaded attachments](#attachments), and compacted transcripts.
 
-```python
+```python fragment
 read_offloaded(handle, offset=0, limit=200, pattern=None)
 ```
 
@@ -136,10 +153,16 @@ Payloads are kept **forever by default** — deleting on run end would break a r
 
 ```python
 from datetime import timedelta
+
+from timbal import Agent
 from timbal.core import LocalOffloadStore, ToolResultLimit
 
 store = LocalOffloadStore(cleanup_after=timedelta(days=7))
-agent = Agent(..., tool_result_limit=ToolResultLimit(store=store))
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-5-mini",
+    tool_result_limit=ToolResultLimit(store=store),
+)
 ```
 
 Pruning runs off the hot path and never fails a run.
@@ -153,7 +176,7 @@ Files in a user message reach the model in one of two ways. Images, PDFs and aud
 ```python
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tool_result_limit=20_000,
     attachment_limit=20_000,  # attachments whose text reaches 20,000 chars are offloaded
 )
@@ -197,7 +220,7 @@ from timbal.core.memory_compaction import keep_last_n_turns
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=keep_last_n_turns(10),
     memory_compaction_ratio=0.75,  # trigger when the context passes 75% of the window
 )
@@ -220,7 +243,7 @@ from timbal.core.memory_compaction import keep_last_n_turns
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=keep_last_n_turns(5),
 )
 ```
@@ -234,7 +257,7 @@ from timbal.core.memory_compaction import keep_last_n_messages
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=keep_last_n_messages(20),
 )
 ```
@@ -248,7 +271,7 @@ from timbal.core.memory_compaction import compact_tool_results
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=compact_tool_results(
         keep_last_n=2,       # keep last 2 tool call pairs intact
         threshold=10,        # only apply when memory exceeds 10 messages
@@ -290,10 +313,10 @@ from timbal.core.memory_compaction import summarize
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=summarize(
         threshold=20,                     # summarize when non-system messages exceed 20
-        model="openai/gpt-4o-mini",       # model used for summarization (defaults to agent's model)
+        model="openai/gpt-5-mini",       # model used for summarization (defaults to agent's model)
         keep_last_n=4,                    # keep last 4 messages unsummarized
         max_summary_tokens=500,
     ),
@@ -301,7 +324,7 @@ agent = Agent(
 ```
 
 <Tip>
-Use a smaller, cheaper model for summarization to reduce cost. For example, `model="openai/gpt-5.4-nano"` works well for summarization tasks.
+Summarization uses the agent's model unless you pass `model=`. A smaller model is enough when the summary does not need the same capability as the conversation.
 </Tip>
 
 The summary message is **sectioned**, and everything except the LLM summary itself is assembled mechanically — never paraphrased by the summarizer:
@@ -335,6 +358,10 @@ You opt a tool in declaratively with `pin_result=True`:
 ```python
 from timbal.core.tool import Tool
 
+def load_policy() -> str:
+    """Load the durable policy document."""
+    return "policy"
+
 tool = Tool(
     name="load_policy",
     handler=load_policy,
@@ -354,7 +381,7 @@ from timbal.core.memory_compaction import compact_tool_results, keep_last_n_turn
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=[
         compact_tool_results(keep_last_n=2),  # first: shrink tool results
         keep_last_n_turns(10),                # then: trim to last 10 turns

@@ -1,6 +1,7 @@
 ---
-title: "Overview"
-description: "Master proven strategies for designing advanced, specialized AI agents using an architecture that work together seamlessly to tackle complex challenges"
+title: "Agents"
+sidebarTitle: "Overview"
+description: "Build an agent that calls tools, keeps memory, and stops when the turn is done."
 ---
 
 ## What are Agents?
@@ -72,7 +73,7 @@ agent = Agent(
     model=FallbackModel(
         "anthropic/claude-sonnet-4-6",
         "openai/gpt-5.5",
-        "google/gemini-2.5-pro",
+        "google/gemini-3.5-flash",
     ),
     max_tokens=1024,  # Required for Anthropic models
 )
@@ -169,6 +170,14 @@ The notice matters: silently handed an empty tool list, models narrate the step 
 For anything custom, pass a callable (sync or async). It receives a `MaxIterContext(max_iter, memory, agent_path)` and returns a message: `role="user"` is used as the notice for a final tool-less call, `role="assistant"` is the reply and ends the turn, `None` makes the tool-less call with no notice, and raising fails the run.
 
 ```python
+def search(query: str) -> str:
+    """Search for a query."""
+    return query
+
+def write_report(text: str) -> str:
+    """Write a report."""
+    return text
+
 def out_of_budget(ctx):
     if ctx.agent_path != "assistant":  # sub-agents: stop cheaply, let the parent decide
         return {"role": "assistant", "content": f"[Stopped after {ctx.max_iter} steps.]"}
@@ -184,6 +193,14 @@ Every mode records `metadata["max_iter_reached"] = {"max_iter", "behavior"}` on 
 `max_iter` bounds steps; `timeout` bounds time. It is the wall-clock budget, in seconds, for one turn — every LLM call and tool call included. Default `None` (no limit).
 
 ```python
+def search(query: str) -> str:
+    """Search for a query."""
+    return query
+
+def write_report(text: str) -> str:
+    """Write a report."""
+    return text
+
 agent = Agent(name="assistant", model="openai/gpt-5", tools=[search, write_report], timeout=120)
 
 result = await agent(prompt="Research and write the report").collect()
@@ -216,6 +233,7 @@ from timbal.types.events import ApprovalEvent
 
 
 refund = Tool(
+    name="refund",
     handler=lambda amount: f"refunded ${amount}",
     requires_approval=lambda amount: amount > 100,
     approval_prompt=lambda amount: f"Approve refunding ${amount}?",
@@ -250,8 +268,13 @@ response = await agent(
 
 Agents accept multiple input formats, automatically converting them to `Message` objects:
 
-```python highlight={3, 9, 14}
+```python highlight={7, 13, 18}
+from pathlib import Path
+
 from timbal.types.file import File
+
+image = Path("image.png")
+image.write_bytes(b"\x89PNG\r\n\x1a\n")
 
 # String
 response = await agent(
@@ -260,12 +283,12 @@ response = await agent(
 
 # File - Timbal type
 response = await agent(
-    prompt=File.validate("image.png")
+    prompt=File.validate(str(image))
 ).collect()
 
 # List
 response = await agent(
-    prompt=["Describe this image", File.validate("image.png")]
+    prompt=["Describe this image", File.validate(str(image))]
 ).collect()
 ```
 
@@ -402,15 +425,20 @@ Messages contain a **role** and **content**:
 Messages can contain different types of content - text, files, tool calls, and tool results. The framework automatically handles complex content structures:
 
 ```python
+from pathlib import Path
+
 from timbal.types.content import FileContent, TextContent
 from timbal.types.file import File
+
+report = Path("report.pdf")
+report.write_bytes(b"%PDF-1.1\n")
 
 # Message with text and file
 mixed_message = Message(
     role="user",
     content=[
         TextContent(text="Analyze this document:"),
-        FileContent(file=File.validate("report.pdf"))
+        FileContent(file=File.validate(str(report)))
     ]
 )
 ```
@@ -418,11 +446,16 @@ mixed_message = Message(
 The same message above can be created easily using `Message.validate()`:
 
 ```python
+from pathlib import Path
+
 from timbal.types.file import File
+
+quarterly_report = Path("quarterly_report.pdf")
+quarterly_report.write_bytes(b"%PDF-1.1\n")
 
 message = Message.validate([
     "Summarize this document:",
-    File.validate("quarterly_report.pdf")
+    File.validate(str(quarterly_report))
 ])
 ```
 
@@ -446,5 +479,11 @@ The framework supports common document and media formats:
 Files are automatically converted to Timbal `File` objects using `File.validate()`:
 
 ```python
-file = File.validate("quarterly_report.pdf")
+from pathlib import Path
+
+from timbal.types.file import File
+
+quarterly_report = Path("quarterly_report.pdf")
+quarterly_report.write_bytes(b"%PDF-1.1\n")
+file = File.validate(str(quarterly_report))
 ```

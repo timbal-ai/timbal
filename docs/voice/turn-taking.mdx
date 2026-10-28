@@ -22,13 +22,21 @@ Greetings have their own `interruptible` setting, which defaults to false; see [
 
 Voice activity detection (VAD) identifies speech and silence. End-of-utterance detection decides whether a pause ends a thought. With Deepgram Flux, the default transcription provider, Flux makes that decision. With other providers, the server uses local audio detection when its dependencies are installed, otherwise lexical detection. The local path combines Smart Turn audio scoring, Namo text scoring, and Silero VAD endpointing.
 
-Inspect `session_started` for the resolved detector and endpointing settings. A requested mode can be changed by the server: STT adapters with native utterance boundaries, currently Flux and Munsit, use `provider` mode and disable local VAD endpointing.
+Inspect `session_started.turn_detector` for the resolved detector. That field is the class name (`ProviderTurnDetector`, `LocalAudioTurnDetector`, …), not the mode string you configured. A requested mode can be changed by the server: STT adapters with native utterance boundaries, currently Flux and Munsit, force `provider` mode unless you explicitly set `heuristic`, `raw`, or `provider`, and they disable local VAD endpointing. OpenAI and ElevenLabs transcription do not have that native boundary, so they keep `local` or `lexical`. `semantic` is accepted as an alias of `lexical`. Opt-in detectors can hold a transcript; the default hold timeout is 1.5 seconds (`hold_timeout_secs` on `VoiceSession`).
 
 ## Choose another mode
 
 For a controlled comparison, add to the dict-based config:
 
 ```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={"language": "en"},
+)
 agent.voice_config["turn_detector"] = "lexical"
 ```
 

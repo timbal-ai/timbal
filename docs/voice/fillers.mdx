@@ -7,15 +7,23 @@ A filler is a generated phrase such as "One moment, let me check." It can cover 
 
 ## Enable one filler
 
-Keep the agent and slow lookup from [Using tools](/voice/tools). Add this line after the `Agent(...)` definition, preserving the existing greeting and language:
+Keep the agent and slow lookup from [Using tools](/voice/tools). This snippet includes a minimal agent so the page stands alone; later snippets on this page continue the same `agent`:
 
 ```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You help callers check deliveries. Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "greeting": "Hi, I can help check your delivery."},
+)
 agent.voice_config["filler"] = {"enabled": True}
 ```
 
 Restart the server and start a new session. Ask "Check order 101." When the lookup remains pending, the assistant can say a short waiting phrase, then give the delivery result. Turn the browser thinking sound off for this test so you can hear the filler behavior on its own.
 
-The default delay is one second; generation has a five-second timeout. A fast tool gets no filler. If generation is too slow or the reply starts first, the phrase is skipped. The default is at most one filler per turn.
+The default delay is one second; generation has a five-second timeout. A fast tool gets no filler. If generation is too slow or the reply starts first, the phrase is skipped. `max_per_turn` defaults to 3. With `repeat_secs` unset you usually hear one filler for the tool, but a think-delay filler and a later tool call can each speak (`max_per_turn: 1` keeps only the first).
 
 ## Control the wording and timing
 
@@ -58,7 +66,7 @@ Pair it with `phrases`, ready-made lines for the first filler of a turn. They ar
 ```python
 agent.voice_config["filler"] = {
     "enabled": True,
-    "model": "google/gemini-2.5-flash-lite",
+    "model": "google/gemini-3.5-flash",
     "think_delay_secs": 1.5,
     "phrases": {
         "en": ["Mm, let me see.", "One second.", "Let me check."],

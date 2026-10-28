@@ -45,7 +45,11 @@ The server sends speech as `{"type": "audio", "data": "..."}` in the same PCM fo
 
 Count playback, not bytes received or merely scheduled. On `interrupted`, stop playback and discard queued audio. The session uses playback acknowledgements to align the caller's heard reply with conversation memory; without them it estimates the position from the buffered playback schedule. Closing the socket closes the session.
 
-Other JSON messages include `session_started`, `transcript_partial`, `transcript_committed`, `agent_status`, `agent_text_delta`, `agent_text_done`, `filler`, `metrics`, `voice_usage`, `interrupted`, `error`, `session_transcript`, and `session_ended`. `agent_status` reports tool activity. A committed transcript with `replace=true` replaces the previous user transcript bubble rather than appending another.
+Other JSON messages include `session_started`, `transcript_partial`, `transcript_committed`, `agent_status`, `agent_text_delta`, `agent_text_done`, `agent_approval`, `agent_interaction`, `filler`, `metrics`, `voice_usage`, `interrupted`, `error`, `event_turn_started`, `notify_ack`, `session_transcript`, and `session_ended`. `agent_status` reports tool activity. A committed transcript with `replace=true` replaces the previous user transcript bubble rather than appending another.
+
+`session_started` includes `session_id`, `stt_provider`, `stt_model`, `tts_provider`, `model` (the text model), `turn_detector` (the resolved class name, such as `LocalAudioTurnDetector`), `direction`, `ambient`, and `parent_run_id` when the call continues a text run. The transport adds `transport` and `playback_acks`. A hello may also send `parent_id` to continue a text run in this call. The server waits up to two seconds for that hello on the WebSocket (`hello_wait_secs`).
+
+A second WebSocket on a single-session server is closed with code 1008. A second WebRTC offer gets HTTP 409. Voice on a non-Agent runnable is 1008 on the socket and 400 on `/voice/rtc`. WebRTC without the voice extra returns 501. At the concurrency cap the dial returns 503. A missing `DEEPGRAM_API_KEY`, or an unknown provider id, falls back to ElevenLabs for that session instead of failing the handshake. `mic_change` is accepted on the socket and is not required for a working client.
 
 ## WebRTC
 

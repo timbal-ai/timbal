@@ -15,10 +15,15 @@ A human won't always say yes or no. Sometimes they close the dialog, hit Escape,
 Resume with `Cancel` (works on either an approval or a suspension id) to abort:
 
 ```python
+from timbal import Agent
 from timbal.types.approval import Cancel
 
+agent = Agent(name="support_agent", model="openai/gpt-5")
+paused_run_id = None
+pending_id = "pending"
+
 result = await agent(
-    prompt="...",
+    prompt="Refund $250",
     parent_id=paused_run_id,
     resume={pending_id: Cancel(reason="user closed the dialog")},
 ).collect()
@@ -39,15 +44,19 @@ Everything above works in-process by default. For "pause in a UI now, resume in 
 
 ```python
 from pathlib import Path
-from timbal import Agent
+
+from timbal import Agent, Tool
 from timbal.state.tracing.providers import JsonlTracingProvider
 
-provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
+def refund(amount: int) -> str:
+    return f"refunded {amount}"
+
+provider = JsonlTracingProvider.configured(path=Path("traces.jsonl"))
 
 agent = Agent(
     name="support_agent",
     model="openai/gpt-5",
-    tools=[refund],
+    tools=[Tool(name="refund", handler=refund)],
     tracing_provider=provider,
 )
 ```
@@ -61,7 +70,7 @@ agent = Agent(
 from pathlib import Path
 from timbal.state.tracing.providers import SqliteTracingProvider
 
-provider = SqliteTracingProvider.configured(_path=Path("traces.db"))
+provider = SqliteTracingProvider.configured(path=Path("traces.db"))
 ```
 
 Same API as JSONL but uses a SQLite database with row-level locking. Better for higher write rates on a single host.
@@ -77,6 +86,12 @@ When `TIMBAL_API_KEY` and a project subject are set, runs auto-select `PlatformT
 To resume from a different process, pass the original run id as `parent_id`:
 
 ```python
+from timbal import Agent
+
+agent = Agent(name="support_agent", model="openai/gpt-5")
+paused_run_id = None
+approval_id = "approval"
+
 result = await agent(
     prompt="Refund $250",
     parent_id=paused_run_id,
@@ -110,15 +125,26 @@ In a `Workflow`, compaction is a per-step concern: a `Workflow` has no LLM conte
 When multiple workers consume the same queue, two of them might race to resume the same `(parent_id, approval_id)`. Timbal **claims** the pair before executing the resolution. The first claimer wins; later duplicates stop before handler execution with `status.reason == "approval_already_claimed"`.
 
 ```python
-result = await agent(
-    prompt="Refund $250",
-    parent_id=paused_run_id,
-    resume={approval_id: True},
-).collect()
+import asyncio
 
-if result.status.reason == "approval_already_claimed":
-    # Another worker already executed this approval. Safe to no-op.
-    return
+from timbal import Agent
+
+
+async def resume_if_unclaimed() -> None:
+    agent = Agent(name="support_agent", model="openai/gpt-5-mini")
+    paused_run_id = None
+    approval_id = "approval"
+    result = await agent(
+        prompt="Refund $250",
+        parent_id=paused_run_id,
+        resume={approval_id: True},
+    ).collect()
+    if result.status.reason == "approval_already_claimed":
+        # Another worker already executed this approval. Safe to no-op.
+        return
+
+
+asyncio.run(resume_if_unclaimed())
 ```
 
 This protection is implemented by `JsonlTracingProvider` and `SqliteTracingProvider` out of the box. **Custom providers must override `claim_approval(parent_id, approval_id, run_id)`** to get the same durable-lock behavior; the base class default is a no-op.
@@ -130,8 +156,12 @@ When a run cancels and the runnable had multiple concurrent calls, each pause em
 **During the stream**, capture every event:
 
 ```python
+from timbal import Agent
+from timbal.types.events import ApprovalEvent, InteractionEvent
+
+agent = Agent(name="support_agent", model="openai/gpt-5")
 pending_approvals, pending_interactions = [], []
-async for event in agent(prompt="..."):
+async for event in agent(prompt="Refund $250"):
     if isinstance(event, ApprovalEvent):
         pending_approvals.append(event)
     if isinstance(event, InteractionEvent):
@@ -141,7 +171,10 @@ async for event in agent(prompt="..."):
 **After `.collect()`**, read the lists the collector attaches to `OutputEvent.metadata` (the `status` only references the first pause):
 
 ```python
-result = await agent(prompt="...").collect()
+from timbal import Agent
+
+agent = Agent(name="support_agent", model="openai/gpt-5")
+result = await agent(prompt="Refund $250").collect()
 
 if result.status.reason == "approval_required":
     for entry in result.metadata["pending_approvals"]:
@@ -155,8 +188,16 @@ if result.status.reason == "input_required":
 Resume by passing **all** the decisions/answers you want to settle in one call:
 
 ```python
-resume = {entry["approval_id"]: True for entry in result.metadata["pending_approvals"]}
-result = await agent(prompt="...", parent_id=paused_run_id, resume=resume).collect()
+from timbal import Agent
+
+agent = Agent(name="support_agent", model="openai/gpt-5")
+paused = await agent(prompt="Refund $250").collect()
+paused_run_id = paused.run_id
+resume = {
+    entry["approval_id"]: True
+    for entry in paused.metadata.get("pending_approvals", [])
+}
+result = await agent(prompt="Refund $250", parent_id=paused_run_id, resume=resume).collect()
 ```
 
 For server-side traversal of a loaded trace (e.g. building a review queue from durable storage), `RunContext.pending_approvals()` and `RunContext.pending_interactions()` walk `RunContext._trace` directly. They tolerate both live `RunStatus` and dict-after-reload shapes, so they work against in-memory, JSONL, SQLite, and platform traces. Approval entries use the **redacted** input snapshot, never the raw secrets.

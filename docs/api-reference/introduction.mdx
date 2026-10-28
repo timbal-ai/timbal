@@ -15,7 +15,7 @@ Most resources in Timbal are scoped to an **organization**, meaning their API pa
 /orgs/{org_id}/projects
 /orgs/{org_id}/projects/{project_id}/envs
 /orgs/{org_id}/projects/{project_id}/envs/{env_id}/deploy
-/orgs/{org_id}/k2/{kb_id}/query
+/orgs/{org_id}/k2/{kb_id}/query   # knowledge bases; the path segment is k2
 ```
 
 <Info>
@@ -27,6 +27,7 @@ HTTP verbs follow REST conventions:
 | Verb     | Usage                        |
 | -------- | ---------------------------- |
 | `GET`    | Retrieve a resource or list  |
-| `POST`   | Create a resource            |
+| `POST`   | Create a resource or start an action |
+| `PUT`    | Replace a resource           |
 | `PATCH`  | Partially update a resource  |
 | `DELETE` | Delete a resource            |

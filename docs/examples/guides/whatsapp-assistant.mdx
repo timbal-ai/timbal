@@ -67,7 +67,7 @@ Install `timbal[server]` and `httpx`; add `pyngrok` only if you use the optional
 
 Use a simple FastAPI app to receive the webhook and pass the full payload to the agent. The agent will process everything in `pre_hook` and send responses in `post_hook`.
 
-```python app.py
+```python fragment app.py
 from fastapi import FastAPI, Request, Response
 import os
 import uvicorn
@@ -123,7 +123,7 @@ Then set the ngrok HTTPS URL as the Callback URL in the Meta console.
 
 ## Creating the Agent
 
-```python agent.py
+```python fragment agent.py
 import os
 import json
 from datetime import datetime
@@ -239,7 +239,7 @@ def pre_hook():
 
 The `pre_hook` runs before invoking the agent. It extracts metadata from the webhook, builds a prompt from the incoming message, persists the inbound event, and sets values in `span.input` for the agent to use during inference.
 
-```python agent.py
+```python fragment agent.py
 async def post_hook():
     """Send the agent response via WhatsApp and persist outbound to JSONL."""
     span = get_run_context().current_span()
@@ -267,7 +267,7 @@ async def post_hook():
 
 The `post_hook` runs after obtaining the agent's response. It sends the text via WhatsApp and persists the outbound event to JSONL.
 
-```python agent.py
+```python fragment agent.py
 agent = Agent(
     name="WhatsAppAgent",
     description="A minimal WhatsApp agent for Timbal",
@@ -309,7 +309,7 @@ Important rules:
 
 If you prefer Timbal Knowledge Bases instead of JSONL, use the async SQL helper below and replace the storage calls in async pre/post hooks. Create the `whatsapp_messages` table with the listed columns first. The helper targets K2; pass `legacy=True` for a legacy KB. User values are SQL parameters.
 
-```python
+```python fragment
 import json
 import os
 from timbal.platform.knowledge_bases import query
@@ -370,7 +370,7 @@ For additional webhook and utility examples, see the Timbal repository. These ar
     - **Why it helps**: avoids replying to partial context when the user is still typing or sending media.
     - **Trade-offs**: adds small latency; choose a short window (e.g., 800–1500 ms).
     - **Example approach (JSONL)**:
-    ```python
+    ```python fragment
     import asyncio, os, json
 
     DEBOUNCE_MS = int(os.getenv("WHATSAPP_DEBOUNCE_MS", "1200"))
@@ -434,7 +434,7 @@ For additional webhook and utility examples, see the Timbal repository. These ar
 
   <Accordion title="Mark inbound message as read">
     Use the WhatsApp Cloud API to mark messages as read. This improves UX and clears unread indicators for the user.
-    ```python
+    ```python fragment
     import os, requests
 
     def mark_as_read(message_id: str) -> None:
@@ -462,7 +462,7 @@ For additional webhook and utility examples, see the Timbal repository. These ar
 
     This request follows [Meta's typing indicator example](https://www.postman.com/meta/whatsapp-business-platform/request/lhf0duq/send-typing-indicator-and-read-receipt). The synchronous helper below should run in a worker, rather than block an async webhook handler.
 
-    ```python
+    ```python fragment
     import os, httpx
 
     def send_typing_and_read(message_id: str) -> dict:
@@ -503,7 +503,7 @@ For additional webhook and utility examples, see the Timbal repository. These ar
 
     Suggested fields to store: `id`, `user_phone`, `direction`, `message_type`, `media_id`, `media_url` (or object store key), `mime_type`, `caption`, `timestamp`.
 
-    ```python
+    ```python fragment
     async def save_media_example(record: dict) -> None:
         # Merge this idea with your existing save flow
         await save_record_to_kb({
