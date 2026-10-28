@@ -5,6 +5,7 @@ The repository test executes Python snippets with TestModel and no network.
 
 import importlib.util
 import json
+import socket
 from pathlib import Path
 
 import pytest
@@ -159,3 +160,72 @@ def test_collector_collect_runs_and_direct_collect_does_not(docs_fixture):
     errors, _ = audit_docs.audit(docs, catalog, execute=True)
     assert any("agent.collect()" in error for error in errors)
     assert not any("run.collect" in error for error in errors)
+
+
+def test_rebound_name_with_error_status_is_reported(docs_fixture):
+    docs, catalog = docs_fixture
+    (docs / "index.mdx").write_text(
+        '---\ntitle: "Example"\n---\n'
+        "```python\n"
+        "class _Status:\n"
+        "    code = 'success'\n"
+        "class _Event:\n"
+        "    def __init__(self, code):\n"
+        "        self.status = _Status()\n"
+        "        self.status.code = code\n"
+        "        self.error = {'message': 'boom'}\n"
+        "result = _Event('success')\n"
+        "```\n"
+        "```python\n"
+        "note = 'status quo'\n"
+        "result = _Event('error')\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    errors, _ = audit_docs.audit(docs, catalog, execute=True)
+    assert any("status is error" in error for error in errors)
+
+
+def test_snippet_that_reads_status_is_left_alone(docs_fixture):
+    docs, catalog = docs_fixture
+    (docs / "index.mdx").write_text(
+        '---\ntitle: "Example"\n---\n'
+        "```python\n"
+        "class _Status:\n"
+        "    code = 'error'\n"
+        "class _Event:\n"
+        "    status = _Status()\n"
+        "    error = {'message': 'boom'}\n"
+        "result = _Event()\n"
+        "assert result.status.code == 'error'\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    errors, _ = audit_docs.audit(docs, catalog, execute=True)
+    assert errors == []
+
+
+def test_netblock_allows_loopback_and_blocks_other_hosts():
+    snippets = audit_docs._load_docs_snippets()
+    with snippets._NetBlock():
+        left, right = socket.socketpair()
+        left.close()
+        right.close()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        try:
+            try:
+                sock.connect(("127.0.0.1", 1))
+            except OSError as exc:
+                assert "network blocked" not in str(exc)
+        finally:
+            sock.close()
+        blocked = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocked.settimeout(0.5)
+        try:
+            with pytest.raises(OSError, match="network blocked"):
+                blocked.connect(("1.2.3.4", 80))
+        finally:
+            blocked.close()
+        with pytest.raises(OSError, match="network blocked"):
+            socket.create_connection(("8.8.8.8", 53), timeout=0.5)

@@ -190,6 +190,19 @@ class TestTestModelWithAgent:
         assert result.output.end.y == 0
 
     @pytest.mark.asyncio
+    async def test_output_model_bare_list_and_dict(self):
+        from pydantic import BaseModel
+
+        class Bag(BaseModel):
+            tags: list
+            meta: dict
+
+        agent = Agent(name="bag", model=TestModel(), output_model=Bag)
+        result = await agent(prompt="pack").collect()
+        assert result.output.tags == ["test"]
+        assert result.output.meta == {}
+
+    @pytest.mark.asyncio
     async def test_no_api_keys_needed(self):
         """TestModel must work even when no API keys are present in the environment."""
         import os

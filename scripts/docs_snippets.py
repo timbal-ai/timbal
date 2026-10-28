@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import ipaddress
 import os
 import re
 import signal
@@ -234,17 +235,41 @@ def _missing_max_tokens(tree: ast.AST) -> bool:
     return False
 
 
+def _is_loopback(addr: object) -> bool:
+    """True for 127.0.0.0/8, ::1, and IPv4-mapped loopback.
+
+    Windows implements ``socket.socketpair`` as a localhost TCP connect.
+    Blocking that connect breaks every asyncio snippet; other hosts stay blocked.
+    """
+    host = addr[0] if isinstance(addr, tuple) and addr else addr
+    if not isinstance(host, str):
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        parsed = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        return parsed.ipv4_mapped.is_loopback
+    return parsed.is_loopback
+
+
 class _NetBlock:
     def __enter__(self):
         self._connect = socket.socket.connect
         self._create = socket.create_connection
         self._popen = subprocess.Popen
 
-        def blocked(_sock, addr):  # noqa: ANN001
+        def blocked(sock, addr):  # noqa: ANN001
+            if _is_loopback(addr):
+                return self._connect(sock, addr)
             raise OSError(f"network blocked: {addr}")
 
-        def _no_connection(*_args, **_kwargs):
-            raise OSError("network blocked")
+        def _no_connection(address, *args, **kwargs):
+            if _is_loopback(address):
+                return self._create(address, *args, **kwargs)
+            raise OSError(f"network blocked: {address}")
 
         socket.socket.connect = blocked  # type: ignore[method-assign]
         socket.create_connection = _no_connection  # type: ignore[assignment]
@@ -294,6 +319,10 @@ def _run_bounded(action, seconds: int) -> None:
         raise failed[0]
 
 
+def _reads_status(tree: ast.AST) -> bool:
+    return any(isinstance(node, ast.Attribute) and node.attr == "status" for node in ast.walk(tree))
+
+
 def _run_code(code: str, namespace: dict) -> None:
     tree = ast.parse(code)
     if _ellipsis_arg(tree):
@@ -302,9 +331,10 @@ def _run_code(code: str, namespace: dict) -> None:
         raise ValueError("agent.collect() is not a method; call agent(...).collect()")
     if _missing_max_tokens(tree):
         raise ValueError("anthropic Agent requires max_tokens")
+    inspects_status = _reads_status(tree)
     tree = _SwapModels().visit(tree)
     ast.fix_missing_locations(tree)
-    before = set(namespace)
+    before = dict(namespace)
     if any(_top_level_await(stmt) for stmt in tree.body):
         function = ast.AsyncFunctionDef(
             name="__docs_main",
@@ -324,10 +354,14 @@ def _run_code(code: str, namespace: dict) -> None:
                 namespace[key] = value
     else:
         exec(compile(tree, "<docs>", "exec"), namespace, namespace)
-    if "status" in code:
+    # Snippets that read ``.status`` (or document it in a comment) are asserting
+    # on the outcome, including intentional error runs. The word "status" alone
+    # is not enough: ``prompt="check status"`` must not hide a failed collect(),
+    # and a later fence can rebind ``result`` to a new OutputEvent.
+    if inspects_status or ".status" in code:
         return
     for key, value in namespace.items():
-        if key in before:
+        if key in before and before[key] is value:
             continue
         status = getattr(value, "status", None)
         if getattr(status, "code", None) == "error":

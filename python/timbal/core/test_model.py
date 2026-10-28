@@ -23,6 +23,11 @@ def _placeholder(annotation: Any, seen: set[type] | None = None) -> Any:
         return [_placeholder(inner, seen)]
     if origin is dict:
         return {}
+    # Bare ``list`` / ``dict`` have no origin. ``"test"`` does not validate.
+    if annotation is list:
+        return ["test"]
+    if annotation is dict:
+        return {}
     if annotation is str or annotation is Any or annotation is None:
         return "test"
     if annotation is int:
