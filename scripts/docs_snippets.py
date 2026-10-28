@@ -24,7 +24,8 @@ TIMBAL_CMD = re.compile(r"^`?\$?\s*timbal\s+([a-z][a-z0-9-]*)", re.M)
 TIMBAL_LINE = re.compile(r"^`?\$?\s*timbal\s+[a-z][a-z0-9-]*")
 PY_MODULE = re.compile(r"python(?:3)?\s+-m\s+(timbal(?:\.[A-Za-z0-9_]+)*)")
 HTTP_CALL = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?://[^/\s]+)?(/[A-Za-z0-9_{}*./~-]*)")
-CLI_COMMANDS = frozenset({"configure", "create", "add", "push", "env", "start", "upgrade", "version"})
+_ZIG_ACTION = re.compile(r'std\.mem\.eql\(u8, action, "([a-z0-9-]+)"\)')
+_ZIG_FLAG = re.compile(r"--[a-z][a-z0-9-]*")
 INTERNAL_PHRASES = (
     "Composer integration",
     "generate_costs_sql.py",
@@ -47,13 +48,65 @@ def deprecated_model_ids(catalog: dict) -> set[str]:
     return banned
 
 
-def cli_flags(cli_dir: Path) -> set[str]:
-    flags: set[str] = set()
-    if not cli_dir.is_dir():
-        return flags
-    for path in cli_dir.rglob("*.zig"):
-        flags.update(re.findall(r"--[a-z0-9-]+", path.read_text(encoding="utf-8", errors="replace")))
-    return flags
+def _until_statement_end(text: str, start: int) -> str:
+    """Slice from ``start`` through the line that ends the Zig string statement."""
+    lines: list[str] = []
+    for line in text[start:].splitlines():
+        lines.append(line)
+        if line.rstrip().endswith('";') or line.rstrip().endswith("';"):
+            break
+    return "\n".join(lines)
+
+
+def _usage_blob(source: str) -> str:
+    """Help text only, so tests and comments that mention fake flags are ignored."""
+    parts: list[str] = []
+    at = source.find("\nconst usage =")
+    if at != -1:
+        rest = source[at:]
+        end = rest.find("\n;")
+        if end != -1:
+            parts.append(rest[:end])
+    at = source.find("\nfn printUsage()")
+    if at != -1:
+        lines: list[str] = []
+        for line in source[at:].splitlines():
+            lines.append(line)
+            if line == "}":
+                break
+        parts.append("\n".join(lines))
+    return "\n".join(parts)
+
+
+def cli_surface(cli_dir: Path) -> tuple[set[str], dict[str, set[str]]]:
+    """Commands from ``cli/main.zig`` dispatch, and flags from each command's help text.
+
+    The command file is ``cli/commands/<name>.zig`` with hyphens turned into underscores.
+    Global flags come from ``global_options_help`` in ``cli/utils.zig`` and apply to every command.
+    """
+    if not (cli_dir / "main.zig").is_file():
+        return set(), {}
+    main = (cli_dir / "main.zig").read_text(encoding="utf-8", errors="replace")
+    commands = {name for name in _ZIG_ACTION.findall(main) if not name.startswith("-")}
+    global_flags: set[str] = set()
+    utils = cli_dir / "utils.zig"
+    if utils.is_file():
+        text = utils.read_text(encoding="utf-8", errors="replace")
+        at = text.find("global_options_help")
+        global_flags = set(_ZIG_FLAG.findall(_until_statement_end(text, at) if at != -1 else ""))
+    flags: dict[str, set[str]] = {}
+    for command in commands:
+        source = cli_dir / "commands" / f"{command.replace('-', '_')}.zig"
+        own: set[str] = set()
+        if source.is_file():
+            blob = _usage_blob(source.read_text(encoding="utf-8", errors="replace"))
+            own = set()
+            for line in blob.splitlines():
+                if "git " in line:
+                    continue
+                own.update(_ZIG_FLAG.findall(line))
+        flags[command] = own | global_flags
+    return commands, flags
 
 
 def server_paths(server_dir: Path) -> set[str]:
@@ -263,10 +316,11 @@ def _validate_voice(namespace: dict) -> None:
     VoiceConfig.model_validate(config)
 
 
-def execute_python_snippets(docs: Path, *, split_fences) -> list[str]:
-    from timbal.core.test_model import TestModel
+def execute_python_snippets(docs: Path, *, split_fences) -> tuple[list[str], int]:
+    from timbal.core import TestModel
 
     errors: list[str] = []
+    executed = 0
     cwd = Path.cwd()
     work = Path(os.environ.get("TMPDIR", "/tmp")) / "timbal-docs-snippets"
     work.mkdir(exist_ok=True)
@@ -290,6 +344,7 @@ def execute_python_snippets(docs: Path, *, split_fences) -> list[str]:
                         except SyntaxError as exc:
                             errors.append(f"{rel}:{number}: fragment does not parse: {exc.msg}")
                         continue
+                    executed += 1
                     try:
                         signal.signal(signal.SIGALRM, _alarm)
                         signal.alarm(4)
@@ -302,7 +357,7 @@ def execute_python_snippets(docs: Path, *, split_fences) -> list[str]:
                         signal.alarm(0)
     finally:
         os.chdir(cwd)
-    return errors
+    return errors, executed
 
 
 def static_checks(
@@ -328,7 +383,7 @@ def static_checks(
     markdown_ids = {p.relative_to(docs).with_suffix("").as_posix() for p in pages if p.suffix == ".md"}
     errors.extend(f"navigation: unlisted page {page}" for page in sorted(markdown_ids - listed))
     banned = deprecated_model_ids(catalog)
-    flags = cli_flags(cli_dir)
+    commands, flags_by_command = cli_surface(cli_dir)
     known_paths = openapi_paths(schema) | server_paths(server_dir)
     titles: dict[str, list[str]] = {}
     model_uses: dict[str, int] = {}
@@ -361,14 +416,17 @@ def static_checks(
             if head:
                 candidates.append(head.group(1))
             candidates.extend(re.findall(r"`timbal\s+([a-z][a-z0-9-]*)", line))
-            for command in candidates:
-                if command not in CLI_COMMANDS:
+            seen_commands = set(candidates)
+            for command in sorted(seen_commands):
+                if command not in commands:
                     errors.append(f"{rel}: unknown CLI command timbal {command}")
-            if not candidates:
+            if len(seen_commands) != 1 or not seen_commands <= commands:
                 continue
+            command = next(iter(seen_commands))
+            allowed = flags_by_command.get(command, set())
             for flag in sorted(set(re.findall(r"--[a-z0-9-]+", line))):
-                if flag not in flags:
-                    errors.append(f"{rel}: unknown CLI flag {flag}")
+                if flag not in allowed:
+                    errors.append(f"{rel}: unknown flag {flag} for timbal {command}")
         for module_name in sorted(set(PY_MODULE.findall(source))):
             if importlib.util.find_spec(module_name) is None:
                 errors.append(f"{rel}: missing module {module_name}")
@@ -447,7 +505,9 @@ def extend_audit(
         server_dir=root / "python/timbal/server",
         split_fences=split_fences,
     )
+    executed = 0
     if execute:
         sys.path.insert(0, str(root / "python"))
-        errors.extend(execute_python_snippets(docs, split_fences=split_fences))
-    return errors, warnings, {"snippet_execution": int(execute)}
+        snippet_errors, executed = execute_python_snippets(docs, split_fences=split_fences)
+        errors.extend(snippet_errors)
+    return errors, warnings, {"snippets_executed": executed}

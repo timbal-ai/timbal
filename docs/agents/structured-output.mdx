@@ -46,14 +46,9 @@ agent = Agent(
     output_model=Recipe,
 )
 
-# A live model returns a Recipe from `await agent(prompt="I want to make lasagna").collect()`.
-# `result.output` is that model, not a Message. TestModel cannot fill the schema, so this
-# sample shows the object you get back:
-recipe = Recipe(
-    ingredients=[Ingredient(name="lasagna noodles", amount=12, unit="sheets")],
-    total_time=60,
-    steps=["Boil the noodles."],
-)
+result = await agent(prompt="I want to make lasagna").collect()
+recipe = result.output  # a Recipe, not a Message
+print(type(recipe).__name__)
 print(recipe.total_time)
 print(recipe.ingredients[0].name)
 ```

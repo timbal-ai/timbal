@@ -148,6 +148,30 @@ class TestTestModelWithAgent:
             assert r.error is None
 
     @pytest.mark.asyncio
+    async def test_output_model_gets_schema_valid_json(self):
+        from pydantic import BaseModel, Field
+
+        class Ingredient(BaseModel):
+            name: str
+            amount: float
+
+        class Recipe(BaseModel):
+            ingredients: list[Ingredient] = Field(min_length=1)
+            total_time: float
+
+        agent = Agent(name="chef", model=TestModel(), output_model=Recipe)
+        result = await agent(prompt="lasagna").collect()
+        assert isinstance(result.output, Recipe)
+        assert result.output.ingredients[0].name == "test"
+        assert result.output.total_time == 0.0
+
+        given = '{"ingredients": [{"name": "noodles", "amount": 12}], "total_time": 60}'
+        agent = Agent(name="chef", model=TestModel(responses=[given]), output_model=Recipe)
+        result = await agent(prompt="lasagna").collect()
+        assert result.output.total_time == 60
+        assert result.output.ingredients[0].name == "noodles"
+
+    @pytest.mark.asyncio
     async def test_no_api_keys_needed(self):
         """TestModel must work even when no API keys are present in the environment."""
         import os
