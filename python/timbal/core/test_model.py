@@ -32,14 +32,16 @@ def _placeholder(annotation: Any, seen: set[type] | None = None) -> Any:
     if annotation is bool:
         return False
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        seen = set() if seen is None else seen
-        if annotation in seen:
+        # Track the path, not every model already emitted. A second field of the
+        # same nested type is a sibling, not a cycle.
+        path = set() if seen is None else set(seen)
+        if annotation in path:
             return {}
-        seen.add(annotation)
+        path.add(annotation)
         payload: dict[str, Any] = {}
         for name, field in annotation.model_fields.items():
             if field.is_required():
-                payload[name] = _placeholder(field.annotation, seen)
+                payload[name] = _placeholder(field.annotation, path)
         return payload
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         return next(iter(annotation)).value
@@ -50,7 +52,9 @@ def _json_for_output_model(raw: str, output_model: type) -> str:
     try:
         output_model.model_validate_json(raw)
     except Exception:
-        return json.dumps(_placeholder(output_model))
+        payload = _placeholder(output_model)
+        output_model.model_validate(payload)
+        return json.dumps(payload)
     return raw
 
 

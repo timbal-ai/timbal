@@ -101,7 +101,7 @@ def audit(
     docs: Path, catalog: Path, *, runtime: bool = False, execute: bool = False
 ) -> tuple[list[str], dict[str, int]]:
     errors: list[str] = []
-    paths = sorted(docs.rglob("*.mdx"))
+    paths = sorted(docs.rglob("*.mdx")) + sorted(p for p in docs.rglob("*.md") if p.name != "docs.json")
     available = {p.relative_to(docs).with_suffix("").as_posix() for p in paths}
     config = json.loads((docs / "docs.json").read_text(encoding="utf-8"))
     listed = navigation_pages(config["navigation"])

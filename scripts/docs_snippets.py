@@ -16,7 +16,9 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import textwrap
+import threading
 from pathlib import Path
 
 MODEL_RE = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w./-]+$")
@@ -157,13 +159,6 @@ class _SwapModels(ast.NodeTransformer):
             node.value = _test_model_call()
         return node
 
-    def visit_Dict(self, node: ast.Dict):
-        self.generic_visit(node)
-        for index, (key, value) in enumerate(zip(node.keys, node.values, strict=True)):
-            if isinstance(key, ast.Constant) and key.value in {"model", "sampling_model"} and _is_model(value):
-                node.values[index] = _test_model_call()
-        return node
-
 
 def _is_model(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, str) and bool(MODEL_RE.match(node.value))
@@ -203,10 +198,15 @@ def _ellipsis_arg(tree: ast.AST) -> bool:
 
 
 def _agent_collect(tree: ast.AST) -> bool:
+    """Flag ``agent.collect(prompt=...)``.
+
+    ``run = agent(...); await run.collect()`` is the collector API. Only a
+    ``collect`` call that still carries runnable arguments is the old method.
+    """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        if node.func.attr != "collect":
+        if node.func.attr != "collect" or not (node.args or node.keywords):
             continue
         target = node.func.value
         if isinstance(target, ast.Name):
@@ -266,6 +266,34 @@ def _alarm(_signum, _frame):
     raise TimeoutError("snippet exceeded 4s")
 
 
+def _run_bounded(action, seconds: int) -> None:
+    """Run ``action`` with a wall-clock cap. SIGALRM on Unix; a daemon thread elsewhere."""
+    if hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.alarm(seconds)
+        try:
+            action()
+        finally:
+            signal.alarm(0)
+        return
+
+    failed: list[BaseException] = []
+
+    def _target() -> None:
+        try:
+            action()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread
+            failed.append(exc)
+
+    worker = threading.Thread(target=_target, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise TimeoutError(f"snippet exceeded {seconds}s")
+    if failed:
+        raise failed[0]
+
+
 def _run_code(code: str, namespace: dict) -> None:
     tree = ast.parse(code)
     if _ellipsis_arg(tree):
@@ -322,41 +350,40 @@ def execute_python_snippets(docs: Path, *, split_fences) -> tuple[list[str], int
     errors: list[str] = []
     executed = 0
     cwd = Path.cwd()
-    work = Path(os.environ.get("TMPDIR", "/tmp")) / "timbal-docs-snippets"
-    work.mkdir(exist_ok=True)
-    os.chdir(work)
-    try:
-        with _NetBlock():
-            for path in sorted(docs.rglob("*.mdx")) + sorted(docs.rglob("*.md")):
-                if path.name == "docs.json":
-                    continue
-                source = path.read_text(encoding="utf-8")
-                _, blocks, _ = split_fences(source)
-                namespace: dict = {"__name__": "docs_snippet", "__TestModel": TestModel}
-                rel = path.relative_to(docs).as_posix()
-                for number, language, code in blocks:
-                    tokens = language.split()
-                    if not tokens or tokens[0] not in {"python", "py"}:
+    with tempfile.TemporaryDirectory(prefix="timbal-docs-snippets-") as work:
+        os.chdir(work)
+        try:
+            with _NetBlock():
+                for path in sorted(docs.rglob("*.mdx")) + sorted(docs.rglob("*.md")):
+                    if path.name == "docs.json":
                         continue
-                    if "fragment" in tokens:
+                    source = path.read_text(encoding="utf-8")
+                    _, blocks, _ = split_fences(source)
+                    namespace: dict = {"__name__": "docs_snippet", "__TestModel": TestModel}
+                    rel = path.relative_to(docs).as_posix()
+                    for number, language, code in blocks:
+                        tokens = language.split()
+                        if not tokens or tokens[0] not in {"python", "py"}:
+                            continue
+                        if "fragment" in tokens:
+                            try:
+                                ast.parse(textwrap.dedent(code))
+                            except SyntaxError as exc:
+                                errors.append(f"{rel}:{number}: fragment does not parse: {exc.msg}")
+                            continue
+                        executed += 1
                         try:
-                            ast.parse(textwrap.dedent(code))
-                        except SyntaxError as exc:
-                            errors.append(f"{rel}:{number}: fragment does not parse: {exc.msg}")
-                        continue
-                    executed += 1
-                    try:
-                        signal.signal(signal.SIGALRM, _alarm)
-                        signal.alarm(4)
-                        _run_code(code, namespace)
-                        _validate_voice(namespace)
-                    except Exception as exc:
-                        message = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
-                        errors.append(f"{rel}:{number}: snippet failed: {type(exc).__name__}: {message}")
-                    finally:
-                        signal.alarm(0)
-    finally:
-        os.chdir(cwd)
+
+                            def _invoke(code: str = code, namespace: dict = namespace) -> None:
+                                _run_code(code, namespace)
+                                _validate_voice(namespace)
+
+                            _run_bounded(_invoke, 4)
+                        except Exception as exc:
+                            message = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+                            errors.append(f"{rel}:{number}: snippet failed: {type(exc).__name__}: {message}")
+        finally:
+            os.chdir(cwd)
     return errors, executed
 
 
@@ -377,11 +404,8 @@ def static_checks(
     pages = sorted(docs.rglob("*.mdx")) + sorted(p for p in docs.rglob("*.md") if p.name != "docs.json")
     config = __import__("json").loads((docs / "docs.json").read_text(encoding="utf-8"))
     listed_list = _page_list(config.get("navigation"))
-    listed = set(listed_list)
     duplicates = sorted({page for page in listed_list if listed_list.count(page) > 1})
     errors.extend(f"navigation: duplicate page {page}" for page in duplicates)
-    markdown_ids = {p.relative_to(docs).with_suffix("").as_posix() for p in pages if p.suffix == ".md"}
-    errors.extend(f"navigation: unlisted page {page}" for page in sorted(markdown_ids - listed))
     banned = deprecated_model_ids(catalog)
     commands, flags_by_command = cli_surface(cli_dir)
     known_paths = openapi_paths(schema) | server_paths(server_dir)

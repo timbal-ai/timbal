@@ -172,6 +172,24 @@ class TestTestModelWithAgent:
         assert result.output.ingredients[0].name == "noodles"
 
     @pytest.mark.asyncio
+    async def test_output_model_repeats_nested_type(self):
+        from pydantic import BaseModel
+
+        class Point(BaseModel):
+            x: int
+            y: int
+
+        class Segment(BaseModel):
+            start: Point
+            end: Point
+
+        agent = Agent(name="draw", model=TestModel(), output_model=Segment)
+        result = await agent(prompt="line").collect()
+        assert isinstance(result.output, Segment)
+        assert result.output.start.x == 0
+        assert result.output.end.y == 0
+
+    @pytest.mark.asyncio
     async def test_no_api_keys_needed(self):
         """TestModel must work even when no API keys are present in the environment."""
         import os
