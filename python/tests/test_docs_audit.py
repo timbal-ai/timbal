@@ -1,4 +1,7 @@
-"""Offline checks for recurring documentation failures; never execute snippets."""
+"""Offline checks for recurring documentation failures.
+
+The repository test executes Python snippets with TestModel and no network.
+"""
 
 import importlib.util
 import json
@@ -107,5 +110,5 @@ def test_audit_rejects_navigation_api_and_price_drift(docs_fixture):
 
 
 def test_repository_docs_pass_offline_audit():
-    errors, _ = audit_docs.audit(ROOT / "docs", ROOT / "python/timbal/models.yaml")
+    errors, _ = audit_docs.audit(ROOT / "docs", ROOT / "python/timbal/models.yaml", runtime=True, execute=True)
     assert errors == []

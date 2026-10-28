@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 import importlib
+import importlib.util
 import json
 import re
 import sys
@@ -86,7 +87,19 @@ def check_imports(tree: ast.AST) -> list[str]:
     return errors
 
 
-def audit(docs: Path, catalog: Path, *, runtime: bool = False) -> tuple[list[str], dict[str, int]]:
+def _load_docs_snippets():
+    path = Path(__file__).with_name("docs_snippets.py")
+    spec = importlib.util.spec_from_file_location("docs_snippets", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load docs_snippets.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def audit(
+    docs: Path, catalog: Path, *, runtime: bool = False, execute: bool = False
+) -> tuple[list[str], dict[str, int]]:
     errors: list[str] = []
     paths = sorted(docs.rglob("*.mdx"))
     available = {p.relative_to(docs).with_suffix("").as_posix() for p in paths}
@@ -156,18 +169,42 @@ def audit(docs: Path, catalog: Path, *, runtime: bool = False) -> tuple[list[str
                     cached_price = float(triple[3] if triple else cached[1])
                     if cached_price != expected_cached:
                         errors.append(f"{label}: {ids[0]} cached input {cached_price} != catalog {expected_cached}")
+    extra_errors, warnings, extra_counts = _load_docs_snippets().extend_audit(
+        docs,
+        catalog,
+        execute=execute,
+        root=ROOT,
+        split_fences=split_fences,
+    )
+    errors.extend(extra_errors)
+    counts["warnings"] = len(warnings)
+    counts.update(extra_counts)
+    counts["_warning_messages"] = warnings  # type: ignore[assignment]
     return errors, counts
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime", action="store_true", help="Check Timbal snippet imports in the installed package")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Execute Python snippets offline with TestModel (no network, no API keys)",
+    )
     args = parser.parse_args()
     sys.path.insert(0, str(ROOT / "python"))
-    errors, counts = audit(ROOT / "docs", ROOT / "python/timbal/models.yaml", runtime=args.runtime)
+    errors, counts = audit(
+        ROOT / "docs",
+        ROOT / "python/timbal/models.yaml",
+        runtime=args.runtime,
+        execute=args.execute,
+    )
+    warnings = counts.pop("_warning_messages", [])
+    for warning in warnings:
+        print(f"warning: {warning}")  # noqa: T201
     for error in errors:
         print(error)  # noqa: T201
-    print(f"Docs audit: {counts}; {len(errors)} errors")  # noqa: T201
+    print(f"Docs audit: {counts}; {len(errors)} errors; {len(warnings)} warnings")  # noqa: T201
     return int(bool(errors))
 
 
