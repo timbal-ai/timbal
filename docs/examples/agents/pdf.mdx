@@ -6,6 +6,8 @@ description: "AI agents can read and analyze PDF documents for content extractio
 Agents automatically handle PDF files when included in prompts. First validate your PDF file with Timbal's `File` type, then pass it alongside text in a list:
 
 ```python
+from pathlib import Path
+
 from timbal import Agent
 from timbal.types.file import File
 
@@ -15,8 +17,11 @@ agent = Agent(
     system_prompt="Analyze PDF documents and extract key information."
 )
 
+document = Path("document.pdf")
+document.write_bytes(b"%PDF-1.1\n")
+
 # Validate PDF file and analyze
-pdf_file = File.validate("path/to/document.pdf")
+pdf_file = File.validate(str(document))
 result = await agent(
     prompt=["Summarize this document and highlight the main points", pdf_file]
 ).collect()

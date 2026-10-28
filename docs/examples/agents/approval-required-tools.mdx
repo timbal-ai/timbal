@@ -82,6 +82,9 @@ agent = Agent(
     tracing_provider=provider,
 )
 
+paused_run_id = None
+approval_id = "approval"
+
 # In the worker, after the reviewer decided:
 result = await agent(
     prompt="Refund $250 to customer C-42",
@@ -101,6 +104,7 @@ if result.status.reason == "approval_already_claimed":
 When the agent calls a denied tool, Timbal converts the denial into a `ToolResultContent` so the model can react (apologize, escalate, try another path) instead of crashing:
 
 ```python
+approval_id = "approval"
 result = await agent(
     prompt="Refund $250 to customer C-42",
     resume={

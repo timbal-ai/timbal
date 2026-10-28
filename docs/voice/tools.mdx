@@ -29,7 +29,7 @@ async def get_delivery_status(order_id: str) -> dict:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-5-mini",
     system_prompt=(
         "You help callers check deliveries. Ask for the order ID if it is missing. "
         "Use get_delivery_status before giving a delivery status; never invent it. "
@@ -99,7 +99,7 @@ async def build_report(topic: str) -> str:
 
 agent = Agent(
     name="voice_assistant",
-    model="openai/gpt-4.1-mini",
+    model="openai/gpt-5-mini",
     system_prompt="You help callers with sales reports. Reply in one or two short spoken sentences.",
     tools=[Tool(handler=build_report, background_mode="always")],
     voice_config={"language": "en", "events": {"announce_background_results": True}},
@@ -129,9 +129,25 @@ Either way, the result reaches the model as a runtime message, never as somethin
 Each tool and each event can override the call's default with an announce policy:
 
 ```python
-Tool(handler=book_table, background_mode="always", background_announce="when_idle")  # speak up when done
-Tool(handler=sync_crm, background_mode="always", background_announce="silent")  # wait for the caller's next turn
-await session.notify("The fire alarm test starts in one minute.", announce="interrupt")
+from timbal import Tool
+
+
+async def book_table() -> str:
+    """Book a table for the caller."""
+    return "Booked."
+
+
+async def sync_crm() -> str:
+    """Sync the caller into the CRM."""
+    return "Synced."
+
+
+book = Tool(handler=book_table, background_mode="always", background_announce="when_idle")
+sync = Tool(handler=sync_crm, background_mode="always", background_announce="silent")
+
+
+async def announce_alarm(session) -> None:
+    await session.notify("The fire alarm test starts in one minute.", announce="interrupt")
 ```
 
 - `"when_idle"`: take a turn once the line is quiet (the default for `notify`).
@@ -157,7 +173,7 @@ Pass `announce="silent"` to keep reports for the caller's next turn instead.
 
 ### Telling the client
 
-When the agent takes a turn of its own, the client gets an `event_turn_started` event (`task_ids`, `event_ids`, `keys`, `urgent`) before any text or audio, so a UI can show the reply as an announcement rather than an answer. Its `voice_turn_metrics` have `event: true`.
+When the agent takes a turn of its own, the client gets an `event_turn_started` event (`task_ids`, `event_ids`, `keys`, `urgent`) before any text or audio, so a UI can show the reply as an announcement rather than an answer. The wire metrics message is `{"type": "metrics", "metrics": {...}}` with `metrics.event` true. The same object is stored on the trace root as `voice_turn_metrics`. `events` (including `announce_background_results` and `on_busy`) is server config; a client hello cannot set it.
 
 A text turn on the same conversation while the call is live (a chat tab continuing from the call's run) is let in only while the call is not mid-turn. While a call turn runs, the chat turn is refused, or queued with `"events": {"on_busy": "enqueue"}` in the server's `voice_config`. Once let in, the chat turn continues from the call's latest turn, even if the chat sent an older run as its parent, so neither side loses what the other said. A caller who speaks while the chat turn runs is answered after it, and the call continues from what the chat said. An `"interrupt"` event goes ahead of a queued chat turn, but waits for one that is already running.
 

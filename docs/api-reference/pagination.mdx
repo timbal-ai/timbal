@@ -9,13 +9,13 @@ The Timbal API uses **cursor-based pagination** with page tokens for efficient n
 
 **Initial request:**
 ```http
-GET /apps
+GET /me/orgs
 ```
 
 **Subsequent requests:**
 When a response includes a `next_page_token`, use it as the `page_token` query parameter:
 ```http
-GET /apps?page_token=eyJpZCI6IjEyMyIsInRzIjoxNjk...
+GET /me/orgs?page_token=eyJpZCI6IjEyMyIsInRzIjoxNjk...
 ```
 
 <Tip>

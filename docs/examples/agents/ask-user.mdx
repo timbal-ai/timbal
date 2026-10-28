@@ -168,6 +168,7 @@ def collect_company_profile() -> dict:
 The emitted `InteractionEvent.payload` is exactly the dict you passed; resume with the filled values:
 
 ```python
+interaction_id = "interaction"
 resume = {
     interaction_id: {
         "company_name": "Acme Inc.",
@@ -208,6 +209,9 @@ agent = Agent(
     tools=[ask_text, ask_form, confirm],
     tracing_provider=JsonlTracingProvider.configured(_path=Path("traces.jsonl")),
 )
+
+paused_run_id = None
+interaction_id = "interaction"
 
 # Later, in any process:
 result = await agent(

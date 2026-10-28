@@ -10,6 +10,8 @@ Workflows execute steps based on their dependencies. By understanding how Timbal
 When steps have no relationship between them, they run concurrently. Timbal doesn't wait for one to finish before starting the next:
 
 ```python
+from timbal import Workflow
+
 async def fetch_users():
     return ["Alice", "Bob"]
 
@@ -44,6 +46,9 @@ Steps can access data from their own context, the parent workflow, or any siblin
 You can also create your own custom variables to share data between steps:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
 async def process_user(user_id: str):
     # Store custom data on this step's context
     get_run_context().current_span().user_status = "active"
@@ -81,6 +86,15 @@ After the workflow runs, each step has the following variables in their context:
 When a step parameter references another step's output via a lambda, Timbal automatically creates a dependency and enforces sequential execution:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+async def fetch_users():
+    return ["Alice", "Bob"]
+
+async def fetch_orders():
+    return [{"id": 1}, {"id": 2}]
+
 async def merge_results(users: list, orders: list) -> dict:
     return {"users": users, "orders": orders}
 
@@ -126,7 +140,22 @@ Consider a workflow that validates data and then processes it differently based 
 
 #### Example
 
-```python {20-29}
+```python {28-37}
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def validate_data(data: dict) -> dict:
+    return {"valid": "@" in str(data.get("email", ""))}
+
+def process_valid(data: dict) -> dict:
+    return {"ok": True, "data": data}
+
+def process_invalid(data: dict) -> dict:
+    return {"ok": False, "data": data}
+
+def merge_results(order: dict, validated: dict, processed: dict | None) -> dict:
+    return {"order": order, "validated": validated, "processed": processed}
+
 workflow = (
     Workflow(name="pipeline")
     # Step 1: Always runs - validates the input data
@@ -177,12 +206,19 @@ workflow = (
 Use `while_` to repeat a step. It accepts an int (run exactly N times) or a parameterless callable evaluated after each iteration (do-while — the step always runs at least once):
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
 def fetch_page() -> dict:
     # The step owns its cursor state (module global, closure, or reading
     # its own previous span) — params are NOT re-resolved per iteration.
     span = get_run_context().step_span("fetch_page", default=None)
     cursor = span.output["next_cursor"] if span else None
-    return api.fetch(cursor=cursor)
+    next_cursor = None if cursor == "page-2" else "page-2"
+    return {"next_cursor": next_cursor, "cursor": cursor}
+
+def summarize(pages: dict) -> str:
+    return str(pages)
 
 workflow = (
     Workflow(name="paginate")
@@ -211,6 +247,14 @@ Things to keep in mind with `while_`:
 Use `depends_on` when you need ordering without a data dependency:
 
 ```python
+from timbal import Workflow
+
+def init_database() -> str:
+    return "ready"
+
+def process_data() -> str:
+    return "processed"
+
 workflow = (
     Workflow(name="pipeline")
     .step(init_database)

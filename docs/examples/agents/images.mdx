@@ -6,20 +6,28 @@ description: "AI agents can analyze and understand images by processing visual c
 Agents automatically handle image files when included in prompts. First validate your image file with Timbal's `File` type, then pass it alongside text in a list:
 
 ```python
+from pathlib import Path
+
 from timbal import Agent
 from timbal.types.file import File
 
 agent = Agent(
     name="VisionAgent",
     model="anthropic/claude-sonnet-4-6",  # Vision-capable model
-    max_tokens=256,
+    max_tokens=4096,
     system_prompt="Analyze images and provide detailed descriptions."
 )
 
+image1_path = Path("image1.jpg")
+image2_path = Path("image2.png")
+image3_path = Path("image3.jpeg")
+for path in (image1_path, image2_path, image3_path):
+    path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
 # Validate multiple image files and analyze
-image1 = File.validate("path/to/image1.jpg")
-image2 = File.validate("path/to/image2.png")
-image3 = File.validate("path/to/image3.jpeg")
+image1 = File.validate(str(image1_path))
+image2 = File.validate(str(image2_path))
+image3 = File.validate(str(image3_path))
 
 result = await agent(
     prompt=["Analyze these images and provide a description of each one", image1, image2, image3]

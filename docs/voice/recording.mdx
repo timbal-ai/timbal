@@ -10,6 +10,14 @@ Recording is opt-in and requires the voice dependencies. Configure it on the ser
 Add to the earlier lessons' dict-based configuration:
 
 ```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={"language": "en"},
+)
 agent.voice_config["recording"] = {"dir": "./call-recordings"}
 ```
 

@@ -72,17 +72,23 @@ description: "Kimi K3 and K2.x models via Moonshot's OpenAI-compatible API"
 ## Usage
 
 ```python
+import asyncio
+
 from timbal import Agent
 
-agent = Agent(
-    name="kimi",
-    model="moonshot/kimi-k3",
-    model_params={"reasoning_effort": "max"},
-    tools=[],
-)
 
-result = await agent.collect(prompt="Explain Kimi K3 in one sentence.")
-print(result.output.collect_text())
+async def main() -> None:
+    agent = Agent(
+        name="kimi",
+        model="moonshot/kimi-k3",
+        model_params={"reasoning_effort": "max"},
+        tools=[],
+    )
+    result = await agent(prompt="Explain Kimi K3 in one sentence.").collect()
+    print(result.output.collect_text())
+
+
+asyncio.run(main())
 ```
 
 ## Cache billing and lifecycle

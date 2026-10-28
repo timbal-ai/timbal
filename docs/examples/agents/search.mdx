@@ -18,7 +18,7 @@ from timbal.tools import WebSearch
 # Works with OpenAI or Anthropic models
 agent = Agent(
     name="SearchAgent",
-    model="openai/gpt-5.1",
+    model="openai/gpt-5-mini",
     tools=[WebSearch()],
     system_prompt="Search the web for current information."
 )
@@ -36,7 +36,7 @@ Set `TAVILY_API_KEY` and use an executable search tool:
 ```python
 agent = Agent(
     name="search_assistant",
-    model="google/gemini-2.5-flash",
+    model="google/gemini-3.5-flash",
     tools=[WebSearch(provider="tavily")],
     system_prompt="Search for current information and cite the sources you use.",
 )

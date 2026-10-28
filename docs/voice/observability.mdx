@@ -15,16 +15,18 @@ from timbal.voice import (
     VoiceUsageEvent,
 )
 
-# session is a VoiceSession; microphone_chunks yields PCM16 mono bytes.
-async for event in session.run(microphone_chunks):
-    if isinstance(event, AudioOutput):
-        await playback.write(event.data)
-    elif isinstance(event, SessionInterrupted):
-        await playback.clear()
-    elif isinstance(event, TurnMetricsEvent):
-        print(event.metrics.model_dump())
-    elif isinstance(event, VoiceUsageEvent):
-        print(event.model_dump())
+
+async def play(session, playback, microphone_chunks):
+    """session is a VoiceSession; microphone_chunks yields PCM16 mono bytes."""
+    async for event in session.run(microphone_chunks):
+        if isinstance(event, AudioOutput):
+            await playback.write(event.data)
+        elif isinstance(event, SessionInterrupted):
+            await playback.clear()
+        elif isinstance(event, TurnMetricsEvent):
+            print(event.metrics.model_dump())
+        elif isinstance(event, VoiceUsageEvent):
+            print(event.model_dump())
 ```
 
 `session.transcript` contains committed user and assistant entries with timestamps. Fillers are marked `filler=True`. At session end, the server sends `session_transcript` followed by `session_ended`. Transcript text reflects interruption handling and may contain only the heard prefix of a cancelled assistant reply.
@@ -41,6 +43,8 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 - `turn_total_ms`, `llm_total_ms`, and `tts_total_ms`: turn and stage durations.
 - `interrupted`, `heard_bytes`, and `playback_acks_received`: interruption and playback evidence.
 - `filler_spoken` and `filler_count`: whether a latency-masking phrase was spoken. When present, first-audio latency can measure the filler rather than the substantive answer.
+- `event`: true when the turn was started by a session event or an announced background result, not by the caller.
+- `vad_endpointed`: whether Silero endpointing forced the commit.
 
 Measure time to the useful answer as well as first audio. Compare providers on representative calls, including slow tools, short acknowledgements, background noise, and interruptions.
 
@@ -48,19 +52,22 @@ Measure time to the useful answer as well as first audio. Compare providers on r
 
 OpenAI transcription and mini-TTS adapters emit `VoiceUsageEvent` independently of transcripts and audio. These events carry provider quantities, not dollar amounts. Other providers and custom adapters emit nothing unless they implement the usage capability.
 
-For billing, register a non-blocking listener on the adapters before the session starts. Delivery through the client connection alone can lose teardown events:
+`VoiceSession.prepare()` (which `run()` calls) already forwards adapter usage onto the session event stream, and the server sends those as `{"type": "voice_usage", ...}`. Register another listener only when you need a queue that outlives the client connection. Registering the session's own listener a second time delivers each event twice:
 
 ```python
 import asyncio
 
 from timbal.voice import VoiceUsageEvent
 
-usage_queue: asyncio.Queue[VoiceUsageEvent] = asyncio.Queue()
-listener = usage_queue.put_nowait
-session.stt.add_usage_listener(listener)
-session.tts.add_usage_listener(listener)
-# A separate consumer drains and persists the queue, including after disconnect.
-# Remove listeners when these adapters are no longer used.
+
+def listen(session) -> asyncio.Queue[VoiceUsageEvent]:
+    usage_queue: asyncio.Queue[VoiceUsageEvent] = asyncio.Queue()
+    listener = usage_queue.put_nowait
+    session.stt.add_usage_listener(listener)
+    session.tts.add_usage_listener(listener)
+    # A separate consumer drains and persists the queue, including after disconnect.
+    # Remove listeners when these adapters are no longer used.
+    return usage_queue
 ```
 
 Listeners are synchronous and must not block. Listener failures are logged and isolated from speech. Delivery is in-process; your consumer must persist records durably.

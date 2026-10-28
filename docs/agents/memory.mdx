@@ -38,12 +38,14 @@ from timbal import Agent
 billing_agent = Agent(
     name="billing_agent",
     model="anthropic/claude-haiku-4-5",
+    max_tokens=4096,
     # Fresh context per call — only the tool prompt from the parent, not the full chat
 )
 
 support_agent = Agent(
     name="support_agent",
     model="anthropic/claude-sonnet-4-6",
+    max_tokens=4096,
     tools=[billing_agent],  # add more specialist agents as needed
 )
 ```
@@ -55,6 +57,10 @@ To hand the child specific context, put it in the tool call (the parent's prompt
 Configure the tracing provider for your deployment and keep run IDs with the conversation. The server also supports explicit continuation:
 
 ```python
+from timbal import Agent
+
+agent = Agent(name="example", model="openai/gpt-4o-mini")
+
 first = await agent(prompt="My name is David").collect()
 second = await agent(parent_id=first.run_id, prompt="What's my name?").collect()
 ```

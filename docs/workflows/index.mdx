@@ -1,6 +1,7 @@
 ---
-title: "Overview"
-description: "Build multi-step AI pipelines with explicit control flow"
+title: "Workflows"
+sidebarTitle: "Overview"
+description: "Run explicit steps in a DAG, including parallel branches and agents as steps."
 ---
 
 Workflows orchestrate **steps** in a DAG: you define what runs, Timbal infers dependencies and runs independent steps in parallel. Use them when the path is predictable (ETL, gated deploys, fan-out/fan-in, LLM routing) rather than leaving every decision to the model.
@@ -71,6 +72,9 @@ Use `.step()` to add a Runnable (function, Tool, Agent, or nested Workflow):
 ```python
 from timbal import Tool, Workflow
 
+def check_threshold(value: int, limit: int) -> bool:
+    return value > limit
+
 # Same handler twice? Give each Tool a unique name.
 threshold_high = Tool(name="threshold_high", handler=check_threshold)
 threshold_low = Tool(name="threshold_low", handler=check_threshold)
@@ -89,6 +93,15 @@ Each step name must be unique within the workflow. Timbal detects cycles when yo
 Keyword arguments passed to the workflow are forwarded to steps. Parameters without a default on a step become **workflow-level inputs** (merged into the workflow's params schema):
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def fetch(url: str) -> str:
+    return f"content of {url}"
+
+def process(raw: str) -> str:
+    return raw
+
 workflow = (
     Workflow(name="scraper")
     .step(fetch)          # fetch(url: str) → url is a workflow input
@@ -105,6 +118,18 @@ Fixed values passed in `.step(name, key=value)` are defaults for that step only 
 The workflow returns the **last executed step's output**. If you need multiple step results, add a final merge step:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def fetch_users() -> list[str]:
+    return ["Ada"]
+
+def fetch_orders() -> list[dict]:
+    return [{"id": 1}]
+
+def build_report(users: list[str], orders: list[dict]) -> dict:
+    return {"users": users, "orders": orders}
+
 workflow = (
     Workflow(name="pipeline")
     .step(fetch_users)
@@ -121,6 +146,13 @@ workflow = (
 ## Running
 
 ```python
+from timbal import Workflow
+
+def fetch(url: str) -> str:
+    return url
+
+workflow = Workflow(name="scraper").step(fetch)
+
 # Collect final OutputEvent
 result = await workflow(url="https://example.com").collect()
 print(result.output)
@@ -137,6 +169,18 @@ async for event in workflow(url="https://example.com"):
 Nest workflows as steps. The inner workflow's final output becomes that step's output:
 
 ```python
+from timbal import Workflow
+from timbal.state import get_run_context
+
+def fetch_data(source: str) -> str:
+    return source
+
+def clean_data(raw: str) -> str:
+    return raw
+
+def generate_report(data: str) -> str:
+    return data
+
 data_pipeline = (
     Workflow(name="data_pipeline")
     .step(fetch_data, source="api")

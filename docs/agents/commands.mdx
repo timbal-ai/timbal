@@ -72,7 +72,13 @@ await main_agent(prompt='/search "python tutorials"').collect()
 Workflows work the same way — arguments map to the workflow's combined parameter model (all step inputs in signature order):
 
 ```python
-from timbal import Workflow
+from timbal import Agent, Workflow
+
+def fetch_data(report: str) -> str:
+    return report
+
+def process_data() -> str:
+    return "processed"
 
 workflow = Workflow(name="pipeline", command="pipeline")
 workflow.step(fetch_data)

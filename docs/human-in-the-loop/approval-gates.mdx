@@ -56,6 +56,11 @@ When a gate fires, the run ends with `status.code == "cancelled"` and `status.re
 `requires_approval` accepts `True`, `False`, or a callable that receives the same kwargs as the handler and returns `bool`. `approval_prompt` and `approval_description` accept strings or callables and surface in the `ApprovalEvent` so the human reviewer has context.
 
 ```python
+from timbal import Tool
+
+def deploy_handler(env: str) -> str:
+    return f"deployed to {env}"
+
 high_risk_deploy = Tool(
     handler=deploy_handler,
     requires_approval=lambda env, **_: env == "production",
@@ -100,6 +105,8 @@ A reviewer often wants to approve *with a tweak* (fix a typo'd recipient, lower 
 ```python
 from timbal.types.approval import ApprovalResolution
 
+paused_run_id = None
+approval_id = "approval"
 result = await agent(
     prompt="email the customer",
     parent_id=paused_run_id,
@@ -144,6 +151,8 @@ This is useful when an operator stamps a decision in a UI but a worker doesn't p
 An `approval_id` covers one exact call. A human who has approved `rm /tmp/a` will be asked again for `rm /tmp/b`. To let them stop being asked, resume with `scope="session"`:
 
 ```python
+paused_run_id = None
+approval_id = "approval"
 result = await agent(
     prompt="clean up",
     parent_id=paused_run_id,
@@ -161,6 +170,14 @@ Every `ApprovalEvent` carries the two fields a client needs to offer the option:
 Narrow or forbid remembering from the tool side:
 
 ```python
+from timbal import Tool
+
+def admin_impl(command: str) -> str:
+    return command
+
+def wire_impl(amount: int) -> str:
+    return f"wired {amount}"
+
 # One tool, several subcommands: remembering `delete` must not cover `drop`.
 admin = Tool(
     handler=admin_impl,
@@ -189,6 +206,11 @@ Approval input is shown to humans and written to traces. If a gated runnable rec
 The simple form lists keys to mask with `"***"`:
 
 ```python
+from timbal import Tool
+
+def rotate_key_impl(api_key: str, password: str = "") -> str:
+    return "rotated"
+
 rotate_key = Tool(
     handler=rotate_key_impl,
     requires_approval=True,
@@ -200,6 +222,11 @@ rotate_key = Tool(
 For custom logic, use `approval_redactor`. It receives a copy of the validated input dict and returns the public snapshot:
 
 ```python
+from timbal import Tool
+
+def rotate_key_impl(api_key: str, customer_email: str) -> str:
+    return "rotated"
+
 rotate_key = Tool(
     handler=rotate_key_impl,
     requires_approval=True,
@@ -229,6 +256,15 @@ Workflow steps follow the same rules as tools. `requires_approval` is a `Runnabl
 
 ```python
 from timbal import Tool, Workflow
+
+def deploy_prod_impl() -> str:
+    return "prod"
+
+def deploy_staging() -> str:
+    return "staging"
+
+def announce() -> str:
+    return "announced"
 
 deploy_prod = Tool(
     name="deploy_prod",

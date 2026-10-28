@@ -53,13 +53,28 @@ This lazy-loading approach keeps the agent's context efficient while ensuring sp
 
 Create a skills directory and configure your agent to use it:
 
-```python highlight=6
+```python highlight=14
+from pathlib import Path
+
 from timbal import Agent
+
+skills = Path("skills")
+for name, description in (
+    ("payment_processing", "Complete payment processing including payments, refunds, and fraud detection"),
+    ("inventory_lookup", "Look up inventory levels for a product"),
+):
+    directory = skills / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{description}\n",
+        encoding="utf-8",
+    )
 
 agent = Agent(
     name="my_agent",
     model="anthropic/claude-sonnet-4-6",
-    skills_path="./skills"
+    max_tokens=4096,
+    skills_path="./skills",
 )
 ```
 The agent can now discover skills from this directory.
@@ -129,9 +144,26 @@ By default, every skill under `skills_path` is loaded into the agent. When a sin
 Load only the listed skills:
 
 ```python
+from pathlib import Path
+
+from timbal import Agent
+
+skills = Path("skills")
+for name, description in (
+    ("payment_processing", "Complete payment processing including payments, refunds, and fraud detection"),
+    ("inventory_lookup", "Look up inventory levels for a product"),
+):
+    directory = skills / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{description}\n",
+        encoding="utf-8",
+    )
+
 agent = Agent(
     name="payments_agent",
     model="anthropic/claude-sonnet-4-6",
+    max_tokens=4096,
     skills_path="./skills",
     skills_include=["payment_processing", "inventory_lookup"],
 )
@@ -144,9 +176,24 @@ Unknown names raise `ValueError` — typos fail loudly instead of silently loadi
 Load every skill except the listed ones:
 
 ```python
+from pathlib import Path
+
+from timbal import Agent
+
+skills = Path("skills")
+directory = skills / "payment_processing"
+directory.mkdir(parents=True, exist_ok=True)
+(directory / "SKILL.md").write_text(
+    "---\nname: payment_processing\n"
+    "description: Complete payment processing including payments, refunds, and fraud detection\n"
+    "---\n\nProcess payments.\n",
+    encoding="utf-8",
+)
+
 agent = Agent(
     name="support_agent",
     model="anthropic/claude-sonnet-4-6",
+    max_tokens=4096,
     skills_path="./skills",
     skills_exclude=["experimental_billing"],
 )
@@ -163,13 +210,25 @@ Unknown names in `skills_exclude` are silently ignored.
 For full control, pass `Skill` instances directly via `tools=[...]`. This bypasses `skills_path` entirely and is useful when skills live in unrelated locations or when an agent only needs one or two:
 
 ```python
+from pathlib import Path
+
 from timbal import Agent
 from timbal.core.skill import Skill
+
+skill_dir = Path("skills") / "payment_processing"
+skill_dir.mkdir(parents=True, exist_ok=True)
+(skill_dir / "SKILL.md").write_text(
+    "---\nname: payment_processing\n"
+    "description: Complete payment processing including payments, refunds, and fraud detection\n"
+    "---\n\nProcess payments.\n",
+    encoding="utf-8",
+)
 
 agent = Agent(
     name="refunds_agent",
     model="anthropic/claude-sonnet-4-6",
-    tools=[Skill(path="./skills/payment_processing")],
+    max_tokens=4096,
+    tools=[Skill(path=str(skill_dir))],
 )
 ```
 

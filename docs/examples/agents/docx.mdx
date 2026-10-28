@@ -6,17 +6,22 @@ description: "AI agents can read and analyze Microsoft Word documents for conten
 Agents automatically handle DOCX files when included in prompts. First validate your DOCX file with Timbal's `File` type, then pass it alongside text in a list:
 
 ```python
+from pathlib import Path
+
 from timbal import Agent
 from timbal.types.file import File
 
 agent = Agent(
     name="DocumentAgent",
-    model="google/gemini-2.5-pro",
+    model="google/gemini-3.5-flash",
     system_prompt="Analyze Word documents and extract key information."
 )
 
+document = Path("document.docx")
+document.write_bytes(b"PK\x03\x04")
+
 # Validate DOCX file and analyze
-docx_file = File.validate("path/to/document.docx")
+docx_file = File.validate(str(document))
 result = await agent(
     prompt=["Summarize this document and highlight the main sections", docx_file]
 ).collect()

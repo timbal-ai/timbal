@@ -12,6 +12,15 @@ Wrap a step function in a `Tool` with `requires_approval`:
 ```python
 from timbal import Tool, Workflow
 
+def deploy_prod_impl() -> str:
+    return "prod"
+
+def deploy_staging() -> str:
+    return "staging"
+
+def announce() -> str:
+    return "announced"
+
 deploy_prod = Tool(
     name="deploy_prod",
     handler=deploy_prod_impl,

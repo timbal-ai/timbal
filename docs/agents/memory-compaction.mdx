@@ -19,6 +19,14 @@ Tool result offloading intercepts a result when it is produced. If it exceeds a 
 ```python
 from timbal import Agent
 
+def search_docs(query: str) -> str:
+    """Search the docs."""
+    return query
+
+def run_query(sql: str) -> str:
+    """Run a query."""
+    return sql
+
 agent = Agent(
     name="my_agent",
     model="openai/gpt-4o-mini",
@@ -81,7 +89,16 @@ Truncate(strategy="head_tail")  # keep both ends, elide the middle (default)
 `Tool(result_limit=...)` overrides the agent default. `None` exempts a tool entirely:
 
 ```python
+from timbal import Agent
 from timbal.core import Tool, ToolResultLimit, Truncate
+
+def run_tests() -> str:
+    """Run the test suite."""
+    return "ok"
+
+def load_policy() -> str:
+    """Load the durable policy document."""
+    return "policy"
 
 agent = Agent(
     name="my_agent",
@@ -105,7 +122,7 @@ Some results are never reduced, regardless of configuration:
 
 When offloading is active, the agent auto-registers a `read_offloaded` tool. It reads everything behind a handle: offloaded tool results, [offloaded attachments](#attachments), and compacted transcripts.
 
-```python
+```python fragment
 read_offloaded(handle, offset=0, limit=200, pattern=None)
 ```
 
@@ -136,10 +153,16 @@ Payloads are kept **forever by default** — deleting on run end would break a r
 
 ```python
 from datetime import timedelta
+
+from timbal import Agent
 from timbal.core import LocalOffloadStore, ToolResultLimit
 
 store = LocalOffloadStore(cleanup_after=timedelta(days=7))
-agent = Agent(..., tool_result_limit=ToolResultLimit(store=store))
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    tool_result_limit=ToolResultLimit(store=store),
+)
 ```
 
 Pruning runs off the hot path and never fails a run.
@@ -301,7 +324,7 @@ agent = Agent(
 ```
 
 <Tip>
-Use a smaller, cheaper model for summarization to reduce cost. For example, `model="openai/gpt-5.4-nano"` works well for summarization tasks.
+Use a smaller, cheaper model for summarization to reduce cost. For example, `model="openai/gpt-5-mini"` works well for summarization tasks.
 </Tip>
 
 The summary message is **sectioned**, and everything except the LLM summary itself is assembled mechanically — never paraphrased by the summarizer:
@@ -334,6 +357,10 @@ You opt a tool in declaratively with `pin_result=True`:
 
 ```python
 from timbal.core.tool import Tool
+
+def load_policy() -> str:
+    """Load the durable policy document."""
+    return "policy"
 
 tool = Tool(
     name="load_policy",

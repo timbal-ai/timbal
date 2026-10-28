@@ -281,7 +281,7 @@ agent = Agent(
 
 Adaptive thinking is on by default, and thinking tokens count toward `max_tokens`. Timbal collects text and thinking blocks separately. Omit non-default sampling parameters. Haiku 5.5 uses the newer tokenizer, which produces approximately 30% more tokens for the same text than Haiku 4.5; recount prompts and budgets before migrating. Replay stored thinking blocks through the account that produced them or a linked account.
 
-Automatic prompt caching is enabled by Timbal. The 100K pricing threshold includes uncached input, cache reads, and cache writes; output uses the rate selected by the prompt length. `scripts/generate_costs_sql.py` emits both standard and `_long_context` token rates, including 5m and 1h cache writes. Apply the generated SQL when updating a billing database; changing the catalog alone does not update stored rates.
+Automatic prompt caching is enabled by Timbal. The 100K pricing threshold includes uncached input, cache reads, and cache writes; output uses the rate selected by the prompt length. Usage includes distinct long-context and cache-write token keys so a billing database can apply the published rates. Changing this catalog page does not update rates you have already stored.
 
 Haiku 5.5 specs and pricing verified October 7, 2026 against the [model specifications](https://platform.claude.com/docs/en/models/haiku-5-5/overview), [migration guide](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide), and [API pricing](https://platform.claude.com/docs/en/about-claude/pricing).
 

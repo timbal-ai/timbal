@@ -5,7 +5,7 @@ description: "Run Timbal projects on your own infrastructure"
 
 Self-hosting means you run the same three layers a `timbal create` project contains — **UI**, **API**, and **workforce** — without `timbal start` managing them. You own process lifecycle, port allocation, env wiring, restarts, and log aggregation.
 
-There is no `timbal build` or CLI-generated Docker image. You bring your own process manager (systemd, supervisord, Kubernetes, etc.) and production build pipeline.
+The CLI does not build a container image. You bring your own process manager (systemd, supervisord, Kubernetes, etc.) and production build pipeline.
 
 ## Prerequisites
 

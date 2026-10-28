@@ -11,7 +11,6 @@ from timbal import Agent
 agent = Agent(
     name="my_agent",
     model="openai/gpt-4o-mini",
-    tools=[...],
     guardrails="default",  # PII redaction + secret redaction + prompt-injection blocking
 )
 ```
@@ -37,7 +36,13 @@ agent = Agent(name="a", model="openai/gpt-4o-mini", guardrails="default")
 ### Shorthands
 
 ```python
-agent = Agent(..., guardrails=["pii:redact", "injection:block", "secrets", "moderation:warn"])
+from timbal import Agent
+
+agent = Agent(
+    name="a",
+    model="openai/gpt-4o-mini",
+    guardrails=["pii:redact", "injection:block", "secrets", "moderation:warn"],
+)
 ```
 
 Each shorthand is `name` or `name:action`. Valid names: `pii`, `secrets`, `injection`, `keywords`, `moderation`, `length`, `topic`, `judge`. A typo raises immediately with the valid options.
@@ -45,10 +50,12 @@ Each shorthand is `name` or `name:action`. Valid names: `pii`, `secrets`, `injec
 ### Configured built-ins
 
 ```python
+from timbal import Agent
 from timbal.guardrails import DetectPII, Moderate, PromptInjection, TopicGuard
 
 agent = Agent(
-    ...,
+    name="scoped",
+    model="openai/gpt-4o-mini",
     guardrails=[
         DetectPII(on_input="redact", on_output="block", types=["email", "credit_card", "ssn"]),
         PromptInjection(action="block"),
@@ -64,6 +71,7 @@ Per-stage actions live on the rail: `on_input=`, `on_output=`, `on_tool_args=`, 
 ### Plain callables
 
 ```python
+from timbal import Agent
 from timbal.guardrails import Verdict, guardrail
 
 def no_competitors(text: str):
@@ -71,7 +79,11 @@ def no_competitors(text: str):
         return Verdict.block("competitor mention")
     return True
 
-agent = Agent(..., guardrails=[guardrail(no_competitors, stages=["model_output"])])
+agent = Agent(
+    name="competitor_guard",
+    model="openai/gpt-4o-mini",
+    guardrails=[guardrail(no_competitors, stages=["model_output"])],
+)
 ```
 
 Return-value coercion: `True`/`None` allow, `False` blocks, a `str` replaces the content, a `Verdict` gives full control. Sync or async; take `(text)` or `(text, ctx)`. `@guardrail(stages=[...])` works as a decorator.
@@ -81,7 +93,7 @@ Return-value coercion: `True`/`None` allow, `False` blocks, a `str` replaces the
 ```python
 from timbal.guardrails import LLMJudge
 
-LLMJudge("Response must not give medical advice", model="openai/gpt-5.4-nano", action="retry")
+LLMJudge("Response must not give medical advice", model="openai/gpt-5-mini", action="retry")
 ```
 
 With `action="retry"` the judge's critique is fed back to the model and the response is re-generated — bounded by `Agent(max_guardrail_retries=2)`. Exhaustion blocks with the last reason.
@@ -136,13 +148,19 @@ result.output         # assistant Message carrying the blocked_message — rende
 A `tool_args` rail can require human sign-off instead of deciding itself, reusing the whole [approval-gate machinery](/human-in-the-loop/approval-gates) — `ApprovalEvent`, resume, edit-on-approve, audit trail:
 
 ```python
+from timbal import Agent
 from timbal.guardrails import Verdict, guardrail
+
+def deploy(env: str) -> str:
+    """Deploy to an environment."""
+    return env
 
 def gate_prod(text):
     return Verdict.escalate("Deploy to prod?") if '"env": "prod"' in text else True
 
 agent = Agent(
-    ...,
+    name="deploy_agent",
+    model="openai/gpt-4o-mini",
     tools=[deploy],
     guardrails=[guardrail(gate_prod, stages=["tool_args"])],
 )
@@ -153,6 +171,14 @@ Tool-local rails also work directly on a `Tool` (with or without an agent):
 
 ```python
 from timbal.core import Tool
+from timbal.guardrails import guardrail
+
+def send_email(to: str, body: str) -> str:
+    """Send an email."""
+    return f"sent to {to}"
+
+def internal_recipients_only(text: str):
+    return True
 
 Tool(handler=send_email, guardrails=[guardrail(internal_recipients_only, stages=["tool_args"])])
 ```
@@ -162,7 +188,14 @@ Tool(handler=send_email, guardrails=[guardrail(internal_recipients_only, stages=
 Deploy rails with zero enforcement risk: everything runs and gets recorded — nothing acts.
 
 ```python
-agent = Agent(..., guardrails=["pii:redact", "injection:block"], guardrail_mode="shadow")
+from timbal import Agent
+
+agent = Agent(
+    name="shadow_agent",
+    model="openai/gpt-4o-mini",
+    guardrails=["pii:redact", "injection:block"],
+    guardrail_mode="shadow",
+)
 ```
 
 Verdicts appear in `GuardrailEvent`s (with `shadow=True`), the run report, and usage counters (`guardrails:shadow_triggered`), so you can watch trigger rates in traces before flipping to `"enforce"` (the default). Per-rail: `DetectPII(shadow=True)`.
@@ -172,10 +205,12 @@ Verdicts appear in `GuardrailEvent`s (with `shadow=True`), the run report, and u
 Combine shadow mode with `sample_rate` to grade a slice of production traffic — the online-evaluation pattern, without the request-path cost:
 
 ```python
+from timbal import Agent
 from timbal.guardrails import LLMJudge
 
 agent = Agent(
-    ...,
+    name="sampled_monitor",
+    model="openai/gpt-4o-mini",
     guardrails=[
         LLMJudge(
             rubric=["Answers the question directly", "Cites a source"],
@@ -212,6 +247,9 @@ If a rail itself crashes, the default is **fail-open** (the run continues; the c
 In-run guardrails redact agent memory and outputs, but traces record every span — including the inner LLM call. `trace_redactor` closes that gap at the storage/export boundary:
 
 ```python
+from pathlib import Path
+
+from timbal import Agent
 from timbal.guardrails import trace_redactor
 from timbal.state.tracing.providers import JsonlTracingProvider
 
@@ -219,7 +257,12 @@ provider = JsonlTracingProvider.configured(
     _path=Path("traces.jsonl"),
     _trace_redactor=trace_redactor(),  # PII + secrets by default
 )
-agent = Agent(..., tracing_provider=provider, guardrails="default")
+agent = Agent(
+    name="redacted_traces",
+    model="openai/gpt-4o-mini",
+    tracing_provider=provider,
+    guardrails="default",
+)
 ```
 
 The redactor runs inside the provider's `put()` on **copies** of every span — inputs, outputs, memory dumps, errors, metadata — before storage and before every exporter fires. The live run is never mutated. It works with any provider (JSONL, SQLite, platform, custom) and accepts the same specs as `guardrails=`, restricted to **deterministic** rails (`trace_redactor("pii:redact", DetectPII(types=["ssn"], redaction="hash"))`) — an LLM call per span store would be a footgun, so judgment rails are rejected loudly.
@@ -269,7 +312,7 @@ It does not catch non-English attacks, base64 or character-separated obfuscation
 paraphrases that avoid the keywords entirely. Those need the classifier:
 
 ```python
-PromptInjection(model="openai/gpt-5.4-nano")  # patterns first; classifier only when they find nothing
+PromptInjection(model="openai/gpt-5-mini")  # patterns first; classifier only when they find nothing
 ```
 
 Treat either as defence in depth, not a boundary: the durable mitigations are least-privilege

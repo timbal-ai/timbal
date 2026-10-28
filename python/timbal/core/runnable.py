@@ -360,12 +360,13 @@ class Runnable(ABC, BaseModel):
     pre_hook: Callable[[], Any] | None = None
     """Pre-execution hook: parameterless callable; use get_run_context() for state.
 
-    Runs after input resolution and before Pydantic validation, so the params
-    model can see in-place changes to ``span.input`` (e.g. STT, middleware). A
-    callable ``requires_approval`` policy is evaluated *after* validation, but
-    this hook still runs on the first attempt, including when the run later cancels
-    for ``approval_required``. Defer expensive work until after approval by using
-    the handler or a nested Runnable.
+    Runs after input resolution, Pydantic validation, and the approval gate,
+    and only when the handler is about to run. Tool and workflow handlers
+    receive the already-validated kwargs; mutating ``span.input`` updates the
+    span record and is visible to later readers (an agent's
+    ``resolve_memory``, a system-prompt callable, a post-hook) but does not
+    change those kwargs. Defer expensive work until after approval by using
+    this hook, the handler, or a nested Runnable.
     """
     post_hook: Callable[[], Any] | None = None
     """Post-execution hook for runtime processing. Must be a parameterless callable.

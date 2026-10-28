@@ -101,7 +101,7 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token-here  # Your bot token
 
 Then configure your Python code:
 
-```python
+```python fragment
 import os
 
 from dotenv import load_dotenv
@@ -119,7 +119,7 @@ client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
 Create the Timbal agent with pre and post hooks for Slack integration:
 
-```python
+```python fragment
 from timbal import Agent
 
 agent = Agent(
@@ -144,7 +144,7 @@ The pre-hook handles incoming Slack webhook events and extracts relevant informa
 Just ensure the same name is used consistently in both the agent call and the pre_hook check.
 </Note>
 
-```python
+```python fragment
 from timbal.state import get_run_context
 from timbal.errors import bail
 
@@ -180,7 +180,7 @@ async def pre_hook():
 
 The post-hook sends the agent's response back to Slack:
 
-```python
+```python fragment
 from timbal.state import get_run_context
 
 def post_hook():
@@ -209,7 +209,7 @@ def post_hook():
 
 Combine the snippets into these files for local development. Thread timestamps control where replies appear; maintaining history per thread additionally requires storing each thread's latest run ID and passing it as `parent_id` with a suitable tracing provider. See [Memory](/agents/memory).
 
-```python agent.py
+```python fragment agent.py
 import os
 
 from dotenv import load_dotenv
@@ -301,7 +301,7 @@ This example uses `pyngrok` to expose the FastAPI app during local development. 
   <Step title="Create FastAPI Webhook Handler">
     Create a simple FastAPI server to handle Slack's URL verification and webhook events:
     
-    ```python server.py
+    ```python fragment server.py
     import uvicorn
     from dotenv import load_dotenv
     from fastapi import FastAPI, Request
