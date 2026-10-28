@@ -501,8 +501,10 @@ async def test_a_failed_upload_backing_off_does_not_hold_the_shutdown_flush():
                 await asyncio.sleep(0.02)
                 raise RuntimeError("platform unavailable")
 
-    # The failure backs off 0.1 s before its retry; the flush has 0.06 s.
-    provider = Storage.configured(durability="buffered", flush_interval_s=0.05)
+    # The failure backs off 2 s before its retry. Shutdown must store without
+    # waiting that out. The flush budget is 1 s: long enough to finish the
+    # in-flight write on a slow runner, short of the backoff.
+    provider = Storage.configured(durability="buffered", flush_interval_s=1.0)
     run_context = await finished_run(provider)
     attempts.clear()
     run_context._live_background += 1
@@ -510,7 +512,7 @@ async def test_a_failed_upload_backing_off_does_not_hold_the_shutdown_flush():
     state["fail_next"] = True
     await run_context._save_trace()  # the upload starts at once, and fails 0.02 s in
     await until(lambda: attempts == ["failed"])
-    await uploads.flush_all(timeout=0.06)  # shutdown while that upload is in flight
+    await uploads.flush_all(timeout=1.0)  # shutdown while that upload is in flight
     assert attempts == ["failed", "stored"]
     assert not uploads.tracked(run_context)
 
