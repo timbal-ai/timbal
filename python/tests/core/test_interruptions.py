@@ -673,8 +673,11 @@ class TestWorkflowInterruption:
         # Start workflow
         task = asyncio.create_task(workflow().collect())
 
-        # Wait for step_a to complete and step_b to start, then interrupt
-        await asyncio.sleep(0.7)
+        # Interrupt once step_b has started. A fixed sleep races a slow runner:
+        # step_a sleeps 0.5s, and cancelling at 0.7s can land before step_b runs.
+        deadline = time.monotonic() + 5
+        while "step_b" not in executed_steps and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         task.cancel()
         result = await task
 
@@ -1026,10 +1029,13 @@ class TestComprehensiveInterruptionVerification:
             .step(step_3, depends_on=["step_2"])
         )
 
-        # Execute and interrupt
+        # Execute and interrupt once step_2 has started. step_1 sleeps 0.5s;
+        # a fixed 0.7s cancel races the runner and can land before step_2.
         with Timer() as timer:
             task = asyncio.create_task(workflow().collect())
-            await asyncio.sleep(0.7)
+            deadline = time.monotonic() + 5
+            while "step_2" not in executed_steps and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
             task.cancel()
             result = await task
 

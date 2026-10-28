@@ -79,7 +79,7 @@ async def _llm_router(
     # TestModel short-circuit — delegates to model.stream() with no network call.
     if hasattr(model, "stream"):
         _set_model_metadata(getattr(model, "provider", "test"), getattr(model, "model_name", "model"))
-        async for chunk in model.stream(messages=messages):
+        async for chunk in model.stream(messages=messages, output_model=output_model):
             yield chunk  # type: ignore[return-type]
         return
 

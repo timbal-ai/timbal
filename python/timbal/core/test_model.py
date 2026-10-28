@@ -1,7 +1,66 @@
 """Drop-in model replacement for testing agents without hitting a real LLM API."""
 
+import json
+import types
 from collections.abc import AsyncGenerator, Callable
-from typing import Any
+from enum import Enum
+from typing import Any, Literal, Union, get_args, get_origin
+
+
+def _placeholder(annotation: Any, seen: set[type] | None = None) -> Any:
+    """Smallest JSON-able value that satisfies a structured-output annotation."""
+    from pydantic import BaseModel
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal and args:
+        return args[0]
+    if origin is Union or origin is types.UnionType:
+        non_none = [arg for arg in args if arg is not type(None)]
+        return _placeholder(non_none[0], seen) if non_none else None
+    if origin is list:
+        inner = args[0] if args else str
+        return [_placeholder(inner, seen)]
+    if origin is dict:
+        return {}
+    # Bare ``list`` / ``dict`` have no origin. ``"test"`` does not validate.
+    if annotation is list:
+        return ["test"]
+    if annotation is dict:
+        return {}
+    if annotation is str or annotation is Any or annotation is None:
+        return "test"
+    if annotation is int:
+        return 0
+    if annotation is float:
+        return 0.0
+    if annotation is bool:
+        return False
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        # Track the path, not every model already emitted. A second field of the
+        # same nested type is a sibling, not a cycle.
+        path = set() if seen is None else set(seen)
+        if annotation in path:
+            return {}
+        path.add(annotation)
+        payload: dict[str, Any] = {}
+        for name, field in annotation.model_fields.items():
+            if field.is_required():
+                payload[name] = _placeholder(field.annotation, path)
+        return payload
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return next(iter(annotation)).value
+    return "test"
+
+
+def _json_for_output_model(raw: str, output_model: type) -> str:
+    try:
+        output_model.model_validate_json(raw)
+    except Exception:
+        payload = _placeholder(output_model)
+        output_model.model_validate(payload)
+        return json.dumps(payload)
+    return raw
 
 
 class TestModel:
@@ -68,7 +127,7 @@ class TestModel:
         self.handler = handler
         self.call_count: int = 0
 
-    async def stream(self, messages: list, **_kwargs: Any) -> AsyncGenerator:
+    async def stream(self, messages: list, output_model: Any = None, **_kwargs: Any) -> AsyncGenerator:
         """Yield a single Message — no network call, no streaming.
 
         Implements the same async-generator interface as ``_llm_router`` so
@@ -100,6 +159,8 @@ class TestModel:
             raw = self.responses[idx]
 
         if isinstance(raw, str):
+            if output_model is not None:
+                raw = _json_for_output_model(raw, output_model)
             response = Message(
                 role="assistant",
                 content=[TextContent(text=raw)],

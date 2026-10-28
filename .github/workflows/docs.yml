@@ -6,7 +6,9 @@ on:
     paths:
       - "docs/**"
       - "python/**"
+      - "cli/**"
       - "scripts/audit_docs.py"
+      - "scripts/docs_snippets.py"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/docs.yml"
@@ -31,7 +33,7 @@ jobs:
       - name: Install all documented import dependencies
         run: uv sync --dev --extra all
       - name: Check navigation, snippets, imports, endpoints, and catalog prices
-        run: uv run python scripts/audit_docs.py --runtime
+        run: uv run python scripts/audit_docs.py --runtime --execute
       - name: Check audit regressions
         run: uv run pytest python/tests/test_docs_audit.py
       - uses: actions/setup-node@v6

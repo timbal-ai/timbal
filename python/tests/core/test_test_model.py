@@ -148,6 +148,61 @@ class TestTestModelWithAgent:
             assert r.error is None
 
     @pytest.mark.asyncio
+    async def test_output_model_gets_schema_valid_json(self):
+        from pydantic import BaseModel, Field
+
+        class Ingredient(BaseModel):
+            name: str
+            amount: float
+
+        class Recipe(BaseModel):
+            ingredients: list[Ingredient] = Field(min_length=1)
+            total_time: float
+
+        agent = Agent(name="chef", model=TestModel(), output_model=Recipe)
+        result = await agent(prompt="lasagna").collect()
+        assert isinstance(result.output, Recipe)
+        assert result.output.ingredients[0].name == "test"
+        assert result.output.total_time == 0.0
+
+        given = '{"ingredients": [{"name": "noodles", "amount": 12}], "total_time": 60}'
+        agent = Agent(name="chef", model=TestModel(responses=[given]), output_model=Recipe)
+        result = await agent(prompt="lasagna").collect()
+        assert result.output.total_time == 60
+        assert result.output.ingredients[0].name == "noodles"
+
+    @pytest.mark.asyncio
+    async def test_output_model_repeats_nested_type(self):
+        from pydantic import BaseModel
+
+        class Point(BaseModel):
+            x: int
+            y: int
+
+        class Segment(BaseModel):
+            start: Point
+            end: Point
+
+        agent = Agent(name="draw", model=TestModel(), output_model=Segment)
+        result = await agent(prompt="line").collect()
+        assert isinstance(result.output, Segment)
+        assert result.output.start.x == 0
+        assert result.output.end.y == 0
+
+    @pytest.mark.asyncio
+    async def test_output_model_bare_list_and_dict(self):
+        from pydantic import BaseModel
+
+        class Bag(BaseModel):
+            tags: list
+            meta: dict
+
+        agent = Agent(name="bag", model=TestModel(), output_model=Bag)
+        result = await agent(prompt="pack").collect()
+        assert result.output.tags == ["test"]
+        assert result.output.meta == {}
+
+    @pytest.mark.asyncio
     async def test_no_api_keys_needed(self):
         """TestModel must work even when no API keys are present in the environment."""
         import os
