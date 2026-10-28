@@ -77,7 +77,7 @@ class JsonlTracingProvider(TracingProvider):
 
     Configure via the base-class ``configured()`` method::
 
-        provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
+        provider = JsonlTracingProvider.configured(path=Path("traces.jsonl"))
         agent = Agent(name="my_agent", model=..., tracing_provider=provider)
 
     Class-level attributes:
@@ -178,7 +178,7 @@ class JsonlTracingProvider(TracingProvider):
         if cls._path is None:
             raise RuntimeError(
                 "JsonlTracingProvider._path is not set. "
-                "Use JsonlTracingProvider.configured(_path=Path(...)) to create a configured provider."
+                "Use JsonlTracingProvider.configured(path=Path(...)) to create a configured provider."
             )
 
         def _claim() -> bool:
@@ -222,7 +222,7 @@ class JsonlTracingProvider(TracingProvider):
         if cls._path is None:
             raise RuntimeError(
                 "JsonlTracingProvider._path is not set. "
-                "Use JsonlTracingProvider.configured(_path=Path(...)) to create a configured provider."
+                "Use JsonlTracingProvider.configured(path=Path(...)) to create a configured provider."
             )
         run_id = str(run_context.id)
         new_record = {

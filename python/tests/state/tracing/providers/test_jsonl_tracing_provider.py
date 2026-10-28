@@ -98,6 +98,12 @@ class TestTracingProviderConfigured:
         assert sub._path == Path("my.jsonl")
         assert sub._lock is None
 
+    def test_path_is_public_alias_of_private_path(self):
+        sub = JsonlTracingProvider.configured(path="traces.jsonl")
+        assert sub._path == Path("traces.jsonl")
+        with pytest.raises(TypeError, match="both path and _path"):
+            JsonlTracingProvider.configured(path="a.jsonl", _path=Path("b.jsonl"))
+
     def test_does_not_mutate_original(self):
         original_path = JsonlTracingProvider._path
         JsonlTracingProvider.configured(_path=Path("other.jsonl"))

@@ -70,10 +70,12 @@ asyncio.run(main())
 To approve in a UI now and resume in a worker later, configure a durable tracing provider and pass `parent_id`:
 
 ```python
+import asyncio
 from pathlib import Path
+
 from timbal.state.tracing.providers import JsonlTracingProvider
 
-provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
+provider = JsonlTracingProvider.configured(path=Path("traces.jsonl"))
 
 agent = Agent(
     name="support_agent",
@@ -85,16 +87,20 @@ agent = Agent(
 paused_run_id = None
 approval_id = "approval"
 
-# In the worker, after the reviewer decided:
-result = await agent(
-    prompt="Refund $250 to customer C-42",
-    parent_id=paused_run_id,
-    resume={approval_id: True},
-).collect()
 
-if result.status.reason == "approval_already_claimed":
-    # Another worker already resumed this approval. Safe to no-op.
-    return
+async def resume_if_unclaimed() -> None:
+    # In the worker, after the reviewer decided:
+    result = await agent(
+        prompt="Refund $250 to customer C-42",
+        parent_id=paused_run_id,
+        resume={approval_id: True},
+    ).collect()
+    if result.status.reason == "approval_already_claimed":
+        # Another worker already resumed this approval. Safe to no-op.
+        return
+
+
+asyncio.run(resume_if_unclaimed())
 ```
 
 `JsonlTracingProvider` (and `SqliteTracingProvider`) implement durable `(parent_id, approval_id)` claims, so two workers racing on the same gate will not both execute the handler.

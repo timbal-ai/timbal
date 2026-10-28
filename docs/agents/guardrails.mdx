@@ -10,7 +10,7 @@ from timbal import Agent
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     guardrails="default",  # PII redaction + secret redaction + prompt-injection blocking
 )
 ```
@@ -28,7 +28,7 @@ The edges:
 ### One string
 
 ```python
-agent = Agent(name="a", model="openai/gpt-4o-mini", guardrails="default")
+agent = Agent(name="a", model="openai/gpt-5-mini", guardrails="default")
 ```
 
 `"default"` is deterministic and free — no classifier calls: `DetectPII(action="redact")` + `RedactSecrets()` + `PromptInjection(action="block")`.
@@ -40,7 +40,7 @@ from timbal import Agent
 
 agent = Agent(
     name="a",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     guardrails=["pii:redact", "injection:block", "secrets", "moderation:warn"],
 )
 ```
@@ -55,7 +55,7 @@ from timbal.guardrails import DetectPII, Moderate, PromptInjection, TopicGuard
 
 agent = Agent(
     name="scoped",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     guardrails=[
         DetectPII(on_input="redact", on_output="block", types=["email", "credit_card", "ssn"]),
         PromptInjection(action="block"),
@@ -81,7 +81,7 @@ def no_competitors(text: str):
 
 agent = Agent(
     name="competitor_guard",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     guardrails=[guardrail(no_competitors, stages=["model_output"])],
 )
 ```
@@ -160,7 +160,7 @@ def gate_prod(text):
 
 agent = Agent(
     name="deploy_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[deploy],
     guardrails=[guardrail(gate_prod, stages=["tool_args"])],
 )
@@ -192,7 +192,7 @@ from timbal import Agent
 
 agent = Agent(
     name="shadow_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     guardrails=["pii:redact", "injection:block"],
     guardrail_mode="shadow",
 )
@@ -210,7 +210,7 @@ from timbal.guardrails import LLMJudge
 
 agent = Agent(
     name="sampled_monitor",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     guardrails=[
         LLMJudge(
             rubric=["Answers the question directly", "Cites a source"],
@@ -254,12 +254,12 @@ from timbal.guardrails import trace_redactor
 from timbal.state.tracing.providers import JsonlTracingProvider
 
 provider = JsonlTracingProvider.configured(
-    _path=Path("traces.jsonl"),
+    path=Path("traces.jsonl"),
     _trace_redactor=trace_redactor(),  # PII + secrets by default
 )
 agent = Agent(
     name="redacted_traces",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tracing_provider=provider,
     guardrails="default",
 )

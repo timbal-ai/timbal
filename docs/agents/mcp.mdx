@@ -23,7 +23,7 @@ from timbal.core import MCPServer
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[
         # stdio: spawn a local server process
         MCPServer(
@@ -156,7 +156,7 @@ Servers can ask the user a question mid tool call ([elicitation](https://modelco
 from timbal import Agent
 from timbal.types.events import InteractionEvent
 
-agent = Agent(name="my_agent", model="openai/gpt-4o-mini")
+agent = Agent(name="my_agent", model="openai/gpt-5-mini")
 paused_run_id = None
 interaction_id = None
 async for event in agent(prompt="Swap the KB to 1586"):

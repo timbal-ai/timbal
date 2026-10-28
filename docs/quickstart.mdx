@@ -9,13 +9,13 @@ Before moving forward, complete the [installation steps](/installation). You nee
 
 ## Run without an API key
 
-`TestModel` answers from a list you provide. It does not call a provider and does not need a key. Import it from `timbal.core.test_model` (it is not re-exported from `timbal`).
+`TestModel` answers from a list you provide. It does not call a provider and does not need a key. Import it from `timbal.core`.
 
 ```python
 import asyncio
 
 from timbal import Agent
-from timbal.core.test_model import TestModel
+from timbal.core import TestModel
 
 
 async def main() -> None:
@@ -32,9 +32,12 @@ asyncio.run(main())
 ```
 
 ```
+[info] Using in-memory tracing provider. event_name=tracing_setup run_id=<run id>
 success
 Hello from Timbal.
 ```
+
+The tracing line is logged before the prints. The run id changes every execution. Debug lines about platform config only show when debug logging is on.
 
 `collect()` is a method of the object `agent(...)` returns, not of `Agent`. Pass `responses` or a `handler(messages)`; do not pass both. `model.call_count` increments once per model call. Swap the same agent to a string model (`openai/gpt-5-mini` and an `OPENAI_API_KEY`, or platform auth from `timbal configure`) when you want a live answer. A voice session cannot use `TestModel` for speech; see [Your first voice agent](/voice/quickstart).
 

@@ -76,20 +76,27 @@ clients cannot override the host. Credentials stay on the server.
 
 For file transcription or standalone audio generation, use the built-in tools:
 
-```python
+```python fragment
+import asyncio
+
 from timbal.tools import OpenAISpeechToText, OpenAITextToSpeech
 
-stt = OpenAISpeechToText()
-tts = OpenAITextToSpeech()
 
-
-async def transcribe(path: str):
+async def main() -> None:
     # Needs OPENAI_API_KEY and a local audio file.
-    return await stt(audio_file_path=path, language="en").collect()
+    transcript = await OpenAISpeechToText()(
+        audio_file_path="recording.wav",
+        language="en",
+    ).collect()
+    audio = await OpenAITextToSpeech()(
+        text="Hello from Timbal!",
+        voice="coral",
+        response_format="mp3",
+    ).collect()
+    print(transcript.output, audio.output)
 
 
-async def speak() -> None:
-    return await tts(text="Hello from Timbal!", voice="coral", response_format="mp3").collect()
+asyncio.run(main())
 ```
 
 Both tools also work in `Agent(tools=[...])` and accept explicit `api_key`,
@@ -157,18 +164,27 @@ agent = Agent(
     model="openai/gpt-5-mini",
     tools=[DeepgramListVoices(), DeepgramTextToSpeech()],
 )
+```
 
-# Tools also work directly, without an agent. Calling them needs DEEPGRAM_API_KEY.
-async def list_spanish_voices():
-    return await DeepgramListVoices()(language="es").collect()
+Calling the tools directly needs `DEEPGRAM_API_KEY`:
+
+```python fragment
+import asyncio
+
+from timbal.tools import DeepgramListVoices, DeepgramTextToSpeech
 
 
-async def speak_deepgram():
-    return await DeepgramTextToSpeech()(
+async def main() -> None:
+    voices = await DeepgramListVoices()(language="es").collect()
+    audio = await DeepgramTextToSpeech()(
         text="Hello from Timbal!",
         model="aura-2-thalia-en",
         encoding="mp3",
     ).collect()
+    print(voices.output, audio.output)
+
+
+asyncio.run(main())
 ```
 
 `DeepgramListVoices` returns Aura model ids, languages and provider metadata

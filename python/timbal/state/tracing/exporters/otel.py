@@ -32,7 +32,7 @@ class OTelExporter(Exporter):
         from timbal.state.tracing.providers import JsonlTracingProvider
 
         provider = JsonlTracingProvider.configured(
-            _path=Path("traces.jsonl"),
+            path=Path("traces.jsonl"),
             _exporters=[
                 OTelExporter(
                     endpoint="http://localhost:4318",

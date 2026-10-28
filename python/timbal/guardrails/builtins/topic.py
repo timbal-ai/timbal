@@ -21,7 +21,7 @@ class TopicGuard(Guardrail):
     ```python
     TopicGuard(allow=["billing", "shipping"],
                blocked_message="I can only help with billing and shipping.")
-    TopicGuard(deny=["medical advice", "legal advice"], model="openai/gpt-5.4-nano")
+    TopicGuard(deny=["medical advice", "legal advice"], model="openai/gpt-5-mini")
     ```
     """
 
@@ -32,7 +32,7 @@ class TopicGuard(Guardrail):
     """Topics the agent may discuss. Anything else is off-topic."""
     deny: list[str] = Field(default_factory=list)
     """Topics that are always off-topic (checked in addition to allow)."""
-    model: Any = "openai/gpt-5.4-nano"
+    model: Any = "openai/gpt-5-mini"
     """Classifier model: a model string, or any model instance the router accepts."""
     max_chars: int = 8_000
 

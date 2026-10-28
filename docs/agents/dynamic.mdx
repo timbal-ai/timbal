@@ -46,7 +46,7 @@ def get_system_prompt() -> str:
 
 agent = Agent(
     name="dynamic_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     system_prompt=get_system_prompt,  # Pass the function directly
 )
 ```
@@ -84,7 +84,7 @@ def system_prompt() -> str:
 
 agent = Agent(
     name="multilang_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     system_prompt=system_prompt,
 )
 
@@ -148,7 +148,7 @@ class RoleBasedToolSet(ToolSet):
 
 admin_agent = Agent(
     name="admin_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[RoleBasedToolSet()]
 )
 

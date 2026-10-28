@@ -64,7 +64,7 @@ class PromptInjection(Guardrail):
     stages: set[GuardrailStage] = Field(default_factory=lambda: {GuardrailStage.INPUT})
     action: str = "block"
     model: Any = None
-    """Optional LLM classifier model — a model string (e.g. 'openai/gpt-5.4-nano'), or any
+    """Optional LLM classifier model — a model string (e.g. 'openai/gpt-5-mini'), or any
     model instance the router accepts (FallbackModel, TestModel). None = patterns only."""
     max_classifier_chars: int = 8_000
     """Input beyond this is truncated before classification (patterns still see all of it)."""

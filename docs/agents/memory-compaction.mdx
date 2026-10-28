@@ -29,7 +29,7 @@ def run_query(sql: str) -> str:
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tools=[search_docs, run_query],
     tool_result_limit=20_000,  # offload results over 20,000 chars
 )
@@ -61,7 +61,7 @@ from timbal.core import LocalOffloadStore, Spill, ToolResultLimit, Truncate
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tool_result_limit=ToolResultLimit(
         threshold=20_000,                  # chars of text content (default 20,000)
         action=Spill(preview_chars=1_000), # what to do when the threshold is reached
@@ -102,7 +102,7 @@ def load_policy() -> str:
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tool_result_limit=20_000,  # agent-wide default: spill over 20k
     tools=[
         Tool(name="run_tests", handler=run_tests,
@@ -160,7 +160,7 @@ from timbal.core import LocalOffloadStore, ToolResultLimit
 store = LocalOffloadStore(cleanup_after=timedelta(days=7))
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tool_result_limit=ToolResultLimit(store=store),
 )
 ```
@@ -176,7 +176,7 @@ Files in a user message reach the model in one of two ways. Images, PDFs and aud
 ```python
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     tool_result_limit=20_000,
     attachment_limit=20_000,  # attachments whose text reaches 20,000 chars are offloaded
 )
@@ -220,7 +220,7 @@ from timbal.core.memory_compaction import keep_last_n_turns
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=keep_last_n_turns(10),
     memory_compaction_ratio=0.75,  # trigger when the context passes 75% of the window
 )
@@ -243,7 +243,7 @@ from timbal.core.memory_compaction import keep_last_n_turns
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=keep_last_n_turns(5),
 )
 ```
@@ -257,7 +257,7 @@ from timbal.core.memory_compaction import keep_last_n_messages
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=keep_last_n_messages(20),
 )
 ```
@@ -271,7 +271,7 @@ from timbal.core.memory_compaction import compact_tool_results
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=compact_tool_results(
         keep_last_n=2,       # keep last 2 tool call pairs intact
         threshold=10,        # only apply when memory exceeds 10 messages
@@ -313,10 +313,10 @@ from timbal.core.memory_compaction import summarize
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=summarize(
         threshold=20,                     # summarize when non-system messages exceed 20
-        model="openai/gpt-4o-mini",       # model used for summarization (defaults to agent's model)
+        model="openai/gpt-5-mini",       # model used for summarization (defaults to agent's model)
         keep_last_n=4,                    # keep last 4 messages unsummarized
         max_summary_tokens=500,
     ),
@@ -324,7 +324,7 @@ agent = Agent(
 ```
 
 <Tip>
-Use a smaller, cheaper model for summarization to reduce cost. For example, `model="openai/gpt-5-mini"` works well for summarization tasks.
+Summarization uses the agent's model unless you pass `model=`. A smaller model is enough when the summary does not need the same capability as the conversation.
 </Tip>
 
 The summary message is **sectioned**, and everything except the LLM summary itself is assembled mechanically — never paraphrased by the summarizer:
@@ -381,7 +381,7 @@ from timbal.core.memory_compaction import compact_tool_results, keep_last_n_turn
 
 agent = Agent(
     name="my_agent",
-    model="openai/gpt-4o-mini",
+    model="openai/gpt-5-mini",
     memory_compaction=[
         compact_tool_results(keep_last_n=2),  # first: shrink tool results
         keep_last_n_turns(10),                # then: trim to last 10 turns

@@ -58,7 +58,7 @@ class LLMJudge(Guardrail):
     """Rubric mode: weighted fraction of criteria that must pass (1.0 = all)."""
     rubric_context: str | None = None
     """Optional task description shown to every rubric judge."""
-    model: Any = "openai/gpt-5.4-nano"
+    model: Any = "openai/gpt-5-mini"
     max_chars: int = 16_000
 
     def __init__(self, criteria: str | None = None, **kwargs: Any) -> None:
