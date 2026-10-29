@@ -293,6 +293,13 @@ def _call_context_from_start(info: dict[str, Any], custom: dict[str, Any]) -> di
         val = info.get(key)
         if key not in ctx and isinstance(val, str) and val:
             ctx[key] = val
+    # Role names that do not depend on direction: the person on the line and our line.
+    outbound = custom.get("direction") == "outbound"
+    user, agent = (ctx.get("to"), ctx.get("from")) if outbound else (ctx.get("from"), ctx.get("to"))
+    if user and "user_number" not in ctx:
+        ctx["user_number"] = user
+    if agent and "agent_number" not in ctx:
+        ctx["agent_number"] = agent
     return ctx
 
 

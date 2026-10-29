@@ -326,7 +326,7 @@ class VoiceSession:
         filler: FillerConfig | dict[str, Any] | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
         user_idle: UserIdleConfig | dict[str, Any] | None = None,
-        call_context: dict[str, str] | None = None,
+        call_context: dict[str, Any] | None = None,
         parent_run_id: str | None = None,
         announce_background_results: bool = False,
         client_events: bool = False,
@@ -464,7 +464,10 @@ class VoiceSession:
         # leftover custom params that must survive turn-2 context forks via
         # the session bag. Do not pass these as agent(prompt=..., rep_id=...);
         # leftover kwargs leak into ``_llm._stream(**kwargs)``.
-        self.call_context: dict[str, str] = dict(call_context or {})
+        self.call_context: dict[str, Any] = dict(call_context or {})
+        # Set by the transport when the platform asked this call for an outcome
+        # (see :mod:`timbal.voice.call`). Holds a call-scoped credential.
+        self.call_control: Any = None
 
         # Run id this call continues from (text → voice). Session identity, not
         # a voice knob: it says which conversation the caller is joining, so it

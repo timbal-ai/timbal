@@ -669,6 +669,7 @@ async def _run_livekit_session(
         is_eligible_caller,
         is_sip_participant,
         phone_tuned_voice_config,
+        platform_outcome_schema,
         sip_abandon_secs,
         sip_call_context,
         sip_recording_meta,
@@ -1070,14 +1071,16 @@ async def _run_livekit_session(
         config = merge_client_config(dial.client_config, hello_holder["hello"])
         if caller_is_sip:
             config = phone_tuned_voice_config(config)
-        sip_ctx: dict[str, str] = {}
+        sip_ctx: dict[str, Any] = {}
         sip_meta: dict[str, str] = {}
+        outcome_schema: dict[str, Any] | None = None
         if caller_is_sip:
             sip_meta["transport_detail"] = "livekit_sip"
             if caller_participant is not None:
                 attrs = dict(getattr(caller_participant, "attributes", None) or {})
                 sip_ctx = sip_call_context(attrs)
                 sip_meta.update(sip_recording_meta(attrs))
+                outcome_schema = platform_outcome_schema(attrs)
         sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)
 
         downlink = LkPacedSource(sample_rate=sample_rate)
@@ -1098,6 +1101,8 @@ async def _run_livekit_session(
             parent_run_id=dial.parent_id or None,
         )
         session_holder["s"] = session
+        if call_control_holder["c"] is not None:
+            session.call_control = call_control_holder["c"].outcome_control(outcome_schema)
         if session_aborted.is_set() or session.closed:
             with contextlib.suppress(BaseException):
                 await session.close()

@@ -64,7 +64,7 @@
               },
               {
                 "group": "Connecting and operating",
-                "pages": ["voice/recording", "voice/transports", "voice/observability"]
+                "pages": ["voice/recording", "voice/transports", "voice/outbound-calls", "voice/observability"]
               },
               {
                 "group": "Reference and extensions",

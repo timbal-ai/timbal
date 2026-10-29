@@ -1,5 +1,6 @@
 """timbal.voice — voice pipeline: VoiceSession, STT/TTS ABCs, turn detection, metrics, and provider implementations."""
 
+from .call import CallControl, call_context, current_call_control
 from .config import (
     AmbientAudioConfig,
     FillerConfig,
@@ -133,6 +134,7 @@ __all__ = [
     "AudioOutput",
     "AudioOutputConfig",
     "BufferedPlaybackTracker",
+    "CallControl",
     "CommitAction",
     "CommitDecision",
     "DeepgramFluxSTT",
@@ -186,6 +188,8 @@ __all__ = [
     "VoiceSession",
     "VoiceSessionEvent",
     "VoiceUsageEvent",
+    "call_context",
+    "current_call_control",
     "current_voice_session",
     "endpointing_delay",
     "resolve_stt",
