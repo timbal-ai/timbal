@@ -469,7 +469,7 @@ class TestFilePersist:
         assert result is not None
         assert os.path.exists(result)
 
-    def _platform_ctx(self):
+    def _platform_ctx(self, org_id: str = "org-1"):
         from timbal.state.context import RunContext
         from timbal.state.config import (
             PlatformAuth,
@@ -482,9 +482,60 @@ class TestFilePersist:
             host="https://api.timbal.ai",
             cdn="content.timbal.ai",
             auth=PlatformAuth(type=PlatformAuthType.BEARER, token="token123"),
-            subject=PlatformSubject(org_id="org-1", app_id="app-9"),
+            subject=PlatformSubject(org_id=org_id, app_id="app-9"),
         )
         return RunContext(platform_config=platform_config, tracing_provider=None)
+
+    async def test_persist_upload_counts_against_the_run_org(self) -> None:
+        """POST /files carries the run's org_id so the org's upload limit applies."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from timbal.state import set_run_context
+
+        set_run_context(self._platform_ctx(org_id="42"))
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content_length": 4,
+            "content_type": "application/octet-stream",
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": None,
+            "name": "a.bin",
+            "url": "https://timbalusercontent.com/tmp/019f/a.bin",
+        }
+
+        file = File.validate(b"data", {"extension": ".bin"})
+        with patch("timbal.platform.utils._request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = mock_response
+            await file.persist()
+
+        assert mock_request.await_args.args == ("POST", "files")
+        assert mock_request.await_args.kwargs["params"] == {"org_id": "42"}
+
+    async def test_persist_upload_omits_non_numeric_org_id(self) -> None:
+        """The platform rejects a non-numeric org_id, so persist() leaves it out."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from timbal.state import set_run_context
+
+        set_run_context(self._platform_ctx(org_id="org-1"))
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "content_length": 4,
+            "content_type": "application/octet-stream",
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": None,
+            "name": "a.bin",
+            "url": "https://timbalusercontent.com/tmp/019f/a.bin",
+        }
+
+        file = File.validate(b"data", {"extension": ".bin"})
+        with patch("timbal.platform.utils._request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = mock_response
+            await file.persist()
+
+        assert mock_request.await_args.kwargs["params"] is None
 
     async def test_persist_upload_returns_unsigned_url(self, tmp_path: pathlib.Path) -> None:
         """POST /files returns a fully-encoded url; persist() must use it verbatim."""

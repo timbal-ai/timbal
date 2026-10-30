@@ -486,9 +486,14 @@ class File(io.IOBase):
 
         path = "files"
         files = {"file": (self.name, content, self.__content_type__)}
+        # The platform counts the upload against this org's files_upload_rate
+        # instead of the per-user default. It only accepts numeric org ids;
+        # platforms without the parameter ignore it.
+        org_id = run_context.platform_config.subject.org_id
+        params = {"org_id": org_id} if org_id.isdigit() else None
 
         from ..platform.utils import _request
-        res = await _request("POST", path, files=files)
+        res = await _request("POST", path, params=params, files=files)
         upload_response = UploadFileResponse.model_validate(res.json())
         # The platform returns a fully percent-encoded URL — use it verbatim.
         # Reconstructing it from `name` (raw, unencoded) breaks whenever the name
