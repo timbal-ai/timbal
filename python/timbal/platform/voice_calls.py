@@ -58,6 +58,7 @@ MAX_JSON_BYTES = 16 * 1024
 
 _CONTEXT_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SPAN_METADATA_KEY = "voice_calls"
+_SPAN_RESULTS_METADATA_KEY = "voice_call_results"
 _ROOT_METADATA_KEY = "voice_call_root_id"
 
 
@@ -267,7 +268,25 @@ async def default_idempotency_key(attempt: int = 0) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-async def _replayed_from_parent(key: str) -> dict[str, Any] | None:
+def _dial_fingerprint(
+    workforce: str,
+    rev: str | None,
+    to: str,
+    from_number: str | None,
+    trunk_id: int | str | None,
+    greeting: str | None,
+) -> list[Any]:
+    return [
+        workforce,
+        rev,
+        to,
+        from_number or None,
+        int(trunk_id) if trunk_id is not None else None,
+        greeting or None,
+    ]
+
+
+async def _replayed_from_parent(key: str, fingerprint: list[Any]) -> dict[str, Any] | None:
     """The call a previous run in this resume chain already started with ``key``."""
     ctx = get_or_create_run_context()
     if not (ctx.parent_id and ctx._resume_values):
@@ -279,11 +298,18 @@ async def _replayed_from_parent(key: str) -> dict[str, Any] | None:
         records = (getattr(span, "metadata", None) or {}).get(_SPAN_METADATA_KEY)
         record = records.get(key) if isinstance(records, dict) else None
         if isinstance(record, dict) and record.get("id"):
-            return record
+            stored_fp = record.get("fingerprint")
+            if isinstance(stored_fp, list) and stored_fp != fingerprint:
+                raise IdempotencyKeyReused(
+                    "Starting the voice call failed: the idempotency key was already used for a different dial "
+                    "(workforce, rev, to, from, trunk or greeting). Use a new key or bump attempt=.",
+                    status_code=422,
+                )
+            return {k: v for k, v in record.items() if k != "fingerprint"}
     return None
 
 
-def _record_on_span(call: VoiceCall) -> None:
+def _record_on_span(call: VoiceCall, fingerprint: list[Any]) -> None:
     span = _current_span()
     if span is None:
         return
@@ -296,6 +322,7 @@ def _record_on_span(call: VoiceCall) -> None:
         "project_id": call.project_id,
         "rev": call.rev,
         "idempotency_key": call.idempotency_key,
+        "fingerprint": fingerprint,
     }
 
 
@@ -352,12 +379,13 @@ async def start_voice_call(
     schema = outcome_schema_for(outcome)
     outcome_model = outcome if isinstance(outcome, type) and issubclass(outcome, BaseModel) else None
     key = idempotency_key or await default_idempotency_key(attempt)
+    fingerprint = _dial_fingerprint(workforce, revision, to, from_number, trunk_id, greeting)
 
-    prior = await _replayed_from_parent(key)
+    prior = await _replayed_from_parent(key, fingerprint)
     if prior is not None:
         call = VoiceCall(**{**prior, "replayed": True})
         call._outcome_model = outcome_model
-        _record_on_span(call)
+        _record_on_span(call, fingerprint)
         return call
 
     body: dict[str, Any] = {"to": to}
@@ -408,7 +436,7 @@ async def start_voice_call(
         replayed=replayed,
     )
     call._outcome_model = outcome_model
-    _record_on_span(call)
+    _record_on_span(call, fingerprint)
     logger.info("voice_call_started", call_id=call.id, workforce=workforce, replayed=replayed)
     return call
 
@@ -427,7 +455,7 @@ def _result(view: Any, call: VoiceCall, outcome_model: type[BaseModel] | None) -
     if str(view.get("id")) != call.id:
         raise VoiceCallError(f"Received the result of call {view.get('id')!r} while waiting for {call.id!r}.")
     result = VoiceCallResult.model_validate(view)
-    if outcome_model is not None and result.outcome_status == "reported" and result.outcome is not None:
+    if outcome_model is not None and result.outcome_status == "reported":
         try:
             result.outcome = outcome_model.model_validate(result.outcome)
         except ValidationError as exc:
@@ -473,6 +501,30 @@ async def cancel_voice_call(call: VoiceCall | dict[str, Any]) -> VoiceCallResult
     return _result(body, handle, handle._outcome_model)
 
 
+async def _replayed_result_from_parent(call_id: str) -> dict[str, Any] | None:
+    """The final result a previous run in this resume chain already received for ``call_id``."""
+    ctx = get_or_create_run_context()
+    if not (ctx.parent_id and ctx._resume_values):
+        return None
+    parent = await ctx._get_parent_trace()
+    if parent is None:
+        return None
+    for span in parent.values():
+        results = (getattr(span, "metadata", None) or {}).get(_SPAN_RESULTS_METADATA_KEY)
+        view = results.get(call_id) if isinstance(results, dict) else None
+        if isinstance(view, dict) and view.get("finalized_at") is not None:
+            return view
+    return None
+
+
+def _record_result_on_span(call_id: str, result: VoiceCallResult) -> None:
+    span = _current_span()
+    if span is None:
+        return
+    results = span.metadata.setdefault(_SPAN_RESULTS_METADATA_KEY, {})
+    results[call_id] = result.model_dump(mode="json")
+
+
 async def wait_for_voice_call(
     call: VoiceCall | dict[str, Any],
     *,
@@ -498,9 +550,16 @@ async def wait_for_voice_call(
         if suspension_id in ctx._resume_values:
             result = _final(suspend(payload, kind=VOICE_CALL_KIND), handle, model)
             await _claim_delivery(ctx, suspension_id, handle.id)
+            _record_result_on_span(handle.id, result)
             return result
+    prior_view = await _replayed_result_from_parent(handle.id)
+    if prior_view is not None:
+        result = _final(prior_view, handle, model)
+        _record_result_on_span(handle.id, result)
+        return result
     current = await get_voice_call(handle, outcome=model)
     if current.is_final:
+        _record_result_on_span(handle.id, current)
         return current
     if ctx._tracing_provider is None:
         logger.warning(

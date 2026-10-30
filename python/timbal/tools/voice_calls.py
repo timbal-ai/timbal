@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from ..core.tool import Tool
 from ..platform.voice_calls import start_voice_call, wait_for_voice_call
@@ -42,12 +42,24 @@ class StartVoiceCall(Tool):
         "Returns the call handle immediately; it does not wait for the conversation."
     )
     workforce: str | None = None
+    outcome: type[BaseModel] | dict[str, Any] | None = None
     outcome_schema: dict[str, Any] | None = None
     from_number: str | None = None
     trunk_id: int | None = None
     rev: str | None = None
 
     def __init__(self, **kwargs: Any) -> None:
+        configured_outcome = (
+            kwargs.get("outcome") if kwargs.get("outcome") is not None else kwargs.get("outcome_schema")
+        )
+        exclude = list(kwargs.get("schema_exclude_params") or [])
+        if kwargs.get("workforce") and "workforce" not in exclude:
+            exclude.append("workforce")
+        if configured_outcome is not None and "outcome_schema" not in exclude:
+            exclude.append("outcome_schema")
+        if exclude:
+            kwargs["schema_exclude_params"] = exclude
+
         async def _start_voice_call(
             to: str = Field(..., description="Number to dial, E.164 (e.g. +34600000000)"),
             context: dict[str, Any] | None = Field(
@@ -63,14 +75,16 @@ class StartVoiceCall(Tool):
             ),
             attempt: int = Field(0, description="Bump to redial on purpose with the default key"),
         ) -> dict[str, Any]:
-            target = workforce or self.workforce
+            target = self.workforce or workforce
             if not target:
                 raise ValueError("workforce is required: configure it on the tool or pass it.")
+            fixed_outcome = self.outcome if self.outcome is not None else self.outcome_schema
+            resolved_outcome = fixed_outcome if fixed_outcome is not None else outcome_schema
             call = await start_voice_call(
                 target,
                 to,
                 context=context,
-                outcome=outcome_schema or self.outcome_schema,
+                outcome=resolved_outcome,
                 greeting=greeting,
                 from_number=self.from_number,
                 trunk_id=self.trunk_id,
@@ -91,12 +105,14 @@ class WaitForVoiceCall(Tool):
         "Wait for a phone call started with start_voice_call to finish and return its result: "
         "telephony status, and outcome_status / outcome as reported by the voice agent."
     )
+    outcome: type[BaseModel] | dict[str, Any] | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         async def _wait_for_voice_call(
             call: dict[str, Any] = Field(..., description="The handle returned by start_voice_call"),
         ) -> dict[str, Any]:
-            result = await wait_for_voice_call(call)
+            model = self.outcome if isinstance(self.outcome, type) and issubclass(self.outcome, BaseModel) else None
+            result = await wait_for_voice_call(call, outcome=model)
             return result.model_dump(mode="json")
 
         super().__init__(handler=_wait_for_voice_call, **kwargs)

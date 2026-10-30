@@ -77,6 +77,8 @@ class TestWireContext:
         assert "secret-token" not in json.dumps(ctx.model_dump(), default=str)
         assert isinstance(ctx._call_control, CallControl)
         assert "secret-token" not in repr(ctx._call_control)
+        assert run_context_from_wire(ctx) is ctx
+        assert run_context_from_wire(ctx)._call_control is ctx._call_control
 
     def test_call_context_from_a_stream_turn(self):
         set_run_context(run_context_from_wire(_wire("call_1", "t")))
@@ -158,13 +160,36 @@ class TestReportCallOutcome:
         assert platform.calls[other_id]["outcome"] is None
 
     def test_the_tool_exposes_the_outcome_schema(self):
-        tool = CallControl(url="https://x/calls/1", token="t", outcome_schema=SCHEMA).report_tool()
+        control = CallControl(url="https://x/calls/1", token="t", outcome_schema=SCHEMA)
+        tool = control.report_tool()
+        assert tool is not control.report_tool(), "fresh Tool instance per call so nest() never mutates shared state"
         assert tool.anthropic_schema["input_schema"]["properties"]["outcome"]["enum"] == [
             "confirmed",
             "declined",
             "callback_requested",
         ]
         assert "BEFORE saying goodbye" in tool.description
+
+    @pytest.mark.asyncio
+    async def test_helper_and_nested_agents_do_not_receive_report_tool(self):
+        main_agent = Agent(name="caller", model=TestModel(responses=["ok"]))
+        filler_agent = Agent(name="voice_filler", model=TestModel(responses=["un segundo"]))
+        sub_agent = Agent(name="helper", model=TestModel(responses=["ok"]))
+        sub_agent.nest("caller")
+
+        control = CallControl(url="https://x/calls/1", token="t", outcome_schema=SCHEMA)
+        token = _current_voice_session.set(
+            SimpleNamespace(agent=main_agent, call_context={"user_number": "+34611"}, call_control=control)
+        )
+        try:
+            main_tools, _ = await main_agent._resolve_tools(0)
+            filler_tools, _ = await filler_agent._resolve_tools(0)
+            sub_tools, _ = await sub_agent._resolve_tools(0)
+            assert [t.name for t in main_tools] == ["report_call_outcome"]
+            assert filler_tools == []
+            assert sub_tools == []
+        finally:
+            _current_voice_session.reset(token)
 
 
 class TestTelephonyStartFrame:
@@ -179,4 +204,5 @@ class TestTelephonyStartFrame:
         from timbal.server.telephony import _call_context_from_start
 
         ctx = _call_context_from_start({"from": "+34930", "to": "+34611"}, {"direction": "outbound"})
+        assert ctx["direction"] == "outbound"
         assert ctx["user_number"] == "+34611" and ctx["agent_number"] == "+34930"

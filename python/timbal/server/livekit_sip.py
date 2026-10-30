@@ -224,7 +224,7 @@ def sip_call_context(attributes: dict[str, str] | None, direction: str | None = 
         ctx["from"] = caller
     if callee:
         ctx["to"] = callee
-    if platform:
+    if platform or direction:
         ctx["direction"] = resolved
     return {**ctx, **platform}
 

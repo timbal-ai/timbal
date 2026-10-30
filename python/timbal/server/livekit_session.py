@@ -136,6 +136,7 @@ def hello_wait_secs(*, caller_is_sip: bool, defaults: Any = None) -> float:
             logger.warning("livekit_bad_hello_wait_secs", env=name, value=raw)
     return default
 
+
 # How long a per-request join may take before the caller gets a 504. The SFU is
 # in the same VPC, so this covers the FFI import on a cold process, not a WAN
 # round trip.
@@ -356,10 +357,7 @@ async def start_livekit_session(
     # Admission is uncapped unless the operator configured a limit. Track
     # every session so diagnostics and explicit caps use the same counter.
     if not acquire_session_slot():
-        return 503, {
-            "error": f"server is at its voice session capacity "
-            f"({max_concurrent_sessions()} concurrent)"
-        }
+        return 503, {"error": f"server is at its voice session capacity ({max_concurrent_sessions()} concurrent)"}
 
     join = _Join()
     task = asyncio.create_task(
@@ -621,12 +619,15 @@ def _local_identity(room: Any, dial: LivekitDial) -> str:
 def _resolve_call_id(dial: LivekitDial, sip_attributes: dict[str, str] | None) -> str:
     if dial.call_id:
         return dial.call_id
-    from .livekit_sip import SIP_ATTR_CALL_ID, call_id_from_env
+    from .livekit_sip import SIP_ATTR_CALL_ID, call_id_from_env, platform_call_context
 
     env = call_id_from_env()
     if env:
         return env
     if sip_attributes:
+        platform_id = platform_call_context(sip_attributes).get("call_id")
+        if isinstance(platform_id, str) and platform_id:
+            return platform_id
         val = sip_attributes.get(SIP_ATTR_CALL_ID)
         if isinstance(val, str) and val:
             return val
@@ -979,16 +980,12 @@ async def _run_livekit_session(
 
             async def _submit_tap() -> None:
                 try:
-                    ok = await sess.submit_user_text(
-                        value, interaction_id=interaction_id, run_id=run_id
-                    )
+                    ok = await sess.submit_user_text(value, interaction_id=interaction_id, run_id=run_id)
                 except Exception as e:  # noqa: BLE001 — a tap must not kill the call
                     logger.warning("voice_livekit_interaction_answer_failed", error=str(e))
                     return
                 if ok:
-                    await send_q.put(
-                        {"type": "interaction_answer_ack", "interaction_id": interaction_id}
-                    )
+                    await send_q.put({"type": "interaction_answer_ack", "interaction_id": interaction_id})
 
             asyncio.create_task(_submit_tap(), name="voice-livekit-interaction-answer")
 
@@ -1078,7 +1075,13 @@ async def _run_livekit_session(
             sip_meta["transport_detail"] = "livekit_sip"
             if caller_participant is not None:
                 attrs = dict(getattr(caller_participant, "attributes", None) or {})
-                sip_ctx = sip_call_context(attrs)
+                cfg_direction = config.get("direction")
+                sip_ctx = sip_call_context(
+                    attrs,
+                    direction=cfg_direction if isinstance(cfg_direction, str) and cfg_direction else None,
+                )
+                if not cfg_direction and isinstance(sip_ctx.get("direction"), str) and sip_ctx["direction"]:
+                    config = {**config, "direction": sip_ctx["direction"]}
                 sip_meta.update(sip_recording_meta(attrs))
                 outcome_schema = platform_outcome_schema(attrs)
         sample_rate = int(merge_client_voice_overrides(defaults, config).sample_rate)

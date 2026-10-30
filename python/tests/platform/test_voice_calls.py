@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -231,13 +232,31 @@ class TestWaitAndResume:
         out2, i2 = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: view1})
         assert out2.status.reason == "input_required"
         assert i2[0].payload == {"call_id": "call_2"}
+        assert platform.gets == ["call_1", "call_2"]
         view2 = platform.finish("call_2", status="no_answer", end_reason="user_unavailable")
         out3, _ = await _run(tool, parent_id=out2.run_id, resume={i2[0].interaction_id: view2})
         assert out3.status.code == "success", out3.error
         assert out3.output == ["completed", "no_answer"]
         assert platform.dials == 2
+        assert platform.gets == ["call_1", "call_2"], "call_1 result replayed from parent trace without another GET"
         first_key = platform.posts[0]["key"]
         assert [p["key"] for p in platform.posts].count(first_key) == 1, "exactly one POST for the first call"
+
+    @pytest.mark.asyncio
+    async def test_reusing_key_across_resume_for_different_dial_is_rejected(self, platform, jsonl):
+        async def bad_reuse() -> str:
+            first = await start_voice_call("receptionist", "+34600000001", idempotency_key="shared")
+            await wait_for_voice_call(first)
+            await start_voice_call("receptionist", "+34600000099", idempotency_key="shared")
+            return "never"
+
+        tool = Tool(name="bad_reuse", handler=bad_reuse, tracing_provider=jsonl)
+        out1, i1 = await _run(tool)
+        assert out1.status.reason == "input_required"
+        view1 = platform.finish("call_1")
+        out2, _ = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: view1})
+        assert out2.status.code == "error"
+        assert "already used for a different dial" in str(out2.error)
 
     @pytest.mark.asyncio
     async def test_duplicate_completion_runs_downstream_once(self, platform, jsonl):
@@ -284,6 +303,11 @@ class TestWaitAndResume:
         out2, _ = await _run(wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: view})
         assert out2.status.code == "error"
         assert "does not match AppointmentOutcome" in str(out2.error)
+
+        null_reported = {**view, "outcome": None, "outcome_status": "reported"}
+        out3, _ = await _run(wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: null_reported})
+        assert out3.status.code == "error"
+        assert "does not match AppointmentOutcome" in str(out3.error)
 
     @pytest.mark.asyncio
     async def test_parallel_waits_correlate_and_resuspend_when_superseded(self, platform, jsonl):
@@ -361,16 +385,40 @@ class TestToolsAndAgents:
     async def test_workflow_steps_with_the_tools(self, platform, jsonl):
         wf = (
             Workflow(name="steps", tracing_provider=jsonl)
-            .step(StartVoiceCall(workforce="receptionist"), to="+34600000001", context={"customer_name": "Ada"})
-            .step(WaitForVoiceCall(), call=lambda: get_run_context().step_span("start_voice_call").output)
+            .step(
+                StartVoiceCall(workforce="receptionist", outcome=AppointmentOutcome),
+                to="+34600000001",
+                context={"customer_name": "Ada"},
+            )
+            .step(
+                WaitForVoiceCall(outcome=AppointmentOutcome),
+                call=lambda: get_run_context().step_span("start_voice_call").output,
+            )
         )
         out1, interactions = await _run(wf)
         assert out1.status.reason == "input_required"
-        view = platform.finish("call_1", outcome_status="unavailable")
+        assert platform.posts[0]["body"]["outcome_schema"]["properties"]["outcome"]["enum"] == [
+            "confirmed",
+            "declined",
+            "callback_requested",
+        ]
+        view = platform.finish("call_1", outcome={"outcome": "confirmed"})
         out2, _ = await _run(wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: view})
         assert out2.status.code == "success", out2.error
-        assert out2.output["outcome_status"] == "unavailable"
+        assert out2.output["outcome"]["outcome"] == "confirmed"
         assert platform.dials == 1
+
+    def test_preconfigured_tool_fields_are_excluded_from_llm_schema(self):
+        configured = StartVoiceCall(workforce="receptionist", outcome=AppointmentOutcome)
+        props = configured.anthropic_schema["input_schema"]["properties"]
+        assert "workforce" not in props
+        assert "outcome_schema" not in props
+        assert "to" in props
+
+        open_tool = StartVoiceCall()
+        open_props = open_tool.anthropic_schema["input_schema"]["properties"]
+        assert "workforce" in open_props
+        assert "outcome_schema" in open_props
 
     @pytest.mark.asyncio
     async def test_agent_tool_starts_a_call(self, platform):
@@ -449,6 +497,8 @@ class TestFreshProcessResume:
         # The child process has no platform credentials and no fake: any dial or read would fail.
         side_effect = tmp_path / "effects.txt"
         script = _SETUP.format(path=path.as_posix())
+        env = {k: v for k, v in os.environ.items() if not k.startswith("TIMBAL_")}
+        env.update({"HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "TIMBAL_LOG_LEVEL": "CRITICAL"})
         done = subprocess.run(  # noqa: S603
             [
                 sys.executable,
@@ -462,7 +512,7 @@ class TestFreshProcessResume:
             capture_output=True,
             text=True,
             timeout=90,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TIMBAL_LOG_LEVEL": "CRITICAL"},
+            env=env,
         )
         assert done.returncode == 0, done.stderr
         assert "<<<success::callback_requested>>>" in done.stdout, done.stdout + done.stderr

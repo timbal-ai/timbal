@@ -106,6 +106,7 @@ def _identity_param_keys() -> tuple[str, ...]:
     keys = tuple(k.strip() for k in raw.split(",") if k.strip())
     return keys or _DEFAULT_IDENTITY_PARAM_KEYS
 
+
 _ULAW_ENCODINGS = {"audio/x-mulaw", "pcmu"}
 
 # Telnyx rejects RTP media chunks under 20ms; Twilio takes any size. Batch
@@ -293,8 +294,11 @@ def _call_context_from_start(info: dict[str, Any], custom: dict[str, Any]) -> di
         val = info.get(key)
         if key not in ctx and isinstance(val, str) and val:
             ctx[key] = val
+    direction = custom.get("direction")
+    if "direction" not in ctx and isinstance(direction, str) and direction:
+        ctx["direction"] = direction
     # Role names that do not depend on direction: the person on the line and our line.
-    outbound = custom.get("direction") == "outbound"
+    outbound = ctx.get("direction") == "outbound"
     user, agent = (ctx.get("to"), ctx.get("from")) if outbound else (ctx.get("from"), ctx.get("to"))
     if user and "user_number" not in ctx:
         ctx["user_number"] = user
@@ -310,9 +314,7 @@ def _stream_xml(ws_url: str, params: dict[str, str], *, telnyx: bool) -> str:
         # Default TeXML mode is mp3 playback; RTP is the raw-audio mode. Pin
         # PCMU both ways so the bridge never has to sniff codecs.
         attrs += ' bidirectionalMode="rtp" codec="PCMU" bidirectionalCodec="PCMU"'
-    children = "".join(
-        f"<Parameter name={quoteattr(k)} value={quoteattr(v)} />" for k, v in params.items() if v
-    )
+    children = "".join(f"<Parameter name={quoteattr(k)} value={quoteattr(v)} />" for k, v in params.items() if v)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         f"<Response><Connect><Stream {attrs}>{children}</Stream></Connect></Response>"
@@ -628,7 +630,9 @@ async def serve_media_ws(
     session.recording_meta = meta
 
     up_resampler = PcmResampler(line_rate, session_rate) if line_rate != session_rate else None
-    down_resampler = PcmResampler(session_rate, TELEPHONY_SAMPLE_RATE) if session_rate != TELEPHONY_SAMPLE_RATE else None
+    down_resampler = (
+        PcmResampler(session_rate, TELEPHONY_SAMPLE_RATE) if session_rate != TELEPHONY_SAMPLE_RATE else None
+    )
 
     sent_ulaw_bytes = 0
 

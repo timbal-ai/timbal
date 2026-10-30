@@ -72,7 +72,6 @@ class CallControl:
     url: str
     token: str = field(repr=False)
     outcome_schema: dict[str, Any] | None = None
-    _tool: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_payload(cls, payload: Any) -> CallControl | None:
@@ -89,21 +88,28 @@ class CallControl:
         return cls(url=url, token=token, outcome_schema=schema if isinstance(schema, dict) else None)
 
     def report_tool(self) -> Any:
-        """The ``report_call_outcome`` tool for this call, or ``None`` when no outcome was requested."""
+        """A fresh ``report_call_outcome`` tool for this call, or ``None`` when no outcome was requested."""
         if not self.outcome_schema:
             return None
-        if self._tool is None:
-            self._tool = report_call_outcome_tool(self)
-        return self._tool
+        return report_call_outcome_tool(self)
 
 
-def current_call_control() -> CallControl | None:
-    """The running call's control handle: from the ``/stream`` turn, or from the voice session."""
+def current_call_control(agent: Any = None) -> CallControl | None:
+    """The running call's control handle: from the ``/stream`` turn, or from the voice session.
+
+    When ``agent`` is given, sub-agents (``"." in agent._path``) and internal
+    session helpers (``voice_greeting``, ``voice_filler``, ``voice_user_idle``)
+    are excluded so only the root call agent gets ``report_call_outcome``.
+    """
+    if agent is not None and "." in getattr(agent, "_path", ""):
+        return None
+    session = _current_voice_session()
+    if agent is not None and session is not None and getattr(session, "agent", agent) is not agent:
+        return None
     ctx = get_run_context()
     control = getattr(ctx, "_call_control", None) if ctx is not None else None
     if isinstance(control, CallControl):
         return control
-    session = _current_voice_session()
     control = getattr(session, "call_control", None) if session is not None else None
     return control if isinstance(control, CallControl) else None
 
@@ -196,7 +202,7 @@ def report_call_outcome_tool(control: CallControl) -> Any:
     return tool
 
 
-def run_context_from_wire(raw: dict[str, Any]) -> Any:
+def run_context_from_wire(raw: Any) -> Any:
     """Build a RunContext from a request's ``context``, keeping ``call_control`` off its fields.
 
     ``call_control`` is a short-lived credential: it lives on a private attribute,
@@ -204,6 +210,10 @@ def run_context_from_wire(raw: dict[str, Any]) -> Any:
     """
     from ..state import RunContext
 
+    if isinstance(raw, RunContext):
+        return raw
+    if not isinstance(raw, dict):
+        return RunContext.model_validate(raw)
     data = dict(raw)
     control = CallControl.from_payload(data.pop("call_control", None))
     run_context = RunContext.model_validate(data)

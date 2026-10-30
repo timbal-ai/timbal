@@ -31,6 +31,7 @@ class FakeVoicePlatform:
         self.keys: dict[str, tuple[tuple, str]] = {}
         self.dials = 0
         self.posts: list[dict[str, Any]] = []
+        self.gets: list[str] = []
         self.timeout_after_accept = 0
         self.tokens: dict[str, str] = {}
 
@@ -74,6 +75,7 @@ class FakeVoicePlatform:
         if call_id not in self.calls:
             return self._json(404, {"code": "NOT_FOUND", "message": "call not found"})
         if request.method == "GET" and op is None:
+            self.gets.append(call_id)
             return self._json(200, self.view(call_id))
         if request.method == "POST" and op == "cancel":
             view = self.calls[call_id]
