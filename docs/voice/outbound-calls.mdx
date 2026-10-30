@@ -78,9 +78,45 @@ done = await reminder(
 ).collect()
 ```
 
-The resume value is checked: it must be the final view of the call the run is waiting for, or the step fails instead of continuing with the wrong call. A completion delivered twice continues the run once.
+The resume value is checked before the wait is claimed: it must be the final view of the call the run is waiting for, or that resume fails with `VoiceCallError` without consuming the parked wait (so the real final result can still resume it later).
 
 A fresh process can resume it: the call is not dialled again, because the accepted call is recorded on the run's trace, and a step that already finished is not run again.
+
+### Call options
+
+Besides `workforce` and `to`, `start_voice_call` (and `StartVoiceCall`) accepts:
+
+<ParamField body="context" type="dict[str, Any]">
+  Business facts handed to the voice agent before its first turn and read with `call_context()`.
+</ParamField>
+
+<ParamField body="outcome" type="type[BaseModel] | dict[str, Any]">
+  Pydantic model or JSON Schema (`"type": "object"`) for the business outcome. Gives the voice agent a `report_call_outcome` tool; when a Pydantic model is passed, the returned result is validated against it.
+</ParamField>
+
+<ParamField body="greeting" type="str">
+  Per-call spoken opener read verbatim when the callee picks up, replacing the agent's configured `outbound_greeting` / `greeting`.
+</ParamField>
+
+<ParamField body="from_number" type="str">
+  Caller ID / line to present from the outbound SIP trunk. Optional when the project binds a single outbound number.
+</ParamField>
+
+<ParamField body="trunk_id" type="int">
+  SIP trunk id to dial through. Optional when the organisation has a single matching outbound trunk.
+</ParamField>
+
+<ParamField body="rev" type="str">
+  Project git revision of the voice workforce to run for this call (defaults to the active revision or `main`).
+</ParamField>
+
+<ParamField body="idempotency_key" type="str">
+  Business key for deduplicating starts across separate runs (for example `f"appointment:{id}:reminder"`).
+</ParamField>
+
+<ParamField body="attempt" type="int" default="0">
+  Bump (`attempt=1`, `2`, …) to intentionally place a fresh call from the same step when using the default idempotency key.
+</ParamField>
 
 ## What the result means
 
@@ -99,26 +135,30 @@ A result that does not match the model you waited with is an error, not a silent
 The same calls are tools. `StartVoiceCall` and `WaitForVoiceCall` work as workflow steps and as agent tools:
 
 ```python
+from typing import Literal
+
+from pydantic import BaseModel
+
 from timbal import Agent
 from timbal.tools import StartVoiceCall, WaitForVoiceCall
+
+
+class Outcome(BaseModel):
+    outcome: Literal["confirmed", "declined"]
+
 
 dispatcher = Agent(
     name="dispatcher",
     model="openai/gpt-5-mini",
     system_prompt="When asked to confirm an appointment, call the customer and report what they decided.",
     tools=[
-        StartVoiceCall(
-            workforce="receptionist",
-            outcome_schema={
-                "type": "object",
-                "properties": {"outcome": {"type": "string", "enum": ["confirmed", "declined"]}},
-                "required": ["outcome"],
-            },
-        ),
-        WaitForVoiceCall(),
+        StartVoiceCall(workforce="receptionist", outcome=Outcome),
+        WaitForVoiceCall(outcome=Outcome),
     ],
 )
 ```
+
+Settings fixed on `StartVoiceCall` (`workforce`, `outcome` or `outcome_schema`) are hidden from the model's tool schema and cannot be overridden by the LLM. Passing a Pydantic model to `outcome=` on `WaitForVoiceCall` (or `wait_for_voice_call`) validates the reported outcome before returning; a plain JSON Schema dict is enforced on the call side when the voice agent reports, and returned as a dict on the waiting side.
 
 ## On the call: context and the outcome
 
@@ -140,27 +180,29 @@ def system_prompt() -> str:
 agent = Agent(name="receptionist", model="openai/gpt-5-mini", system_prompt=system_prompt)
 ```
 
-The context arrives before the first turn. Besides your keys it carries `call_id`, `direction`, `from` and `to` as dialled, and the direction-independent `user_number` (the person on the line) and `agent_number` (your line).
+The context arrives before the first turn. Besides your keys it carries `call_id`, `direction`, `from` and `to` as dialled, and the direction-independent `user_number` (the person on the line) and `agent_number` (your line). `from` and `to` follow the call's direction; use `user_number` and `agent_number` for roles.
 
-When the call was started with an outcome schema, the voice agent gets one more tool, `report_call_outcome`, whose parameters are that schema. The agent should call it as soon as the answer is clear and before saying goodbye or transferring. A rejected report returns the invalid fields so the model can correct them; a later report replaces an earlier one until the call is final. If no valid report arrives, the result is `outcome_status="unavailable"`.
+When the call was started with an outcome schema, the root voice `Agent` runnable gets one more tool, `report_call_outcome`, whose parameters are that schema (voice workforces must expose an `Agent` as the root runnable; sub-agents in `agent.tools` and internal session helpers do not receive it). The agent should call it as soon as the answer is clear and before saying goodbye or transferring. A rejected report returns the invalid fields so the model can correct them; a later report replaces an earlier one until the call is final. If no valid report arrives, the result is `outcome_status="unavailable"`.
 
 The tool authenticates with a per-call credential that the framework keeps out of the run context fields, the trace and the logs.
 
 ## Duplicates and retries
 
 - Every start sends an `Idempotency-Key`. Pass your own business key (`appointment:{id}:reminder`) when the same event may trigger twice; otherwise the default is derived from the run, the step and its position, and stays the same when the run is resumed or retried.
-- A start that times out after the platform accepted it is retried with the same key and returns the same call.
-- Reusing a key for a different number, workforce or context raises `IdempotencyKeyReused`.
+- If a start times out after the platform accepted it, retrying with the same key returns the same call instead of dialling again.
+- Reusing a key with a different workforce, revision, number, caller ID (`from_number`), trunk or greeting raises `IdempotencyKeyReused`.
 - To call the same person again on purpose, pass a new key or `attempt=1`.
-- A completion delivered twice resumes the run once; the second is cancelled.
+- A completion delivered twice resumes the run once: on the platform the `SipCallWaits` outbox serializes delivery per waiting run and reuses one resume run id on retry, while the worker claims `(parent_id, suspension_id)` (durable across processes on SQLite and JSONL, and in-process on the platform and in-memory providers) and cancels any duplicate.
 - `cancel_voice_call(call)` cancels a call that has not ended.
 
 ## Limits
 
 - One call per action. Campaigns, bulk dialling and scheduling are built on top.
-- `context` is a flat-keyed JSON object of at most 64 keys and 16 KiB; `call_id`, `direction`, `from`, `to`, `user_number` and `agent_number` are reserved.
+- `context` is a JSON object with identifier-like keys (letters, digits, `_`), at most 64 keys and 16 KiB serialized; null values are dropped. `call_id`, `direction`, `from`, `to`, `user_number` and `agent_number` are reserved.
 - The outcome schema must be a JSON object schema of at most 16 KiB with internal `$ref`s only.
 
-<Note>
-`call_context()["from"]` and `["to"]` now follow the call's direction. Before, a LiveKit SIP outbound call reported the person you called as `from`. Read `user_number` and `agent_number` when you mean a role rather than a direction.
-</Note>
+## Next steps
+
+- [Suspending a run (`suspend`)](/human-in-the-loop/suspend) — how `InteractionEvent` and `kind="voice_call"` work under the hood
+- [Resuming a paused run](/human-in-the-loop/resuming) — durable cross-process resume and cancellation
+- [Voice transports](/voice/transports) — LiveKit SIP, Twilio, Telnyx and WebRTC session setup

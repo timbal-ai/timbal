@@ -18,6 +18,7 @@ from timbal.platform.voice_calls import (
     VoiceCallError,
     VoiceCallsUnavailable,
     cancel_voice_call,
+    get_voice_call,
     normalize_context,
     outcome_schema_for,
     start_voice_call,
@@ -25,7 +26,9 @@ from timbal.platform.voice_calls import (
 )
 from timbal.state import get_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
 from timbal.state.tracing.providers.jsonl import JsonlTracingProvider
+from timbal.state.tracing.providers.platform import PlatformTracingProvider
 from timbal.tools import StartVoiceCall, WaitForVoiceCall
 from timbal.types.content import ToolUseContent
 from timbal.types.events import InteractionEvent, OutputEvent
@@ -173,6 +176,14 @@ class TestStart:
             outcome_schema_for({"type": "object", "properties": {"a": {"$ref": "https://x/y.json"}}})
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("platform")
+    async def test_invalid_trunk_id_raises_clear_value_error(self):
+        with pytest.raises(ValueError, match="trunk_id must be an integer"):
+            await start_voice_call("receptionist", "+34600000001", trunk_id="not-a-number")
+        with pytest.raises(ValueError, match="trunk_id must be an integer"):
+            await start_voice_call("receptionist", "+34600000001", trunk_id=True)
+
+    @pytest.mark.asyncio
     async def test_default_key_is_distinct_per_call_site_and_attempt(self, platform):
         async def two_calls() -> list[str]:
             a = await start_voice_call("receptionist", "+34600000001")
@@ -243,6 +254,28 @@ class TestWaitAndResume:
         assert [p["key"] for p in platform.posts].count(first_key) == 1, "exactly one POST for the first call"
 
     @pytest.mark.asyncio
+    async def test_multi_suspend_chain_replays_first_result_without_network(self, platform, jsonl):
+        async def two_calls() -> list[str]:
+            first = await start_voice_call("receptionist", "+34600000001")
+            a = await wait_for_voice_call(first)
+            second = await start_voice_call("receptionist", "+34600000002")
+            b = await wait_for_voice_call(second)
+            return [a.status, b.status]
+
+        tool = Tool(name="two_calls_offline", handler=two_calls, tracing_provider=jsonl)
+        out1, i1 = await _run(tool)
+        view1 = platform.finish("call_1")
+        out2, i2 = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: view1})
+        assert out2.status.reason == "input_required"
+
+        view2 = platform.finish("call_2", status="completed")
+        # Remove call_1 from the platform so any HTTP GET for it would 404.
+        del platform.calls["call_1"]
+        out3, _ = await _run(tool, parent_id=out2.run_id, resume={i2[0].interaction_id: view2})
+        assert out3.status.code == "success", out3.error
+        assert out3.output == ["completed", "completed"]
+
+    @pytest.mark.asyncio
     async def test_reusing_key_across_resume_for_different_dial_is_rejected(self, platform, jsonl):
         async def bad_reuse() -> str:
             first = await start_voice_call("receptionist", "+34600000001", idempotency_key="shared")
@@ -259,6 +292,21 @@ class TestWaitAndResume:
         assert "already used for a different dial" in str(out2.error)
 
     @pytest.mark.asyncio
+    async def test_ambient_revision_change_across_resume_does_not_reject_replay(self, platform, jsonl, monkeypatch):
+        monkeypatch.setenv("TIMBAL_PROJECT_REV", "rev-a")
+        effects: list[str] = []
+        wf = _reminder_workflow(jsonl, effects)
+        out1, interactions = await _run(wf)
+        assert out1.status.reason == "input_required"
+
+        monkeypatch.setenv("TIMBAL_PROJECT_REV", "rev-b")
+        view = platform.finish("call_1", outcome={"outcome": "confirmed"})
+        out2, _ = await _run(wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: view})
+        assert out2.status.code == "success", out2.error
+        assert effects == ["confirmed"]
+        assert platform.dials == 1
+
+    @pytest.mark.asyncio
     async def test_duplicate_completion_runs_downstream_once(self, platform, jsonl):
         effects: list[str] = []
         wf = _reminder_workflow(jsonl, effects)
@@ -270,6 +318,23 @@ class TestWaitAndResume:
         assert first.status.code == "success", first.error
         assert duplicate.status.code == "cancelled"
         assert effects == ["confirmed"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_completion_with_platform_and_in_memory_tracing(self, platform):
+        effects: list[str] = []
+        wf = _reminder_workflow(InMemoryTracingProvider, effects, key="appt:mem:1")
+        out1, interactions = await _run(wf)
+        view = platform.finish("call_1", outcome={"outcome": "confirmed"})
+        resume = {interactions[0].interaction_id: view}
+        first, _ = await _run(wf, parent_id=out1.run_id, resume=resume)
+        duplicate, _ = await _run(wf, parent_id=out1.run_id, resume=resume)
+        assert first.status.code == "success", first.error
+        assert duplicate.status.code == "cancelled"
+        assert effects == ["confirmed"]
+
+        assert await PlatformTracingProvider.claim_approval("parent-p1", "susp-1", "run-a") is True
+        assert await PlatformTracingProvider.claim_approval("parent-p1", "susp-1", "run-a") is True
+        assert await PlatformTracingProvider.claim_approval("parent-p1", "susp-1", "run-b") is False
 
     @pytest.mark.asyncio
     async def test_result_for_another_call_is_rejected(self, platform, jsonl):
@@ -295,6 +360,22 @@ class TestWaitAndResume:
         assert "before its result was final" in str(out2.error)
 
     @pytest.mark.asyncio
+    async def test_early_or_wrong_resume_does_not_claim_wait(self, platform, jsonl):
+        effects: list[str] = []
+        wf = _reminder_workflow(jsonl, effects)
+        out1, interactions = await _run(wf)
+
+        early, _ = await _run(
+            wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: platform.view("call_1")}
+        )
+        assert early.status.code == "error"
+
+        view = platform.finish("call_1", outcome={"outcome": "confirmed"})
+        final, _ = await _run(wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: view})
+        assert final.status.code == "success", final.error
+        assert effects == ["confirmed"]
+
+    @pytest.mark.asyncio
     async def test_invalid_typed_outcome_is_a_bug_not_unavailable(self, platform, jsonl):
         effects: list[str] = []
         wf = _reminder_workflow(jsonl, effects)
@@ -304,10 +385,17 @@ class TestWaitAndResume:
         assert out2.status.code == "error"
         assert "does not match AppointmentOutcome" in str(out2.error)
 
+    @pytest.mark.asyncio
+    async def test_reported_with_null_outcome_is_rejected_when_typed(self, platform, jsonl):
+        effects: list[str] = []
+        wf = _reminder_workflow(jsonl, effects)
+        out1, interactions = await _run(wf)
+        view = platform.finish("call_1", outcome={"outcome": "confirmed"})
         null_reported = {**view, "outcome": None, "outcome_status": "reported"}
-        out3, _ = await _run(wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: null_reported})
-        assert out3.status.code == "error"
-        assert "does not match AppointmentOutcome" in str(out3.error)
+        out2, _ = await _run(wf, parent_id=out1.run_id, resume={interactions[0].interaction_id: null_reported})
+        assert out2.status.code == "error"
+        assert "does not match AppointmentOutcome" in str(out2.error)
+        assert effects == []
 
     @pytest.mark.asyncio
     async def test_parallel_waits_correlate_and_resuspend_when_superseded(self, platform, jsonl):
@@ -376,8 +464,21 @@ class TestWaitAndResume:
         call = await start_voice_call("receptionist", "+34600000001", idempotency_key="t")
         foreign = call.model_dump()
         foreign["org_id"] = "org_2"
-        with pytest.raises(VoiceCallError):
+        with pytest.raises(VoiceCallError) as exc_info:
             await wait_for_voice_call(foreign)
+        assert not isinstance(exc_info.value, VoiceCallsUnavailable)
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("platform")
+    async def test_missing_call_on_get_or_cancel_is_not_unavailable(self):
+        call = await start_voice_call("receptionist", "+34600000001", idempotency_key="t-missing")
+        missing = {**call.model_dump(), "id": "call_does_not_exist"}
+        with pytest.raises(VoiceCallError) as get_exc:
+            await get_voice_call(missing)
+        assert not isinstance(get_exc.value, VoiceCallsUnavailable)
+        with pytest.raises(VoiceCallError) as cancel_exc:
+            await cancel_voice_call(missing)
+        assert not isinstance(cancel_exc.value, VoiceCallsUnavailable)
 
 
 class TestToolsAndAgents:

@@ -268,20 +268,47 @@ async def default_idempotency_key(attempt: int = 0) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _normalize_trunk_id(trunk_id: int | str | None) -> int | None:
+    if trunk_id is None:
+        return None
+    if isinstance(trunk_id, bool):
+        raise ValueError("trunk_id must be an integer.")
+    if isinstance(trunk_id, int):
+        return trunk_id
+    if isinstance(trunk_id, str):
+        stripped = trunk_id.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError as exc:
+            raise ValueError(f"trunk_id must be an integer, got {trunk_id!r}.") from exc
+    raise ValueError(f"trunk_id must be an integer, got {trunk_id!r}.")
+
+
 def _dial_fingerprint(
     workforce: str,
-    rev: str | None,
+    explicit_rev: str | None,
     to: str,
     from_number: str | None,
-    trunk_id: int | str | None,
+    trunk_id: int | None,
     greeting: str | None,
 ) -> list[Any]:
+    """Dial identity checked on parent-trace replay.
+
+    Matches the platform's ``OutboundFingerprint``: ``context`` and
+    ``outcome_schema`` are intentionally excluded so a handler that re-executes
+    from the top on resume and rebuilds dynamic context fields (such as
+    timestamps) does not trigger a false ``IdempotencyKeyReused``. Only an
+    explicitly passed ``rev=`` is pinned so an ambient project revision change
+    between the initial run and a resume does not break replay.
+    """
     return [
         workforce,
-        rev,
+        explicit_rev or None,
         to,
         from_number or None,
-        int(trunk_id) if trunk_id is not None else None,
+        trunk_id,
         greeting or None,
     ]
 
@@ -326,7 +353,7 @@ def _record_on_span(call: VoiceCall, fingerprint: list[Any]) -> None:
     }
 
 
-def _platform_error(exc: PlatformError, action: str) -> VoiceCallError:
+def _platform_error(exc: PlatformError, action: str, *, starting: bool = False) -> VoiceCallError:
     status = getattr(exc, "status_code", None)
     text = str(exc)
     if status == 422 and "IDEMPOTENCY_KEY_REUSED" in text:
@@ -335,7 +362,7 @@ def _platform_error(exc: PlatformError, action: str) -> VoiceCallError:
             "(workforce, rev, to, from, trunk or greeting). Use a new key or bump attempt=.\n" + text,
             status_code=status,
         )
-    if status in (404, 501) or (status == 409 and "not enabled" in text.lower()):
+    if status == 501 or (status == 409 and "not enabled" in text.lower()) or (starting and status == 404):
         return VoiceCallsUnavailable(
             f"{action}: outbound voice calls are not available here.\n{text}", status_code=status
         )
@@ -375,11 +402,12 @@ async def start_voice_call(
     if not to:
         raise ValueError("to is required.")
     org, project, revision = _resolve_scope(org_id, project_id, rev)
+    trunk = _normalize_trunk_id(trunk_id)
     body_context = normalize_context(context)
     schema = outcome_schema_for(outcome)
     outcome_model = outcome if isinstance(outcome, type) and issubclass(outcome, BaseModel) else None
     key = idempotency_key or await default_idempotency_key(attempt)
-    fingerprint = _dial_fingerprint(workforce, revision, to, from_number, trunk_id, greeting)
+    fingerprint = _dial_fingerprint(workforce, rev, to, from_number, trunk, greeting)
 
     prior = await _replayed_from_parent(key, fingerprint)
     if prior is not None:
@@ -391,8 +419,8 @@ async def start_voice_call(
     body: dict[str, Any] = {"to": to}
     if from_number:
         body["from_number"] = from_number
-    if trunk_id is not None:
-        body["trunk_id"] = int(trunk_id)
+    if trunk is not None:
+        body["trunk_id"] = trunk
     if greeting:
         body["greeting"] = greeting
     if body_context:
@@ -415,7 +443,7 @@ async def start_voice_call(
             json=body,
         )
     except PlatformError as exc:
-        raise _platform_error(exc, "Starting the voice call failed") from exc
+        raise _platform_error(exc, "Starting the voice call failed", starting=True) from exc
     view = res.json()
     if not isinstance(view, dict) or not view.get("id"):
         raise VoiceCallError("Starting the voice call failed: the platform returned no call id.")
@@ -573,8 +601,15 @@ async def wait_for_voice_call(
 async def _claim_delivery(ctx: Any, suspension_id: str, call_id: str) -> None:
     """Let one resume consume a call's result. A duplicate delivery cancels its run.
 
-    Uses the tracing provider's atomic ``(parent_id, id)`` claim, the same one
-    that stops an approval from being executed twice.
+    Called only after :func:`_final` validates the resume value, so an early or
+    misrouted delivery fails without consuming the wait.
+
+    On the platform, cross-host resumes are serialized by the ``SipCallWaits``
+    outbox (per-run Postgres advisory lock, pinned ``resume_run_id``, and a
+    single-child check). In the worker, ``provider.claim_approval`` enforces
+    the claim across processes on ``SqliteTracingProvider`` /
+    ``JsonlTracingProvider`` and within the process on
+    ``PlatformTracingProvider`` / ``InMemoryTracingProvider``.
     """
     provider = ctx._tracing_provider
     if provider is None or not ctx.parent_id:
@@ -588,6 +623,7 @@ async def _claim_delivery(ctx: Any, suspension_id: str, call_id: str) -> None:
 
 
 def _final(view: Any, call: VoiceCall, outcome_model: type[BaseModel] | None) -> VoiceCallResult:
+    """Validate that a resume value is the final view for ``call`` before claiming the wait."""
     result = _result(view, call, outcome_model)
     if not result.is_final:
         raise VoiceCallError(f"Resumed with call {call.id} before its result was final.")

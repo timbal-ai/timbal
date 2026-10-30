@@ -77,8 +77,17 @@ class TestWireContext:
         assert "secret-token" not in json.dumps(ctx.model_dump(), default=str)
         assert isinstance(ctx._call_control, CallControl)
         assert "secret-token" not in repr(ctx._call_control)
-        assert run_context_from_wire(ctx) is ctx
-        assert run_context_from_wire(ctx)._call_control is ctx._call_control
+
+    def test_run_context_from_wire_with_run_context_and_non_dict(self):
+        from pydantic import ValidationError
+
+        ctx = run_context_from_wire(_wire("call_1", "secret-token"))
+        same = run_context_from_wire(ctx)
+        assert same is ctx
+        assert same._call_control is ctx._call_control
+
+        with pytest.raises(ValidationError):
+            run_context_from_wire("not-a-mapping")
 
     def test_call_context_from_a_stream_turn(self):
         set_run_context(run_context_from_wire(_wire("call_1", "t")))
@@ -204,5 +213,14 @@ class TestTelephonyStartFrame:
         from timbal.server.telephony import _call_context_from_start
 
         ctx = _call_context_from_start({"from": "+34930", "to": "+34611"}, {"direction": "outbound"})
-        assert ctx["direction"] == "outbound"
         assert ctx["user_number"] == "+34611" and ctx["agent_number"] == "+34930"
+
+    def test_outbound_direction_is_preserved_in_call_context(self):
+        from timbal.server.telephony import _call_context_from_start
+
+        ctx = _call_context_from_start(
+            {"from": "+34930", "to": "+34611", "call_id": "CA2"},
+            {"direction": "outbound", "greeting": "Hola"},
+        )
+        assert ctx["direction"] == "outbound"
+        assert "greeting" not in ctx
