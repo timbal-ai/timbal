@@ -346,7 +346,6 @@ def main() -> None:
 
         setup_logging()
 
-        from ..state import RunContext
         from . import parse_fqn
         from .test import run_test
 
@@ -365,7 +364,9 @@ def main() -> None:
         run_context = None
         if args.context is not None:
             try:
-                run_context = RunContext.model_validate(json.loads(args.context))
+                from ..voice.call import run_context_from_wire
+
+                run_context = run_context_from_wire(json.loads(args.context))
             except (json.JSONDecodeError, Exception) as e:
                 print(f"error: invalid JSON context: {e}", file=sys.stderr)
                 sys.exit(1)

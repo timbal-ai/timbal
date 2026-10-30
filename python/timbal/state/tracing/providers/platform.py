@@ -119,6 +119,9 @@ class PlatformTracingProvider(TracingProvider):
     # Another process may write the same run later (an approval resumed
     # elsewhere); past this, the platform's copy is the one to trust.
     _recent_ttl_s: ClassVar[float] = 300.0
+    # (parent_id:approval_id) -> run_id that claimed it in this process.
+    _claims: ClassVar[OrderedDict[str, str]] = OrderedDict()
+    _claims_max: ClassVar[int] = 4096
 
     @staticmethod
     def _recent_key(platform_config: PlatformConfig, subject_path: str, run_id: str) -> str:
@@ -198,6 +201,7 @@ class PlatformTracingProvider(TracingProvider):
         cfg = run_context.platform_config or cls.platform_config
         if cfg is None:
             from ....state.config_loader import resolve_platform_config
+
             cfg = resolve_platform_config(None)
             if cfg is None:
                 raise RuntimeError(
@@ -246,6 +250,27 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     @override
+    async def claim_approval(cls, parent_id: str | None, approval_id: str, run_id: str) -> bool:
+        """Claim ``(parent_id, approval_id)`` within this worker process.
+
+        Cross-host ``voice_call`` resumes are serialized on the platform by the
+        ``SipCallWaits`` outbox (per-run Postgres advisory lock, pinned
+        ``resume_run_id``, and a single-child check on the waiting run). This
+        in-process map catches duplicate resumes that hit the same worker.
+        """
+        if parent_id is None:
+            return True
+        key = f"{parent_id}:{approval_id}"
+        existing = cls._claims.get(key)
+        if existing is not None:
+            return existing == run_id
+        cls._claims[key] = run_id
+        while len(cls._claims) > cls._claims_max:
+            cls._claims.popitem(last=False)
+        return True
+
+    @classmethod
+    @override
     async def _store(cls, run_context: RunContext) -> None:
         """See base class."""
         from ....platform.utils import _request
@@ -253,7 +278,9 @@ class PlatformTracingProvider(TracingProvider):
         platform_config = cls._resolve_config(run_context)
         subject = platform_config.subject
         if subject is None:
-            raise RuntimeError("PlatformTracingProvider._store requires a subject (org_id + app_id) in platform_config.")
+            raise RuntimeError(
+                "PlatformTracingProvider._store requires a subject (org_id + app_id) in platform_config."
+            )
 
         payload = {"parent_id": run_context.parent_id, "trace": run_context._trace.model_dump()}
         if subject.app_id:

@@ -12,6 +12,7 @@ from timbal.server.livekit_sip import (
     find_eligible_caller,
     is_eligible_caller,
     phone_tuned_voice_config,
+    platform_outcome_schema,
     sip_call_context,
     sip_recording_meta,
 )
@@ -47,12 +48,8 @@ class TestEligibleCaller:
         assert not is_eligible_caller(_p("agent-1"), local_identity="agent-1")
 
     def test_egress_ingress_excluded(self) -> None:
-        assert not is_eligible_caller(
-            _p("recorder", kind="PARTICIPANT_KIND_EGRESS"), local_identity="agent-1"
-        )
-        assert not is_eligible_caller(
-            _p("ingress", kind="PARTICIPANT_KIND_INGRESS"), local_identity="agent-1"
-        )
+        assert not is_eligible_caller(_p("recorder", kind="PARTICIPANT_KIND_EGRESS"), local_identity="agent-1")
+        assert not is_eligible_caller(_p("ingress", kind="PARTICIPANT_KIND_INGRESS"), local_identity="agent-1")
 
     def test_caller_hint_does_not_gate_match(self) -> None:
         assert is_eligible_caller(
@@ -95,8 +92,52 @@ class TestSipMetadata:
             "call_id": "abc",
             "from": "+34111",
             "to": "+34999",
+            "user_number": "+34111",
+            "agent_number": "+34999",
             "sip_call_status": "active",
         }
+
+    def test_outbound_call_context_follows_the_call(self) -> None:
+        attrs = {"sip.callID": "abc", "sip.phoneNumber": "+34111", "sip.trunkPhoneNumber": "+34999"}
+        ctx = sip_call_context(attrs, direction="outbound")
+        assert ctx["direction"] == "outbound"
+        assert (ctx["from"], ctx["to"]) == ("+34999", "+34111")
+        assert (ctx["user_number"], ctx["agent_number"]) == ("+34111", "+34999")
+
+    def test_resolve_call_id_prefers_platform_call_id(self) -> None:
+        from timbal.server.livekit_session import LivekitDial, _resolve_call_id
+
+        attrs = {
+            "sip.callID": "sip-leg-id",
+            "timbal.call_context": '{"call_id": "call_99"}',
+        }
+        assert _resolve_call_id(LivekitDial(url="wss://x", token="t"), attrs) == "call_99"
+        assert _resolve_call_id(LivekitDial(url="wss://x", token="t"), {"sip.callID": "sip-leg-id"}) == "sip-leg-id"
+
+    def test_platform_call_context_is_the_base_and_wins(self) -> None:
+        attrs = {
+            "sip.callID": "sip-abc",
+            "sip.phoneNumber": "+34111",
+            "sip.trunkPhoneNumber": "+34999",
+            "timbal.call_context": (
+                '{"call_id": "call_9", "direction": "outbound", "customer_name": "Ada", "appointment": {"at": "10:00"}}'
+            ),
+        }
+        ctx = sip_call_context(attrs)
+        assert ctx["call_id"] == "call_9"
+        assert ctx["direction"] == "outbound"
+        assert (ctx["from"], ctx["to"]) == ("+34999", "+34111")
+        assert ctx["user_number"] == "+34111"
+        assert ctx["appointment"] == {"at": "10:00"}
+
+    def test_broken_platform_attribute_is_ignored(self) -> None:
+        ctx = sip_call_context({"sip.phoneNumber": "+34111", "timbal.call_context": "{not json"})
+        assert ctx == {"from": "+34111", "user_number": "+34111"}
+
+    def test_outcome_schema_attribute(self) -> None:
+        schema = platform_outcome_schema({"timbal.outcome_schema": '{"type": "object", "properties": {}}'})
+        assert schema == {"type": "object", "properties": {}}
+        assert platform_outcome_schema({}) is None
 
     def test_recording_meta(self) -> None:
         meta = sip_recording_meta({"sip.callID": "x", "sip.phoneNumber": "+1"})
@@ -126,17 +167,13 @@ class TestDisconnectPolicy:
 
     def test_sip_bye_closes_immediately(self) -> None:
         assert (
-            caller_disconnect_action(
-                _p("sip", kind="PARTICIPANT_KIND_SIP", reason="CLIENT_INITIATED")
-            )
+            caller_disconnect_action(_p("sip", kind="PARTICIPANT_KIND_SIP", reason="CLIENT_INITIATED"))
             is CallerDisconnectAction.CLOSE
         )
 
     def test_sip_media_blip_short_abandon(self) -> None:
         assert (
-            caller_disconnect_action(
-                _p("sip", kind="PARTICIPANT_KIND_SIP", reason="STATE_MISMATCH")
-            )
+            caller_disconnect_action(_p("sip", kind="PARTICIPANT_KIND_SIP", reason="STATE_MISMATCH"))
             is CallerDisconnectAction.SHORT_ABANDON
         )
 
