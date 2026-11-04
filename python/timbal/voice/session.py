@@ -102,7 +102,6 @@ from .turn_detection import (
     TurnState,
     _is_same_user_utterance_refinement,
     _likely_stt_echo,
-    _normalize_echo,
     resolve_turn_detector,
 )
 
@@ -117,6 +116,16 @@ logger = structlog.get_logger("timbal.voice.session")
 # Platform session-id contract (see server/recording_upload.py): the id is a
 # file stem and a URL path segment, so no separators and a bounded length.
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# Letters and digits. Punctuation is not part of a word, so "there." and
+# "there?" match, while an added word does not.
+_SPOKEN_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _same_spoken_words(a: str, b: str) -> bool:
+    """True when two transcripts are the same words, ignoring case and punctuation."""
+    left = " ".join(_SPOKEN_WORD_RE.findall(a.lower()))
+    right = " ".join(_SPOKEN_WORD_RE.findall(b.lower()))
+    return bool(left) and left == right
 
 # Wall-clock cap on a single agent turn (LLM stream + in-turn TTS drains).
 # Without this a hung provider leaves the caller in silence forever.
@@ -1755,7 +1764,7 @@ class VoiceSession:
             retracted = True
         if retracted:
             await self._emit(TranscriptCommitted(text="", replace=True))
-        await self._align_continue_memory(fragment_user_text=text)
+            await self._align_continue_memory(fragment_user_text=text)
 
     async def _handle_provider_prediction(self, event: TranscriptEvent) -> None:
         """Flux ``EagerEndOfTurn`` / ``TurnResumed``.
@@ -1810,12 +1819,13 @@ class VoiceSession:
     async def _handle_provider_commit(self, text: str) -> None:
         """``EndOfTurn`` / any committed transcript, confirming an eager turn.
 
-        Confirmation is an exact match of a turn that was actually accepted.
-        A longer final transcript cancels the short eager turn and starts
-        again, so an ignored or unfinished eager pass cannot swallow it.
+        Confirmation is the same words, ignoring punctuation, of a turn that
+        was actually accepted. A longer final transcript cancels the short
+        eager turn and starts again, so an ignored or unfinished eager pass
+        cannot swallow it.
         """
         pending = self._eager_unconfirmed
-        if pending and _normalize_echo(pending) == _normalize_echo(text):
+        if pending and _same_spoken_words(pending, text):
             self._eager_unconfirmed = None
             logger.info("flux_eager_confirmed", text_preview=text[:80])
             return

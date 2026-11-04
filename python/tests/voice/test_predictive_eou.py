@@ -551,9 +551,29 @@ class TestBuildVoiceSession:
         await session._handle_provider_prediction(
             TranscriptEvent(type="eager", text="Hello there.", confidence=0.9)
         )
-        await session._handle_provider_commit("Hello there.")
+        await session._handle_provider_commit("Hello there?")
         assert session._eager_unconfirmed is None
         assert [entry.text for entry in session.transcript if entry.role == "user"] == ["Hello there."]
+
+    async def test_punctuation_only_final_confirms_without_restarting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        cancelled: list[str] = []
+
+        async def cancel() -> None:
+            cancelled.append("yes")
+
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there", confidence=0.9)
+        )
+        session._cancel_unconfirmed_eager = cancel  # type: ignore[method-assign]
+        await session._handle_provider_commit("Hello there.")
+        assert cancelled == []
+        assert session._eager_unconfirmed is None
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == ["Hello there"]
 
     async def test_ignored_eager_does_not_swallow_end_of_turn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from timbal.server.voice import build_voice_session
@@ -596,25 +616,6 @@ class TestBuildVoiceSession:
 
         session._emit = capture  # type: ignore[method-assign]
 
-        class _Msg:
-            def __init__(self, role: str, text: str) -> None:
-                self.role = role
-                self.text = text
-
-            def collect_text(self) -> str:
-                return self.text
-
-        class _Span:
-            def __init__(self) -> None:
-                self.memory = [_Msg("user", "Hello there.")]
-
-        class _Ctx:
-            def __init__(self) -> None:
-                self.span = _Span()
-
-            def root_span(self) -> _Span:
-                return self.span
-
         aligned: list[str] = []
 
         async def align(*, fragment_user_text: str) -> None:
@@ -635,10 +636,32 @@ class TestBuildVoiceSession:
             if isinstance(event, TranscriptCommitted) and event.replace and event.text == ""
         ]
         assert retracted
-        ctx = _Ctx()
-        session._last_run_context = ctx  # type: ignore[assignment]
-        await VoiceSession._align_continue_memory(session, fragment_user_text="Hello there.")
-        assert ctx.span.memory == []
+
+    async def test_cancel_keeps_memory_when_the_reply_stays_on_screen(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+        from timbal.voice import TranscriptEntry
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there.", confidence=0.9)
+        )
+        session._transcript.append(TranscriptEntry(role="assistant", text="Sure."))
+        session._active_turn_user_text = ""
+        aligned: list[str] = []
+
+        async def align(*, fragment_user_text: str) -> None:
+            aligned.append(fragment_user_text)
+
+        async def interrupt() -> None:
+            return None
+
+        session._align_continue_memory = align  # type: ignore[method-assign]
+        session.interrupt = interrupt  # type: ignore[method-assign]
+        await session._cancel_unconfirmed_eager()
+        assert aligned == []
+        assert [entry.role for entry in session.transcript] == ["user", "assistant"]
 
     async def test_audio_vote_does_not_wait_for_a_cold_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from timbal.server.voice import build_voice_session
