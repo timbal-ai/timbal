@@ -1046,6 +1046,10 @@ class VoiceSession:
         ``_is_speaking`` flips true — HOLD expiry / commit races can leave an
         orphan task that must not double-run with the next turn.
         """
+        # A speculative attempt cancelled from here (hold expiry on a different
+        # transcript, submit_user_text) must drop its hold. Otherwise the next
+        # turn still sees an unreleased buffer and never speaks.
+        self._abandon_speculative_attempt(reason="interrupted")
         if self._greeting_holds_interrupt():
             # INFO on purpose: the caller *did* barge in and heard the agent
             # keep talking anyway — that only looks like a bug without this line.
@@ -2031,7 +2035,12 @@ class VoiceSession:
         async with self._user_turn_lock:
             await self._discard_speculative_held(reason=reason)
 
-    async def _discard_speculative_held(self, *, reason: str) -> None:
+    def _abandon_speculative_attempt(self, *, reason: str) -> None:
+        """Drop an unconfirmed attempt without waiting for its task.
+
+        ``interrupt`` cancels that task itself. Waiting here deadlocks when the
+        caller already holds ``_user_turn_lock`` (``submit_user_text``).
+        """
         attempt = self._speculative_attempt
         if attempt is None or attempt.settled:
             return
@@ -2045,6 +2054,8 @@ class VoiceSession:
         self._speculative_final_text = None
         self._drop_speculative_context = True
         self._speculative_prior_context = attempt.prior_context
+        self._last_run_context = attempt.prior_context
+        self._scheduler.head = attempt.prior_head
         logger.info(
             "speculative_discarded",
             reason=reason,
@@ -2053,9 +2064,12 @@ class VoiceSession:
             text_preview=attempt.text[:120],
             **_trace_debug_fields(),
         )
-        ctx = self._turn_run_context or self._last_run_context
+        ctx = self._turn_run_context or attempt.prior_context
         if ctx is not None:
             ctx.update_usage("speculative_generations:discarded", 1)
+
+    async def _discard_speculative_held(self, *, reason: str) -> None:
+        self._abandon_speculative_attempt(reason=reason)
         task = self._current_turn_task
         if task is not None and not task.done() and task is not asyncio.current_task():
             task.cancel()
@@ -2063,9 +2077,6 @@ class VoiceSession:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
-        self._last_run_context = attempt.prior_context
-        # The attempt's run must not become the parent of the turn that replaces it.
-        self._scheduler.head = attempt.prior_head
         self._cancel_turn.clear()
         self._active_turn_user_text = ""
 
@@ -2086,13 +2097,13 @@ class VoiceSession:
         # The headline clocks start at confirmation, not at the eager start.
         self._turn_eou_at = time.monotonic()
         self._active_turn_user_text = final_text
-        if self._transcript and self._transcript[-1].role == "user" and self._transcript[-1].text == attempt.text:
-            self._transcript[-1] = TranscriptEntry(role="user", text=final_text)
-            replace = True
-        else:
-            self._transcript.append(TranscriptEntry(role="user", text=final_text))
-            replace = False
-        await self._emit(TranscriptCommitted(text=final_text, replace=replace))
+        # The attempt does not write a user row. Always append, so a caller who
+        # repeats the previous turn's words does not overwrite that row.
+        self._cancel_hold()
+        self._held_user_text = None
+        self._hold_armed_timeout_secs = None
+        self._transcript.append(TranscriptEntry(role="user", text=final_text))
+        await self._emit(TranscriptCommitted(text=final_text, replace=False))
         attempt.gate.confirm()
         attempt.hold.release()
         logger.info(
@@ -2286,6 +2297,9 @@ class VoiceSession:
                     "early_duplicate",
                 )
                 if not noise:
+                    # Measured above the detector await; the later assignment is
+                    # skipped because this return confirms immediately.
+                    self._pending_stt_latency = stt_latency
                     async with self._user_turn_lock:
                         if self._speculative_matches(candidate):
                             await self._confirm_speculative(candidate, vad_endpointed=vad_endpointed)

@@ -444,6 +444,43 @@ class TestSpeculativeSession:
             await stt.inject(TranscriptEvent(type="committed", text="book a table"))
             await _until(lambda: drive.audio())
 
+    async def test_interrupt_drops_the_hold_so_the_next_turn_speaks(self) -> None:
+        session, stt, _tts, model = _session(["Held.", "After."])
+
+        def reply(_messages):
+            return "After."
+
+        model.handler = reply
+        model.responses = None
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await session.interrupt()
+            assert session.speculative_generations_discarded == 1
+            assert not session._speculative_unconfirmed()
+            await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
+            await _until(lambda: drive.audio())
+        assert "After" in drive.assistant_text()
+
+    async def test_confirm_appends_when_the_caller_repeats_the_previous_line(self) -> None:
+        session, stt, _tts, model = _session(["First.", "Second."])
+
+        def reply(messages):
+            return "Second." if messages[-1].collect_text().lower().startswith("book") else "First."
+
+        model.handler = reply
+        model.responses = None
+        async with _Drive(session, stt):
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 2)
+            await stt.inject(TranscriptEvent(type="committed", text="Book a table."))
+            await _until(lambda: sum(1 for row in session.transcript if row.role == "user") >= 2)
+        user_lines = [row.text for row in session.transcript if row.role == "user"]
+        assert user_lines == ["book a table", "Book a table."]
+
     async def test_long_utterance_is_not_speculated(self) -> None:
         session, stt, _tts, model = _session(["Hello."])
         async with _Drive(session, stt) as drive:
