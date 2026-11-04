@@ -31,6 +31,7 @@ platform. This module only speaks the platform contract:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -265,7 +266,13 @@ async def _resume_chain(ctx: Any) -> AsyncIterator[tuple[str, Any]]:
     chain = getattr(ctx, "_voice_call_chain", None)
     if chain is None:
         resumed = bool(ctx.parent_id and ctx._resume_values)
-        chain = {"runs": [], "next": str(ctx.parent_id) if resumed else None, "error": None}
+        chain = {
+            "runs": [],
+            "next": str(ctx.parent_id) if resumed else None,
+            "error": None,
+            # Starts and waits in parallel tasks share this run context: one loads a link at a time.
+            "lock": asyncio.Lock(),
+        }
         ctx._voice_call_chain = chain
     index = 0
     while True:
@@ -273,26 +280,29 @@ async def _resume_chain(ctx: Any) -> AsyncIterator[tuple[str, Any]]:
             yield chain["runs"][index]
             index += 1
             continue
-        if chain["error"] is not None:
-            raise chain["error"]
-        run_id = chain["next"]
-        if run_id is None:
-            return
-        if len(chain["runs"]) >= _MAX_RESUME_CHAIN:
-            chain["error"] = _unknown_root(run_id, f"the chain is longer than {_MAX_RESUME_CHAIN} runs")
-            continue
-        trace = await ctx._get_parent_trace(run_id)
-        if trace is None or trace._root_call_id is None:
-            chain["error"] = _unknown_root(run_id, "its trace could not be loaded")
-            continue
-        chain["runs"].append((run_id, trace))
-        if not _root_metadata(trace).get("resumed"):
-            chain["next"] = None
-        elif trace.parent_id:
-            chain["next"] = str(trace.parent_id)
-        else:
-            chain["next"] = None
-            chain["error"] = _unknown_root(run_id, "it is a resume but its trace does not record its parent")
+        async with chain["lock"]:
+            if index < len(chain["runs"]):
+                continue  # another task loaded it while this one waited
+            if chain["error"] is not None:
+                raise chain["error"]
+            run_id = chain["next"]
+            if run_id is None:
+                return
+            if len(chain["runs"]) >= _MAX_RESUME_CHAIN:
+                chain["error"] = _unknown_root(run_id, f"the chain is longer than {_MAX_RESUME_CHAIN} runs")
+                continue
+            trace = await ctx._get_parent_trace(run_id)
+            if trace is None or trace._root_call_id is None:
+                chain["error"] = _unknown_root(run_id, "its trace could not be loaded")
+                continue
+            chain["runs"].append((run_id, trace))
+            if not _root_metadata(trace).get("resumed"):
+                chain["next"] = None
+            elif trace.parent_id:
+                chain["next"] = str(trace.parent_id)
+            else:
+                chain["next"] = None
+                chain["error"] = _unknown_root(run_id, "it is a resume but its trace does not record its parent")
 
 
 async def _inherited_root_run_id(ctx: Any) -> str:

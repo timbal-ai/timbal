@@ -349,6 +349,44 @@ class TestWaitAndResume:
         assert len(platform.posts) == 1, "the call is replayed from the first run's trace, not started again"
 
     @pytest.mark.asyncio
+    async def test_parallel_starts_on_resume_walk_the_chain_once(self, platform, jsonl, monkeypatch):
+        import asyncio
+
+        from timbal.state import suspend
+
+        runs = iter(range(10))
+
+        async def parallel() -> list[str]:
+            n = next(runs)
+            if n < 2:
+                suspend({"question": f"ready {n}?"}, kind="ask")
+            a, b = await asyncio.gather(
+                start_voice_call("receptionist", "+34600000001"),
+                start_voice_call("receptionist", "+34600000002"),
+            )
+            return [a.id, b.id]
+
+        tool = Tool(name="parallel_starts", handler=parallel, tracing_provider=jsonl)
+        out1, i1 = await _run(tool)
+        out2, i2 = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: True})
+        assert i2[0].payload == {"question": "ready 1?"}
+
+        loads: list[str] = []
+        original = jsonl.get
+
+        async def slow_get(_cls, run_context):
+            loads.append(str(run_context.parent_id))
+            await asyncio.sleep(0.01)  # both starts wait on the same link
+            return await original(run_context)
+
+        monkeypatch.setattr(jsonl, "get", classmethod(slow_get))
+        out3, _ = await _run(tool, parent_id=out2.run_id, resume={i2[0].interaction_id: True})
+        assert out3.status.code == "success", out3.error
+        assert sorted(out3.output) == ["call_1", "call_2"]
+        assert loads.count(out1.run_id) == 1, "the grandparent is loaded once, not once per parallel start"
+        assert len({p["key"] for p in platform.posts}) == 2
+
+    @pytest.mark.asyncio
     async def test_replay_finds_the_call_on_an_ancestor_after_a_revision_change(self, platform, jsonl, monkeypatch):
         from timbal.state import suspend
 
