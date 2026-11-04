@@ -1175,10 +1175,13 @@ class VoiceSession:
         if self._closed:
             return
         # A HOLD during a protected window lives in ``_held_user_text``, not
-        # the deferred buffer. Fold it in before the hold is cancelled.
+        # the deferred buffer. Merge it the same way a later commit would
+        # (refinement replaces, a new fragment is appended) before the hold
+        # is cancelled. Do this before ``_closed`` so the merge is not skipped.
         held = (self._held_user_text or "").strip()
-        if held and held not in self._deferred_user_text:
-            self._deferred_user_text = f"{self._deferred_user_text} {held}".strip()
+        self._held_user_text = None
+        if held:
+            self._defer_user_speech(held)
         self._closed = True
         self._cancel_hold()
         self._held_user_text = None

@@ -426,9 +426,11 @@ def test_unfinished_tool_batch_does_not_lock_the_call() -> None:
 async def test_hangup_keeps_speech_held_during_a_protected_window() -> None:
     script = _Script()
     session, _stt = _voice(script, [])
+    session._deferred_user_text = "also check"
     session._held_user_text = DURING_TOOL
     await session.close()
-    assert any(entry.role == "user" and entry.text == DURING_TOOL for entry in session.transcript)
+    # The hold is a refinement of the deferred fragment, not a second copy.
+    assert [entry.text for entry in session.transcript if entry.role == "user"] == [DURING_TOOL]
 
 
 def test_dict_tool_definition_accepts_interruption_mode() -> None:
