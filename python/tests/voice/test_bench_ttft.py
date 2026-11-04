@@ -26,6 +26,10 @@ def test_prompt_is_stable_and_about_7k_tokens() -> None:
     assert 7600 <= tokens <= 8600
     assert "phone call" in first
     assert "markdown" in first
+    assert bench.system_for_run(None) == first
+    fresh = bench.system_for_run("abc")
+    assert fresh.startswith("Benchmark run abc.\n")
+    assert fresh.endswith(first)
 
 
 def test_shortlist_is_openai_groq_and_anthropic_including_bedrock_eu() -> None:

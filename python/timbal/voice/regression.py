@@ -17,6 +17,9 @@ False cut here means one of:
 
 Ceilings are opt-in arguments. The committed corpus in the test suite passes
 them. Nothing in a normal agent call turns this on.
+
+This module is the CI replay, not a supported import. Gate traces you already
+have with :func:`timbal.voice.latency.gate_silence_to_first_audio`.
 """
 
 from __future__ import annotations
@@ -268,12 +271,3 @@ class _InstantTTS(TextToSpeech):
 
     async def close(self) -> None:
         return None
-
-
-__all__ = [
-    "ReplayObservation",
-    "false_cuts_for",
-    "gate_voice_regression",
-    "replay_case",
-    "replay_cases",
-]

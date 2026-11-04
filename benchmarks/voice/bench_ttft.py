@@ -53,8 +53,10 @@ import hmac
 import json
 import os
 import struct
+import sys
 import time
 import urllib.parse
+import uuid
 import zlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -70,8 +72,10 @@ TARGET_TOKENS = 8000
 # Sizing aid only. The provider's prompt_tokens in the report is the real count.
 CHARS_PER_TOKEN = 4
 # High enough that a reasoning preface cannot consume the budget before the
-# first speakable token. The clock still stops at that token, not at the cap.
-MAX_OUTPUT_TOKENS = 256
+# first speakable token. Groq gpt-oss hit finish_reason=length at 256 with no
+# text. The clock still stops at the first speakable token, not at the cap,
+# and the model stops when the short reply is done.
+MAX_OUTPUT_TOKENS = 2048
 DEFAULT_SAMPLES = 6
 DEFAULT_TIMEOUT_SECS = 30.0
 BEDROCK_SERVICE = "bedrock"
@@ -121,6 +125,18 @@ _VOICE_FACTS: tuple[str, ...] = (
 def estimate_tokens(text: str) -> int:
     """Rough size used to build the prompt. Not a model tokenizer."""
     return len(text) // CHARS_PER_TOKEN
+
+
+def system_for_run(nonce: str | None) -> str:
+    """Stable prompt, or the same prompt under a unique first line.
+
+    The first line sits in the cached prefix. A new nonce misses. Every sample
+    in that run shares it, so the first request is cold and the rest can hit.
+    """
+    prompt = voice_system_prompt()
+    if not nonce:
+        return prompt
+    return f"Benchmark run {nonce}.\n{prompt}"
 
 
 def voice_system_prompt(target_tokens: int = TARGET_TOKENS) -> str:
@@ -621,6 +637,7 @@ async def run_targets(
     timeout: float = DEFAULT_TIMEOUT_SECS,
     env: Mapping[str, str] | None = None,
     client_factory: ClientFactory | None = None,
+    system: str | None = None,
 ) -> list[TargetResult]:
     results: list[TargetResult] = []
     for plan in plans:
@@ -644,6 +661,7 @@ async def run_targets(
                 timeout=timeout,
                 env=env or {},
                 client_factory=client_factory,
+                system=system,
             )
         except Exception as exc:  # noqa: BLE001 — one model must not abort the rest of the matrix
             result.error = f"{type(exc).__name__}: {exc}"
@@ -709,6 +727,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECS)
     parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="prefix a unique run id so the first sample misses the cache and later samples share that prefix",
+    )
     parser.add_argument("--list", action="store_true", help="print the plan and the keys it still needs")
     args = parser.parse_args(argv)
     plans = plan_targets(
@@ -725,6 +748,10 @@ def main(argv: list[str] | None = None) -> int:
             state = plan.skip_reason or f"{plan.route} {plan.api} {request_url(plan)}"
             print(f"{plan.label}  {state}")  # noqa: T201
         return 0
+    nonce = uuid.uuid4().hex if args.fresh else None
+    system = system_for_run(nonce)
+    if nonce:
+        print(f"fresh prefix: Benchmark run {nonce}", file=sys.stderr)  # noqa: T201
     results = asyncio.run(
         run_targets(
             plans,
@@ -732,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
             warmup=not args.no_warmup,
             timeout=args.timeout,
             env=os.environ,
+            system=system,
         )
     )
     if args.json:
@@ -913,13 +941,14 @@ async def _sample_target(
     timeout: float,
     env: Mapping[str, str],
     client_factory: ClientFactory | None,
+    system: str | None = None,
 ) -> list[Sample]:
     factory = client_factory or _default_client(timeout)
     client = await factory(plan)
     try:
         if warmup and plan.api != "bedrock":
             await _warmup(client, plan)
-        body = build_body(plan)
+        body = build_body(plan, system=system)
         payload = json.dumps(body).encode()
         taken: list[Sample] = []
         for _ in range(samples):
