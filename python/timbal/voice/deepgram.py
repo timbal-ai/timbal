@@ -82,6 +82,19 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
     return key
 
 
+def _flux_confidence(value: Any) -> float | None:
+    """Clamp Flux ``end_of_turn_confidence`` into ``[0, 1]``, or ``None``."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if score != score:  # NaN
+        return None
+    return min(1.0, max(0.0, score))
+
+
 def _encoding_param(config: AudioInputConfig) -> str:
     """Timbal speaks PCM16LE mono end-to-end; Deepgram calls that ``linear16``."""
     if config.encoding in ("pcm_s16le", "linear16", ""):
@@ -225,7 +238,8 @@ class _DeepgramSTTBase(SpeechToText):
                 break
             if item.type == "error":
                 raise RuntimeError(item.text)
-            if item.text:
+            # TurnResumed cancels a speculative reply even with an empty transcript.
+            if item.type == "resumed" or item.text:
                 yield item
 
     async def _send_json(self, payload: dict[str, Any]) -> None:
@@ -264,8 +278,15 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
       so far, matching how the session treats Scribe partials)
     * ``EndOfTurn`` → ``committed``
     * ``EagerEndOfTurn`` → ``eager`` and ``TurnResumed`` → ``resumed``, with
-      ``end_of_turn_confidence``. Predictions only: they do not commit, and
-      the session uses them when during-speech prediction is on.
+      ``end_of_turn_confidence``. Predictions only: they do not commit.
+      During-speech prediction commits from them when speculation is off.
+      Speculative generation holds a reply from them when it is on.
+
+    Flux emits the eager pair only when ``eager_eot_threshold`` is on the
+    connection. Both features set that from
+    :func:`timbal.voice.predictive_eou.flux_eager_threshold`, once, strictly
+    below ``eot_threshold``. Deepgram guarantees the ``EndOfTurn`` transcript
+    matches the preceding ``EagerEndOfTurn`` unless ``TurnResumed`` came first.
 
     ``commit()`` is a no-op: the Flux turn machine owns endpointing, there is
     no client-side force-commit. Run with ``turn_detector="provider"`` and

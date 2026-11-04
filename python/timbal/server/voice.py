@@ -1100,15 +1100,19 @@ def build_voice_session(
         # (Flux, Munsit).
         for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
             stt_extra.pop(k, None)
+    # One helper, one query value. During-speech prediction and speculative
+    # generation both need EagerEndOfTurn. Whichever is on (or both) sets
+    # eager_eot_threshold once, strictly below eot_threshold.
     eager_eot_threshold: float | None = None
-    if merged.predict_during_speech is True and stt_native_eou:
+    wants_flux_eager = (merged.predict_during_speech is True and stt_native_eou) or (
+        merged.speculative_generation.enabled and stt_provider == "deepgram-flux"
+    )
+    if wants_flux_eager:
         from ..voice.deepgram import DeepgramFluxSTT
 
         if isinstance(stt, DeepgramFluxSTT):
-            # Flux emits EagerEndOfTurn only when this query param is set, and
-            # it must be below eot_threshold. The session uses the same number
-            # as the early-commit gate. Local VAD force-commit stays off:
-            # Flux commit() is a no-op.
+            # Flux emits EagerEndOfTurn only when this query param is set.
+            # Local VAD force-commit stays off: Flux commit() is a no-op.
             from ..voice.predictive_eou import flux_eager_threshold
 
             eager_eot_threshold = flux_eager_threshold(stt_extra)
@@ -1244,6 +1248,7 @@ def build_voice_session(
         session_kwargs["announce_background_results"] = defaults.events.announce_background_results
         session_kwargs["client_events"] = defaults.events.client_notify
         session_kwargs["on_busy"] = defaults.events.on_busy
+    session_kwargs["speculative_generation"] = merged.speculative_generation
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).

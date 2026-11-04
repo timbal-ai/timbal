@@ -163,6 +163,12 @@ class VadEndpointer:
         self._commit: Callable[[], Awaitable[None]] | None = None
         self._should_commit: Callable[[], bool] | None = None
         self._text_score: Callable[[], Awaitable[float | None]] | None = None
+        # Speculative generation (opt-in). ``on_score`` sees the audio
+        # P(complete) and whether the text scorer called the pause incomplete.
+        # ``on_speech_resume`` fires only when new speech cancels a pending
+        # endpoint — not when a commit does.
+        self._on_score: Callable[[float, bool], Awaitable[None]] | None = None
+        self._on_speech_resume: Callable[[], None] | None = None
 
         self._started = False
         self._closed = False
@@ -196,6 +202,8 @@ class VadEndpointer:
         commit: Callable[[], Awaitable[None]],
         should_commit: Callable[[], bool],
         text_score: Callable[[], Awaitable[float | None]] | None = None,
+        on_score: Callable[[float, bool], Awaitable[None]] | None = None,
+        on_speech_resume: Callable[[], None] | None = None,
     ) -> None:
         """Attach the session callbacks. Must run before :meth:`start`.
 
@@ -209,6 +217,8 @@ class VadEndpointer:
         self._commit = commit
         self._should_commit = should_commit
         self._text_score = text_score
+        self._on_score = on_score
+        self._on_speech_resume = on_speech_resume
 
     def attach_predictor(self, predictor: Any) -> None:
         """Use a during-speech :class:`~timbal.voice.predictive_eou.SpeechEouPredictor`.
@@ -265,11 +275,14 @@ class VadEndpointer:
                 # Real resumed speech invalidates a pending endpoint: the user
                 # was not done. (Two-frame debounce; see SPEECH_RESUME_SECS.)
                 if self._speech_run >= self.SPEECH_RESUME_SECS:
+                    had_pending = self._pending is not None and not self._pending.done()
                     self._cancel_pending()
                     if self._resume_pending:
                         self._resume_pending = False
                         if self._predictor is not None:
                             self._predictor.on_speech_resumed()
+                    if had_pending and self._on_speech_resume is not None:
+                        self._on_speech_resume()
                 self._utterance_speech += _FRAME_SECS
                 if self._utterance_speech >= self.min_speech_secs:
                     self._utterance_active = True
@@ -432,6 +445,14 @@ class VadEndpointer:
                 text_incomplete_bump=text_bumped,
                 predictive=early,
             )
+            # Smart Turn only. A text-driven or predictive-early score is not
+            # "Smart Turn says the pause is probably complete". ``remaining``
+            # was already sized above, including the short predictive wait.
+            if driver == "audio" and self._on_score is not None:
+                try:
+                    await self._on_score(p, text_bumped)
+                except Exception as e:
+                    logger.warning("vad_speculative_score_failed", error=str(e))
             if remaining > 0:
                 await asyncio.sleep(remaining)
             if self._closed or not self._should_commit():

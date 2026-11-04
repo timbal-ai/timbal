@@ -69,7 +69,7 @@ agent = Agent(
 
 A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
-Recording, ambient audio, `events`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, and `first_flush_min_words` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`) are treated as unset so they do not wipe an inherited value.
+Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, and `first_flush_min_words` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
 
 ## Mix providers
 
@@ -95,6 +95,10 @@ agent.voice_config = {
 ```
 
 This assignment replaces the agent's declared config. Keep any greetings or other behavior fields you want to retain. The earlier lessons use a dict and add individual keys to preserve previous behavior; a `VoiceConfig` instance or callable needs its own update pattern.
+
+## Speculative generation
+
+`speculative_generation` is off unless you set it. `True` uses the defaults. A dict turns the feature on as well, unless that dict sets `enabled` to false: `{"eou_threshold": 0.6}` enables it at that threshold, and `{"enabled": false}` leaves it off. The dict keys are `enabled`, `preemptive_tts`, `max_retries`, `max_speech_duration`, and `eou_threshold`. A Smart Turn pause below `eou_threshold`, or one the text scorer calls incomplete, does not start a reply. On Flux it shares the eager threshold with during-speech prediction. See [Turn-taking and interruptions](/voice/turn-taking#flux-eager-threshold).
 
 ## Turn detection
 

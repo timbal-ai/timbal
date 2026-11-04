@@ -105,11 +105,38 @@ agent.voice_config["predict_during_speech"] = True
 
 On transcription that does not decide the turn itself (ElevenLabs Scribe, Deepgram Nova, OpenAI), the local endpointer scores the live transcript and the recent audio while the caller is speaking. When the words read as a finished sentence and the audio agrees, the session confirms the turn after 0.16 seconds of silence. Otherwise it keeps the usual wait: 0.20 seconds of silence, then up to the 0.45 second floor when the score is confident.
 
-Deepgram Flux still owns the final boundary, and local VAD force-commit stays off, as described above. With this setting the session asks Flux for an early end-of-turn (`EagerEndOfTurn`). That event can start the turn. `TurnResumed` cancels it. `EndOfTurn` confirms it when the words match, including a difference of punctuation only; a longer final transcript cancels the early turn and starts again with the full text. When Smart Turn is available, an incomplete audio score holds the early start and `EndOfTurn` still commits.
-
-The eager threshold defaults to 0.5. If `eot_threshold` is set close to that, the eager value is lowered so it stays below the end-of-turn threshold. An `eager_eot_threshold` at or above `eot_threshold` is lowered below it. Set `eager_eot_threshold` in `stt_extra` to choose it yourself.
+Deepgram Flux still owns the final boundary, and local VAD force-commit stays off, as described above. With this setting, and speculative generation off, the session asks Flux for an early end-of-turn (`EagerEndOfTurn`). That event can start the turn. `TurnResumed` cancels it. `EndOfTurn` confirms it when the words match, including a difference of punctuation only; a longer final transcript cancels the early turn and starts again with the full text. When Smart Turn is available, an incomplete audio score holds the early start and `EndOfTurn` still commits. The eager value is the shared threshold below.
 
 Munsit decides the turn itself and does not emit an early end-of-turn event, so `predict_during_speech` has no effect there.
+
+## Speculative generation
+
+By default the model waits until the transcript is confirmed. Set `speculative_generation` to start it earlier, while the caller might still be pausing:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "speculative_generation": True},
+)
+```
+
+`True` uses the defaults. A dict turns it on too, unless the dict sets `enabled` to false. `{"eou_threshold": 0.6}` enables it; `{"enabled": false}` does not. The keys are `enabled`, `preemptive_tts`, `max_retries` (default 3), `max_speech_duration` (default 10 seconds), and `eou_threshold` (default `0.5`). A Smart Turn pause is skipped when the score is below `eou_threshold`, and also when the text scorer calls the pause incomplete. `preemptive_tts` defaults to false: the model runs early, and speech synthesis starts once the turn is confirmed. Set it to true to synthesize during the wait as well. Those bytes stay buffered either way.
+
+Nothing is played until the turn is confirmed. A caller who keeps talking, or a Flux `TurnResumed`, drops the attempt and its audio. If the confirmed transcript is not the same words (case and punctuation aside), the attempt is dropped and the reply starts over on the final text. A matching transcript is reused, including when only capitalization or punctuation changed.
+
+On Flux the server sends `eager_eot_threshold` so `EagerEndOfTurn` and `TurnResumed` are emitted. `TurnResumed` discards the held reply. `EndOfTurn` confirms it when the words match, and restarts it when they do not. The threshold is the shared value below. When `predict_during_speech` is also on, speculative generation owns those Flux events: the early event starts a held reply and does not also commit the turn. During-speech prediction still shortens the local silence confirmation on providers that do not own the turn.
+
+Read-only tools run during that wait. A tool that books, charges, sends, or hangs up should set `defer_until_eot=True` so it does not run until the turn is confirmed; if the attempt is dropped, it never runs. An MCP tool annotated destructive gets that flag whether or not `approval` gates it. See [Using tools](/voice/tools).
+
+Each turn's metrics carry `speculative`, plus the call's `speculative_generations_started` and `speculative_generations_discarded` counts. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded`. The setting is server-side. A client hello cannot turn it on.
+
+## Flux eager threshold
+
+`predict_during_speech` and `speculative_generation` share one helper. There is no 0.3 floor. Omitted, `eager_eot_threshold` is `min(0.5, eot_threshold - 0.1)`. An explicit value in `stt_extra` is lowered the same way when it is not already strictly below `eot_threshold`. Deepgram rejects an eager threshold at or above the end-of-turn threshold. If both features are on, the query parameter is set once.
 
 ## Custom clients
 

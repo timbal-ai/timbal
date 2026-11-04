@@ -24,16 +24,25 @@ What was copied, and what was not:
   for. A rolling score alone cannot authorize an early commit.
 * **Deepgram Flux**: ``EagerEndOfTurn`` / ``TurnResumed`` are a provider
   prediction with a confidence, not a commit. ``TurnResumed`` vetoes the short
-  wait. Neither event starts the assistant's reply.
+  wait. The events themselves are not a commit.
 * **ElevenLabs ``turn_v3``**: the target shape — decide from words, prosody,
   and a short pause together, instead of a fixed silence. Their model is not
   in this process. Smart Turn plus the text score plus Silero is the local
   stand-in, and it still confirms with :data:`EAGER_SILENCE_SECS` of silence.
 
 Off unless a session sets ``predict_during_speech``. On a provider without a
-native boundary the endpointer still force-commits. On Deepgram Flux the
-session treats ``EagerEndOfTurn`` as an early commit, ``TurnResumed`` as its
-cancel, and ``EndOfTurn`` as the confirmation. This class only keeps the scores.
+native boundary the endpointer still force-commits. On Deepgram Flux, with
+prediction on and speculative generation off, the session treats
+``EagerEndOfTurn`` as an early commit, ``TurnResumed`` as its cancel, and
+``EndOfTurn`` as the confirmation. Speculative generation uses the same events
+and holds the reply until ``EndOfTurn``; when both are on it owns those events.
+This class only keeps the scores.
+
+:func:`flux_eager_threshold` is the one place that chooses Flux
+``eager_eot_threshold``, for both features. There is no 0.3 floor. The result
+stays strictly below ``eot_threshold``. An explicit ``eager_eot_threshold`` is
+lowered the same way when it is not already below that end-of-turn value.
+Omitted, the value is ``min(0.5, eot_threshold - 0.1)``.
 """
 
 from __future__ import annotations

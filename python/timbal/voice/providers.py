@@ -74,12 +74,14 @@ class TranscriptEvent(BaseModel):
     """Single event from an STT provider."""
 
     type: Literal["partial", "committed", "error", "eager", "resumed"]
-    text: str
+    text: str = ""
     confidence: float | None = None
     """Provider end-of-turn confidence, set on ``eager`` / ``resumed``.
 
     ``eager`` is a prediction while the caller may still continue (Deepgram
     Flux ``EagerEndOfTurn``). ``resumed`` cancels it. Neither is a commit.
+    Speculative generation and during-speech prediction both consume these
+    events. ``resumed`` is delivered even when ``text`` is empty.
     """
 
 

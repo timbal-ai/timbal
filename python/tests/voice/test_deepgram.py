@@ -133,6 +133,12 @@ class TestFluxEventMapping:
             ("resumed", "tell me a story about", 0.9),
         ]
 
+    async def test_turn_resumed_without_text_is_still_an_event(self) -> None:
+        stt = DeepgramFluxSTT()
+        await stt._handle_message(_flux_turn_info("TurnResumed", ""))
+        events = _drain(stt)
+        assert [(e.type, e.text) for e in events] == [("resumed", "")]
+
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()
         await stt._handle_message(_flux_turn_info("Update", ""))
