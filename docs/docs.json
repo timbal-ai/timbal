@@ -55,6 +55,7 @@
                 "pages": [
                   "voice/greetings",
                   "voice/tools",
+                  "voice/prompts",
                   "voice/thinking-sounds",
                   "voice/fillers",
                   "voice/background-audio",

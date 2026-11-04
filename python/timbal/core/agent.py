@@ -69,6 +69,7 @@ from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump, invalidate_message_dump_caches
 from .attachment_limit import AttachmentSpills, apply_attachment_limit
 from .llm import _llm_router
+from .llm.prompt_cache import SystemPrompt
 from .memory_compaction import MemoryCompactor
 from .models import Model, base_usage_metric, get_context_window
 from .runnable import Runnable, RunnableLike
@@ -284,8 +285,18 @@ class Agent(Runnable):
 
     model: SkipValidation[Model | str]
     """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5') or a TestModel for offline testing."""
-    system_prompt: str | Callable[[], str] | Callable[[], Coroutine[Any, Any, str]] | None = None
-    """System prompt. Can be a string, sync callable, or async callable returning a string."""
+    system_prompt: (
+        str
+        | SystemPrompt
+        | Callable[[], str | SystemPrompt]
+        | Callable[[], Coroutine[Any, Any, str | SystemPrompt]]
+        | None
+    ) = None
+    """System prompt.
+
+    A string, a :class:`SystemPrompt` (static prefix, then a per-turn suffix),
+    or a sync/async callable returning either.
+    """
     tools: list[SkipValidation[RunnableLike]] = []
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     skills_path: str | Path | None = None
@@ -660,6 +671,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """See base class."""
         if self._system_prompt_fn is not None:
             system_prompt = f"<{self._system_prompt_fn.__name__}>"
+        elif isinstance(self.system_prompt, SystemPrompt):
+            system_prompt = self.system_prompt.model_dump()
         else:
             system_prompt = self.system_prompt
 
@@ -758,7 +771,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return AgentContinuation(self, max_idle_secs=max_idle_secs, max_continuations=max_continuations, **kwargs)
 
-    async def _resolve_system_prompt(self) -> str | None:
+    async def _resolve_system_prompt(self) -> str | SystemPrompt | None:
         """Resolve system prompt by executing callable or embedded template functions."""
         system_prompt = self.system_prompt
 
@@ -768,12 +781,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             )
 
         if self._system_prompt_skills:
-            if not isinstance(system_prompt, str):
+            # Skills are stable, so they stay on the cached prefix.
+            if isinstance(system_prompt, SystemPrompt):
+                static = system_prompt.static
+                skills = self._system_prompt_skills
+                static = f"{static}\n\n{skills}" if static else skills
+                system_prompt = system_prompt.model_copy(update={"static": static})
+            elif not isinstance(system_prompt, str):
                 system_prompt = self._system_prompt_skills
             else:
                 system_prompt += "\n\n" + self._system_prompt_skills
 
-        if system_prompt is not None and not isinstance(system_prompt, str):
+        if system_prompt is not None and not isinstance(system_prompt, str | SystemPrompt):
             logger.warning(
                 "Invalid system prompt type after resolution, ignoring...",
                 system_prompt=system_prompt,
@@ -782,6 +801,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = None
 
         return system_prompt
+
+    def _voice_system_prompt(self, system_prompt: str | SystemPrompt | None) -> str | SystemPrompt | None:
+        """On a voice turn of this agent, keep per-turn facts after the static prefix.
+
+        Greeting and filler agents are different instances, so they do not pick
+        up the call's caller, clock, or customer block.
+        """
+        # Lazy: voice.session imports Agent. Only a live call pays for it.
+        from ..voice.session import current_voice_session
+
+        session = current_voice_session()
+        if session is None or session.agent is not self:
+            return system_prompt
+        return session.prompt_for_turn(system_prompt)
 
     def _find_pending_tool_uses(self, memory: list[Message]) -> list[ToolUseContent]:
         """Return any tool_uses in the most recent assistant message that
@@ -1729,6 +1762,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         system_prompt = kwargs.pop("system_prompt", None)
         if not system_prompt:
             system_prompt = await self._resolve_system_prompt()
+        system_prompt = self._voice_system_prompt(system_prompt)
 
         await self.resolve_memory()
         # Session BG caps (concurrent / depth) before tools can spawn this turn.

@@ -36,6 +36,7 @@ import unicodedata
 from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Coroutine
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -43,6 +44,12 @@ import structlog
 from uuid_extensions import uuid7
 
 from ..core.agent import Agent
+from ..core.llm.prompt_cache import (
+    SystemPrompt,
+    bind_prompt_cache_key,
+    reset_prompt_cache_key,
+    system_prompt_text,
+)
 from ..core.session_scheduler import Followup, OnBusy, SessionScheduler, is_parked
 from ..guardrails.types import GuardrailContext, GuardrailStage
 from ..state import get_run_context, set_run_context
@@ -1078,6 +1085,9 @@ class VoiceSession:
         try:
             self.started_at = time.time()
             self._current_session_token = _current_voice_session.set(self)
+            # Same key for every LLM call in this call, including fillers.
+            # OpenAI uses it as prompt_cache_key; the proxy reads the header.
+            self._prompt_cache_token = bind_prompt_cache_key(self.session_id)
             self._start_llm_warmup()
             await self.prepare()
             await self.turn_detector.start(self.audio_input)
@@ -1135,6 +1145,11 @@ class VoiceSession:
                     with contextlib.suppress(ValueError):
                         _current_voice_session.reset(self._current_session_token)
                     self._current_session_token = None
+                cache_token = getattr(self, "_prompt_cache_token", None)
+                if cache_token is not None:
+                    with contextlib.suppress(ValueError):
+                        reset_prompt_cache_key(cache_token)
+                    self._prompt_cache_token = None
             # Closing adapters can report incomplete operations after the stop
             # sentinel. Deliver their accounting before the terminal event.
             while not self._event_queue.empty():
@@ -3034,6 +3049,8 @@ class VoiceSession:
             await self._scheduler.until_no_other_turn(include_queued=False)
         self._is_speaking = True
         self._turn_is_event = followup is not None
+        # One clock for every LLM call in this turn, including an empty retry.
+        self._turn_prompt_now = datetime.now(UTC)
         self._turn_asked_caller = False
         self._turn_assistant_text = ""
         self._turn_iteration_prefix = ""
@@ -3139,11 +3156,6 @@ class VoiceSession:
             # What the caller *heard*, not what was configured: an interruptible
             # opener cut mid-sentence leaves a prefix, and one cut before a
             # single word landed leaves nothing to not-repeat.
-            greeting_heard = self._greeting_heard_text()
-            if greeting_heard and self._last_run_context is None:
-                agent_kwargs["system_prompt"] = _dont_greet_again_prompt(
-                    await self._agent_system_prompt(), greeting_heard
-                )
             agen = self.agent(**agent_kwargs)
             # Armed at turn start rather than at the first tool call: a model
             # that thinks for seconds before calling anything is dead air too.
@@ -4627,10 +4639,33 @@ class VoiceSession:
         across connections — a per-call greeting must not mutate it.
         """
         try:
-            return await self.agent._resolve_system_prompt()
+            resolved = await self.agent._resolve_system_prompt()
         except Exception as e:
             logger.debug("greeting_system_prompt_unavailable", error=str(e))
             return None
+        return system_prompt_text(resolved)
+
+    def prompt_for_turn(self, resolved: str | SystemPrompt | None) -> SystemPrompt:
+        """This turn's prompt: the agent's static prefix, then per-turn facts.
+
+        Called from ``Agent.handler`` once the turn's run context exists, so a
+        callable system prompt still sees the session. The already-greeted note
+        is turn one only and lives in the dynamic suffix, so turn two's static
+        prefix matches turn one.
+        """
+        from .prompt import compose_voice_system_prompt
+
+        note = None
+        heard = self._greeting_heard_text()
+        if heard and self._last_run_context is None:
+            note = _already_greeted_note(heard)
+        now = getattr(self, "_turn_prompt_now", None) or datetime.now(UTC)
+        return compose_voice_system_prompt(
+            resolved,
+            call_context=self.call_context,
+            now=now,
+            greeting_note=note,
+        )
 
     async def _generate_greeting(self) -> str | None:
         """One-shot LLM completion for an ``instructions`` opener.
@@ -5458,20 +5493,18 @@ def _reconcile_final_assistant_text(streamed: str, final_text: str) -> tuple[str
     return streamed, None
 
 
-def _dont_greet_again_prompt(system_prompt: str | None, greeting: str) -> str:
-    """``system_prompt`` plus one line stating the call is already open.
+def _already_greeted_note(greeting: str) -> str:
+    """One line for the dynamic suffix: the call is already open.
 
-    Passed as the first turn's ``system_prompt`` override — a note, not a
-    rewrite, so a callable or skill-bearing prompt survives intact. ``greeting``
-    is what the caller actually heard, which on a barge-in can be a prefix of
-    the configured line.
+    ``greeting`` is what the caller actually heard, which on a barge-in can be
+    a prefix of the configured line. It stays out of the static prefix so turn
+    two still matches turn one's cached instructions.
     """
-    note = (
+    return (
         f'You already opened this call by saying: "{greeting}". '
         "The caller has heard it. Do not greet them or introduce yourself again — "
         "answer what they just said."
     )
-    return f"{system_prompt}\n\n{note}" if system_prompt else note
 
 
 def _outside_links(text: str, ends: list[int]) -> list[int]:

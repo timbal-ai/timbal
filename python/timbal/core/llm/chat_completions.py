@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from ...types.message import Message
 from ...utils import transform_schema
 from .auto import AUTO_PROVIDER, auto_metadata
+from .prompt_cache import apply_openai_prompt_cache_key, openai_chat_system_message
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -38,8 +39,9 @@ def prepare_chat_completions_request(
 ) -> tuple[Callable[[], AsyncIterator[Any]], str]:
     """Build the Chat Completions kwargs and return (create_stream, context_label)."""
     chat_completions_messages = []
-    if system_prompt:
-        chat_completions_messages.append({"role": "system", "content": system_prompt})
+    system_message = openai_chat_system_message(system_prompt)
+    if system_message is not None:
+        chat_completions_messages.append(system_message)
     reasoning_as = "reasoning_content" if config.supports_chat_reasoning_content else "omit"
     for message in messages:
         chat_completions_message = message.to_openai_chat_completions_input(reasoning_as=reasoning_as)
@@ -92,6 +94,9 @@ def prepare_chat_completions_request(
     # tools instead of letting dict.update clobber the generated list.
     provider_params = dict(provider_params)
     extra_tools = provider_params.pop("tools", None)
+    # Pop the session key before update so Groq (no key; automatic prefix cache
+    # on GPT-OSS only) never receives prompt_cache_key.
+    apply_openai_prompt_cache_key(provider, chat_completions_kwargs, provider_params)
     chat_completions_kwargs.update(provider_params)
     if extra_tools:
         chat_completions_kwargs["tools"] = [*chat_completions_kwargs.get("tools", []), *extra_tools]
