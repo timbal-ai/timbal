@@ -37,9 +37,9 @@ The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate
 
 ## Pace synthesized speech
 
-Both controls are off unless you set them, and both need the `timbal[voice]` extra. They run on the PCM the caller hears, after the speech provider returns it, and an interrupted reply is still cut to the audio that was actually played.
+Both controls are off unless you set them, and both need the `timbal[voice]` extra. They apply only to the cascaded pipeline (transcription, then the agent, then speech), not to a `RealtimeSession`. They run on the PCM the caller hears, after the speech provider returns it, and only when the session encoding is PCM16 (`pcm_s16le`, or the `linear16` / `pcm16` aliases). Any other encoding is left unchanged and a warning is logged. An interrupted reply is still cut to the audio that was actually played.
 
-`max_tts_pause_secs` shortens an internal silence quieter than `tts_quiet_dbfs` (default `-45`, which leaves breaths in) down to that many seconds. The start of the reply is not delayed. `tts_tempo` changes the speaking rate without changing the pitch: `1.0` leaves the audio alone, and a value above `1` is faster. `None` on either field disables it.
+`max_tts_pause_secs` must be `0` or greater. It shortens an internal silence quieter than `tts_quiet_dbfs` (default `-45`, which leaves breaths in) down to that many seconds. Pause trimming does not delay the start of the reply. `tts_tempo` must be greater than `0`. It changes the speaking rate without changing the pitch: `1.0` leaves the audio alone, and a value above `1` is faster. Tempo holds 20–50 ms before the first samples, and a short tail can wait up to 0.25 s of silence before it is flushed. `None` on either field disables it. An invalid value in a client hello is dropped and the server's value is kept.
 
 ```python
 from timbal import Agent

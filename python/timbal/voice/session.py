@@ -384,6 +384,8 @@ class VoiceSession:
         ):
             raise ValueError("tts_tempo must be finite and positive")
         self.tts_tempo = None if tts_tempo is None else float(tts_tempo)
+        # Logged once when pace is configured but the session audio is not PCM16.
+        self._tts_pace_encoding_warned = False
         self._turn_audio_playing_until = 0.0
         # Wall-clock cap for one agent turn. ``<= 0`` disables. On expiry the
         # session emits SessionError, speaks ``turn_timeout_fallback`` if no
@@ -4155,8 +4157,21 @@ class VoiceSession:
 
         Byte accounting (playback, ``_turn_audio_bytes``, the segment record,
         the call recorder) runs on whatever this yields, which is the PCM the
-        caller can actually hear.
+        caller can actually hear. Only PCM16 session audio is processed.
+        Anything else is returned unchanged and warned about once.
         """
+        if not self._tts_pace_enabled():
+            return chunks
+        encoding = (self.audio_output.encoding or "").strip().lower()
+        if encoding not in ("", "pcm_s16le", "pcm16", "linear16"):
+            if not self._tts_pace_encoding_warned:
+                self._tts_pace_encoding_warned = True
+                logger.warning(
+                    "tts_pace_skipped",
+                    encoding=self.audio_output.encoding,
+                    reason="pause trimming and tempo require pcm_s16le",
+                )
+            return chunks
         rate = self.audio_output.sample_rate
         if self.max_tts_pause_secs is not None:
             from .pauses import limit_pauses
@@ -4173,6 +4188,12 @@ class VoiceSession:
 
             chunks = change_tempo(chunks, sample_rate=rate, tempo=tempo)
         return chunks
+
+    def _tts_pace_enabled(self) -> bool:
+        if self.max_tts_pause_secs is not None:
+            return True
+        tempo = self.tts_tempo
+        return tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6)
 
     def _note_turn_audio(self, num_bytes: int) -> None:
         self._turn_audio_bytes += num_bytes
