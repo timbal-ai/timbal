@@ -32,6 +32,7 @@ class FakeVoicePlatform:
         self.dials = 0
         self.posts: list[dict[str, Any]] = []
         self.gets: list[str] = []
+        self.requests: list[tuple[str, str]] = []
         self.timeout_after_accept = 0
         self.tokens: dict[str, str] = {}
 
@@ -61,6 +62,7 @@ class FakeVoicePlatform:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        self.requests.append((request.method, path))
         result = _RESULT.match(path)
         if result:
             return self._report(request, result.group("id"))

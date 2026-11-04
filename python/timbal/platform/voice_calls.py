@@ -218,6 +218,10 @@ async def _root_run_id() -> str:
     key derived from ``run_context.id`` would dial again on every resume. The
     root id is the first run's id, inherited through every resume and stamped
     on the root span so the next resume in a chain finds it too.
+
+    A resume never substitutes another id for the root: when the chain cannot
+    be read back to a run that carries the stamp or that started the chain,
+    this raises before anything is dialled.
     """
     ctx = get_or_create_run_context()
     cached = getattr(ctx, "_voice_call_root_id", None)
@@ -225,17 +229,48 @@ async def _root_run_id() -> str:
         return cached
     root_id = ctx.id
     if ctx.parent_id and ctx._resume_values:
-        parent = await ctx._get_parent_trace()
-        inherited = None
-        if parent is not None and parent._root_call_id is not None:
-            parent_root = parent.get(parent._root_call_id)
-            inherited = (getattr(parent_root, "metadata", None) or {}).get(_ROOT_METADATA_KEY)
-        root_id = inherited or ctx.parent_id
+        root_id = await _inherited_root_run_id(ctx)
     ctx._voice_call_root_id = root_id
     root = ctx.root_span()
     if root is not None:
         root.metadata[_ROOT_METADATA_KEY] = root_id
     return root_id
+
+
+_MAX_RESUME_CHAIN = 1000
+
+
+def _unknown_root(run_id: str, why: str) -> VoiceCallError:
+    return VoiceCallError(
+        f"Cannot derive the voice call's idempotency key: {why} (run {run_id} of this resume chain). "
+        "Nothing was dialled. Retry the resume once the trace is readable, or pass idempotency_key=."
+    )
+
+
+async def _inherited_root_run_id(ctx: Any) -> str:
+    """Walk up a resume chain to the run that stamped or started it.
+
+    Each run's root span records the chain root once it reaches voice-call code
+    (``voice_call_root_id``) and is marked ``resumed`` when it was a resume of
+    its parent. A run with neither started the chain. Old traces without the
+    marker are treated as chain starts.
+    """
+    run_id = str(ctx.parent_id)
+    for _ in range(_MAX_RESUME_CHAIN):
+        trace = await ctx._get_parent_trace(run_id)
+        if trace is None or trace._root_call_id is None:
+            raise _unknown_root(run_id, "its trace could not be loaded")
+        root = trace.get(trace._root_call_id)
+        metadata = getattr(root, "metadata", None) or {}
+        stamped = metadata.get(_ROOT_METADATA_KEY)
+        if stamped:
+            return str(stamped)
+        if not metadata.get("resumed"):
+            return run_id
+        if not trace.parent_id:
+            raise _unknown_root(run_id, "it is a resume but its trace does not record its parent")
+        run_id = str(trace.parent_id)
+    raise _unknown_root(run_id, f"the chain is longer than {_MAX_RESUME_CHAIN} runs")
 
 
 def _current_span() -> Any:
@@ -313,8 +348,13 @@ def _dial_fingerprint(
     ]
 
 
-async def _replayed_from_parent(key: str, fingerprint: list[Any]) -> dict[str, Any] | None:
-    """The call a previous run in this resume chain already started with ``key``."""
+def _scoped(org: str, project: str, key: str) -> str:
+    """Span-metadata key for a call record: calls in another org or project never match."""
+    return f"{org}/{project}/{key}"
+
+
+async def _replayed_from_parent(org: str, project: str, key: str, fingerprint: list[Any]) -> dict[str, Any] | None:
+    """The call a previous run in this resume chain already started with ``key`` in this org and project."""
     ctx = get_or_create_run_context()
     if not (ctx.parent_id and ctx._resume_values):
         return None
@@ -323,8 +363,13 @@ async def _replayed_from_parent(key: str, fingerprint: list[Any]) -> dict[str, A
         return None
     for span in parent.values():
         records = (getattr(span, "metadata", None) or {}).get(_SPAN_METADATA_KEY)
-        record = records.get(key) if isinstance(records, dict) else None
-        if isinstance(record, dict) and record.get("id"):
+        record = records.get(_scoped(org, project, key)) if isinstance(records, dict) else None
+        if (
+            isinstance(record, dict)
+            and record.get("id")
+            and record.get("org_id") == org
+            and record.get("project_id") == project
+        ):
             stored_fp = record.get("fingerprint")
             if isinstance(stored_fp, list) and stored_fp != fingerprint:
                 raise IdempotencyKeyReused(
@@ -341,7 +386,7 @@ def _record_on_span(call: VoiceCall, fingerprint: list[Any]) -> None:
     if span is None:
         return
     records = span.metadata.setdefault(_SPAN_METADATA_KEY, {})
-    records[call.idempotency_key] = {
+    records[_scoped(call.org_id, call.project_id, call.idempotency_key)] = {
         "id": call.id,
         "status": call.status,
         "workforce": call.workforce,
@@ -409,7 +454,7 @@ async def start_voice_call(
     key = idempotency_key or await default_idempotency_key(attempt)
     fingerprint = _dial_fingerprint(workforce, rev, to, from_number, trunk, greeting)
 
-    prior = await _replayed_from_parent(key, fingerprint)
+    prior = await _replayed_from_parent(org, project, key, fingerprint)
     if prior is not None:
         call = VoiceCall(**{**prior, "replayed": True})
         call._outcome_model = outcome_model
@@ -529,8 +574,8 @@ async def cancel_voice_call(call: VoiceCall | dict[str, Any]) -> VoiceCallResult
     return _result(body, handle, handle._outcome_model)
 
 
-async def _replayed_result_from_parent(call_id: str) -> dict[str, Any] | None:
-    """The final result a previous run in this resume chain already received for ``call_id``."""
+async def _replayed_result_from_parent(call: VoiceCall) -> dict[str, Any] | None:
+    """The final result a previous run in this resume chain already received for ``call``."""
     ctx = get_or_create_run_context()
     if not (ctx.parent_id and ctx._resume_values):
         return None
@@ -539,18 +584,18 @@ async def _replayed_result_from_parent(call_id: str) -> dict[str, Any] | None:
         return None
     for span in parent.values():
         results = (getattr(span, "metadata", None) or {}).get(_SPAN_RESULTS_METADATA_KEY)
-        view = results.get(call_id) if isinstance(results, dict) else None
+        view = results.get(_scoped(call.org_id, call.project_id, call.id)) if isinstance(results, dict) else None
         if isinstance(view, dict) and view.get("finalized_at") is not None:
             return view
     return None
 
 
-def _record_result_on_span(call_id: str, result: VoiceCallResult) -> None:
+def _record_result_on_span(call: VoiceCall, result: VoiceCallResult) -> None:
     span = _current_span()
     if span is None:
         return
     results = span.metadata.setdefault(_SPAN_RESULTS_METADATA_KEY, {})
-    results[call_id] = result.model_dump(mode="json")
+    results[_scoped(call.org_id, call.project_id, call.id)] = result.model_dump(mode="json")
 
 
 async def wait_for_voice_call(
@@ -578,16 +623,16 @@ async def wait_for_voice_call(
         if suspension_id in ctx._resume_values:
             result = _final(suspend(payload, kind=VOICE_CALL_KIND), handle, model)
             await _claim_delivery(ctx, suspension_id, handle.id)
-            _record_result_on_span(handle.id, result)
+            _record_result_on_span(handle, result)
             return result
-    prior_view = await _replayed_result_from_parent(handle.id)
+    prior_view = await _replayed_result_from_parent(handle)
     if prior_view is not None:
         result = _final(prior_view, handle, model)
-        _record_result_on_span(handle.id, result)
+        _record_result_on_span(handle, result)
         return result
     current = await get_voice_call(handle, outcome=model)
     if current.is_final:
-        _record_result_on_span(handle.id, current)
+        _record_result_on_span(handle, current)
         return current
     if ctx._tracing_provider is None:
         logger.warning(

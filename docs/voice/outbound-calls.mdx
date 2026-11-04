@@ -78,7 +78,7 @@ done = await reminder(
 ).collect()
 ```
 
-The resume value is checked before the wait is claimed: it must be the final view of the call the run is waiting for, or that resume fails with `VoiceCallError` without consuming the parked wait (so the real final result can still resume it later).
+The resume value is checked before the wait is claimed: it must be the final view of the call the run is waiting for, or that resume fails with `VoiceCallError` without consuming the parked wait.
 
 A fresh process can resume it: the call is not dialled again, because the accepted call is recorded on the run's trace, and a step that already finished is not run again.
 
@@ -92,6 +92,10 @@ Besides `workforce` and `to`, `start_voice_call` (and `StartVoiceCall`) accepts:
 
 <ParamField body="outcome" type="type[BaseModel] | dict[str, Any]">
   Pydantic model or JSON Schema (`"type": "object"`) for the business outcome. Gives the voice agent a `report_call_outcome` tool; when a Pydantic model is passed, the returned result is validated against it.
+</ParamField>
+
+<ParamField body="outcome_schema" type="dict[str, Any]">
+  `StartVoiceCall` only. A JSON Schema dict, same as `outcome` but untyped: the agent gets `report_call_outcome` and the result's `outcome` is a plain dict. `outcome` wins when both are set.
 </ParamField>
 
 <ParamField body="greeting" type="str">
@@ -182,7 +186,7 @@ agent = Agent(name="receptionist", model="openai/gpt-5-mini", system_prompt=syst
 
 The context arrives before the first turn. Besides your keys it carries `call_id`, `direction`, `from` and `to` as dialled, and the direction-independent `user_number` (the person on the line) and `agent_number` (your line). `from` and `to` follow the call's direction; use `user_number` and `agent_number` for roles.
 
-When the call was started with an outcome schema, the root voice `Agent` runnable gets one more tool, `report_call_outcome`, whose parameters are that schema (voice workforces must expose an `Agent` as the root runnable; sub-agents in `agent.tools` and internal session helpers do not receive it). The agent should call it as soon as the answer is clear and before saying goodbye or transferring. A rejected report returns the invalid fields so the model can correct them; a later report replaces an earlier one until the call is final. If no valid report arrives, the result is `outcome_status="unavailable"`.
+When the call was started with an outcome schema, the voice agent gets one more tool, `report_call_outcome`, whose parameters are that schema. Only the root `Agent` of the voice workforce gets this tool; sub-agents don't. The agent should call it as soon as the answer is clear and before saying goodbye or transferring. A rejected report returns the invalid fields so the model can correct them; a later report replaces an earlier one until the call is final. If no valid report arrives, the result is `outcome_status="unavailable"`.
 
 The tool authenticates with a per-call credential that the framework keeps out of the run context fields, the trace and the logs.
 
@@ -192,7 +196,7 @@ The tool authenticates with a per-call credential that the framework keeps out o
 - If a start times out after the platform accepted it, retrying with the same key returns the same call instead of dialling again.
 - Reusing a key with a different workforce, revision, number, caller ID (`from_number`), trunk or greeting raises `IdempotencyKeyReused`.
 - To call the same person again on purpose, pass a new key or `attempt=1`.
-- A completion delivered twice resumes the run once: on the platform the `SipCallWaits` outbox serializes delivery per waiting run and reuses one resume run id on retry, while the worker claims `(parent_id, suspension_id)` (durable across processes on SQLite and JSONL, and in-process on the platform and in-memory providers) and cancels any duplicate.
+- A completion delivered twice resumes the run once; the duplicate is cancelled.
 - `cancel_voice_call(call)` cancels a call that has not ended.
 
 ## Limits

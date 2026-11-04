@@ -2111,6 +2111,10 @@ class Runnable(ABC, BaseModel):
         metadata = {**self.metadata}  # Shallow copy
         if _new_parent_call_id is None and run_context._invoked_by is not None:
             metadata["invoked_by"] = run_context._invoked_by
+        if _new_parent_call_id is None and resume_values:
+            # Marks the run as a resume of its parent (not a new turn), so code
+            # walking the parent chain knows where a resume chain starts.
+            metadata["resumed"] = True
         span = Span(
             path=self._path,
             call_id=_new_call_id,

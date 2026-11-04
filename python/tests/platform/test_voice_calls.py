@@ -275,6 +275,78 @@ class TestWaitAndResume:
         assert out3.status.code == "success", out3.error
         assert out3.output == ["completed", "completed"]
 
+    @staticmethod
+    def _two_calls_tool(name: str, prov) -> Tool:
+        async def two_calls() -> list[str]:
+            first = await start_voice_call("receptionist", "+34600000001")
+            a = await wait_for_voice_call(first)
+            second = await start_voice_call("receptionist", "+34600000002")
+            b = await wait_for_voice_call(second)
+            return [a.status, b.status]
+
+        return Tool(name=name, handler=two_calls, tracing_provider=prov)
+
+    @pytest.mark.asyncio
+    async def test_unreadable_parent_trace_fails_before_dialing(self, platform, jsonl, tmp_path):
+        tool = self._two_calls_tool("two_calls_lost_parent", jsonl)
+        out1, i1 = await _run(tool)
+        out2, i2 = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: platform.finish("call_1")})
+        assert i2[0].payload == {"call_id": "call_2"}
+        posts = len(platform.posts)
+
+        # The immediate parent's trace is gone: the chain root cannot be established.
+        path = tmp_path / "traces.jsonl"
+        kept = [line for line in path.read_text().splitlines() if json.loads(line)["run_id"] != out2.run_id]
+        path.write_text("\n".join(kept) + "\n")
+
+        view2 = platform.finish("call_2")
+        out3, i3 = await _run(tool, parent_id=out2.run_id, resume={i2[0].interaction_id: view2})
+        assert out3.status.code == "error"
+        assert "Nothing was dialled" in str(out3.error)
+        assert not i3
+        assert len(platform.posts) == posts, "no start request when the root run is unknown"
+        assert platform.dials == 2
+
+    @pytest.mark.asyncio
+    async def test_parent_trace_read_failure_fails_before_dialing(self, platform, jsonl, monkeypatch):
+        tool = self._two_calls_tool("two_calls_flaky_provider", jsonl)
+        out1, i1 = await _run(tool)
+        posts = len(platform.posts)
+
+        async def unavailable(_cls, _run_context):
+            raise ConnectionError("trace store unreachable")
+
+        monkeypatch.setattr(jsonl, "get", classmethod(unavailable))
+        out2, _ = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: platform.finish("call_1")})
+        assert out2.status.code == "error"
+        assert "Nothing was dialled" in str(out2.error)
+        assert len(platform.posts) == posts
+        assert platform.dials == 1
+
+    @pytest.mark.asyncio
+    async def test_root_is_found_through_a_resume_that_never_reached_the_call(self, platform, jsonl):
+        from timbal.state import suspend
+
+        runs = iter(range(10))
+
+        async def flaky() -> str:
+            # The second run asks something first and never reaches the call (an LLM may branch like this).
+            if next(runs) == 1:
+                suspend({"question": "still want the call?"}, kind="ask")
+            call = await start_voice_call("receptionist", "+34600000001")
+            return (await wait_for_voice_call(call)).status
+
+        tool = Tool(name="flaky_chain", handler=flaky, tracing_provider=jsonl)
+        out1, i1 = await _run(tool)
+        assert i1[0].payload == {"call_id": "call_1"}
+        out2, i2 = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: platform.finish("call_1")})
+        assert out2.status.reason == "input_required"
+        assert i2[0].payload == {"question": "still want the call?"}
+        out3, _ = await _run(tool, parent_id=out2.run_id, resume={i2[0].interaction_id: True})
+        assert out3.status.code == "success", out3.error
+        assert out3.output == "completed"
+        assert platform.dials == 1, "the third run derives the first run's key and gets the same call back"
+
     @pytest.mark.asyncio
     async def test_reusing_key_across_resume_for_different_dial_is_rejected(self, platform, jsonl):
         async def bad_reuse() -> str:
@@ -457,6 +529,24 @@ class TestWaitAndResume:
         r2 = await Tool(name="read", handler=read)(call=silent.model_dump()).collect()
         assert (r1.output["status"], r1.output["outcome_status"]) == ("no_answer", "unavailable")
         assert (r2.output["status"], r2.output["outcome_status"]) == ("completed", "unavailable")
+
+    @pytest.mark.asyncio
+    async def test_replay_is_scoped_to_org_and_project(self, platform, jsonl):
+        async def two_scopes() -> str:
+            first = await start_voice_call("receptionist", "+34600000001", idempotency_key="appt:1")
+            await wait_for_voice_call(first)
+            other = await start_voice_call(
+                "receptionist", "+34600000001", idempotency_key="appt:1", org_id="org_2", project_id="88"
+            )
+            return other.id
+
+        tool = Tool(name="two_scopes", handler=two_scopes, tracing_provider=jsonl)
+        out1, i1 = await _run(tool)
+        out2, _ = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: platform.finish("call_1")})
+        # Not replayed from org_1/77: the request reaches org_2/88 (which this fake platform does not serve).
+        assert out2.status.code == "error"
+        assert ("POST", "/orgs/org_2/projects/88/workforce/receptionist/voice/calls") in platform.requests
+        assert platform.dials == 1
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("platform")
