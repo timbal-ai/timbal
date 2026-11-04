@@ -45,6 +45,7 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 - `filler_spoken` and `filler_count`: whether a latency-masking phrase was spoken. When present, first-audio latency can measure the filler rather than the substantive answer.
 - `event`: true when the turn was started by a session event or an announced background result, not by the caller.
 - `vad_endpointed`: whether Silero endpointing forced the commit.
+- `predictive_endpoint`: whether that commit used a during-speech end-of-turn prediction. It is true only when `vad_endpointed` is also true.
 
 ## Silence to first audio
 

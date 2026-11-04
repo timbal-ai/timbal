@@ -440,6 +440,15 @@ class VoiceConfig(BaseModel):
     segment. A whole number from 1 to 40 lets that first segment start at a
     comma once it has that many words. 4 is the useful value: long enough to
     speak, early enough in a long opening sentence. A caller hello cannot set it."""
+    predict_during_speech: bool = False
+    """Score the turn while the caller is still speaking.
+
+    Off by default. Without a native end-of-turn provider, a finished
+    sentence whose audio agrees is confirmed after 0.16 s of silence instead
+    of the usual 0.20 s pause plus the 0.45 s floor. On Deepgram Flux, an
+    EagerEndOfTurn at or above the eager threshold can start the turn;
+    TurnResumed cancels it and EndOfTurn confirms it. Local VAD force-commit
+    stays off for Flux."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
