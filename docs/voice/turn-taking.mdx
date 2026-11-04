@@ -54,7 +54,7 @@ Available modes are:
 
 Local endpointing waits out two silences before it force-commits. `stop_silence_secs` (default 0.2) is how long the line must be quiet before the end-of-turn model is scored. `min_delay_secs` (default 0.45) is the extra wait after a confident score. Scoring runs during that wait, so a confident turn commits about 0.65 seconds after speech stops. A lower score waits longer, up to 3 seconds, and often loses to the transcription provider's own pause.
 
-LiveKit's turn detector uses a floor around 0.3–0.5 seconds (0.5 by default, 0.3 with dynamic endpointing). 0.3 seconds here would commit a confident turn at about 0.5 seconds of silence. Pauses of about 0.6 seconds are still often the middle of a thought, a clause the caller finishes and then continues, so the defaults stay at 0.45 and 0.2. Lower `min_delay_secs` only when those short pauses should take the turn. Both fields are set on the agent's `voice_config`. A caller hello cannot change them, and passing a `VadEndpointer` into `VoiceSession` keeps the values on that object.
+Lower `min_delay_secs` only when short pauses of about 0.6 s should end the caller's turn.
 
 ```python
 from timbal import Agent
@@ -65,8 +65,7 @@ agent = Agent(
     system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
     voice_config={
         "language": "en",
-        "min_delay_secs": 0.45,
-        "stop_silence_secs": 0.2,
+        "min_delay_secs": 0.35,
     },
 )
 ```

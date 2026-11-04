@@ -7,7 +7,13 @@ may still close on a comma after four words. Later segments stay on sentences.
 """
 
 from timbal.voice.segments import clause_boundary_ends, sentence_boundary_ends
-from timbal.voice.session import FIRST_SEGMENT_MIN_WORDS, _flush_segment
+from timbal.voice.session import RECOMMENDED_FIRST_FLUSH_MIN_WORDS, _flush_segment
+
+
+def _flush(text: str, **kwargs: object) -> str | None:
+    """Comma flush on, at the recommended word count, unless a test overrides it."""
+    kwargs.setdefault("first_flush_min_words", RECOMMENDED_FIRST_FLUSH_MIN_WORDS)
+    return _flush_segment(text, **kwargs)  # type: ignore[arg-type]
 
 
 def _only_sentence(text: str) -> str:
@@ -76,29 +82,29 @@ class TestSentenceBoundaries:
 class TestFirstSegmentComma:
     def test_long_clause_flushes_on_the_comma(self) -> None:
         text = "The return window is thirty days, so you can still send it back."
-        flushed = _flush_segment(text, first_segment=True)
+        flushed = _flush(text, first_segment=True)
         assert flushed == "The return window is thirty days, "
 
     def test_spanish_clause(self) -> None:
         text = "El plazo de devolución es de treinta días, así que puedes enviarlo hoy."
-        flushed = _flush_segment(text, first_segment=True)
+        flushed = _flush(text, first_segment=True)
         assert flushed is not None
         assert flushed.rstrip().endswith("días,")
         assert "así" not in flushed
 
     def test_short_comma_waits_for_the_sentence(self) -> None:
-        assert _flush_segment("Hello, how are you?", first_segment=True) == "Hello, how are you?"
-        assert _flush_segment("Hola, ¿qué tal estás?", first_segment=True) == "Hola, ¿qué tal estás?"
-        assert FIRST_SEGMENT_MIN_WORDS == 4
+        assert _flush("Hello, how are you?", first_segment=True) == "Hello, how are you?"
+        assert _flush("Hola, ¿qué tal estás?", first_segment=True) == "Hola, ¿qué tal estás?"
+        assert RECOMMENDED_FIRST_FLUSH_MIN_WORDS == 4
 
     def test_three_words_do_not_split_a_finished_sentence(self) -> None:
         text = "I can help, with the rest of this very long explanation today."
-        assert _flush_segment(text, first_segment=True) == text
-        assert _flush_segment("I can help, with the rest of this very long explanation", first_segment=True) is None
+        assert _flush(text, first_segment=True) == text
+        assert _flush("I can help, with the rest of this very long explanation", first_segment=True) is None
 
     def test_four_words_do_split(self) -> None:
         text = "I can help you, with the rest of this very long explanation today."
-        flushed = _flush_segment(text, first_segment=True)
+        flushed = _flush(text, first_segment=True)
         assert flushed is not None
         assert flushed.rstrip().endswith("you,")
 
@@ -110,36 +116,36 @@ class TestFirstSegmentComma:
         # No final period yet: this is the streaming path, where the first
         # sentence is already closed and the comma is still ahead of it.
         text = "Hello! The return window is thirty days, so you can still send it"
-        flushed = _flush_segment(text, first_segment=True)
+        flushed = _flush(text, first_segment=True)
         assert flushed is not None
         assert flushed.rstrip().endswith("Hello!")
         assert "return" not in flushed
 
     def test_title_period_is_not_the_first_cut(self) -> None:
-        assert _flush_segment("Ask Dr. Smith about the results today", first_segment=True) is None
+        assert _flush("Ask Dr. Smith about the results today", first_segment=True) is None
         text = "La Sra. García llegará mañana por la tarde."
-        assert _flush_segment(text, first_segment=True) == text
+        assert _flush(text, first_segment=True) == text
         streaming = "Ask Dr. Smith about the results today. Thanks for waiting"
-        flushed = _flush_segment(streaming, first_segment=True)
+        flushed = _flush(streaming, first_segment=True)
         assert flushed is not None
         assert flushed.rstrip().endswith("today.")
         assert "Thanks" not in flushed
         # A finished reply with no long comma is still one segment.
         closed = "Ask Dr. Smith about the results today. Thanks for waiting."
-        assert _flush_segment(closed, first_segment=True) == closed
+        assert _flush(closed, first_segment=True) == closed
 
     def test_thousands_separator_waits_for_lookahead(self) -> None:
-        assert _flush_segment("The order number is 12,", first_segment=True) is None
-        assert _flush_segment("The order number is 12,000 today and tomorrow", first_segment=True) is None
+        assert _flush("The order number is 12,", first_segment=True) is None
+        assert _flush("The order number is 12,000 today and tomorrow", first_segment=True) is None
         text = "The order total is 12,000 euros, which covers shipping too."
-        flushed = _flush_segment(text, first_segment=True)
+        flushed = _flush(text, first_segment=True)
         assert flushed is not None
         assert flushed.rstrip().endswith("euros,")
         assert "12,000" in flushed
 
     def test_audio_already_playing_does_not_rush_the_comma(self) -> None:
         text = "The return window is thirty days, so you can still send it back."
-        assert _flush_segment(text, first_segment=True, audio_playing=True) is None
+        assert _flush(text, first_segment=True, audio_playing=True) is None
 
     def test_streaming_deltas_flush_once_the_next_word_arrives(self) -> None:
         deltas = ["The return window is thirty ", "days, so you can ", "still send it back."]
@@ -148,7 +154,7 @@ class TestFirstSegmentComma:
         segments: list[str] = []
         for delta in deltas:
             buffer += delta
-            flush = _flush_segment(buffer, first_segment=not scheduled)
+            flush = _flush(buffer, first_segment=not scheduled)
             if flush is not None:
                 segments.append(flush)
                 scheduled += flush
@@ -159,3 +165,21 @@ class TestFirstSegmentComma:
             "The return window is thirty days, ",
             "so you can still send it back.",
         ]
+
+    def test_a_higher_word_count_keeps_a_shorter_clause(self) -> None:
+        text = "The return window is thirty days, so you can still send it back."
+        assert _flush(text, first_segment=True, first_flush_min_words=8) == text
+
+
+class TestCommaFlushOffByDefault:
+    def test_a_long_clause_waits_for_the_sentence(self) -> None:
+        text = "The return window is thirty days, so you can still send it back."
+        assert _flush_segment(text, first_segment=True) == text
+
+    def test_streaming_does_not_release_at_the_comma(self) -> None:
+        text = "The return window is thirty days, so you can still"
+        assert _flush_segment(text, first_segment=True) is None
+
+    def test_spanish_clause_stays_whole(self) -> None:
+        text = "El plazo de devolución es de treinta días, así que puedes enviarlo hoy."
+        assert _flush_segment(text, first_segment=True) == text

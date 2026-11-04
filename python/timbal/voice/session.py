@@ -211,17 +211,17 @@ def _strip_markdown(text: str, *, previous_text: str = "") -> str:
 
 
 # TTS flush: send text once a sentence is closed so audio tracks the LLM without
-# waiting for the whole reply. The first segment may also close on a comma once
-# it holds FIRST_SEGMENT_MIN_WORDS, so a long opening sentence starts speaking
-# at the clause instead of at the period. Later segments stay sentence-based.
-# Boundaries skip abbreviations, initials, and numbers (see ``segments``).
-# When audio is already playing, _flush_segment skips these thresholds and
-# buffers up to MAX_TTS_BUFFER_CHARS for prosody.
+# waiting for the whole reply. Later segments stay sentence-based. The first
+# segment may also close on a comma when ``first_flush_min_words`` is set
+# (recommended 4). Boundaries skip abbreviations, initials, and numbers (see
+# ``segments``). When audio is already playing, _flush_segment skips these
+# thresholds and buffers up to MAX_TTS_BUFFER_CHARS for prosody.
 MIN_FLUSH_CHARS = 24
 FIRST_SEGMENT_MIN_CHARS = 6
-# Four words is a speakable clause ("I can check that,") and still early in a
-# long first sentence. One word ("Hello,") waits for the sentence.
-FIRST_SEGMENT_MIN_WORDS = 4
+# Recommended ``VoiceConfig.first_flush_min_words``. The flush stays off until
+# that option is set. Four words is a speakable clause ("I can check that,")
+# and still early in a long first sentence.
+RECOMMENDED_FIRST_FLUSH_MIN_WORDS = 4
 MAX_TTS_BUFFER_CHARS = 200
 
 # Clause-ending chars for flush heuristics (ASCII + common Spanish + fullwidth variants +
@@ -247,6 +247,15 @@ def _nfc_aligned_prefix_end(final_assistant: str, scheduled: str) -> int | None:
         if not sn.startswith(na):
             return None
     return None
+
+
+def _optional_min_words(value: int | None) -> int | None:
+    """``None`` leaves comma flush off. Otherwise an integer >= 1."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("first_flush_min_words must be an integer >= 1")
+    return value
 
 
 def _finite_secs(name: str, value: float | None, *, upper: float) -> float | None:
@@ -338,6 +347,7 @@ class VoiceSession:
         vad_endpointing: bool | VadEndpointer | None = None,
         min_delay_secs: float | None = None,
         stop_silence_secs: float | None = None,
+        first_flush_min_words: int | None = None,
         model: str | None = None,
         filler: FillerConfig | dict[str, Any] | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
@@ -388,6 +398,7 @@ class VoiceSession:
         # the same numbers through; a VadEndpointer instance keeps its own knobs.
         self._endpoint_min_delay_secs = _finite_secs("min_delay_secs", min_delay_secs, upper=3.0)
         self._endpoint_stop_silence_secs = _finite_secs("stop_silence_secs", stop_silence_secs, upper=2.0)
+        self._first_flush_min_words = _optional_min_words(first_flush_min_words)
         self._endpointer: VadEndpointer | None = None
         # Whether Silero's speech history may be used as *evidence* about the
         # user (barge-in vetoes, hold extension), as opposed to merely driving
@@ -2744,6 +2755,7 @@ class VoiceSession:
                         tts_tail,
                         first_segment=len(self._turn_tts_scheduled_text) == 0,
                         audio_playing=self._assistant_audio_playing,
+                        first_flush_min_words=self._first_flush_min_words,
                     )
                     if flush_text is not None:
                         turn_phase = "tts_synthesize_flush"
@@ -4794,12 +4806,16 @@ def _clause_boundary_ends(text: str) -> list[int]:
     return _outside_links(text, clause_boundary_ends(text))
 
 
-def _first_segment_cut(text: str) -> int | None:
-    """Earliest first-segment cut: a sentence, or a comma after enough words."""
+def _first_segment_cut(text: str, min_words: int | None) -> int | None:
+    """Earliest first-segment cut: a sentence, or a comma after ``min_words``.
+
+    ``min_words is None`` leaves the comma path off.
+    """
     candidates = [end for end in _sentence_boundary_ends(text) if end >= FIRST_SEGMENT_MIN_CHARS]
-    for end in _clause_boundary_ends(text):
-        if word_count(text[:end]) >= FIRST_SEGMENT_MIN_WORDS:
-            candidates.append(end)
+    if min_words is not None:
+        for end in _clause_boundary_ends(text):
+            if word_count(text[:end]) >= min_words:
+                candidates.append(end)
     return min(candidates) if candidates else None
 
 
@@ -4809,7 +4825,13 @@ def _last_sentence_boundary_end(text: str) -> int | None:
     return ends[-1] if ends else None
 
 
-def _flush_segment(text: str, *, first_segment: bool, audio_playing: bool = False) -> str | None:
+def _flush_segment(
+    text: str,
+    *,
+    first_segment: bool,
+    audio_playing: bool = False,
+    first_flush_min_words: int | None = None,
+) -> str | None:
     """Return the prefix of *text* to send to TTS now, or ``None`` to keep buffering.
 
     When the buffer contains a sentence boundary in the *middle* (e.g. ``mucho. ¿Hay…``),
@@ -4834,32 +4856,42 @@ def _flush_segment(text: str, *, first_segment: bool, audio_playing: bool = Fals
     if pending := _TRAILING_DIGITS.search(text):
         start = pending.start()
         if start == 0 or text[start - 1] in ".!?…;:":
-            return _flush_segment(text[:start], first_segment=first_segment, audio_playing=audio_playing)
+            return _flush_segment(
+                text[:start],
+                first_segment=first_segment,
+                audio_playing=audio_playing,
+                first_flush_min_words=first_flush_min_words,
+            )
 
     # Cap ordinary prose; incomplete numeric runs above wait for their end.
     if len(text) >= MAX_TTS_BUFFER_CHARS:
-        if first_segment and (cut := _first_segment_cut(text)) is not None:
+        if first_segment and (cut := _first_segment_cut(text, first_flush_min_words)) is not None:
             return text[:cut]
         last = _last_sentence_boundary_end(text)
         return text[:last] if last is not None else text
 
     # Only the unfinished link or URL waits; what precedes it flushes as usual.
     if unfinished := _UNFINISHED_LINK_OR_URL.search(text):
-        return _flush_segment(text[: unfinished.start()], first_segment=first_segment, audio_playing=audio_playing)
+        return _flush_segment(
+            text[: unfinished.start()],
+            first_segment=first_segment,
+            audio_playing=audio_playing,
+            first_flush_min_words=first_flush_min_words,
+        )
 
     # While audio is still playing, keep buffering — no need to rush.
     if audio_playing:
         return None
 
-    # Still streaming: the earliest sentence, or a comma once the clause is
-    # long enough to speak. A buffer that already ends on punctuation is sent
-    # whole (the text is in hand), except a long first sentence, which still
-    # opens at its comma.
-    if first_segment and not ends_clause and (cut := _first_segment_cut(text)) is not None:
+    # Still streaming: the earliest sentence. A comma is a cut only when
+    # ``first_flush_min_words`` is set and the clause has that many words.
+    # A buffer that already ends on punctuation is sent whole, except that
+    # same opt-in comma.
+    if first_segment and not ends_clause and (cut := _first_segment_cut(text, first_flush_min_words)) is not None:
         return text[:cut]
-    if first_segment and ends_clause:
+    if first_segment and ends_clause and first_flush_min_words is not None:
         for end in _clause_boundary_ends(text):
-            if word_count(text[:end]) >= FIRST_SEGMENT_MIN_WORDS:
+            if word_count(text[:end]) >= first_flush_min_words:
                 return text[:end]
 
     lo_clause = FIRST_SEGMENT_MIN_CHARS if first_segment else 2

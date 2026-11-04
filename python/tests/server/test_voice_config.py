@@ -507,6 +507,25 @@ class TestDefaultPipeline:
         )
         assert session._endpoint_min_delay_secs == 0.45
         assert session._endpoint_stop_silence_secs == 0.2
+        assert session._first_flush_min_words is None
+
+    def test_first_flush_min_words_reaches_the_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = self._session(VoiceConfig(turn_detector="heuristic", first_flush_min_words=4))
+        assert session._first_flush_min_words == 4
+
+    def test_hello_cannot_enable_comma_flush(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+
+        agent = Agent(name="voice_test", model=TestModel(responses=["hi"]), tools=[])
+        session, _ = voice_routes.build_voice_session(
+            agent,
+            VoiceConfig(turn_detector="heuristic"),
+            {"first_flush_min_words": 4},
+        )
+        assert session._first_flush_min_words is None
 
 
 class TestEndpointingFloorConfig:
@@ -517,6 +536,7 @@ class TestEndpointingFloorConfig:
         assert cfg.min_delay_secs == VadEndpointer.MIN_DELAY_SECS == 0.45
         assert cfg.stop_silence_secs == VadEndpointer.STOP_SILENCE_SECS == 0.20
         assert cfg.min_delay_secs <= VadEndpointer.MAX_DELAY_SECS
+        assert cfg.first_flush_min_words is None
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -527,6 +547,9 @@ class TestEndpointingFloorConfig:
             {"stop_silence_secs": 2.1},
             {"min_delay_secs": True},
             {"stop_silence_secs": "fast"},
+            {"first_flush_min_words": 0},
+            {"first_flush_min_words": True},
+            {"first_flush_min_words": -1},
         ],
     )
     def test_rejects_out_of_range(self, kwargs: dict[str, object]) -> None:

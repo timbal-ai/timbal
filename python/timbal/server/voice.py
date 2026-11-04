@@ -1142,6 +1142,7 @@ def build_voice_session(
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
         min_delay_secs=merged.min_delay_secs,
         stop_silence_secs=merged.stop_silence_secs,
+        first_flush_min_words=merged.first_flush_min_words,
         direction=direction,
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
@@ -1161,6 +1162,7 @@ def build_voice_session(
     # these and keeps the knobs it was built with.
     session_kwargs["min_delay_secs"] = merged.min_delay_secs
     session_kwargs["stop_silence_secs"] = merged.stop_silence_secs
+    session_kwargs["first_flush_min_words"] = merged.first_flush_min_words
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)

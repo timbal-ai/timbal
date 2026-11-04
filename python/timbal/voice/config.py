@@ -425,6 +425,11 @@ class VoiceConfig(BaseModel):
     The default 0.2 seconds is the usual speech-stop gap; shorter hears a
     breath as the end of the turn. Added to ``min_delay_secs`` on a confident
     commit. Same exposure rules as ``min_delay_secs``."""
+    first_flush_min_words: int | None = Field(default=None, ge=1, le=40)
+    """Unset → the first spoken segment waits for a sentence, like every later
+    segment. Set to a word count to let that first segment start at a comma
+    once it has that many words. 4 is the useful value: long enough to speak,
+    early enough in a long opening sentence. A caller hello cannot set it."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -473,12 +478,12 @@ class VoiceConfig(BaseModel):
     call direction can apply it (:func:`greeting_for_direction`); the session
     itself never sees a direction."""
 
-    @field_validator("min_delay_secs", "stop_silence_secs", mode="before")
+    @field_validator("min_delay_secs", "stop_silence_secs", "first_flush_min_words", mode="before")
     @classmethod
     def _reject_bool_seconds(cls, v: Any) -> Any:
-        # ``True`` is an int. A JSON ``true`` must not become a 1 second floor.
+        # ``True`` is an int. A JSON ``true`` must not become 1.
         if isinstance(v, bool):
-            raise ValueError("must be a number of seconds, not a boolean")
+            raise ValueError("must be a number, not a boolean")
         return v
 
     @field_validator("greeting", "outbound_greeting", mode="before")
