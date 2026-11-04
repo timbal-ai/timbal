@@ -1174,6 +1174,11 @@ class VoiceSession:
         """Gracefully shut down the session."""
         if self._closed:
             return
+        # A HOLD during a protected window lives in ``_held_user_text``, not
+        # the deferred buffer. Fold it in before the hold is cancelled.
+        held = (self._held_user_text or "").strip()
+        if held and held not in self._deferred_user_text:
+            self._deferred_user_text = f"{self._deferred_user_text} {held}".strip()
         self._closed = True
         self._cancel_hold()
         self._held_user_text = None
@@ -1887,18 +1892,24 @@ class VoiceSession:
     def _reset_tool_interruption(self) -> None:
         """Clear this turn's barge-in latch. Carried caller speech stays.
 
-        A ``disable_during_tool_and_turn`` tool that paused for approval or
-        ``ask_user`` has not finished. The next turn is the one that speaks
-        the reply, so the latch comes with it.
+        ``_and_turn_after_pause`` is not spent here. A deferred turn for words
+        said while the tool ran must not use up the protection owed to the
+        reply after the caller answers an approval or ``ask_user``.
         """
-        carry = self._and_turn_after_pause
+        self._release_unfinished_tool_batch()
+        self._turn_uninterruptible_reply = False
+
+    def _release_unfinished_tool_batch(self) -> None:
+        """Drop an in-flight tool batch that will never see its OutputEvent.
+
+        Timeout, ``announce="interrupt"``, and cancel end the turn without one.
+        Leaving the counter raised would keep barge-in off for the rest of the call.
+        """
         self._turn_tool_call_ids = set()
         self._turn_open_tools = {}
         self._turn_unmatched_arms = {}
         self._turn_tool_batch_inflight = 0
         self._turn_tool_batch_mode = "allow"
-        self._and_turn_after_pause = False
-        self._turn_uninterruptible_reply = carry
 
     def _tool_interruption_mode(self, name: str) -> str:
         """``allow`` unless this iteration's resolved tools say otherwise."""
@@ -1988,13 +1999,13 @@ class VoiceSession:
             self._turn_open_tools[name] = open_count - 1
         self._turn_tool_batch_inflight = max(0, self._turn_tool_batch_inflight - 1)
         if self._tool_interruption_mode(name) == "disable_during_tool_and_turn":
-            # A pause is not the end of the tool. Protect the rest of this turn,
-            # and carry that into the next turn so the reply after the caller
-            # answers is protected too. A normal completion protects this turn's
-            # reply only.
-            self._turn_uninterruptible_reply = True
             if paused:
+                # The caller has to be able to answer. Remember the mode; the
+                # turn that actually finishes the tool latches its reply.
                 self._and_turn_after_pause = True
+            else:
+                self._turn_uninterruptible_reply = True
+                self._and_turn_after_pause = False
         if self._turn_tool_batch_inflight == 0:
             self._turn_tool_batch_mode = "allow"
 
@@ -3382,6 +3393,9 @@ class VoiceSession:
                         logger.debug("turn_trace_resave_failed", error=str(e))
             finally:
                 self._is_speaking = False
+                # A tool announced but never finished must not keep the next
+                # caller turn from starting.
+                self._release_unfinished_tool_batch()
                 self._active_turn_user_text = ""
                 self._turn_is_event = False
                 self._turn_asked_caller = False

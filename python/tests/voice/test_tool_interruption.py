@@ -386,32 +386,49 @@ async def test_sub_agent_used_as_a_tool_can_block_barge_in() -> None:
     assert session.agent._tool_interruption_modes == {"pricing": "disable_during_tool"}
 
 
-def test_and_turn_protection_survives_an_approval_pause() -> None:
-    """A pause is not the end of the tool. The reply after the caller answers stays protected."""
+def test_and_turn_pause_waits_for_the_turn_that_finishes_the_tool() -> None:
+    """The wait stays open. A deferred turn does not spend the protection."""
     script = _Script()
     session, _stt = _voice(script, [])
     session.agent._tool_interruption_modes = {"wire": "disable_during_tool_and_turn"}
     session._is_speaking = True
     session._note_tool_call("wire", "c1")
-    session._note_tool_output("voice_events.wire", paused=True)
-    # Still this turn: don't let a barge-in cancel the park.
     assert session._interruptions_suppressed()
-    session._is_speaking = False
-    # The caller can speak while the call is waiting.
+    session._note_tool_output("voice_events.wire", paused=True)
+    # Parked: the caller can speak, including over leftover playback.
+    session.playback._playing_until = session.playback._clock() + 5
     assert not session._interruptions_suppressed()
-    # The next turn speaks the reply.
+    # Words captured during the tool open their own turn and leave the flag.
     session._reset_tool_interruption()
     session._is_speaking = True
-    assert session._interruptions_suppressed()
-    assert session._active_interruption_mode() == "disable_during_tool_and_turn"
-    # A normal completion does not protect the turn after the reply.
-    session._and_turn_after_pause = False
-    session._turn_uninterruptible_reply = False
+    assert session._and_turn_after_pause
+    assert not session._interruptions_suppressed()
+    # The turn that finishes the tool protects the reply, and only that reply.
     session._note_tool_call("wire", "c2")
     session._note_tool_output("voice_events.wire", paused=False)
-    session._reset_tool_interruption()
+    assert session._interruptions_suppressed()
+    assert not session._and_turn_after_pause
+
+
+def test_unfinished_tool_batch_does_not_lock_the_call() -> None:
+    script = _Script()
+    session, _stt = _voice(script, [])
+    session.agent._tool_interruption_modes = {"wire": "disable_during_tool"}
     session._is_speaking = True
+    session._note_tool_call("wire", "c1")
+    assert session._interruptions_suppressed()
+    session._release_unfinished_tool_batch()
+    session._is_speaking = False
     assert not session._interruptions_suppressed()
+
+
+@pytest.mark.asyncio
+async def test_hangup_keeps_speech_held_during_a_protected_window() -> None:
+    script = _Script()
+    session, _stt = _voice(script, [])
+    session._held_user_text = DURING_TOOL
+    await session.close()
+    assert any(entry.role == "user" and entry.text == DURING_TOOL for entry in session.transcript)
 
 
 def test_dict_tool_definition_accepts_interruption_mode() -> None:
