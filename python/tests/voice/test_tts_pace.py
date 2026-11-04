@@ -12,16 +12,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import av
+import numpy as np
 import pytest
-
-np = pytest.importorskip("numpy", reason="timbal[voice] extra (numpy) not installed")
-pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
-
-from timbal import Agent  # noqa: E402
-from timbal.core.test_model import TestModel  # noqa: E402
-from timbal.voice.events import AudioOutput  # noqa: E402
-from timbal.voice.playback import map_played_bytes_to_text  # noqa: E402
-from timbal.voice.providers import (  # noqa: E402
+from timbal import Agent
+from timbal.core.test_model import TestModel
+from timbal.voice.events import AudioOutput
+from timbal.voice.playback import map_played_bytes_to_text
+from timbal.voice.providers import (
     AudioInputConfig,
     AudioOutputConfig,
     SpeechToText,
@@ -34,6 +32,12 @@ from timbal.voice.session import VoiceSession  # noqa: E402
 
 SR = 16_000
 TEXT = "alpha beta gamma delta epsilon"
+
+
+def test_voice_extra_is_installed() -> None:
+    """CI installs timbal[voice] via --extra all. Missing av/numpy must fail, not skip."""
+    assert av.__version__
+    assert np.__version__
 
 
 def _const(samples: int, amp: int) -> bytes:

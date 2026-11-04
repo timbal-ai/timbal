@@ -5,13 +5,16 @@ from __future__ import annotations
 import ast
 import inspect
 
+import numpy as np
 import pytest
-
-np = pytest.importorskip("numpy", reason="timbal[voice] extra (numpy) not installed")
-
-from timbal.voice.pauses import ANALYSIS_WINDOW_SECS, limit_pauses  # noqa: E402
+from timbal.voice.pauses import ANALYSIS_WINDOW_SECS, limit_pauses
 
 SR = 16_000
+
+
+def test_voice_extra_is_installed() -> None:
+    """CI installs timbal[voice] via --extra all. Missing numpy must fail, not skip."""
+    assert np.__version__
 
 
 def _const(samples: int, amp: int) -> bytes:

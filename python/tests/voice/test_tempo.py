@@ -7,12 +7,10 @@ import asyncio
 import inspect
 import math
 
+import av
+import numpy as np
 import pytest
-
-np = pytest.importorskip("numpy", reason="timbal[voice] extra (numpy) not installed")
-pytest.importorskip("av", reason="timbal[voice] extra (av) not installed")
-
-from timbal.voice.tempo import (  # noqa: E402
+from timbal.voice.tempo import (
     FRAME_MS,
     IDLE_FLUSH_SECS,
     MAX_BUFFER_MS,
@@ -23,6 +21,12 @@ from timbal.voice.tempo import (  # noqa: E402
 )
 
 SR = 16_000
+
+
+def test_voice_extra_is_installed() -> None:
+    """CI installs timbal[voice] via --extra all. Missing av/numpy must fail, not skip."""
+    assert av.__version__
+    assert np.__version__
 
 
 def _sine(samples: int, freq: float = 440.0, amp: int = 8000, sr: int = SR) -> bytes:
