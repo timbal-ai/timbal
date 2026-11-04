@@ -29,6 +29,19 @@ Set `tts_provider`, `tts_model`, and `voice` for the output provider:
 - **`munsit`**: defaults to `faseeh-v1-preview`; requires `MUNSIT_API_KEY`. The fallback voice is `MUNSIT_VOICE_ID` or `ar-uae-male-1`.
 - **`openai`**: defaults to `gpt-4o-mini-tts` and `coral`; requires `OPENAI_API_KEY`. Synthesizes complete text segments as they become ready.
 
+By default every segment, including the first, waits for a sentence. Set `first_flush_min_words` to any whole number from 1 to 40 (`4` is the useful value) to let the first segment start at a comma once it has that many words, so a long opening sentence is not held until its period. "The return window is thirty days, so you can still send it back." then starts speaking at the comma. "Hello, how are you?" does not: that comma is one word, and the segment waits for the sentence. Later segments still wait for a sentence boundary: a period, exclamation mark, question mark, semicolon, colon, or newline, including the Arabic question mark and semicolon and the fullwidth question mark and exclamation mark. Punctuation inside titles (`Dr.`, `Sr.`, `Sra.`), initials (`U.S.`), times (`3:00`, `a.m.`), numbers (`3.14`, `1,234`), and ellipses (`...`) is not a boundary. `first_flush_min_words` is an agent setting. A caller hello cannot set it.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "first_flush_min_words": 4},
+)
+```
+
 Use the chosen provider's voice ID. `language` controls transcription; it does not select a Deepgram Aura voice. Output style options belong in `tts_extra`. See [Speech examples](/examples/agents/tts) for detailed OpenAI and Deepgram settings.
 
 The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate=16000`, `encoding="pcm_s16le"`). Transports convert their wire formats where needed. OpenAI uses 24 kHz on the provider connection and requires the voice extra to resample other session rates.
@@ -39,7 +52,7 @@ The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate
 
 A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `model`, `tool_beat_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
-Recording, ambient audio, `events`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, and `hold_unfinished_secs` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`) are treated as unset so they do not wipe an inherited value.
+Recording, ambient audio, `events`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, and `first_flush_min_words` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`) are treated as unset so they do not wipe an inherited value.
 
 ## Mix providers
 
@@ -68,7 +81,7 @@ This assignment replaces the agent's declared config. Keep any greetings or othe
 
 ## Turn detection
 
-See [Turn-taking and interruptions](/voice/turn-taking) for mode names, native provider boundaries, VAD endpointing, and a listening test.
+See [Turn-taking and interruptions](/voice/turn-taking) for mode names, native provider boundaries, VAD endpointing, the `min_delay_secs` and `stop_silence_secs` floors, and a listening test. Those two floors are agent settings. A caller hello cannot set them.
 
 ## Greetings and silence
 
