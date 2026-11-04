@@ -233,7 +233,17 @@ class TestByteAccounting:
         finally:
             recorder.close()
 
-    async def test_non_pcm_encoding_is_left_unchanged(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    async def test_non_pcm_encoding_is_left_unchanged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.voice import session as session_mod
+
+        events: list[str] = []
+        real = session_mod.logger.warning
+
+        def spy(event: str, *args, **kwargs):
+            events.append(event)
+            return real(event, *args, **kwargs)
+
+        monkeypatch.setattr(session_mod.logger, "warning", spy)
         raw = _gap_phrase()
         session, recorder = _session(_PcmTTS(raw), tmp_path, max_tts_pause_secs=0.10, tts_tempo=2.0)
         session.audio_output.encoding = "mulaw"
@@ -241,7 +251,8 @@ class TestByteAccounting:
             await session._speak(TEXT)
             await session._speak(TEXT)
             assert _emitted(session) == raw + raw
-            assert capsys.readouterr().out.count("tts_pace_skipped") == 1
+            assert events.count("tts_pace_skipped") == 1
+            assert session._tts_pace_encoding_warned is True
         finally:
             recorder.close()
 
