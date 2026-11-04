@@ -30,9 +30,10 @@ What was copied, and what was not:
   in this process. Smart Turn plus the text score plus Silero is the local
   stand-in, and it still confirms with :data:`EAGER_SILENCE_SECS` of silence.
 
-Off unless a session sets ``predict_during_speech``. Nothing here starts an
-agent turn; the endpointer still force-commits the STT, and the turn detector
-can still hold an unfinished transcript.
+Off unless a session sets ``predict_during_speech``. On a provider without a
+native boundary the endpointer still force-commits. On Deepgram Flux the
+session treats ``EagerEndOfTurn`` as an early commit, ``TurnResumed`` as its
+cancel, and ``EndOfTurn`` as the confirmation. This class only keeps the scores.
 """
 
 from __future__ import annotations
@@ -73,6 +74,11 @@ AUDIO_COMPLETE = 0.5
 TEXT_COMPLETE = 0.5
 LEXICAL_CONFIDENT = 0.9
 FLUX_COMPLETE = 0.5
+# Sent as Flux ``eager_eot_threshold`` when prediction is on and the caller
+# did not set one. Must stay below the confirmation ``eot_threshold`` (0.8
+# unless overridden). Deepgram rejects eager >= eot.
+DEFAULT_EAGER_EOT_THRESHOLD = 0.5
+DEFAULT_FLUX_EOT_THRESHOLD = 0.8
 
 # Replay prior from benchmarks/voice/scenario.py. Smart Turn v3 scores the
 # fluent mid-sentence cut "I want to return an item I bought" at 0.019, and
@@ -84,6 +90,29 @@ FINISHED_AUDIO_P = 0.95
 
 ScoreAudio = Callable[[], Awaitable[float | None]]
 ScoreText = Callable[[str], Awaitable[float | None]]
+
+
+def flux_eager_threshold(stt_extra: dict[str, Any]) -> float:
+    """Eager confidence for a Flux session, kept strictly under end-of-turn.
+
+    An explicit ``eager_eot_threshold`` wins. Otherwise use
+    :data:`DEFAULT_EAGER_EOT_THRESHOLD`, lowered when the caller set
+    ``eot_threshold`` close to it. Deepgram requires eager < eot.
+    """
+    raw = stt_extra.get("eager_eot_threshold")
+    if raw is not None and not isinstance(raw, bool):
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_EAGER_EOT_THRESHOLD
+    eot = DEFAULT_FLUX_EOT_THRESHOLD
+    configured = stt_extra.get("eot_threshold")
+    if configured is not None and not isinstance(configured, bool):
+        try:
+            eot = float(configured)
+        except (TypeError, ValueError):
+            eot = DEFAULT_FLUX_EOT_THRESHOLD
+    return min(DEFAULT_EAGER_EOT_THRESHOLD, max(0.3, eot - 0.1))
 
 
 def endpoint_curve(

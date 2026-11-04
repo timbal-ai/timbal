@@ -1074,6 +1074,19 @@ def build_voice_session(
         # (Flux, Munsit).
         for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
             stt_extra.pop(k, None)
+    eager_eot_threshold: float | None = None
+    if merged.predict_during_speech is True and stt_native_eou:
+        from ..voice.deepgram import DeepgramFluxSTT
+
+        if isinstance(stt, DeepgramFluxSTT):
+            # Flux emits EagerEndOfTurn only when this query param is set, and
+            # it must be below eot_threshold. The session uses the same number
+            # as the early-commit gate. Local VAD force-commit stays off:
+            # Flux commit() is a no-op.
+            from ..voice.predictive_eou import flux_eager_threshold
+
+            eager_eot_threshold = flux_eager_threshold(stt_extra)
+            stt_extra["eager_eot_threshold"] = str(eager_eot_threshold)
     audio_in = AudioInputConfig(
         model=stt_model,
         language=merged.language,
@@ -1118,8 +1131,8 @@ def build_voice_session(
     if not isinstance(vad_endpointing, bool):
         vad_endpointing = None
     if stt_native_eou:
-        # Flux/Munsit have no force-commit (commit() is a no-op); the Silero
-        # fast path would just burn CPU scoring audio it can never act on.
+        # Flux/Munsit have no force-commit (commit() is a no-op). During-speech
+        # prediction on Flux uses EagerEndOfTurn instead of this fast path.
         vad_endpointing = False
 
     # Playground / client may override the Agent's LLM for this session only.
@@ -1156,6 +1169,8 @@ def build_voice_session(
         session_kwargs["user_idle"] = merged.user_idle
     if merged.predict_during_speech is True:
         session_kwargs["predict_during_speech"] = True
+        if eager_eot_threshold is not None:
+            session_kwargs["eager_eot_threshold"] = eager_eot_threshold
     if merged.tool_beat_secs is not None:
         session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
     if merged.turn_timeout_secs is not None:

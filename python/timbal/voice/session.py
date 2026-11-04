@@ -26,6 +26,7 @@ import random
 import re
 import time
 import unicodedata
+from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Coroutine
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
@@ -107,6 +108,7 @@ from .turn_detection import (
 if TYPE_CHECKING:
     from .endpointing import VadEndpointer
     from .predictive_eou import SpeechEouPredictor
+    from .providers import TranscriptEvent
     from .recording import CallRecorder
 
 logger = structlog.get_logger("timbal.voice.session")
@@ -324,6 +326,7 @@ class VoiceSession:
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
         vad_endpointing: bool | VadEndpointer | None = None,
         predict_during_speech: bool = False,
+        eager_eot_threshold: float | None = None,
         model: str | None = None,
         filler: FillerConfig | dict[str, Any] | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
@@ -374,7 +377,19 @@ class VoiceSession:
         # and confirm a finished pause on a short silence. Off leaves the
         # silence-then-score endpointer unchanged.
         self._predict_during_speech = predict_during_speech
+        # Flux EagerEndOfTurn confidence required to start a turn early.
+        # None → :data:`timbal.voice.predictive_eou.FLUX_COMPLETE` (0.5).
+        self.eager_eot_threshold = eager_eot_threshold
         self._eou_predictor: SpeechEouPredictor | None = None
+        # Text of an EagerEndOfTurn turn that EndOfTurn has not confirmed.
+        self._eager_unconfirmed: str | None = None
+        self._eager_commit = False
+        # Mic PCM for a Smart Turn vote when the turn detector does not buffer
+        # (provider mode on Flux). Unused when the detector already has audio.
+        self._predict_pcm: deque[bytes] = deque()
+        self._predict_pcm_bytes = 0
+        self._predict_audio_model: Any = None
+        self._predict_audio_model_loaded = False
         self._endpointer: VadEndpointer | None = None
         # Whether Silero's speech history may be used as *evidence* about the
         # user (barge-in vetoes, hold extension), as opposed to merely driving
@@ -1532,6 +1547,7 @@ class VoiceSession:
                 if self._recorder is not None:
                     self._recorder.add_mic(chunk)
                 self.turn_detector.push_audio(chunk)
+                self._push_predict_pcm(chunk)
                 if self._endpointer is not None:
                     self._endpointer.push(chunk)
                 await self.stt.push_audio(chunk)
@@ -1630,6 +1646,150 @@ class VoiceSession:
         except asyncio.CancelledError:
             return
 
+    # -- Internal: during-speech prediction (Flux eager + local audio) ------
+
+    def _push_predict_pcm(self, chunk: bytes) -> None:
+        """Keep a mic window for the Flux Smart Turn vote.
+
+        A local audio detector already buffers. Provider mode (Flux) does not,
+        and its ``commit()`` cannot be forced, so the vote is scored here when
+        an ``EagerEndOfTurn`` arrives.
+        """
+        if not self._predict_during_speech or not chunk:
+            return
+        if getattr(self.turn_detector, "audio_eou", None) is not None:
+            return
+        rate = int(self.audio_input.sample_rate or 16_000)
+        limit = int(rate * 2 * 12)
+        self._predict_pcm.append(chunk)
+        self._predict_pcm_bytes += len(chunk)
+        while self._predict_pcm_bytes > limit and self._predict_pcm:
+            dropped = self._predict_pcm.popleft()
+            self._predict_pcm_bytes -= len(dropped)
+
+    def _lazy_predict_audio_model(self) -> Any:
+        if self._predict_audio_model_loaded:
+            return self._predict_audio_model
+        self._predict_audio_model_loaded = True
+        from .turn_detection import _default_audio_eou
+
+        self._predict_audio_model = _default_audio_eou()
+        return self._predict_audio_model
+
+    async def _audio_vote(self) -> float | None:
+        """Smart Turn ``P(complete)`` if a model and enough audio exist.
+
+        ``None`` means no vote (missing model or too little audio), not
+        "incomplete". A float below 0.5 holds an early Flux commit.
+        """
+        detector = self.turn_detector
+        score = getattr(detector, "score_recent_audio", None)
+        if callable(score) and getattr(detector, "audio_eou", None) is not None:
+            try:
+                return await score()
+            except Exception as exc:
+                logger.warning("predictive_audio_vote_failed", error=str(exc))
+                return None
+        model = self._lazy_predict_audio_model()
+        if model is None or not self._predict_pcm:
+            return None
+        pcm = b"".join(self._predict_pcm)
+        rate = int(self.audio_input.sample_rate or 16_000)
+        if len(pcm) < rate:
+            return None
+        try:
+            return await model.predict_complete(pcm, sample_rate=rate)
+        except Exception as exc:
+            logger.warning("predictive_audio_vote_failed", error=str(exc))
+            return None
+
+    def _eager_confidence_ok(self, confidence: float | None) -> bool:
+        if confidence is None:
+            return False
+        from .predictive_eou import FLUX_COMPLETE
+
+        threshold = self.eager_eot_threshold if self.eager_eot_threshold is not None else FLUX_COMPLETE
+        return confidence >= threshold
+
+    async def _cancel_unconfirmed_eager(self) -> None:
+        """``TurnResumed``: the early turn was wrong. Stop it.
+
+        Drop the speculative user line when the assistant never answered it.
+        Leaving it in the transcript makes the real ``EndOfTurn`` look like a
+        late duplicate of a turn that was cancelled.
+        """
+        text = self._eager_unconfirmed
+        if not text:
+            return
+        self._eager_unconfirmed = None
+        logger.info("flux_eager_cancelled")
+        await self.interrupt()
+        if (
+            self._transcript
+            and self._transcript[-1].role == "user"
+            and self._transcript[-1].text == text
+            and not self._active_turn_user_text
+        ):
+            self._transcript.pop()
+
+    async def _handle_provider_prediction(self, event: TranscriptEvent) -> None:
+        """Flux ``EagerEndOfTurn`` / ``TurnResumed``.
+
+        Eager, at or above ``eager_eot_threshold`` and not contradicted by
+        Smart Turn, starts the turn. Resumed cancels that turn. ``EndOfTurn``
+        still arrives as a normal commit and confirms or replaces it.
+        """
+        kind = "eager" if event.type == "eager" else "resumed"
+        if self._eou_predictor is not None:
+            self._eou_predictor.note_flux(kind, event.text, event.confidence)
+        if kind == "resumed":
+            await self._cancel_unconfirmed_eager()
+            return
+        text = event.text.strip()
+        if not text or not self._eager_confidence_ok(event.confidence):
+            logger.info(
+                "flux_eager_held",
+                reason="confidence",
+                confidence=event.confidence,
+                threshold=self.eager_eot_threshold,
+                text_preview=text[:80],
+            )
+            return
+        from .predictive_eou import AUDIO_COMPLETE
+
+        p_audio = await self._audio_vote()
+        if p_audio is not None and p_audio < AUDIO_COMPLETE:
+            logger.info(
+                "flux_eager_held",
+                reason="audio_incomplete",
+                p_audio=round(p_audio, 3),
+                text_preview=text[:80],
+            )
+            return
+        self._eager_unconfirmed = text
+        self._eager_commit = True
+        try:
+            logger.info(
+                "flux_eager_commit",
+                confidence=event.confidence,
+                p_audio=None if p_audio is None else round(p_audio, 3),
+                text_preview=text[:80],
+            )
+            await self._handle_committed(text)
+        finally:
+            self._eager_commit = False
+
+    async def _handle_provider_commit(self, text: str) -> None:
+        """``EndOfTurn`` / any committed transcript, confirming an eager turn."""
+        pending = self._eager_unconfirmed
+        if pending and _is_same_user_utterance_refinement(pending, text):
+            self._eager_unconfirmed = None
+            logger.info("flux_eager_confirmed", text_preview=text[:80])
+            return
+        if pending:
+            await self._cancel_unconfirmed_eager()
+        await self._handle_committed(text)
+
     # -- Internal: STT → turns ---------------------------------------------
 
     async def _process_stt_events(self) -> None:
@@ -1671,13 +1831,9 @@ class VoiceSession:
                         )
                         await self.interrupt()
                 elif event.type == "committed" and event.text.strip():
-                    await self._handle_committed(event.text.strip())
-                elif event.type in ("eager", "resumed") and self._eou_predictor is not None:
-                    self._eou_predictor.note_flux(
-                        "eager" if event.type == "eager" else "resumed",
-                        event.text,
-                        event.confidence,
-                    )
+                    await self._handle_provider_commit(event.text.strip())
+                elif event.type in ("eager", "resumed") and self._predict_during_speech:
+                    await self._handle_provider_prediction(event)
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -1927,7 +2083,7 @@ class VoiceSession:
         vad_endpointed = (
             self._endpoint_commit_sent_at is not None and time.monotonic() - self._endpoint_commit_sent_at < 2.0
         )
-        predictive_endpoint = bool(
+        predictive_endpoint = self._eager_commit or bool(
             vad_endpointed and self._endpointer is not None and self._endpointer.last_predictive
         )
         if vad_endpointed:

@@ -411,13 +411,14 @@ class VoiceConfig(BaseModel):
     vad_endpointing: bool | None = None
     """None → auto: on when the turn detector exposes an audio EOU model."""
     predict_during_speech: bool = False
-    """Score the live transcript and recent audio while the caller is still
-    speaking, and confirm a finished-sounding pause sooner.
+    """Score the turn while the caller is still speaking.
 
-    Off by default. Takes effect with local VAD endpointing, which is the
-    path for transcription that does not decide turns itself. Deepgram Flux
-    keeps its own turn boundary; its eager events are one input to this
-    decision and do not start a reply on their own."""
+    Off by default. Without a native end-of-turn provider, a finished
+    sentence whose audio agrees is confirmed after 0.16 s of silence instead
+    of the usual 0.20 s pause plus the 0.45 s floor. On Deepgram Flux, an
+    EagerEndOfTurn at or above the eager threshold can start the turn;
+    TurnResumed cancels it and EndOfTurn confirms it. Local VAD force-commit
+    stays off for Flux."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)

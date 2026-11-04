@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from timbal.voice import (
     VoiceSession,
     endpointing_delay,
 )
+from timbal.voice.eou import AudioEouModel
 from timbal.voice.predictive_eou import (
     AUDIO_COMPLETE,
     DEFAULT_MAX_DELAY_SECS,
@@ -38,6 +40,7 @@ from timbal.voice.predictive_eou import (
     baseline_decision_secs,
     endpoint_curve,
     evaluate_replay,
+    flux_eager_threshold,
     prediction_is_complete,
     script_pauses,
     text_blocks_early,
@@ -330,7 +333,7 @@ class _QuietTTS(TextToSpeech):
 
 
 class TestSession:
-    async def _turns(self, *, predict: bool) -> list[str]:
+    async def _turns(self, *, predict: bool) -> tuple[list[str], list[str]]:
         stt = _ScriptSTT(
             [
                 TranscriptEvent(type="eager", text="Hello there", confidence=0.9),
@@ -355,13 +358,19 @@ class TestSession:
         events = []
         async for event in session.run(_silent()):
             events.append(event)
-        return [event.text for event in events if isinstance(event, TranscriptCommitted)]
+        committed = [event.text for event in events if isinstance(event, TranscriptCommitted)]
+        spoken = [entry.text for entry in session.transcript if entry.role == "user"]
+        return committed, spoken
 
     async def test_predictions_do_not_start_a_turn_when_off(self) -> None:
-        assert await self._turns(predict=False) == ["Hello there."]
+        committed, spoken = await self._turns(predict=False)
+        assert committed == ["Hello there."]
+        assert spoken == ["Hello there."]
 
-    async def test_predictions_do_not_start_a_turn_when_on(self) -> None:
-        assert await self._turns(predict=True) == ["Hello there."]
+    async def test_eager_starts_a_turn_and_resume_cancels_it(self) -> None:
+        committed, transcript = await self._turns(predict=True)
+        assert "Hello there" in committed
+        assert transcript == ["Hello there."]
 
     def test_config_defaults_off(self) -> None:
         assert VoiceConfig().predict_during_speech is False
@@ -425,3 +434,171 @@ class TestReplay:
         )
         assert report.false_cuts == 0
         assert report.text_only_false_cuts == 1
+
+
+class _FixedAudio(AudioEouModel):
+    def __init__(self, p: float) -> None:
+        self.p = p
+
+    async def predict_complete(self, pcm: bytes, *, sample_rate: int) -> float:
+        return self.p
+
+
+def _agent() -> Agent:
+    return Agent(name="voice_test", model=TestModel(responses=["Hi."]), tools=[])
+
+
+def _stub_tts(session: VoiceSession) -> None:
+    """Keep a built session from opening a real speech socket."""
+
+    async def connect(_config: object) -> None:
+        return None
+
+    async def close() -> None:
+        return None
+
+    async def synthesize(_text: str) -> AsyncIterator[bytes]:
+        yield b"\x00\x01" * 4
+
+    session.tts.connect = connect  # type: ignore[method-assign]
+    session.tts.close = close  # type: ignore[method-assign]
+    session.tts.synthesize = synthesize  # type: ignore[method-assign]
+    session.tts.open_stream = lambda: None  # type: ignore[method-assign]
+
+
+class TestBuildVoiceSession:
+    """Prediction wired by the server, for Flux and for Scribe."""
+
+    def test_flux_eager_threshold_and_vad_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, meta = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        assert meta["stt_provider"] == "deepgram-flux"
+        assert meta["turn_detector"] == "ProviderTurnDetector"
+        assert session._vad_endpointing is False
+        assert session._predict_during_speech is True
+        assert session.eager_eot_threshold == pytest.approx(0.5)
+        assert session.audio_input.extra["eager_eot_threshold"] == "0.5"
+
+    def test_flux_keeps_a_caller_eager_threshold(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(
+            _agent(),
+            VoiceConfig(predict_during_speech=True, stt_extra={"eager_eot_threshold": 0.4}),
+            {},
+        )
+        assert session.eager_eot_threshold == pytest.approx(0.4)
+        assert session.audio_input.extra["eager_eot_threshold"] == "0.4"
+
+    def test_threshold_stays_under_a_low_eot(self) -> None:
+        assert flux_eager_threshold({}) == pytest.approx(0.5)
+        assert flux_eager_threshold({"eot_threshold": 0.4}) == pytest.approx(0.3)
+        assert flux_eager_threshold({"eager_eot_threshold": "0.45"}) == pytest.approx(0.45)
+
+    async def test_flux_eager_commits_resume_cancels_end_confirms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        await session._maybe_start_endpointer()
+        assert session._eou_predictor is not None
+        assert session._endpointer is None
+
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there.", confidence=0.2)
+        )
+        assert session._eager_unconfirmed is None
+
+        session._predict_audio_model = _FixedAudio(0.1)
+        session._predict_audio_model_loaded = True
+        session._push_predict_pcm(b"\x01\x00" * 8000)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there.", confidence=0.9)
+        )
+        assert session._eager_unconfirmed is None
+
+        session._predict_audio_model = _FixedAudio(0.95)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there.", confidence=0.9)
+        )
+        assert session._eager_unconfirmed == "Hello there."
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == ["Hello there."]
+
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="resumed", text="Hello there actually", confidence=0.1)
+        )
+        assert session._eager_unconfirmed is None
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == []
+
+        await session._handle_provider_commit("Hello there actually.")
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == [
+            "Hello there actually.",
+        ]
+
+    async def test_flux_end_of_turn_confirms_without_a_second_turn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there.", confidence=0.9)
+        )
+        await session._handle_provider_commit("Hello there.")
+        assert session._eager_unconfirmed is None
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == ["Hello there."]
+
+    async def test_scribe_keeps_the_local_endpointer_and_confirms_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+        from timbal.voice import LocalAudioTurnDetector
+        from timbal.voice.eou import PunctuationEouPredictor
+
+        monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+        detector = LocalAudioTurnDetector(
+            audio_eou=_FixedAudio(0.95),
+            fallback_text_eou=PunctuationEouPredictor(),
+        )
+        session, meta = build_voice_session(
+            _agent(),
+            VoiceConfig(
+                stt_provider="elevenlabs",
+                predict_during_speech=True,
+                turn_detector=detector,
+            ),
+            {},
+        )
+        assert meta["stt_provider"] == "elevenlabs"
+        assert session._predict_during_speech is True
+        assert session._vad_endpointing is None
+        session._vad_endpointing = VadEndpointer(
+            _FakeVad(),
+            stop_silence_secs=0.096,
+            min_speech_secs=0.064,
+            min_delay_secs=0.25,
+            max_delay_secs=0.25,
+            min_commit_interval_secs=0.0,
+        )
+        commits: list[int] = []
+
+        async def commit() -> None:
+            commits.append(1)
+
+        session.stt.commit = commit
+        await session._maybe_start_endpointer()
+        assert session._endpointer is not None
+        assert session._endpointer._predictor is session._eou_predictor
+        await session.turn_detector.start(session.audio_input)
+        session.turn_detector.push_audio(b"\x01\x00" * 8000)
+        assert session._eou_predictor is not None
+        session._eou_predictor.note_partial("Hello there.")
+        session._latest_partial_text = "Hello there."
+        session._last_partial_at = time.monotonic()
+        session._endpointer.push(b"SS" + bytes(3))
+        # Armed at 96 ms of silence; the short confirmation is 160 ms.
+        await asyncio.sleep(0.15)
+        assert commits == [1]
+        assert session._endpointer.last_predictive is True

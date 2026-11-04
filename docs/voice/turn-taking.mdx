@@ -52,13 +52,15 @@ Available modes are:
 
 ## Predict a turn while the caller is speaking
 
-By default the local path waits until voice activity detection hears a pause, scores that audio, and then keeps a short silence floor even when the score is confident. Set `predict_during_speech` to score the live transcript and the caller's recent audio while they are still speaking. When the words read as a finished sentence, the audio agrees, and the caller has paused briefly, the session confirms the turn on that short pause. A pause that still sounds unfinished keeps the usual wait, so a caller who stops mid-thought is not cut off.
+Set `predict_during_speech` to decide the turn from what the caller has already said and how it sounds, instead of waiting out a fixed silence. The setting is off unless you turn it on. Clients may send it on a call hello. `SpeechEouPredictor` is the scorer the session uses; a normal call sets the flag and does not construct the class.
 
 ```python
 agent.voice_config["predict_during_speech"] = True
 ```
 
-This follows the local endpointer, so it applies when transcription does not decide the turn itself. Deepgram Flux keeps its own turn boundary. Flux can report an early end-of-turn and a resumed turn; with this setting those signals join the same decision, and neither one starts the assistant's reply on its own. The setting is off unless you turn it on. Clients may send it on a call hello.
+On transcription that does not decide the turn itself (ElevenLabs Scribe, Deepgram Nova, OpenAI), the local endpointer scores the live transcript and the recent audio while the caller is speaking. When the words read as a finished sentence and the audio agrees, the session confirms the turn after 0.16 seconds of silence. Otherwise it keeps the usual wait: 0.20 seconds of silence, then up to the 0.45 second floor when the score is confident.
+
+Deepgram Flux still owns the final boundary, and local VAD force-commit stays off, as described above. With this setting the session asks Flux for an early end-of-turn (`EagerEndOfTurn`) at an eager threshold below Flux's own end-of-turn threshold. That event can start the turn. `TurnResumed` cancels it. `EndOfTurn` confirms it, or starts the turn if the early start was held. When Smart Turn is available, an incomplete audio score holds the early start and `EndOfTurn` still commits.
 
 ## Custom clients
 
