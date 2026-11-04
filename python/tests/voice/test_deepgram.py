@@ -123,17 +123,21 @@ class TestFluxEventMapping:
         events = _drain(stt)
         assert [(e.type, e.text) for e in events] == [("committed", "tell me a story.")]
 
-    async def test_eager_end_of_turn_and_turn_resumed_are_events(self) -> None:
+    async def test_eager_events_are_predictions_not_commits(self) -> None:
         stt = DeepgramFluxSTT()
-        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "book a table"))
+        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "tell me a story"))
+        await stt._handle_message(_flux_turn_info("TurnResumed", "tell me a story about"))
+        events = _drain(stt)
+        assert [(e.type, e.text, e.confidence) for e in events] == [
+            ("eager", "tell me a story", 0.9),
+            ("resumed", "tell me a story about", 0.9),
+        ]
+
+    async def test_turn_resumed_without_text_is_still_an_event(self) -> None:
+        stt = DeepgramFluxSTT()
         await stt._handle_message(_flux_turn_info("TurnResumed", ""))
         events = _drain(stt)
-        assert [(e.type, e.text) for e in events] == [("eager", "book a table"), ("resumed", "")]
-
-    async def test_empty_eager_end_of_turn_is_skipped(self) -> None:
-        stt = DeepgramFluxSTT()
-        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "  "))
-        assert _drain(stt) == []
+        assert [(e.type, e.text) for e in events] == [("resumed", "")]
 
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()

@@ -31,7 +31,8 @@ from timbal.voice import (
     VoiceConfig,
     VoiceSession,
 )
-from timbal.voice.speculative import apply_flux_eager_eot, transcripts_equivalent
+from timbal.voice.predictive_eou import flux_eager_threshold
+from timbal.voice.speculative import transcripts_equivalent
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -193,17 +194,14 @@ class TestTranscriptsEquivalent:
 
 
 class TestFluxEagerQuery:
-    def test_inserts_threshold_only_when_enabled(self) -> None:
-        extra: dict = {}
-        assert apply_flux_eager_eot(extra, SpeculativeGeneration(enabled=True), flux=True) is True
-        assert extra["eager_eot_threshold"] == 0.5
-        assert apply_flux_eager_eot(extra, SpeculativeGeneration(enabled=True), flux=True) is False
-        kept = {"eager_eot_threshold": 0.7}
-        assert apply_flux_eager_eot(kept, SpeculativeGeneration(enabled=True), flux=True) is False
-        assert kept["eager_eot_threshold"] == 0.7
-        off: dict = {}
-        assert apply_flux_eager_eot(off, SpeculativeGeneration(enabled=False), flux=True) is False
-        assert off == {}
+    def test_explicit_value_wins_otherwise_stays_under_eot(self) -> None:
+        assert flux_eager_threshold({}) == 0.5
+        assert flux_eager_threshold({"eager_eot_threshold": 0.7}) == 0.7
+        assert flux_eager_threshold({"eager_eot_threshold": "0.4"}) == 0.4
+        # eot 0.5 would put 0.5 next to itself; eager must stay strictly below.
+        assert flux_eager_threshold({"eot_threshold": 0.5}) == 0.4
+        assert flux_eager_threshold({"eot_threshold": "0.35"}) == 0.3
+        assert flux_eager_threshold({"eager_eot_threshold": "nope"}) == 0.5
 
     def test_voice_config_coerces_bool_and_stays_off_the_client_hello(self) -> None:
         from timbal.server.voice import CLIENT_SETTABLE_VOICE_FIELDS
@@ -211,6 +209,12 @@ class TestFluxEagerQuery:
         assert VoiceConfig().speculative_generation.enabled is False
         assert VoiceConfig(speculative_generation=True).speculative_generation.enabled is True
         assert VoiceConfig(speculative_generation=False).speculative_generation.enabled is False
+        tuned = VoiceConfig(speculative_generation={"eou_threshold": 0.6})
+        assert tuned.speculative_generation.enabled is True
+        assert tuned.speculative_generation.eou_threshold == 0.6
+        held_off = VoiceConfig(speculative_generation={"enabled": False, "eou_threshold": 0.6})
+        assert held_off.speculative_generation.enabled is False
+        assert held_off.speculative_generation.eou_threshold == 0.6
         assert "speculative_generation" not in CLIENT_SETTABLE_VOICE_FIELDS
         # An empty block is omitted, so it does not clobber an inherited value.
         assert "speculative_generation" not in VoiceConfig.model_validate({}).model_fields_set

@@ -179,7 +179,7 @@ A text turn on the same conversation while the call is live (a chat tab continui
 
 ## Wait for a confirmed turn
 
-Speculative generation can run a tool before the caller has actually finished. That is what you want for a lookup. It is the wrong time to book, charge, send a message, or hang up. Set `defer_until_eot=True` on those tools. The call waits until the turn is confirmed; if the caller keeps talking, the tool never runs. Other tools in the same turn are not held.
+Speculative generation can run a tool before the caller has actually finished. That is what you want for a lookup. It is the wrong time to book, charge, send a message, or hang up. Set `defer_until_eot=True` on those tools. The call waits until the turn is confirmed; if the caller keeps talking, the tool never runs. Other tools in the same turn are not held. An MCP tool whose annotations say it is destructive gets `defer_until_eot=True` on its own, whether or not `approval` also gates it. Unannotated MCP tools do not.
 
 ```python
 from timbal import Agent, Tool
@@ -199,13 +199,14 @@ agent = Agent(
 )
 ```
 
-`end_call` below should use the same flag when speculative generation is on. See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation).
+`end_call` below is one of those tools. See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation).
 
 ## Let the caller end the call
 
 `session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply:
 
 ```python agent.py
+from timbal import Tool
 from timbal.voice import current_voice_session
 
 
@@ -216,6 +217,9 @@ async def end_call() -> str:
         return "There is no call to end."
     session.end_call()
     return "If you have not said goodbye yet, say it now in one short sentence. The call ends once it has been heard."
+
+
+end_call_tool = Tool(handler=end_call, defer_until_eot=True)
 ```
 
 The session waits for the turn to finish and its audio to play, then closes itself, as `session.close()` does. Some models call the tool before writing the goodbye, so the tool's result asks for one; the goodbye then comes from a second model call in the same turn, and the session still waits for it. If the caller says something first, the call stays up. If the goodbye never finishes playing, the call ends after 20 seconds anyway. Calling it again changes nothing.

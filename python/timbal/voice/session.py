@@ -378,7 +378,11 @@ class VoiceSession:
         elif speculative_generation is False or speculative_generation is None:
             self.speculative_generation = SpeculativeGeneration(enabled=False)
         elif isinstance(speculative_generation, dict):
-            self.speculative_generation = SpeculativeGeneration.model_validate(speculative_generation)
+            # Same rule as VoiceConfig: a dict turns the feature on unless it
+            # sets ``enabled`` itself.
+            data = dict(speculative_generation)
+            data.setdefault("enabled", True)
+            self.speculative_generation = SpeculativeGeneration.model_validate(data)
         else:
             self.speculative_generation = speculative_generation
         # Session-lifetime counters. Also copied onto each TurnMetrics event.
@@ -1675,10 +1679,21 @@ class VoiceSession:
                             audio_playing=self._assistant_audio_playing,
                         )
                         await self.interrupt()
-                elif event.type == "eager" and event.text.strip():
-                    await self._maybe_start_speculative(event.text.strip(), source="eager_eot")
-                elif event.type == "resumed":
-                    await self._discard_speculative(reason="turn_resumed")
+                elif event.type in ("eager", "resumed"):
+                    # Speculative generation owns these events when it is on:
+                    # the model starts, audio stays held. During-speech
+                    # prediction (``_handle_provider_prediction``) uses the same
+                    # events only when speculation is off, so the two do not
+                    # each start a turn.
+                    if self.speculative_generation.enabled:
+                        if event.type == "eager" and event.text.strip():
+                            await self._maybe_start_speculative(event.text.strip(), source="eager_eot")
+                        elif event.type == "resumed":
+                            await self._discard_speculative(reason="turn_resumed")
+                    elif getattr(self, "_predict_during_speech", False):
+                        handle = getattr(self, "_handle_provider_prediction", None)
+                        if handle is not None:
+                            await handle(event)
                 elif event.type == "committed" and event.text.strip():
                     await self._handle_committed(event.text.strip())
         except asyncio.CancelledError:

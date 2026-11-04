@@ -65,13 +65,15 @@ agent = Agent(
 )
 ```
 
-`True` uses the defaults. A dict sets the knobs: `eou_threshold` (default `0.5`) is the Smart Turn probability that treats a pause as probably complete, `eager_eot_threshold` (default `0.5`, range 0.3–0.9) is what Flux needs in order to emit `EagerEndOfTurn`, `max_retries` (default 3) caps attempts per caller turn, and `max_speech_duration` (default 10 seconds) skips long utterances. `preemptive_tts` defaults to false: the model runs early, and speech synthesis starts once the turn is confirmed. Set it to true to synthesize during the wait as well.
+`True` uses the defaults. A dict turns it on too, unless the dict sets `enabled` to false. `{"eou_threshold": 0.6}` enables it; `{"enabled": false}` does not. The keys are `enabled`, `preemptive_tts`, `max_retries` (default 3), `max_speech_duration` (default 10 seconds), and `eou_threshold` (default `0.5`). A Smart Turn pause is skipped when the score is below `eou_threshold`, and also when the text scorer calls the pause incomplete. `preemptive_tts` defaults to false: the model runs early, and speech synthesis starts once the turn is confirmed. Set it to true to synthesize during the wait as well. Those bytes stay buffered either way.
 
 Nothing is played until the turn is confirmed. A caller who keeps talking, or a Flux `TurnResumed`, drops the attempt and its audio. If the confirmed transcript is not the same words (case and punctuation aside), the attempt is dropped and the reply starts over on the final text. A matching transcript is reused, including when only capitalization or punctuation changed.
 
-Read-only tools run during that wait. A tool that books, charges, sends, or hangs up should set `defer_until_eot=True` so it does not run until the turn is confirmed; if the attempt is dropped, it never runs. See [Using tools](/voice/tools).
+Flux `EagerEndOfTurn` and `TurnResumed` are the same events `predict_during_speech` uses, and both features share one `eager_eot_threshold` (`stt_extra` wins; otherwise `min(0.5, max(0.3, eot_threshold - 0.1))`). When only prediction is on, an eager event can start a normal turn and `TurnResumed` cancels it. When speculative generation is on, that same eager event starts the held reply instead, so the two settings do not each start a turn. `TurnResumed` discards the held reply. `EndOfTurn` confirms it when the words match, and restarts it when they do not. Prediction on a transcriber that does not emit eager events is unchanged.
 
-Each turn's metrics carry `speculative`, plus the call's `speculative_generations_started` and `speculative_generations_discarded` counts. The setting is server-side. A client hello cannot turn it on.
+Read-only tools run during that wait. A tool that books, charges, sends, or hangs up should set `defer_until_eot=True` so it does not run until the turn is confirmed; if the attempt is dropped, it never runs. An MCP tool annotated destructive gets that flag whether or not `approval` gates it. See [Using tools](/voice/tools).
+
+Each turn's metrics carry `speculative`, plus the call's `speculative_generations_started` and `speculative_generations_discarded` counts. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded`. The setting is server-side. A client hello cannot turn it on.
 
 ## Custom clients
 

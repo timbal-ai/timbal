@@ -9,8 +9,9 @@ Two triggers, both opt-in via :class:`SpeculativeGeneration`:
   ``eou_threshold``).
 * Deepgram Flux ``EagerEndOfTurn``. ``TurnResumed`` cancels the attempt.
   Flux only emits those events when ``eager_eot_threshold`` is on the
-  connection; the server sets it from this config when speculative generation
-  is enabled and the agent did not set one.
+  connection. The server sets it with
+  :func:`timbal.voice.predictive_eou.flux_eager_threshold` (the same helper
+  during-speech prediction uses). An explicit ``stt_extra`` value wins.
 
 Transcript reuse follows LiveKit Agents' ``_transcripts_equivalent``
 (Apache-2.0, ``livekit/agents`` ``agent_activity.py``): exact match, otherwise
@@ -102,19 +103,6 @@ def _words(text: str) -> list[str]:
             word_start = pos + 1
     _add(word_start, len(text))
     return words
-
-
-def apply_flux_eager_eot(extra: dict[str, Any], config: Any, *, flux: bool) -> bool:
-    """Set Flux ``eager_eot_threshold`` when speculative generation needs it.
-
-    Deepgram emits ``EagerEndOfTurn`` / ``TurnResumed`` only when the
-    connection string carries the parameter. An agent-supplied value wins.
-    Returns whether this call inserted the default.
-    """
-    if not flux or not getattr(config, "enabled", False) or "eager_eot_threshold" in extra:
-        return False
-    extra["eager_eot_threshold"] = config.eager_eot_threshold
-    return True
 
 
 class SpeculativeGate:

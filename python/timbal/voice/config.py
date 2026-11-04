@@ -342,12 +342,9 @@ class SpeculativeGeneration(BaseModel):
     is confirmed. LiveKit's default is 3."""
     eou_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     """Smart Turn ``P(complete)`` at or above which a pause starts a
-    speculative reply. 0.5 is the model's complete/incomplete boundary."""
-    eager_eot_threshold: float = Field(default=0.5, ge=0.3, le=0.9)
-    """Flux ``eager_eot_threshold`` inserted when this is enabled and the
-    agent did not set one. Deepgram's allowed range is 0.3–0.9. Lower fires
-    earlier and cancels more often. Flux's own ``eot_threshold`` (default
-    0.8) still confirms the turn."""
+    speculative reply. 0.5 is the model's complete/incomplete boundary.
+    A pause the text scorer calls incomplete does not start one, even above
+    this."""
 
 
 class VoiceEventsConfig(BaseModel):
@@ -446,6 +443,15 @@ class VoiceConfig(BaseModel):
     ``select_turn_detector_spec``)."""
     vad_endpointing: bool | None = None
     """None → auto: on when the turn detector exposes an audio EOU model."""
+    predict_during_speech: bool = False
+    """Score the turn while the caller is still speaking.
+
+    Off by default. Without a native end-of-turn provider, a finished
+    sentence whose audio agrees is confirmed after 0.16 s of silence instead
+    of the usual 0.20 s pause plus the 0.45 s floor. On Deepgram Flux, an
+    EagerEndOfTurn at or above the eager threshold can start the turn;
+    TurnResumed cancels it and EndOfTurn confirms it. Local VAD force-commit
+    stays off for Flux."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -510,6 +516,11 @@ class VoiceConfig(BaseModel):
             return {"enabled": True}
         if v is False:
             return {"enabled": False}
+        # A dict is the feature turning on. ``{"enabled": false}`` is how a
+        # caller keeps the other knobs and leaves it off. An empty dict is
+        # removed before this runs (see omit_empty_voice_blocks).
+        if isinstance(v, dict) and "enabled" not in v:
+            return {**v, "enabled": True}
         return v
 
 
