@@ -1,0 +1,2116 @@
+{
+  "cells": [
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "groq/openai/gpt-oss-20b",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1457.1,
+        "p90": 4138.8
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1649.8,
+        "p90": 4721.6
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1569.5,
+        "p90": 4301.7
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 1416.1,
+        "p90": 4128.8
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 10,
+        "p50": 235.6,
+        "p90": 404.7
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "ttft_warm": {
+          "n": 9,
+          "p50": 719.0,
+          "p90": 1650.3
+        },
+        "cached_tokens": 61952,
+        "input_tokens_incl_cached": 61952,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 1,
+      "end_call_calls": 1,
+      "speculative_started": 16,
+      "speculative_discarded": 7,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 16,
+        "p50": 0.2,
+        "p90": 0.5
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "groq/openai/gpt-oss-20b",
+      "stt": "deepgram-flux",
+      "kind": "latency",
+      "runs": 6,
+      "caller_silence_to_first_audio_ms": {
+        "n": 6,
+        "p50": 2633.7,
+        "p90": 4809.1
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 6,
+        "p50": 2376.9,
+        "p90": 4639.9
+      },
+      "eou_to_first_audio_ms": {
+        "n": 6,
+        "p50": 2216.8,
+        "p90": 4482.2
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 6,
+        "p50": 2020.9,
+        "p90": 4298.7
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 6,
+        "p50": 159.8,
+        "p90": 260.2
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 6,
+          "p50": 1123.0,
+          "p90": 1572.4
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 12288,
+        "input_tokens_incl_cached": 12288,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 3,
+      "speculative_started": 6,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 6,
+        "p50": 0.4,
+        "p90": 0.5
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "backchannel",
+      "runs": 15,
+      "caller_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 1589.7,
+        "p90": 1635.7
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 284.9,
+        "p90": 319.7
+      },
+      "eou_to_first_audio_ms": {
+        "n": 15,
+        "p50": 44.7,
+        "p90": 80.0
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 15,
+        "p50": 0.0,
+        "p90": 0.0
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 15,
+        "p50": 240.2,
+        "p90": 242.6
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 15,
+          "p50": 385.3,
+          "p90": 523.0
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 125440,
+        "input_tokens_incl_cached": 125440,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 15,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 15,
+        "p50": 1.0,
+        "p90": 1.4
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "barge",
+      "runs": 10,
+      "caller_silence_to_first_audio_ms": {
+        "n": 10,
+        "p50": 1579.0,
+        "p90": 1704.8
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 10,
+        "p50": 405.9,
+        "p90": 630.6
+      },
+      "eou_to_first_audio_ms": {
+        "n": 10,
+        "p50": 205.4,
+        "p90": 542.6
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 10,
+        "p50": 45.0,
+        "p90": 348.9
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 20,
+        "p50": 160.3,
+        "p90": 249.9
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 10,
+          "p50": 345.6,
+          "p90": 436.1
+        },
+        "ttft_warm": {
+          "n": 3,
+          "p50": 330.4,
+          "p90": 353.5
+        },
+        "cached_tokens": 100352,
+        "input_tokens_incl_cached": 100352,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 20,
+      "speculative_discarded": 6,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 20,
+        "p50": 0.2,
+        "p90": 0.7
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 5,
+      "caller_silence_to_first_audio_ms": {
+        "n": 13,
+        "p50": 343.2,
+        "p90": 715.0
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 881.3,
+        "p90": 1777.8
+      },
+      "eou_to_first_audio_ms": {
+        "n": 15,
+        "p50": 655.7,
+        "p90": 1398.2
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 15,
+        "p50": 459.6,
+        "p90": 1155.6
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 18,
+        "p50": 399.8,
+        "p90": 400.5
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "ttft_warm": {
+          "n": 15,
+          "p50": 341.9,
+          "p90": 449.2
+        },
+        "cached_tokens": 163072,
+        "input_tokens_incl_cached": 163072,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 28,
+      "speculative_discarded": 13,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 28,
+        "p50": 0.1,
+        "p90": 0.3
+      },
+      "errors": 2
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "destructive",
+      "runs": 5,
+      "caller_silence_to_first_audio_ms": {
+        "n": 6,
+        "p50": 274.4,
+        "p90": 481.5
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 6,
+        "p50": 719.2,
+        "p90": 917.2
+      },
+      "eou_to_first_audio_ms": {
+        "n": 6,
+        "p50": 558.8,
+        "p90": 756.6
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 6,
+        "p50": 305.9,
+        "p90": 404.8
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 10,
+        "p50": 160.6,
+        "p90": 160.8
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 5,
+          "p50": 399.1,
+          "p90": 653.3
+        },
+        "ttft_warm": {
+          "n": 5,
+          "p50": 344.6,
+          "p90": 389.2
+        },
+        "cached_tokens": 150528,
+        "input_tokens_incl_cached": 150528,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 1,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 4,
+      "speculative_started": 10,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 10,
+        "p50": 0.3,
+        "p90": 0.4
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "latency",
+      "runs": 20,
+      "caller_silence_to_first_audio_ms": {
+        "n": 20,
+        "p50": 1445.8,
+        "p90": 1807.2
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 20,
+        "p50": 1237.1,
+        "p90": 2205.6
+      },
+      "eou_to_first_audio_ms": {
+        "n": 20,
+        "p50": 1076.7,
+        "p90": 1725.1
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 20,
+        "p50": 869.8,
+        "p90": 1436.5
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 20,
+        "p50": 160.8,
+        "p90": 480.2
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 20,
+          "p50": 386.9,
+          "p90": 656.0
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 175104,
+        "input_tokens_incl_cached": 175104,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 20,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 20,
+        "p50": 0.4,
+        "p90": 0.6
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "tool",
+      "runs": 5,
+      "caller_silence_to_first_audio_ms": {
+        "n": 5,
+        "p50": 1476.6,
+        "p90": 1936.6
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 5,
+        "p50": 1607.9,
+        "p90": 2085.2
+      },
+      "eou_to_first_audio_ms": {
+        "n": 5,
+        "p50": 1447.7,
+        "p90": 1925.1
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 5,
+        "p50": 1143.1,
+        "p90": 1525.1
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 5,
+        "p50": 160.0,
+        "p90": 160.5
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 5,
+          "p50": 323.1,
+          "p90": 465.1
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 87808,
+        "input_tokens_incl_cached": 87808,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 5,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 5,
+        "p50": 0.3,
+        "p90": 0.5
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "best",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "unfinished",
+      "runs": 10,
+      "caller_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 1138.5,
+        "p90": 1353.7
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 560.0,
+        "p90": 1029.6
+      },
+      "eou_to_first_audio_ms": {
+        "n": 15,
+        "p50": 319.1,
+        "p90": 789.1
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 15,
+        "p50": 0.0,
+        "p90": 595.2
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 15,
+        "p50": 240.5,
+        "p90": 259.2
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 8,
+          "p50": 326.1,
+          "p90": 521.7
+        },
+        "ttft_warm": {
+          "n": 10,
+          "p50": 336.7,
+          "p90": 358.0
+        },
+        "cached_tokens": 137984,
+        "input_tokens_incl_cached": 137984,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 5,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 15,
+      "speculative_discarded": 5,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 20,
+        "p50": 0.5,
+        "p90": 0.6
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "cache_bust",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 272.1,
+        "p90": 1466.5
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 8,
+        "p50": 1686.8,
+        "p90": 2127.4
+      },
+      "eou_to_first_audio_ms": {
+        "n": 8,
+        "p50": 1286.7,
+        "p90": 1726.6
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 8,
+        "p50": 1110.8,
+        "p90": 1509.3
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 11,
+        "p50": 399.0,
+        "p90": 400.3
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "ttft_warm": {
+          "n": 9,
+          "p50": 375.4,
+          "p90": 476.3
+        },
+        "cached_tokens": 0,
+        "input_tokens_incl_cached": 0,
+        "hit_rate": null
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 17,
+      "speculative_discarded": 8,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 17,
+        "p50": 0.1,
+        "p90": 0.3
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "default_floors",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "unfinished",
+      "runs": 6,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1262.3,
+        "p90": 1561.3
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 696.5,
+        "p90": 1264.5
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 456.3,
+        "p90": 1016.9
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 172.7,
+        "p90": 763.8
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 9,
+        "p50": 240.4,
+        "p90": 242.8
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 5,
+          "p50": 340.7,
+          "p90": 374.3
+        },
+        "ttft_warm": {
+          "n": 6,
+          "p50": 374.2,
+          "p90": 445.6
+        },
+        "cached_tokens": 100352,
+        "input_tokens_incl_cached": 100352,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 3,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 9,
+      "speculative_discarded": 3,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 12,
+        "p50": 0.5,
+        "p90": 0.6
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "no_backchannels",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "backchannel",
+      "runs": 9,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1581.8,
+        "p90": 1657.2
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 14,
+        "p50": 335.8,
+        "p90": 1024.1
+      },
+      "eou_to_first_audio_ms": {
+        "n": 14,
+        "p50": 94.9,
+        "p90": 847.8
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 14,
+        "p50": 0.0,
+        "p90": 619.0
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 17,
+        "p50": 240.4,
+        "p90": 273.2
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 9,
+          "p50": 373.6,
+          "p90": 492.5
+        },
+        "ttft_warm": {
+          "n": 8,
+          "p50": 333.8,
+          "p90": 469.4
+        },
+        "cached_tokens": 112896,
+        "input_tokens_incl_cached": 112896,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 6,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 14,
+      "speculative_discarded": 2,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 17,
+        "p50": 0.8,
+        "p90": 1.3
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "no_first_flush",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 8,
+        "p50": 342.7,
+        "p90": 1789.9
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1130.5,
+        "p90": 2313.5
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 678.3,
+        "p90": 1905.2
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 448.6,
+        "p90": 1662.2
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 12,
+        "p50": 400.0,
+        "p90": 440.1
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "ttft_warm": {
+          "n": 9,
+          "p50": 390.9,
+          "p90": 644.1
+        },
+        "cached_tokens": 100352,
+        "input_tokens_incl_cached": 100352,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 18,
+      "speculative_discarded": 9,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 18,
+        "p50": 0.0,
+        "p90": 0.4
+      },
+      "errors": 1
+    },
+    {
+      "side": "after",
+      "profile": "no_hold",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "unfinished",
+      "runs": 6,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1038.9,
+        "p90": 1407.5
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 578.5,
+        "p90": 1099.5
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 338.4,
+        "p90": 859.2
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 46.5,
+        "p90": 643.7
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 9,
+        "p50": 240.1,
+        "p90": 240.3
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 5,
+          "p50": 295.1,
+          "p90": 328.4
+        },
+        "ttft_warm": {
+          "n": 6,
+          "p50": 360.5,
+          "p90": 465.6
+        },
+        "cached_tokens": 87808,
+        "input_tokens_incl_cached": 87808,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 3,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 9,
+      "speculative_discarded": 3,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 12,
+        "p50": 0.4,
+        "p90": 0.6
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "no_pause_trim",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 469.9,
+        "p90": 1607.0
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1492.8,
+        "p90": 2279.2
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1252.2,
+        "p90": 1814.2
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 978.4,
+        "p90": 1545.4
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 11,
+        "p50": 400.0,
+        "p90": 440.1
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "ttft_warm": {
+          "n": 9,
+          "p50": 356.0,
+          "p90": 458.4
+        },
+        "cached_tokens": 87808,
+        "input_tokens_incl_cached": 87808,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 17,
+      "speculative_discarded": 8,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 17,
+        "p50": 0.1,
+        "p90": 0.5
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "no_predict",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "unfinished",
+      "runs": 6,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1218.3,
+        "p90": 1515.5
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 669.1,
+        "p90": 1187.0
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 469.1,
+        "p90": 946.7
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 226.9,
+        "p90": 709.2
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 9,
+        "p50": 240.3,
+        "p90": 240.6
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 4,
+          "p50": 311.8,
+          "p90": 337.0
+        },
+        "ttft_warm": {
+          "n": 6,
+          "p50": 314.0,
+          "p90": 408.2
+        },
+        "cached_tokens": 87552,
+        "input_tokens_incl_cached": 87552,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 3,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 9,
+      "speculative_discarded": 3,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 12,
+        "p50": 0.6,
+        "p90": 0.9
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "no_speculative",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "destructive",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 4,
+        "p50": 418.4,
+        "p90": 528.1
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 7,
+        "p50": 1323.9,
+        "p90": 3941.8
+      },
+      "eou_to_first_audio_ms": {
+        "n": 7,
+        "p50": 918.6,
+        "p90": 1108.4
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 7,
+        "p50": 678.0,
+        "p90": 800.0
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 9,
+        "p50": 136.3,
+        "p90": 2937.3
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 3,
+          "p50": 330.4,
+          "p90": 348.8
+        },
+        "ttft_warm": {
+          "n": 6,
+          "p50": 389.6,
+          "p90": 561.7
+        },
+        "cached_tokens": 125440,
+        "input_tokens_incl_cached": 125440,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 1,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 2,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 9,
+        "p50": 0.2,
+        "p90": 0.3
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "scribe_default_floors",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "elevenlabs",
+      "kind": "latency",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 3,
+        "p50": 1957.2,
+        "p90": 2082.3
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 3,
+        "p50": 2419.2,
+        "p90": 2556.6
+      },
+      "eou_to_first_audio_ms": {
+        "n": 3,
+        "p50": 906.0,
+        "p90": 1019.8
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 3,
+        "p50": 681.9,
+        "p90": 746.3
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 3,
+        "p50": 1542.7,
+        "p90": 1571.3
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 3,
+          "p50": 389.6,
+          "p90": 411.3
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 12544,
+        "input_tokens_incl_cached": 12544,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 3,
+        "p50": 0.6,
+        "p90": 0.9
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "scribe_default_floors",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "elevenlabs",
+      "kind": "unfinished",
+      "runs": 6,
+      "caller_silence_to_first_audio_ms": {
+        "n": 12,
+        "p50": 1763.3,
+        "p90": 2188.3
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 12,
+        "p50": 2325.2,
+        "p90": 2504.3
+      },
+      "eou_to_first_audio_ms": {
+        "n": 12,
+        "p50": 924.5,
+        "p90": 1017.3
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 12,
+        "p50": 625.5,
+        "p90": 771.8
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 12,
+        "p50": 1492.4,
+        "p90": 1560.8
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 6,
+          "p50": 338.3,
+          "p90": 377.4
+        },
+        "ttft_warm": {
+          "n": 6,
+          "p50": 336.4,
+          "p90": 388.2
+        },
+        "cached_tokens": 112640,
+        "input_tokens_incl_cached": 112640,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 6,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 12,
+        "p50": 0.8,
+        "p90": 1.0
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "scribe_tuned_floors",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "elevenlabs",
+      "kind": "latency",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 3,
+        "p50": 2094.0,
+        "p90": 2108.3
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 3,
+        "p50": 2575.5,
+        "p90": 2586.8
+      },
+      "eou_to_first_audio_ms": {
+        "n": 3,
+        "p50": 1026.2,
+        "p90": 1031.1
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 3,
+        "p50": 678.9,
+        "p90": 742.1
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 3,
+        "p50": 1549.3,
+        "p90": 1555.7
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 3,
+          "p50": 301.7,
+          "p90": 448.4
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 12544,
+        "input_tokens_incl_cached": 12544,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 3,
+        "p50": 0.6,
+        "p90": 0.9
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "scribe_tuned_floors",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "elevenlabs",
+      "kind": "unfinished",
+      "runs": 6,
+      "caller_silence_to_first_audio_ms": {
+        "n": 10,
+        "p50": 1870.1,
+        "p90": 2048.8
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 10,
+        "p50": 2232.3,
+        "p90": 2687.7
+      },
+      "eou_to_first_audio_ms": {
+        "n": 10,
+        "p50": 855.2,
+        "p90": 1099.6
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 10,
+        "p50": 595.6,
+        "p90": 781.9
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 10,
+        "p50": 1444.0,
+        "p90": 1588.1
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 6,
+          "p50": 337.6,
+          "p90": 466.8
+        },
+        "ttft_warm": {
+          "n": 4,
+          "p50": 321.1,
+          "p90": 359.5
+        },
+        "cached_tokens": 75264,
+        "input_tokens_incl_cached": 75264,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 4,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 10,
+        "p50": 0.7,
+        "p90": 1.1
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "speculative_hold_tts",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "destructive",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 3,
+        "p50": 78.5,
+        "p90": 113.0
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 3,
+        "p50": 593.6,
+        "p90": 637.2
+      },
+      "eou_to_first_audio_ms": {
+        "n": 3,
+        "p50": 432.9,
+        "p90": 540.9
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 3,
+        "p50": 210.2,
+        "p90": 298.2
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 6,
+        "p50": 160.2,
+        "p90": 160.7
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 3,
+          "p50": 307.0,
+          "p90": 315.2
+        },
+        "ttft_warm": {
+          "n": 3,
+          "p50": 332.5,
+          "p90": 335.9
+        },
+        "cached_tokens": 100352,
+        "input_tokens_incl_cached": 100352,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 3,
+      "speculative_started": 6,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 6,
+        "p50": 0.2,
+        "p90": 0.5
+      },
+      "errors": 0
+    },
+    {
+      "side": "after",
+      "profile": "tempo_1_05",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 7,
+        "p50": 249.7,
+        "p90": 1055.9
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 872.3,
+        "p90": 1436.6
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 671.5,
+        "p90": 1047.3
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 403.5,
+        "p90": 836.0
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 9,
+        "p50": 200.5,
+        "p90": 408.2
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "ttft_warm": {
+          "n": 9,
+          "p50": 456.3,
+          "p90": 522.1
+        },
+        "cached_tokens": 112896,
+        "input_tokens_incl_cached": 112896,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 15,
+      "speculative_discarded": 6,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 15,
+        "p50": 0.1,
+        "p90": 0.2
+      },
+      "errors": 2
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "groq/openai/gpt-oss-20b",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 3,
+      "caller_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1522.6,
+        "p90": 3084.1
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 9,
+        "p50": 2180.7,
+        "p90": 3452.3
+      },
+      "eou_to_first_audio_ms": {
+        "n": 9,
+        "p50": 1984.4,
+        "p90": 3199.4
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 9,
+        "p50": 1813.6,
+        "p90": 3053.8
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 9,
+        "p50": 188.8,
+        "p90": 269.0
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 3,
+          "p50": 169.8,
+          "p90": 684.7
+        },
+        "ttft_warm": {
+          "n": 6,
+          "p50": 248.1,
+          "p90": 565.4
+        },
+        "cached_tokens": 150016,
+        "input_tokens_incl_cached": 150016,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 2,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 9,
+        "p50": 0.5,
+        "p90": 0.8
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "groq/openai/gpt-oss-20b",
+      "stt": "deepgram-flux",
+      "kind": "latency",
+      "runs": 6,
+      "caller_silence_to_first_audio_ms": {
+        "n": 6,
+        "p50": 2722.3,
+        "p90": 3537.7
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 6,
+        "p50": 2436.8,
+        "p90": 3314.6
+      },
+      "eou_to_first_audio_ms": {
+        "n": 6,
+        "p50": 2232.6,
+        "p90": 3140.6
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 6,
+        "p50": 2045.5,
+        "p90": 2958.7
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 6,
+        "p50": 173.2,
+        "p90": 254.4
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 6,
+          "p50": 702.0,
+          "p90": 890.2
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 49664,
+        "input_tokens_incl_cached": 49664,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 1,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 6,
+        "p50": 0.5,
+        "p90": 0.8
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "backchannel",
+      "runs": 15,
+      "caller_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 2781.6,
+        "p90": 3384.5
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 25,
+        "p50": 1368.5,
+        "p90": 1743.5
+      },
+      "eou_to_first_audio_ms": {
+        "n": 25,
+        "p50": 1135.0,
+        "p90": 1490.1
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 25,
+        "p50": 904.0,
+        "p90": 1154.3
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 26,
+        "p50": 240.4,
+        "p90": 270.4
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 15,
+          "p50": 321.5,
+          "p90": 617.7
+        },
+        "ttft_warm": {
+          "n": 11,
+          "p50": 309.5,
+          "p90": 651.4
+        },
+        "cached_tokens": 312576,
+        "input_tokens_incl_cached": 312576,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 10,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 26,
+        "p50": 0.7,
+        "p90": 1.2
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "barge",
+      "runs": 10,
+      "caller_silence_to_first_audio_ms": {
+        "n": 10,
+        "p50": 2692.2,
+        "p90": 2912.7
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 10,
+        "p50": 1486.2,
+        "p90": 1606.8
+      },
+      "eou_to_first_audio_ms": {
+        "n": 10,
+        "p50": 1274.3,
+        "p90": 1425.3
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 10,
+        "p50": 955.0,
+        "p90": 1141.0
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 13,
+        "p50": 190.4,
+        "p90": 264.5
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 10,
+          "p50": 394.2,
+          "p90": 430.2
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 125184,
+        "input_tokens_incl_cached": 125184,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 13,
+        "p50": 1.0,
+        "p90": 1.3
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "cache",
+      "runs": 5,
+      "caller_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 940.2,
+        "p90": 1213.7
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 1200.3,
+        "p90": 1358.8
+      },
+      "eou_to_first_audio_ms": {
+        "n": 15,
+        "p50": 1027.6,
+        "p90": 1196.9
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 15,
+        "p50": 812.9,
+        "p90": 982.1
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 15,
+        "p50": 188.3,
+        "p90": 196.9
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 5,
+          "p50": 318.0,
+          "p90": 387.7
+        },
+        "ttft_warm": {
+          "n": 10,
+          "p50": 332.3,
+          "p90": 402.9
+        },
+        "cached_tokens": 174336,
+        "input_tokens_incl_cached": 174336,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 15,
+        "p50": 0.3,
+        "p90": 0.5
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "destructive",
+      "runs": 5,
+      "caller_silence_to_first_audio_ms": {
+        "n": 7,
+        "p50": 912.7,
+        "p90": 2069.6
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 7,
+        "p50": 1303.7,
+        "p90": 2288.8
+      },
+      "eou_to_first_audio_ms": {
+        "n": 7,
+        "p50": 1119.5,
+        "p90": 2099.1
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 7,
+        "p50": 904.1,
+        "p90": 1851.4
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 10,
+        "p50": 187.3,
+        "p90": 189.2
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 5,
+          "p50": 311.3,
+          "p90": 415.9
+        },
+        "ttft_warm": {
+          "n": 5,
+          "p50": 349.2,
+          "p90": 453.1
+        },
+        "cached_tokens": 186624,
+        "input_tokens_incl_cached": 186624,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 2,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 4,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 10,
+        "p50": 0.5,
+        "p90": 0.6
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "latency",
+      "runs": 20,
+      "caller_silence_to_first_audio_ms": {
+        "n": 20,
+        "p50": 1845.9,
+        "p90": 2475.5
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 20,
+        "p50": 1821.7,
+        "p90": 2367.4
+      },
+      "eou_to_first_audio_ms": {
+        "n": 20,
+        "p50": 1629.2,
+        "p90": 2098.8
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 20,
+        "p50": 1375.9,
+        "p90": 1855.1
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 20,
+        "p50": 179.9,
+        "p90": 272.5
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 20,
+          "p50": 357.0,
+          "p90": 566.2
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 361728,
+        "input_tokens_incl_cached": 361728,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 20,
+        "p50": 0.5,
+        "p90": 0.9
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "tool",
+      "runs": 5,
+      "caller_silence_to_first_audio_ms": {
+        "n": 5,
+        "p50": 1908.6,
+        "p90": 2288.6
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 5,
+        "p50": 2094.3,
+        "p90": 2405.8
+      },
+      "eou_to_first_audio_ms": {
+        "n": 5,
+        "p50": 1933.5,
+        "p90": 2234.9
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 5,
+        "p50": 1732.3,
+        "p90": 2012.1
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 5,
+        "p50": 186.8,
+        "p90": 189.3
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 5,
+          "p50": 313.4,
+          "p90": 482.7
+        },
+        "ttft_warm": {
+          "n": 0,
+          "p50": null,
+          "p90": null
+        },
+        "cached_tokens": 124672,
+        "input_tokens_incl_cached": 124672,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 0,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 5,
+        "p50": 0.2,
+        "p90": 0.6
+      },
+      "errors": 0
+    },
+    {
+      "side": "before",
+      "profile": "default",
+      "model": "openai/gpt-5.4-mini",
+      "stt": "deepgram-flux",
+      "kind": "unfinished",
+      "runs": 10,
+      "caller_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 1633.3,
+        "p90": 2025.9
+      },
+      "turn_metrics_silence_to_first_audio_ms": {
+        "n": 15,
+        "p50": 1220.6,
+        "p90": 1432.0
+      },
+      "eou_to_first_audio_ms": {
+        "n": 15,
+        "p50": 960.8,
+        "p90": 1181.1
+      },
+      "eou_to_llm_first_token_ms": {
+        "n": 15,
+        "p50": 702.2,
+        "p90": 922.3
+      },
+      "speech_end_to_transcript_ms": {
+        "n": 15,
+        "p50": 240.0,
+        "p90": 269.2
+      },
+      "cache": {
+        "ttft_cold": {
+          "n": 10,
+          "p50": 386.0,
+          "p90": 511.3
+        },
+        "ttft_warm": {
+          "n": 5,
+          "p50": 324.1,
+          "p90": 356.2
+        },
+        "cached_tokens": 173056,
+        "input_tokens_incl_cached": 173056,
+        "hit_rate": 1.0
+      },
+      "false_interrupts": 0,
+      "missed_barges": 0,
+      "premature_cutoffs": 5,
+      "destructive_on_retracted": 0,
+      "end_call_calls": 0,
+      "speculative_started": 0,
+      "speculative_discarded": 0,
+      "wasted_tokens": {
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0
+      },
+      "internal_pause_secs": {
+        "n": 15,
+        "p50": 0.7,
+        "p90": 0.8
+      },
+      "errors": 0
+    }
+  ]
+}
