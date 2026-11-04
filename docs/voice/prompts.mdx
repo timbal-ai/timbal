@@ -1,0 +1,69 @@
+---
+title: "Voice prompts"
+sidebarTitle: "Prompts"
+description: "Write a short spoken system prompt and keep per-turn facts after the stable instructions"
+---
+
+A voice system prompt is sent on every turn, before the first word is spoken. Keep it to how the assistant should talk. Put a rule that applies to one action in that tool's description, and put caller, time, and customer facts after the instructions that never change.
+
+```python
+from timbal import Agent
+from timbal.voice import voice_prompt
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt=voice_prompt(
+        "You help callers check a delivery. Reply in one or two short spoken sentences. Ask one question at a time.",
+        "Caller: +15551212001",
+    ),
+    voice_config={"language": "en"},
+)
+```
+
+`voice_prompt` takes the stable instructions first and this turn's facts second. On each voice turn Timbal appends the call's own caller, customer fields, and the current time after that, in that order. The time is fixed for the whole turn, including tool calls. Do not also paste the date, the caller id, or a customer record at the top of the instructions. That text changes every turn, and the reused prefix stops at the first byte that changed.
+
+A callable system prompt can return `voice_prompt(...)` when the facts come from your own lookup. Return the instructions as a plain string when you have no extra facts; Timbal still appends the call context.
+
+## Move rare rules onto the tool
+
+The system prompt is the behavior for every turn: length, tone, and when to ask a question. A refund window, a required confirmation, or a field the tool needs belongs on the tool. The model reads it when it calls that tool, and you can leave the tool off agents that never take that action.
+
+```python
+from timbal import Agent
+
+
+async def refund_order(order_id: str) -> str:
+    """Refund an order.
+
+    Call only after the caller asks for a refund, you have repeated the order id back to them,
+    and the order is within 30 days. Say the refund is submitted. Do not say the money has arrived.
+    """
+    return f"Refund submitted for {order_id}."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You help callers with orders. Reply in one or two short spoken sentences.",
+    tools=[refund_order],
+    voice_config={"language": "en"},
+)
+```
+
+Register only the tools this call can use. Each tool's name, description, and parameters are sent on every turn, in the same order. Renaming a tool, editing its description, or reordering the list changes the prefix the same way editing the instructions does.
+
+## What gets reused
+
+OpenAI, Groq, and Anthropic reuse an unchanged prefix of the request. Timbal sends the stable instructions and the tool list before the per-turn block.
+
+- **OpenAI.** Prefixes of 1,024 tokens and longer can be cached. Timbal sends a stable key for the voice session (`prompt_cache_key`). On models before GPT-5.6 that key helps routing; from GPT-5.6 it separates cache accounting per session. A voice session on GPT-5.6 or later also marks the end of the stable instructions so the per-turn block does not have to match. Cached tokens are `input_cached_tokens` on the run's usage.
+- **Groq.** Exact-prefix caching is automatic on `groq/openai/gpt-oss-20b` and `groq/openai/gpt-oss-120b`, and an unused entry expires after 2 hours. There is no session key. Cached tokens are `input_cached_tokens`.
+- **Anthropic**, including Claude on AWS Bedrock. Timbal turns on prompt caching. The stable instructions are one breakpoint and the growing conversation is another. Haiku 5.5 caches a prefix of at least 512 tokens; Haiku 4.5 needs 4,096. A shorter prefix is answered normally and is not an error. Cache reads are `cache_read_input_tokens` on the run's usage. The default lifetime is 5 minutes; pass `model_params={"cache_control": {"type": "ephemeral", "ttl": "1h"}}` for an hour. `model_params={"cache_control": None}` turns caching off.
+
+The first turn writes the prefix. Later turns in the same call read it when the instructions and tools are unchanged. A short prompt is still the faster one to process when it is under the model's minimum.
+
+## Next steps
+
+Add the action the prompt mentions in [Using tools](/voice/tools). Read cached-token counts next to turn latency in [Events and usage](/voice/observability).
