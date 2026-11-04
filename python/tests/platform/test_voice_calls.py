@@ -346,6 +346,34 @@ class TestWaitAndResume:
         assert out3.status.code == "success", out3.error
         assert out3.output == "completed"
         assert platform.dials == 1, "the third run derives the first run's key and gets the same call back"
+        assert len(platform.posts) == 1, "the call is replayed from the first run's trace, not started again"
+
+    @pytest.mark.asyncio
+    async def test_replay_finds_the_call_on_an_ancestor_after_a_revision_change(self, platform, jsonl, monkeypatch):
+        from timbal.state import suspend
+
+        monkeypatch.setenv("TIMBAL_PROJECT_REV", "rev-a")
+        runs = iter(range(10))
+
+        async def flaky() -> str:
+            if next(runs) == 1:
+                suspend({"question": "still want the call?"}, kind="ask")
+            call = await start_voice_call("receptionist", "+34600000001", idempotency_key="appt:9")
+            return (await wait_for_voice_call(call)).status
+
+        tool = Tool(name="flaky_chain_rev", handler=flaky, tracing_provider=jsonl)
+        out1, i1 = await _run(tool)
+        out2, i2 = await _run(tool, parent_id=out1.run_id, resume={i1[0].interaction_id: platform.finish("call_1")})
+        assert i2[0].payload == {"question": "still want the call?"}
+
+        # A new ambient revision would make the platform reject the key (its fingerprint pins rev),
+        # so the call must come from the first run's trace, two runs up.
+        monkeypatch.setenv("TIMBAL_PROJECT_REV", "rev-b")
+        out3, _ = await _run(tool, parent_id=out2.run_id, resume={i2[0].interaction_id: True})
+        assert out3.status.code == "success", out3.error
+        assert out3.output == "completed"
+        assert len(platform.posts) == 1
+        assert platform.dials == 1
 
     @pytest.mark.asyncio
     async def test_reusing_key_across_resume_for_different_dial_is_rejected(self, platform, jsonl):

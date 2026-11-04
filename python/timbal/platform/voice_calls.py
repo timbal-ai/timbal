@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, Literal
 
@@ -247,30 +248,83 @@ def _unknown_root(run_id: str, why: str) -> VoiceCallError:
     )
 
 
-async def _inherited_root_run_id(ctx: Any) -> str:
-    """Walk up a resume chain to the run that stamped or started it.
+def _root_metadata(trace: Any) -> dict[str, Any]:
+    root = trace.get(trace._root_call_id)
+    return getattr(root, "metadata", None) or {}
 
-    Each run's root span records the chain root once it reaches voice-call code
-    (``voice_call_root_id``) and is marked ``resumed`` when it was a resume of
-    its parent. A run with neither started the chain. Old traces without the
-    marker are treated as chain starts.
+
+async def _resume_chain(ctx: Any) -> AsyncIterator[tuple[str, Any]]:
+    """``(run_id, trace)`` of the earlier runs of this resume chain, nearest first.
+
+    The chain runs from the parent up to the run that started it: each run's
+    root span is marked ``resumed`` when it was a resume of its parent, so the
+    first run without the mark is the start (old traces without the mark end
+    the chain where they are). Traces are loaded lazily and once per run.
+    Raises :class:`VoiceCallError` on reaching a link that cannot be read.
     """
-    run_id = str(ctx.parent_id)
-    for _ in range(_MAX_RESUME_CHAIN):
+    chain = getattr(ctx, "_voice_call_chain", None)
+    if chain is None:
+        resumed = bool(ctx.parent_id and ctx._resume_values)
+        chain = {"runs": [], "next": str(ctx.parent_id) if resumed else None, "error": None}
+        ctx._voice_call_chain = chain
+    index = 0
+    while True:
+        if index < len(chain["runs"]):
+            yield chain["runs"][index]
+            index += 1
+            continue
+        if chain["error"] is not None:
+            raise chain["error"]
+        run_id = chain["next"]
+        if run_id is None:
+            return
+        if len(chain["runs"]) >= _MAX_RESUME_CHAIN:
+            chain["error"] = _unknown_root(run_id, f"the chain is longer than {_MAX_RESUME_CHAIN} runs")
+            continue
         trace = await ctx._get_parent_trace(run_id)
         if trace is None or trace._root_call_id is None:
-            raise _unknown_root(run_id, "its trace could not be loaded")
-        root = trace.get(trace._root_call_id)
-        metadata = getattr(root, "metadata", None) or {}
-        stamped = metadata.get(_ROOT_METADATA_KEY)
+            chain["error"] = _unknown_root(run_id, "its trace could not be loaded")
+            continue
+        chain["runs"].append((run_id, trace))
+        if not _root_metadata(trace).get("resumed"):
+            chain["next"] = None
+        elif trace.parent_id:
+            chain["next"] = str(trace.parent_id)
+        else:
+            chain["next"] = None
+            chain["error"] = _unknown_root(run_id, "it is a resume but its trace does not record its parent")
+
+
+async def _inherited_root_run_id(ctx: Any) -> str:
+    """The chain root: the nearest stamp (``voice_call_root_id``), else the run that started the chain."""
+    start = None
+    async for run_id, trace in _resume_chain(ctx):
+        stamped = _root_metadata(trace).get(_ROOT_METADATA_KEY)
         if stamped:
             return str(stamped)
-        if not metadata.get("resumed"):
-            return run_id
-        if not trace.parent_id:
-            raise _unknown_root(run_id, "it is a resume but its trace does not record its parent")
-        run_id = str(trace.parent_id)
-    raise _unknown_root(run_id, f"the chain is longer than {_MAX_RESUME_CHAIN} runs")
+        start = run_id
+    if start is None:
+        raise _unknown_root(str(ctx.parent_id), "its trace could not be loaded")
+    return start
+
+
+async def _from_resume_chain(metadata_key: str, record_key: str) -> dict[str, Any] | None:
+    """The nearest record under ``metadata_key[record_key]`` on any span of an earlier run in this chain.
+
+    A link that cannot be read ends the search: the start then goes to the
+    platform, which dedupes by idempotency key.
+    """
+    ctx = get_or_create_run_context()
+    try:
+        async for _, trace in _resume_chain(ctx):
+            for span in trace.values():
+                records = (getattr(span, "metadata", None) or {}).get(metadata_key)
+                record = records.get(record_key) if isinstance(records, dict) else None
+                if isinstance(record, dict):
+                    return record
+    except VoiceCallError:
+        return None
+    return None
 
 
 def _current_span() -> Any:
@@ -354,31 +408,18 @@ def _scoped(org: str, project: str, key: str) -> str:
 
 
 async def _replayed_from_parent(org: str, project: str, key: str, fingerprint: list[Any]) -> dict[str, Any] | None:
-    """The call a previous run in this resume chain already started with ``key`` in this org and project."""
-    ctx = get_or_create_run_context()
-    if not (ctx.parent_id and ctx._resume_values):
+    """The call an earlier run in this resume chain already started with ``key`` in this org and project."""
+    record = await _from_resume_chain(_SPAN_METADATA_KEY, _scoped(org, project, key))
+    if not (record and record.get("id") and record.get("org_id") == org and record.get("project_id") == project):
         return None
-    parent = await ctx._get_parent_trace()
-    if parent is None:
-        return None
-    for span in parent.values():
-        records = (getattr(span, "metadata", None) or {}).get(_SPAN_METADATA_KEY)
-        record = records.get(_scoped(org, project, key)) if isinstance(records, dict) else None
-        if (
-            isinstance(record, dict)
-            and record.get("id")
-            and record.get("org_id") == org
-            and record.get("project_id") == project
-        ):
-            stored_fp = record.get("fingerprint")
-            if isinstance(stored_fp, list) and stored_fp != fingerprint:
-                raise IdempotencyKeyReused(
-                    "Starting the voice call failed: the idempotency key was already used for a different dial "
-                    "(workforce, rev, to, from, trunk or greeting). Use a new key or bump attempt=.",
-                    status_code=422,
-                )
-            return {k: v for k, v in record.items() if k != "fingerprint"}
-    return None
+    stored_fp = record.get("fingerprint")
+    if isinstance(stored_fp, list) and stored_fp != fingerprint:
+        raise IdempotencyKeyReused(
+            "Starting the voice call failed: the idempotency key was already used for a different dial "
+            "(workforce, rev, to, from, trunk or greeting). Use a new key or bump attempt=.",
+            status_code=422,
+        )
+    return {k: v for k, v in record.items() if k != "fingerprint"}
 
 
 def _record_on_span(call: VoiceCall, fingerprint: list[Any]) -> None:
@@ -575,19 +616,9 @@ async def cancel_voice_call(call: VoiceCall | dict[str, Any]) -> VoiceCallResult
 
 
 async def _replayed_result_from_parent(call: VoiceCall) -> dict[str, Any] | None:
-    """The final result a previous run in this resume chain already received for ``call``."""
-    ctx = get_or_create_run_context()
-    if not (ctx.parent_id and ctx._resume_values):
-        return None
-    parent = await ctx._get_parent_trace()
-    if parent is None:
-        return None
-    for span in parent.values():
-        results = (getattr(span, "metadata", None) or {}).get(_SPAN_RESULTS_METADATA_KEY)
-        view = results.get(_scoped(call.org_id, call.project_id, call.id)) if isinstance(results, dict) else None
-        if isinstance(view, dict) and view.get("finalized_at") is not None:
-            return view
-    return None
+    """The final result an earlier run in this resume chain already received for ``call``."""
+    view = await _from_resume_chain(_SPAN_RESULTS_METADATA_KEY, _scoped(call.org_id, call.project_id, call.id))
+    return view if view and view.get("finalized_at") is not None else None
 
 
 def _record_result_on_span(call: VoiceCall, result: VoiceCallResult) -> None:
