@@ -50,7 +50,7 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 
 The caller-facing wait is `speech_end_to_transcript_ms + eou_to_first_audio_ms`: the caller goes quiet, the transcript is committed, and the first speech bytes are emitted. Read the p50 and p95 of that per-turn sum. Adding a p95 of transcription to a p95 of first audio describes a turn where both stages were slow at once, which is a larger number than the tail callers actually hit.
 
-`speech_end_source="vad"` is the last speech frame, back-dated past the silence the detector had to hear. `"partial"` uses the last interim transcript and reads low, because some transcriber delay is already inside the anchor. `report.by_speech_end_source` splits that same per-turn sum by anchor, so compare calls on the `vad` row. Turns with either clock missing are left out, not counted as zero. A session event or greeting (`event`) has no caller silence and is left out too.
+`speech_end_source="vad"` is the last speech frame, back-dated past the silence the detector had to hear. `"partial"` uses the last interim transcript and reads low, because some transcriber delay is already inside the anchor. `report.by_speech_end_source` splits that same per-turn sum by anchor, so compare calls on the `vad` row. Turns with either clock missing are left out, not counted as zero. A session event or greeting (`event`) has no caller silence and is left out too. Filler turns are counted: the clock stops at the filler, and `filler_spoken` marks those turns. The sum stops at the first byte the server sends and excludes client playback delay.
 
 ```python
 from timbal.voice.latency import gate_silence_to_first_audio, summarize_turn_metrics
