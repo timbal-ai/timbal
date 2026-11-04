@@ -69,7 +69,7 @@ agent = Agent(
 
 Nothing is played until the turn is confirmed. A caller who keeps talking, or a Flux `TurnResumed`, drops the attempt and its audio. If the confirmed transcript is not the same words (case and punctuation aside), the attempt is dropped and the reply starts over on the final text. A matching transcript is reused, including when only capitalization or punctuation changed.
 
-On Flux the server sends `eager_eot_threshold` so `EagerEndOfTurn` and `TurnResumed` are emitted. There is no 0.3 floor. Omitted, the value is `min(0.5, eot_threshold - 0.1)`. An explicit value in `stt_extra` is lowered the same way when it is not already strictly below `eot_threshold`. `TurnResumed` discards the held reply. `EndOfTurn` confirms it when the words match, and restarts it when they do not.
+With `speculative_generation` on Flux, the server sets `eager_eot_threshold` for you. By default it is `min(0.5, eot_threshold - 0.1)`, which is 0.5 with the default `eot_threshold` of 0.8. You can set your own in `stt_extra`. It must be below `eot_threshold`, because Deepgram rejects anything equal or higher, so a value that isn't gets lowered to `eot_threshold - 0.1`. `TurnResumed` discards the held reply. `EndOfTurn` confirms it when the words match, and restarts it when they do not.
 
 Read-only tools run during that wait. A tool that books, charges, sends, or hangs up should set `defer_until_eot=True` so it does not run until the turn is confirmed; if the attempt is dropped, it never runs. An MCP tool annotated destructive gets that flag whether or not `approval` gates it. See [Using tools](/voice/tools).
 
