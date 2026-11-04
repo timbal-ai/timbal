@@ -124,6 +124,23 @@ class TestMCPToolNamespacing:
         )
         assert tool.name == "alpha__greet"
         assert tool.description == "[alpha] Greet someone."
+        assert tool.interruption_mode == "allow"
+
+    def test_server_interruption_mode_is_copied_onto_tools(self):
+        server = MCPServer(
+            name="alpha",
+            transport="http",
+            url="https://example.com/mcp",
+            interruption_mode="disable_during_tool",
+        )
+        tool = server._make_tool(
+            mcp_types.Tool(
+                name="greet",
+                description="Greet someone.",
+                inputSchema={"type": "object", "properties": {}},
+            )
+        )
+        assert tool.interruption_mode == "disable_during_tool"
 
     @pytest.mark.asyncio
     async def test_two_named_servers_with_same_tool_both_register(self):

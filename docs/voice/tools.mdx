@@ -73,6 +73,42 @@ context for the result. With the pause disabled, providers that support flushing
 keep their context open across the tool call. Other providers finish the context
 at the boundary so interruption tracking never counts unspoken result text as heard.
 
+## Keep a tool from being cut off
+
+By default the caller can barge in at any time, including while a tool runs. That cancels the tool and cuts the reply down to the words already heard. A payment confirmation or a disclaimer should finish. Set `interruption_mode` on the tool:
+
+```python
+from timbal import Agent, Tool
+
+
+async def confirm_payment(order_id: str) -> str:
+    """Confirm a payment and read the result back in full."""
+    return f"Payment for {order_id} is confirmed."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You confirm payments. Reply in one or two short spoken sentences.",
+    tools=[
+        Tool(
+            handler=confirm_payment,
+            interruption_mode="disable_during_tool_and_turn",
+        )
+    ],
+)
+```
+
+- `allow` (the default): the caller can interrupt at any time.
+- `disable_during_tool`: barge-in is ignored only while the tool runs. The spoken reply after it can still be interrupted, and that interruption still keeps only the words the caller heard.
+- `disable_during_tool_and_turn`: barge-in is ignored while the tool runs and until the reply that follows has been played. If the tool pauses for approval or `ask_user`, the caller can speak while the call is waiting, and the reply after they answer is still played through.
+
+This only holds back the caller's barge-in. `session.close()` and an event sent with `announce="interrupt"` still cut the turn.
+
+Speech during the protected window is still transcribed. Those words open the next turn, after the protected audio has finished. When several tools run in the same step, the strictest mode among them covers the whole batch. A plain function passed in `tools` stays `allow`. The same field on an `MCPServer` is copied onto every tool that server exposes.
+
+An agent or workflow in `tools` takes `interruption_mode` too, and it covers that whole call. A mode on a tool inside the nested agent applies only when that agent is the one talking to the caller.
+
 ## Add real actions carefully
 
 Replace the mock with an async service call when the basic flow works. For actions requiring approval, wrap the function in `Tool(handler=..., requires_approval=True)` and implement the approval UI and HTTP resume flow. The playground displays a pending request; it does not resolve approval from spoken words. See [Approval gates](/human-in-the-loop/approval-gates) and [Voice approval events](/voice/transports#approval-and-input-requests).

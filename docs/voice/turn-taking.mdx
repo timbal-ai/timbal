@@ -16,6 +16,8 @@ Use the same server and browser playground:
 
 An interruption cancels the current reply and clears queued playback. Conversation memory is adjusted to the portion the caller is estimated or known to have heard, and that message is marked `metadata["interrupted"] = True` (metadata is not sent to model providers). A cancelled tool may already have performed work; stopping speech does not undo external side effects.
 
+A tool can opt out of that barge-in with `interruption_mode`. While barge-in is off, the caller is still transcribed and those words open the next turn. See [Keep a tool from being cut off](/voice/tools#keep-a-tool-from-being-cut-off).
+
 Greetings have their own `interruptible` setting, which defaults to false; see [Greetings](/voice/greetings).
 
 ## How the boundary is chosen

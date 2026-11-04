@@ -99,8 +99,7 @@ DEFAULT_MAX_ITER_NOTICE = (
 """User message injected before the final tool-less LLM call (``on_max_iter="final_answer"``)."""
 
 DEFAULT_MAX_ITER_STOP_MESSAGE = (
-    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
-    "answer was produced.]"
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final answer was produced.]"
 )
 """Assistant reply returned without an LLM call (``on_max_iter="stop"``)."""
 
@@ -405,6 +404,10 @@ class Agent(Runnable):
         self._system_prompt_fn_is_async: bool = False
         self._system_prompt_skills: str | None = None
         self._path = self.name
+        # Name → non-allow interruption_mode for the tools resolved this iteration.
+        # VoiceSession reads it when a tool call is announced. Empty until the first
+        # resolve, and absent keys mean ``allow``.
+        self._tool_interruption_modes: dict[str, str] = {}
 
         # Handle callable system_prompt
         if callable(self.system_prompt):
@@ -1335,6 +1338,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 bg_tool.nest(self._path)
                 _register(bg_tool)
 
+        # Voice barge-in policy, keyed by the name the LLM calls. Only the
+        # non-default modes are stored; VoiceSession treats a missing name as allow.
+        self._tool_interruption_modes = {
+            tool.name: mode for tool in tools if (mode := getattr(tool, "interruption_mode", "allow")) != "allow"
+        }
+
         return tools, commands
 
     def _synthetic_event(
@@ -2151,11 +2160,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             await _append_memory(
                                 Message(
                                     role="user",
-                                    content=[TextContent(text=(
-                                        "Your previous response ended before the tool call was issued "
-                                        "(the call was emitted as text, without arguments, and nothing ran). "
-                                        "Issue the tool call now as a proper function call."
-                                    ))],
+                                    content=[
+                                        TextContent(
+                                            text=(
+                                                "Your previous response ended before the tool call was issued "
+                                                "(the call was emitted as text, without arguments, and nothing ran). "
+                                                "Issue the tool call now as a proper function call."
+                                            )
+                                        )
+                                    ],
                                     metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
                                 )
                             )

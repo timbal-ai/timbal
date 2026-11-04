@@ -214,6 +214,10 @@ warning suggesting offload_blocking=True / an async handler. Set to 0 to warn
 on any sync handler; raise it (or set very high) to silence."""
 
 
+# ElevenLabs Agents tool interruption modes. Set on a Tool, or on an Agent or
+# Workflow passed in ``tools``. ``allow`` leaves caller barge-in unchanged.
+InterruptionMode = Literal["allow", "disable_during_tool", "disable_during_tool_and_turn"]
+
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
@@ -403,6 +407,18 @@ class Runnable(ABC, BaseModel):
     """Optional seconds without log events before a background child is
     cancelled as ``stalled``. Resets on every emitted event. Distinct from
     ``background_timeout`` (wall-clock). ``None`` / non-positive = disabled."""
+
+    interruption_mode: InterruptionMode = "allow"
+    """Whether a voice caller can barge in around this runnable when it is used as a tool.
+
+    ``allow`` (default) interrupts at any time. ``disable_during_tool`` ignores
+    barge-in only while it runs; the spoken reply after it can be interrupted.
+    ``disable_during_tool_and_turn`` also plays that reply through, including the
+    reply after an approval or ``ask_user`` pause. Speech during the protected
+    window is still transcribed and opens the next turn. When several tools run
+    together, the strictest mode applies to that batch. A mode on a tool inside
+    a nested agent applies when that agent is the one on the call.
+    """
 
     background_announce: Literal["when_idle", "silent", "interrupt"] | None = None
     """How this child's completion asks for the session's attention, overriding
@@ -759,7 +775,9 @@ class Runnable(ABC, BaseModel):
         plus a ``value`` key holding the current value. Override in subclasses
         to expose additional construction-time settings.
         """
-        return self._annotate_config({"name": self.name, "description": self.description})
+        return self._annotate_config(
+            {"name": self.name, "description": self.description, "interruption_mode": self.interruption_mode}
+        )
 
     @abstractmethod
     def nest(self, parent_path: str) -> None:
