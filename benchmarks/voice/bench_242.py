@@ -1554,7 +1554,9 @@ def _worker() -> None:
                 "errors": [f"{type(exc).__name__}: {exc}"],
                 "metrics": [],
             }
-        sys.stdout.write(json.dumps(row, default=str) + "\n")
+        # A marker, because the main tree logs to stdout and a log line that
+        # starts with a year parses as a JSON number.
+        sys.stdout.write("BENCH " + json.dumps(row, default=str) + "\n")
         sys.stdout.flush()
 
 
@@ -1588,10 +1590,13 @@ def _run_wave2(out: Path, flux_reps: int, other_reps: int) -> None:
                 if job["side"] == "before":
                     worker.stdin.write(json.dumps(job) + "\n")
                     worker.stdin.flush()
-                    raw = worker.stdout.readline()
-                    if not raw:
-                        raise RuntimeError("before worker exited")
-                    row = json.loads(raw)
+                    row = None
+                    while row is None:
+                        raw = worker.stdout.readline()
+                        if not raw:
+                            raise RuntimeError("before worker exited")
+                        if raw.startswith("BENCH "):
+                            row = json.loads(raw[len("BENCH ") :])
                 else:
                     row = _execute_job(job, clips)
             except Exception as exc:
