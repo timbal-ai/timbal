@@ -285,9 +285,7 @@ class TestMergeVoiceConfig:
 
         assert voice_routes.merge_voice_config(R()).filler.system_prompt == "PLATFORM PROMPT"
 
-    def test_filler_via_voice_config_instance_merges_sparsely(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_filler_via_voice_config_instance_merges_sparsely(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unset FillerConfig fields (e.g. the default prompt) must not clobber env values."""
         monkeypatch.setenv("TIMBAL_VOICE_FILLER_SYSTEM_PROMPT", "PLATFORM PROMPT")
 
@@ -489,6 +487,52 @@ class TestDefaultPipeline:
         assert meta["stt_model"] is None  # the Flux id never reaches the Scribe wire
         assert session.audio_output.model == "eleven_v4_turbo"
 
+    def test_endpointing_floors_reach_the_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = self._session(VoiceConfig(turn_detector="heuristic", min_delay_secs=0.4, stop_silence_secs=0.25))
+        assert session._endpoint_min_delay_secs == 0.4
+        assert session._endpoint_stop_silence_secs == 0.25
+
+    def test_hello_cannot_change_endpointing_floors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+
+        agent = Agent(name="voice_test", model=TestModel(responses=["hi"]), tools=[])
+        defaults = VoiceConfig(turn_detector="heuristic", min_delay_secs=0.45, stop_silence_secs=0.2)
+        session, _ = voice_routes.build_voice_session(
+            agent,
+            defaults,
+            {"min_delay_secs": 0.1, "stop_silence_secs": 0.01},
+        )
+        assert session._endpoint_min_delay_secs == 0.45
+        assert session._endpoint_stop_silence_secs == 0.2
+
+
+class TestEndpointingFloorConfig:
+    def test_defaults_match_the_endpointer(self) -> None:
+        from timbal.voice.endpointing import VadEndpointer
+
+        cfg = VoiceConfig()
+        assert cfg.min_delay_secs == VadEndpointer.MIN_DELAY_SECS == 0.45
+        assert cfg.stop_silence_secs == VadEndpointer.STOP_SILENCE_SECS == 0.20
+        assert cfg.min_delay_secs <= VadEndpointer.MAX_DELAY_SECS
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"min_delay_secs": -0.1},
+            {"min_delay_secs": 3.1},
+            {"stop_silence_secs": -0.01},
+            {"stop_silence_secs": 2.1},
+            {"min_delay_secs": True},
+            {"stop_silence_secs": "fast"},
+        ],
+    )
+    def test_rejects_out_of_range(self, kwargs: dict[str, object]) -> None:
+        with pytest.raises(ValidationError):
+            VoiceConfig(**kwargs)  # type: ignore[arg-type]
+
 
 class TestLifespanVoiceState:
     @pytest.mark.asyncio
@@ -499,9 +543,7 @@ class TestLifespanVoiceState:
     ) -> None:
         mod = tmp_path / "runnable_voice.py"
         mod.write_text(
-            'class R:\n'
-            '    voice_config = {"language": "nl", "voice": "nl_voice"}\n'
-            "agent = R()\n",
+            'class R:\n    voice_config = {"language": "nl", "voice": "nl_voice"}\nagent = R()\n',
         )
         monkeypatch.setenv("TIMBAL_RUNNABLE", f"{mod.resolve()}::agent")
         for k in VOICE_ENV_KEYS:
@@ -541,9 +583,7 @@ class TestCreateAppVoiceIntegration:
     ) -> None:
         mod = tmp_path / "app.py"
         mod.write_text(
-            'class R:\n'
-            '    voice_config = {"language": "sv"}\n'
-            "x = R()\n",
+            'class R:\n    voice_config = {"language": "sv"}\nx = R()\n',
         )
         monkeypatch.setenv("TIMBAL_RUNNABLE", f"{mod.resolve()}::x")
         for k in VOICE_ENV_KEYS:
@@ -562,8 +602,7 @@ class TestCreateAppVoiceIntegration:
     ) -> None:
         mod = tmp_path / "named.py"
         mod.write_text(
-            "from timbal import Agent\n"
-            'r = Agent(name="voice_demo", model="timbal/TestModel", tools=[])\n',
+            'from timbal import Agent\nr = Agent(name="voice_demo", model="timbal/TestModel", tools=[])\n',
         )
         monkeypatch.setenv("TIMBAL_RUNNABLE", f"{mod.resolve()}::r")
         for k in VOICE_ENV_KEYS:
@@ -753,7 +792,10 @@ class TestDeclaredVoiceConfig:
         declared = voice_routes.declared_voice_config(Both())
         # A bare string travels as written (the consumer coerces, like ``""``); a block stays sparse.
         assert declared["greeting"] == "Hey, this is your calorie coach. What have you eaten today?"
-        assert declared["outbound_greeting"] == {"text": "Hi, it's your coach checking in — got a minute?", "delay_ms": 500}
+        assert declared["outbound_greeting"] == {
+            "text": "Hi, it's your coach checking in — got a minute?",
+            "delay_ms": 500,
+        }
         merged = voice_routes.merge_voice_config(Both())
         assert greeting_for_direction(merged, outbound=False).text.startswith("Hey")
         assert greeting_for_direction(merged, outbound=True).text.startswith("Hi, it's")
@@ -761,7 +803,10 @@ class TestDeclaredVoiceConfig:
         class Quiet:  # inbound opener, silence on outbound
             voice_config = {"greeting": "Thanks for calling.", "outbound_greeting": ""}
 
-        assert voice_routes.declared_voice_config(Quiet()) == {"greeting": "Thanks for calling.", "outbound_greeting": ""}
+        assert voice_routes.declared_voice_config(Quiet()) == {
+            "greeting": "Thanks for calling.",
+            "outbound_greeting": "",
+        }
         merged = voice_routes.merge_voice_config(Quiet())
         assert greeting_for_direction(merged, outbound=False).text == "Thanks for calling."
         assert greeting_for_direction(merged, outbound=True) is None

@@ -58,18 +58,19 @@ def endpointing_delay(
     """Map EOU probability to extra silence to wait before force-committing.
 
     ``delay = min + (max - min) * (1 - p) ** curve`` — smooth, monotonic
-    decreasing in ``p``. ``min_delay`` is a LiveKit-shaped floor: even a
-    confident-complete score still waits before force-committing, so a brief
-    thinking pause ("Uh, I don't know." → "tell me a story") can cancel the
-    pending endpoint via resumed speech. Defaults (fired ~0.3s after speech
-    stop: 0.2s VAD silence + ~0.1s Smart Turn inference):
+    decreasing in ``p``. ``min_delay`` is the floor: even a confident score
+    still waits before force-committing, so a brief thinking pause ("Uh, I
+    don't know." → "tell me a story") can cancel the pending endpoint via
+    resumed speech. Scoring overlaps that wait (``remaining = delay - score
+    time``), so silence from speech-stop is ``stop_silence + delay``, not
+    delay plus inference on top. Defaults (``stop_silence`` 0.20s):
 
     ========  =========  ==========================================
-    p         delay      total silence before commit
+    p         delay      silence from speech-stop
     ========  =========  ==========================================
-    0.95      0.45s      ~0.75s  (confident: LiveKit min_delay floor)
-    0.7       ~0.68s     ~1.0s
-    0.5       ~1.1s      ~1.4s   (unsure)
+    0.95      ~0.46s     ~0.66s  (confident: the 0.45s floor)
+    0.7       ~0.68s     ~0.88s
+    0.5       ~1.1s      ~1.3s   (unsure)
     <0.4      >1.4s      provider debounce (~1.2s) often commits first —
                          incomplete utterances fall through to the
                          existing HOLD machinery untouched
@@ -112,7 +113,11 @@ class VadEndpointer:
     """Consecutive speech (2 frames) that cancels a pending endpoint — a single
     noise-spike frame must not kill a valid pending commit."""
     MIN_DELAY_SECS = 0.45
-    """LiveKit-shaped floor: never force-commit instantly on high-p scores."""
+    """Floor on a confident score. LiveKit uses 0.5s by default and 0.3s with
+    dynamic endpointing. 0.3s here commits at ``stop_silence + 0.3`` ≈ 0.5s,
+    inside the ~0.6s pauses the replay scripts still treat as a continuation,
+    so the default stays 0.45 (≈ 0.65s of silence). ``VoiceConfig.min_delay_secs``
+    exposes it."""
     MAX_DELAY_SECS = 3.0
     DELAY_CURVE = 2.0
     """See :func:`endpointing_delay`."""
