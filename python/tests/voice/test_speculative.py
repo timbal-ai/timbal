@@ -462,6 +462,39 @@ class TestSpeculativeSession:
             await _until(lambda: drive.audio())
         assert "After" in drive.assistant_text()
 
+    async def test_discarded_run_does_not_reclaim_session_head(self) -> None:
+        session, stt, _tts, model = _session(["Held.", "After."])
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: session._turn_run_context is not None)
+            attempt = session._speculative_attempt
+            assert attempt is not None
+            prior = attempt.prior_head
+            discarded = session._turn_run_context.id
+            assert discarded != prior
+            # Abandon rewinds the head, then the still-running turn notes its
+            # run and takes the head back. The turn finally has to undo that.
+            session._abandon_speculative_attempt(reason="interrupted")
+            session._scheduler.note_run(discarded)
+            assert session._scheduler.head == discarded
+            task = session._current_turn_task
+            assert task is not None and not task.done()
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            assert session._scheduler.head == prior
+            await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
+            await _until(
+                lambda: session._last_run_context is not None and session._last_run_context.id != discarded
+            )
+            await _until(lambda: drive.audio())
+        assert session._last_run_context is not None
+        assert session._last_run_context.parent_id != discarded
+        assert session._scheduler.head != discarded
+        assert model.call_count >= 2
+
     async def test_confirm_appends_when_the_caller_repeats_the_previous_line(self) -> None:
         session, stt, _tts, model = _session(["First.", "Second."])
 

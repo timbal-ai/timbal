@@ -396,6 +396,11 @@ class VoiceSession:
         self._speculative_text_deltas: list[str] = []
         self._speculative_final_text: str | None = None
         self._speculative_prior_context: Any = None
+        self._speculative_prior_head: str | None = None
+        # Run id of an attempt already rewound off the scheduler head. The
+        # in-flight turn can note_run after that rewind; the turn finally and
+        # the discard await put the head back only while it still names this id.
+        self._speculative_discarded_run_id: str | None = None
         self._drop_speculative_context = False
         self._turn_speculative = False
         self._caller_speech_started_at: float | None = None
@@ -1120,6 +1125,7 @@ class VoiceSession:
                 await self._current_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
+            self._rewind_discarded_speculative_head()
         # Long replies synthesize faster than the WS can drain: dozens of
         # AudioOutput frames sit in ``_event_queue``. Drop them *before*
         # SessionInterrupted so the client is not still scheduling backlog PCM
@@ -2054,8 +2060,13 @@ class VoiceSession:
         self._speculative_final_text = None
         self._drop_speculative_context = True
         self._speculative_prior_context = attempt.prior_context
+        self._speculative_prior_head = attempt.prior_head
         self._last_run_context = attempt.prior_context
+        # Immediate rewind. The turn may note_run afterwards and take the head
+        # back; ``_rewind_discarded_speculative_head`` runs once that task ends.
         self._scheduler.head = attempt.prior_head
+        if self._turn_run_context is not None:
+            self._speculative_discarded_run_id = self._turn_run_context.id
         logger.info(
             "speculative_discarded",
             reason=reason,
@@ -2079,6 +2090,15 @@ class VoiceSession:
                 pass
         self._cancel_turn.clear()
         self._active_turn_user_text = ""
+        # note_run can land after the rewind above, including inside the
+        # cancelled task's finally. Put the head back once that task is done.
+        self._rewind_discarded_speculative_head()
+
+    def _rewind_discarded_speculative_head(self) -> None:
+        """Drop a discarded speculative run that reclaimed ``scheduler.head``."""
+        run_id = self._speculative_discarded_run_id
+        if run_id is not None and self._scheduler.head == run_id:
+            self._scheduler.head = self._speculative_prior_head
 
     async def _confirm_speculative(self, final_text: str, *, vad_endpointed: bool) -> None:
         """The committed transcript matches the attempt. Release its audio."""
@@ -2494,6 +2514,10 @@ class VoiceSession:
         # Before the run resumes: its session admission check must see it as the call's own.
         self._scheduler.mark_own(ctx)
         self._scheduler.note_run(ctx.id)
+        # Abandon may already have rewound the head. Remember this run so the
+        # turn finally can take it back off without touching a newer one.
+        if self._drop_speculative_context:
+            self._speculative_discarded_run_id = ctx.id
         if ctx._bg_store is None:
             previous = self._last_run_context._bg_store if self._last_run_context is not None else None
             store = previous or self._unbound_store
@@ -2826,6 +2850,8 @@ class VoiceSession:
         llm_steps = 0
         empty_llm_reply = False
         retry_blocked = False
+        # This task's run, not ``_turn_run_context`` (a newer turn can replace that).
+        speculative_run_id: str | None = None
         try:
             if speculative and self._speculative_gate is not None:
                 speculative_token = install_speculative_gate(self._speculative_gate)
@@ -2972,6 +2998,7 @@ class VoiceSession:
                     if speculative:
                         ctx = get_run_context()
                         if ctx is not None:
+                            speculative_run_id = ctx.id
                             ctx.update_usage("speculative_generations:started", 1)
 
                 if speculative and not self._speculative_unconfirmed():
@@ -3480,6 +3507,14 @@ class VoiceSession:
                     except Exception as e:
                         logger.debug("turn_trace_resave_failed", error=str(e))
             finally:
+                # Last step of this task, after any note_run it still managed.
+                # Only rewind when the head is still this task's run, so a
+                # newer turn that already took it is left alone.
+                if speculative and self._drop_speculative_context:
+                    self._last_run_context = self._speculative_prior_context
+                    if speculative_run_id is not None:
+                        self._speculative_discarded_run_id = speculative_run_id
+                    self._rewind_discarded_speculative_head()
                 self._is_speaking = False
                 self._active_turn_user_text = ""
                 self._turn_speculative = False
@@ -3932,6 +3967,7 @@ class VoiceSession:
             await self._current_turn_task
         except (asyncio.CancelledError, Exception):
             pass
+        self._rewind_discarded_speculative_head()
         self._active_turn_user_text = ""
         self._turn_finalized_ok = False
         self._is_speaking = False
@@ -5103,6 +5139,7 @@ class VoiceSession:
                 await self._current_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
+            self._rewind_discarded_speculative_head()
         await self.stt.close()
         await self.tts.close()
         await self.turn_detector.close()
