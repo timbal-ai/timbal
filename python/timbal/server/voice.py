@@ -317,6 +317,7 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "stt_extra",
     "tts_extra",
     "vad_endpointing",
+    "predict_during_speech",
     "model",
     "tool_beat_secs",
     "turn_timeout_secs",
@@ -1140,6 +1141,7 @@ def build_voice_session(
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
+        predict_during_speech=merged.predict_during_speech is True,
         direction=direction,
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
@@ -1152,6 +1154,8 @@ def build_voice_session(
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
         session_kwargs["user_idle"] = merged.user_idle
+    if merged.predict_during_speech is True:
+        session_kwargs["predict_during_speech"] = True
     if merged.tool_beat_secs is not None:
         session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
     if merged.turn_timeout_secs is not None:

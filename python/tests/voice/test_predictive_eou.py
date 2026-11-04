@@ -1,0 +1,427 @@
+# ruff: noqa: ARG002
+"""During-speech end-of-turn prediction.
+
+The live path is opt-in. These tests cover the agreement rule, the endpointer
+timing that rule produces, Flux predictions not becoming commits, and a replay
+of the voice scenario scripts: decision latency versus false cuts.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+from timbal import Agent
+from timbal.core.test_model import TestModel
+from timbal.voice import (
+    SpeechEouPredictor,
+    SpeechToText,
+    TextToSpeech,
+    TranscriptCommitted,
+    TranscriptEvent,
+    VadEndpointer,
+    VoiceConfig,
+    VoiceSession,
+    endpointing_delay,
+)
+from timbal.voice.predictive_eou import (
+    AUDIO_COMPLETE,
+    DEFAULT_MAX_DELAY_SECS,
+    DEFAULT_MIN_DELAY_SECS,
+    DEFAULT_STOP_SILENCE_SECS,
+    EAGER_SILENCE_SECS,
+    EouSignals,
+    ScriptPause,
+    baseline_decision_secs,
+    endpoint_curve,
+    evaluate_replay,
+    prediction_is_complete,
+    script_pauses,
+    text_blocks_early,
+)
+
+# ---------------------------------------------------------------------------
+# Fakes
+# ---------------------------------------------------------------------------
+
+
+class _FakeVad:
+    async def start(self, *, sample_rate: int) -> None:
+        return None
+
+    def reset(self) -> None:
+        return None
+
+    def process(self, chunk: bytes) -> list[float]:
+        return [1.0 if byte == ord("S") else 0.0 for byte in chunk]
+
+
+class _Scores:
+    def __init__(self, p_audio: float, *, delay: float = 0.0) -> None:
+        self.p_audio = p_audio
+        self.delay = delay
+        self.audio_calls = 0
+
+    async def audio(self) -> float:
+        self.audio_calls += 1
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return self.p_audio
+
+    async def text(self, text: str) -> float:
+        return 0.95
+
+
+class _Gate:
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def score(self) -> float:
+        return 0.1
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    def should_commit(self) -> bool:
+        return True
+
+
+def _predictor(scores: _Scores, **kwargs: float) -> SpeechEouPredictor:
+    return SpeechEouPredictor(score_audio=scores.audio, score_text=scores.text, **kwargs)
+
+
+async def _armed(ep: VadEndpointer, gate: _Gate) -> None:
+    ep.bind(score=gate.score, commit=gate.commit, should_commit=gate.should_commit)
+    await ep.start(sample_rate=16_000)
+
+
+# ---------------------------------------------------------------------------
+# Agreement
+# ---------------------------------------------------------------------------
+
+
+def _signals(**overrides: object) -> EouSignals:
+    base = dict(
+        p_audio=0.9,
+        audio_fresh=True,
+        p_text=0.95,
+        text_fresh=True,
+        text_veto=False,
+    )
+    base.update(overrides)
+    return EouSignals(**base)  # type: ignore[arg-type]
+
+
+class TestAgreement:
+    def test_all_signals_agree(self) -> None:
+        assert prediction_is_complete(_signals())
+
+    def test_rolling_score_is_not_a_vote(self) -> None:
+        assert not prediction_is_complete(_signals(p_audio=None, audio_fresh=False, p_rolling=0.99))
+
+    def test_audio_below_the_model_cut_keeps_the_floor(self) -> None:
+        assert not prediction_is_complete(_signals(p_audio=AUDIO_COMPLETE - 0.01))
+
+    def test_stale_audio_does_not_agree(self) -> None:
+        assert not prediction_is_complete(_signals(audio_fresh=False))
+
+    def test_incomplete_text_does_not_agree(self) -> None:
+        assert not prediction_is_complete(_signals(p_text=0.2))
+
+    def test_lexical_veto_blocks_a_confident_model(self) -> None:
+        assert not prediction_is_complete(_signals(text_veto=True))
+
+    def test_flux_resume_vetoes(self) -> None:
+        assert not prediction_is_complete(_signals(flux_state="resumed", p_flux=0.99))
+
+    def test_low_flux_eager_confidence_vetoes(self) -> None:
+        assert not prediction_is_complete(_signals(flux_state="eager", p_flux=0.2))
+
+    def test_high_flux_eager_still_needs_audio(self) -> None:
+        assert prediction_is_complete(_signals(flux_state="eager", p_flux=0.8))
+        assert not prediction_is_complete(_signals(flux_state="eager", p_flux=0.8, audio_fresh=False, p_audio=None))
+
+    @pytest.mark.parametrize(
+        "text",
+        ["I need help with", "Uh...", "Send it to account 447. Sorry.", "and"],
+    )
+    async def test_unfinished_words_block_the_short_wait(self, text: str) -> None:
+        assert await text_blocks_early(text)
+
+    async def test_a_finished_sentence_does_not_block(self) -> None:
+        assert not await text_blocks_early("Hello there.")
+
+    def test_curve_matches_the_endpointer(self) -> None:
+        assert DEFAULT_STOP_SILENCE_SECS == VadEndpointer.STOP_SILENCE_SECS
+        assert DEFAULT_MIN_DELAY_SECS == VadEndpointer.MIN_DELAY_SECS
+        assert DEFAULT_MAX_DELAY_SECS == VadEndpointer.MAX_DELAY_SECS
+        for p in (0.0, 0.2, 0.5, 0.95, 1.0):
+            assert endpoint_curve(p) == pytest.approx(endpointing_delay(p))
+
+
+class TestPredictor:
+    async def test_partial_is_scored_and_flux_resume_clears_eager(self) -> None:
+        scores = _Scores(0.9)
+        predictor = _predictor(scores)
+        predictor.note_partial("Hello there.")
+        predictor.note_flux("eager", "Hello there.", 0.8)
+        ready = await predictor.signals()
+        assert ready.text_fresh
+        assert ready.p_text == pytest.approx(0.95)
+        assert ready.flux_state == "eager"
+        assert prediction_is_complete(ready) is False  # no pause-onset audio yet
+        predictor.note_flux("resumed", "Hello there actually", 0.1)
+        resumed = await predictor.signals()
+        assert resumed.flux_state == "resumed"
+        assert not prediction_is_complete(resumed)
+        await predictor.close()
+
+    async def test_rolling_audio_does_not_authorize_an_early_commit(self) -> None:
+        scores = _Scores(0.99)
+        predictor = _predictor(scores)
+        predictor.note_partial("Hello there.")
+        predictor.note_speech()
+        await asyncio.sleep(0)
+        ready = await predictor.signals()
+        assert ready.p_rolling == pytest.approx(0.99)
+        assert scores.audio_calls == 1
+        assert not ready.audio_fresh
+        assert not prediction_is_complete(ready)
+        await predictor.close()
+
+    async def test_pause_onset_score_is_the_audio_vote(self) -> None:
+        scores = _Scores(0.91)
+        predictor = _predictor(scores)
+        predictor.note_partial("Hello there.")
+        predictor.kick_audio()
+        ready = await predictor.signals()
+        assert ready.audio_fresh
+        assert ready.p_audio == pytest.approx(0.91)
+        assert prediction_is_complete(ready)
+        await predictor.close()
+
+    async def test_flux_resume_does_not_stick_to_the_next_pause(self) -> None:
+        scores = _Scores(0.91)
+        predictor = _predictor(scores)
+        predictor.note_partial("Hello there.")
+        predictor.note_flux("resumed", "Hello there", 0.2)
+        blocked = await predictor.signals()
+        assert blocked.flux_state == "resumed"
+        assert not prediction_is_complete(blocked)
+        predictor.on_speech_resumed()
+        predictor.kick_audio()
+        nxt = await predictor.signals()
+        assert nxt.flux_state == "none"
+        assert prediction_is_complete(nxt)
+        await predictor.close()
+
+    async def test_resumed_speech_drops_the_pause_score(self) -> None:
+        scores = _Scores(0.91, delay=0.05)
+        predictor = _predictor(scores)
+        predictor.kick_audio()
+        predictor.on_speech_resumed()
+        ready = await predictor.signals()
+        assert not ready.audio_fresh
+        await predictor.close()
+
+
+class TestEndpointerTiming:
+    def _endpointer(self, predictor: SpeechEouPredictor) -> VadEndpointer:
+        ep = VadEndpointer(
+            _FakeVad(),
+            stop_silence_secs=0.096,
+            min_speech_secs=0.064,
+            min_delay_secs=0.25,
+            max_delay_secs=0.25,
+            min_commit_interval_secs=0.0,
+        )
+        ep.attach_predictor(predictor)
+        return ep
+
+    async def test_agreement_commits_on_the_short_silence(self) -> None:
+        scores = _Scores(0.95)
+        predictor = _predictor(scores, eager_silence_secs=0.096, predict_silence_secs=0.032)
+        gate = _Gate()
+        ep = self._endpointer(predictor)
+        await _armed(ep, gate)
+        predictor.note_partial("Hello there.")
+        await asyncio.sleep(0)
+        # Two speech frames, then three silent ones: 96 ms, the eager confirmation.
+        ep.push(b"SS" + b"\x00" * 3)
+        await asyncio.sleep(0.05)
+        assert gate.commits == 1
+        assert ep.last_predictive is True
+        # The silence floor would still be running.
+        assert 0.05 < 0.25
+        await ep.close()
+        await predictor.close()
+
+    async def test_disagreement_keeps_the_silence_floor(self) -> None:
+        scores = _Scores(0.1)
+        predictor = _predictor(scores, eager_silence_secs=0.096, predict_silence_secs=0.032)
+        gate = _Gate()
+        ep = self._endpointer(predictor)
+        await _armed(ep, gate)
+        predictor.note_partial("Hello there.")
+        await asyncio.sleep(0)
+        ep.push(b"SS" + b"\x00" * 3)
+        await asyncio.sleep(0.05)
+        assert gate.commits == 0
+        await asyncio.sleep(0.35)
+        assert gate.commits == 1
+        assert ep.last_predictive is False
+        await ep.close()
+        await predictor.close()
+
+    async def test_resumed_speech_cancels_the_short_commit(self) -> None:
+        scores = _Scores(0.95, delay=0.2)
+        predictor = _predictor(scores, eager_silence_secs=0.096, predict_silence_secs=0.032)
+        gate = _Gate()
+        ep = self._endpointer(predictor)
+        await _armed(ep, gate)
+        predictor.note_partial("Hello there.")
+        await asyncio.sleep(0)
+        ep.push(b"SS" + b"\x00" * 3)
+        ep.push(b"SS")
+        await asyncio.sleep(0.35)
+        assert gate.commits == 0
+        await ep.close()
+        await predictor.close()
+
+
+# ---------------------------------------------------------------------------
+# Session: Flux predictions are not turns
+# ---------------------------------------------------------------------------
+
+
+class _ScriptSTT(SpeechToText):
+    def __init__(self, script: list[TranscriptEvent]) -> None:
+        self._script = script
+
+    async def connect(self, config: object) -> None:
+        return None
+
+    async def push_audio(self, chunk: bytes) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def events(self) -> AsyncIterator[TranscriptEvent]:
+        for event in self._script:
+            yield event
+
+    async def close(self) -> None:
+        return None
+
+
+class _QuietTTS(TextToSpeech):
+    async def connect(self, config: object) -> None:
+        return None
+
+    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
+        yield b"\x00\x01" * 8
+
+    async def close(self) -> None:
+        return None
+
+
+class TestSession:
+    async def _turns(self, *, predict: bool) -> list[str]:
+        stt = _ScriptSTT(
+            [
+                TranscriptEvent(type="eager", text="Hello there", confidence=0.9),
+                TranscriptEvent(type="resumed", text="Hello there actually", confidence=0.2),
+                TranscriptEvent(type="partial", text="Hello there."),
+                TranscriptEvent(type="committed", text="Hello there."),
+            ]
+        )
+        session = VoiceSession(
+            agent=Agent(name="t", model=TestModel(responses=["Hi."]), tools=[]),
+            stt=stt,
+            tts=_QuietTTS(),
+            turn_detector="heuristic",
+            vad_endpointing=False,
+            predict_during_speech=predict,
+        )
+
+        async def _silent() -> AsyncIterator[bytes]:
+            return
+            yield b""
+
+        events = []
+        async for event in session.run(_silent()):
+            events.append(event)
+        return [event.text for event in events if isinstance(event, TranscriptCommitted)]
+
+    async def test_predictions_do_not_start_a_turn_when_off(self) -> None:
+        assert await self._turns(predict=False) == ["Hello there."]
+
+    async def test_predictions_do_not_start_a_turn_when_on(self) -> None:
+        assert await self._turns(predict=True) == ["Hello there."]
+
+    def test_config_defaults_off(self) -> None:
+        assert VoiceConfig().predict_during_speech is False
+
+
+# ---------------------------------------------------------------------------
+# Replay corpus
+# ---------------------------------------------------------------------------
+
+
+def _load_scenarios() -> list:
+    import sys
+
+    path = Path(__file__).resolve().parents[3] / "benchmarks" / "voice" / "scenario.py"
+    spec = importlib.util.spec_from_file_location("voice_replay_scenario", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves the class module through sys.modules during import.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return list(module.SCENARIOS)
+
+
+class TestReplay:
+    async def test_script_pauses_split_a_fluent_gap_from_the_turn_end(self) -> None:
+        scenarios = _load_scenarios()
+        support = next(s for s in scenarios if s.id == "support_pause_short")
+        pauses = script_pauses(support.script)
+        intra = [p for p in pauses if p.continues]
+        ends = [p for p in pauses if not p.continues]
+        assert intra and intra[0].gap_secs == pytest.approx(0.6)
+        assert any(not p.continues for p in pauses)
+        assert ends[-1].text.startswith("I need help with")
+
+    async def test_replay_false_cuts_and_decision_latency(self) -> None:
+        pauses = [pause for scenario in _load_scenarios() for pause in script_pauses(scenario.script)]
+        report = await evaluate_replay(pauses)
+        # Fluent fragments in the scripts are lexically unfinished, so neither
+        # the guarded policy nor a text-only policy cuts them. Finished turns
+        # that read as sentences take the short confirmation.
+        assert report.intra > 0
+        assert report.turns > 0
+        assert report.false_cuts == 0
+        assert report.baseline_false_cuts == 0
+        assert report.text_only_false_cuts == 0
+        assert report.qualified_turn_ends > 0
+        assert report.median_qualified_predictive_ms == pytest.approx(EAGER_SILENCE_SECS * 1000.0)
+        assert report.median_qualified_baseline_ms == pytest.approx(baseline_decision_secs(0.95) * 1000.0)
+        saved_ms = report.median_qualified_baseline_ms - report.median_qualified_predictive_ms
+        assert saved_ms == pytest.approx(496.375)
+        assert report.median_predictive_ms <= report.median_baseline_ms
+
+    async def test_audio_prior_blocks_a_punctuated_mid_sentence_fragment(self) -> None:
+        """The measured Smart Turn score on a fluent cut, once STT adds a period.
+
+        ``benchmarks/voice/scenario.py`` records that cut at 0.019 complete.
+        Text alone would confirm it 160 ms into a 1.5 s pause.
+        """
+        report = await evaluate_replay(
+            [ScriptPause("I want to return an item I bought.", continues=True, gap_secs=1.5)]
+        )
+        assert report.false_cuts == 0
+        assert report.text_only_false_cuts == 1

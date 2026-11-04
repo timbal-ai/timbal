@@ -89,6 +89,19 @@ def _encoding_param(config: AudioInputConfig) -> str:
     return config.encoding
 
 
+def _flux_confidence(value: Any) -> float | None:
+    """Clamp Flux ``end_of_turn_confidence`` into ``[0, 1]``, or ``None``."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if score != score:  # NaN
+        return None
+    return min(1.0, max(0.0, score))
+
+
 class _DeepgramSTTBase(SpeechToText):
     """Shared WS plumbing: buffered audio flusher, receiver task, event queue."""
 
@@ -250,8 +263,9 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
     * ``Update`` / ``StartOfTurn`` → ``partial`` (transcript is the whole turn
       so far, matching how the session treats Scribe partials)
     * ``EndOfTurn`` → ``committed``
-    * ``EagerEndOfTurn`` / ``TurnResumed`` → logged only (speculative-LLM
-      lifecycle is a follow-up)
+    * ``EagerEndOfTurn`` → ``eager`` and ``TurnResumed`` → ``resumed``, with
+      ``end_of_turn_confidence``. Predictions only: they do not commit, and
+      the session uses them when during-speech prediction is on.
 
     ``commit()`` is a no-op: the Flux turn machine owns endpointing, there is
     no client-side force-commit. Run with ``turn_detector="provider"`` and
@@ -320,14 +334,24 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
             elif event in ("Update", "StartOfTurn"):
                 if text:
                     await self._queue.put(TranscriptEvent(type="partial", text=text))
-            elif event in ("EagerEndOfTurn", "TurnResumed"):
-                # Speculative reply lifecycle not wired yet — visibility only.
+            elif event == "EagerEndOfTurn":
+                confidence = _flux_confidence(msg.get("end_of_turn_confidence"))
                 logger.info(
                     "dg_flux_eager_event",
                     turn_event=event,
-                    eou_confidence=msg.get("end_of_turn_confidence"),
+                    eou_confidence=confidence,
                     text_preview=text[:80],
                 )
+                await self._queue.put(TranscriptEvent(type="eager", text=text, confidence=confidence))
+            elif event == "TurnResumed":
+                confidence = _flux_confidence(msg.get("end_of_turn_confidence"))
+                logger.info(
+                    "dg_flux_eager_event",
+                    turn_event=event,
+                    eou_confidence=confidence,
+                    text_preview=text[:80],
+                )
+                await self._queue.put(TranscriptEvent(type="resumed", text=text, confidence=confidence))
             return
         if mt in ("Error", "FatalError"):
             err = msg.get("description") or msg.get("message") or "Unknown Flux error"

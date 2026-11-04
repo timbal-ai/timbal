@@ -410,6 +410,14 @@ class VoiceConfig(BaseModel):
     ``select_turn_detector_spec``)."""
     vad_endpointing: bool | None = None
     """None → auto: on when the turn detector exposes an audio EOU model."""
+    predict_during_speech: bool = False
+    """Score the live transcript and recent audio while the caller is still
+    speaking, and confirm a finished-sounding pause sooner.
+
+    Off by default. Takes effect with local VAD endpointing, which is the
+    path for transcription that does not decide turns itself. Deepgram Flux
+    keeps its own turn boundary; its eager events are one input to this
+    decision and do not start a reply on their own."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)

@@ -106,6 +106,7 @@ from .turn_detection import (
 
 if TYPE_CHECKING:
     from .endpointing import VadEndpointer
+    from .predictive_eou import SpeechEouPredictor
     from .recording import CallRecorder
 
 logger = structlog.get_logger("timbal.voice.session")
@@ -322,6 +323,7 @@ class VoiceSession:
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
         vad_endpointing: bool | VadEndpointer | None = None,
+        predict_during_speech: bool = False,
         model: str | None = None,
         filler: FillerConfig | dict[str, Any] | None = None,
         greeting: GreetingConfig | dict[str, Any] | str | None = None,
@@ -368,6 +370,11 @@ class VoiceSession:
         # timbal[voice] extra is installed; False = off; True = on (warn when
         # unavailable); a VadEndpointer instance = use as-is (custom knobs).
         self._vad_endpointing = vad_endpointing
+        # Opt-in: score partials and audio while the caller is still speaking
+        # and confirm a finished pause on a short silence. Off leaves the
+        # silence-then-score endpointer unchanged.
+        self._predict_during_speech = predict_during_speech
+        self._eou_predictor: SpeechEouPredictor | None = None
         self._endpointer: VadEndpointer | None = None
         # Whether Silero's speech history may be used as *evidence* about the
         # user (barge-in vetoes, hold extension), as opposed to merely driving
@@ -381,6 +388,7 @@ class VoiceSession:
         # committed transcript within a short window is attributed to it.
         self._endpoint_commit_sent_at: float | None = None
         self._turn_vad_endpointed = False
+        self._turn_predictive_endpoint = False
         # (ms, "vad" | "partial") — the user's ASR wait for this turn's
         # transcript; measured when the commit arrives, consumed by the turn.
         self._pending_stt_latency: tuple[float, str] | None = None
@@ -1198,6 +1206,8 @@ class VoiceSession:
         vetoing barge-ins on a detector that has never done so.
         """
         spec = self._vad_endpointing
+        if self._predict_during_speech and self._eou_predictor is None:
+            self._eou_predictor = self._build_eou_predictor()
         if spec is False:
             return
         explicit = spec is not None
@@ -1240,13 +1250,43 @@ class VoiceSession:
             logger.warning("vad_endpointer_start_failed", error=str(e))
             return
         self._endpointer = endpointer
+        if self._eou_predictor is not None:
+            endpointer.attach_predictor(self._eou_predictor)
         self._vad_evidence = has_audio_eou
         logger.info(
             "vad_endpointing_active",
             stop_silence_secs=endpointer.stop_silence_secs,
             max_delay_secs=endpointer.max_delay_secs,
             driver="audio_eou" if has_audio_eou else "text_eou",
+            predict_during_speech=self._eou_predictor is not None,
         )
+
+    def _build_eou_predictor(self) -> SpeechEouPredictor:
+        """Text on each partial, Smart Turn on the detector's audio window."""
+        from .predictive_eou import SpeechEouPredictor
+
+        score_fn = getattr(self.turn_detector, "score_recent_audio", None)
+        audio_eou = getattr(self.turn_detector, "audio_eou", None)
+
+        async def score_audio() -> float | None:
+            if score_fn is None or audio_eou is None:
+                return None
+            return await score_fn()
+
+        async def score_text(text: str) -> float | None:
+            effective = getattr(self.turn_detector, "effective_text_eou", None)
+            if callable(effective):
+                return await effective(text)
+            text_eou = getattr(self.turn_detector, "fallback_text_eou", None)
+            if text_eou is None:
+                text_eou = getattr(self.turn_detector, "text_eou", None)
+            if text_eou is None:
+                from .eou import PunctuationEouPredictor
+
+                text_eou = PunctuationEouPredictor()
+            return await text_eou.predict_eou(text)
+
+        return SpeechEouPredictor(score_audio=score_audio, score_text=score_text)
 
     def _has_text_eou(self) -> bool:
         """Whether the detector can score a partial's completeness."""
@@ -1609,6 +1649,8 @@ class VoiceSession:
                     elif text:
                         self._last_partial_at = time.monotonic()
                         self._latest_partial_text = text
+                        if self._eou_predictor is not None:
+                            self._eou_predictor.note_partial(text)
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
                         # Hallucinated multi-word partials during TTS (no mic
@@ -1630,6 +1672,12 @@ class VoiceSession:
                         await self.interrupt()
                 elif event.type == "committed" and event.text.strip():
                     await self._handle_committed(event.text.strip())
+                elif event.type in ("eager", "resumed") and self._eou_predictor is not None:
+                    self._eou_predictor.note_flux(
+                        "eager" if event.type == "eager" else "resumed",
+                        event.text,
+                        event.confidence,
+                    )
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -1789,7 +1837,12 @@ class VoiceSession:
         )
 
     async def _begin_user_turn(
-        self, final_text: str, *, replace_user_entry: bool, vad_endpointed: bool = False
+        self,
+        final_text: str,
+        *,
+        replace_user_entry: bool,
+        vad_endpointed: bool = False,
+        predictive_endpoint: bool = False,
     ) -> None:
         """Record ``final_text`` and start an agent turn.
 
@@ -1803,6 +1856,7 @@ class VoiceSession:
             logger.debug("stt_turn_dropped_session_closed", text_preview=final_text[:80])
             return
         self._turn_vad_endpointed = vad_endpointed
+        self._turn_predictive_endpoint = predictive_endpoint
         self._turn_stt_latency = self._pending_stt_latency
         self._pending_stt_latency = None
         self._last_commit_at = time.monotonic()
@@ -1872,6 +1926,9 @@ class VoiceSession:
             self._endpointer.notify_committed()
         vad_endpointed = (
             self._endpoint_commit_sent_at is not None and time.monotonic() - self._endpoint_commit_sent_at < 2.0
+        )
+        predictive_endpoint = bool(
+            vad_endpointed and self._endpointer is not None and self._endpointer.last_predictive
         )
         if vad_endpointed:
             # INFO: the observable payoff of the fast path — how much sooner
@@ -2024,7 +2081,12 @@ class VoiceSession:
                     # has user:fragment + assistant:heard unless we mirror the rewrite.
                     await self._align_continue_memory(fragment_user_text=state.active_user_text)
 
-                await self._begin_user_turn(final_text, replace_user_entry=replace, vad_endpointed=vad_endpointed)
+                await self._begin_user_turn(
+                    final_text,
+                    replace_user_entry=replace,
+                    vad_endpointed=vad_endpointed,
+                    predictive_endpoint=predictive_endpoint,
+                )
 
     # -- Internal: event turns (notify, background results) ------------------
 
@@ -2222,6 +2284,7 @@ class VoiceSession:
                 self._scheduler.turn_started()
             self._cancel_turn.clear()
             self._turn_vad_endpointed = False
+            self._turn_predictive_endpoint = False
             self._turn_stt_latency = None
             self._active_turn_user_text = ""
             self._turn_eou_at = time.monotonic()
@@ -4557,6 +4620,7 @@ class VoiceSession:
             playback_acks_received=self.playback.ack_received,
             heard_bytes=self._turn_heard_bytes if interrupted else None,
             vad_endpointed=self._turn_vad_endpointed,
+            predictive_endpoint=self._turn_predictive_endpoint,
             filler_spoken=self._turn_filler_count > 0,
             filler_count=self._turn_filler_count,
             event=self._turn_is_event,
@@ -4652,6 +4716,9 @@ class VoiceSession:
         if self._endpointer is not None:
             await self._endpointer.close()
             self._endpointer = None
+        if self._eou_predictor is not None:
+            await self._eou_predictor.close()
+            self._eou_predictor = None
         for t in list(self._tts_tasks):
             if not t.done():
                 t.cancel()
