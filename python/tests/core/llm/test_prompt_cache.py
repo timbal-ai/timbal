@@ -114,6 +114,7 @@ class TestVoicePromptOrder:
         assert first.dynamic.startswith("Caller and customer:\naccount: 42\nfrom: +15551212")
         assert "Current date and time (UTC): 2026-11-04T09:40:00Z" in first.dynamic
         assert first.dynamic.index("from: +15551212") < first.dynamic.index("Current date and time")
+        assert second.dynamic.index("Current date and time") < second.dynamic.index("You already opened this call.")
         assert second.dynamic.endswith("You already opened this call.")
         # The clock changed; the caller block did not.
         assert first.dynamic.split("Current date and time")[0] == second.dynamic.split("Current date and time")[0]

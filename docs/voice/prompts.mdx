@@ -4,7 +4,7 @@ sidebarTitle: "Prompts"
 description: "Write a short spoken system prompt and keep per-turn facts after the stable instructions"
 ---
 
-A voice system prompt is sent on every turn, before the first word is spoken. Keep it to how the assistant should talk. Put a rule that applies to one action in that tool's description, and put caller, time, and customer facts after the instructions that never change.
+A voice system prompt is sent on every turn, before the first word is spoken. Keep it to how the assistant should talk. Put a rule that applies to one action in that tool's description. Anything that changes per call or per turn goes after the instructions that never change.
 
 ```python
 from timbal import Agent
@@ -16,15 +16,15 @@ agent = Agent(
     model="openai/gpt-5-mini",
     system_prompt=voice_prompt(
         "You help callers check a delivery. Reply in one or two short spoken sentences. Ask one question at a time.",
-        "Caller: +15551212001",
+        "Account: gold. Last delivery was order 101.",
     ),
     voice_config={"language": "en"},
 )
 ```
 
-`voice_prompt` takes the stable instructions first and this turn's facts second. On each voice turn Timbal appends the call's own caller, customer fields, and the current time after that, in that order. The time is fixed for the whole turn, including tool calls. Do not also paste the date, the caller id, or a customer record at the top of the instructions. That text changes every turn, and the reused prefix stops at the first byte that changed.
+`voice_prompt` takes the stable instructions first and one per-call fact second. On each voice turn the suffix is, in order: the caller and customer fields from the call, that fact, the UTC time for this turn, and on the first turn a note that the greeting was already heard. Caller and customer lines are sorted and stay the same for the whole call, so they extend the cached prefix. The time is fixed for every model call in the turn, including tools, and changes on the next turn, so it stays after the per-call lines. Do not put the caller id in the second argument; Timbal already appends it. Do not paste the date or the caller at the top of the instructions. The reused prefix stops at the first byte that changed.
 
-A callable system prompt can return `voice_prompt(...)` when the facts come from your own lookup. Return the instructions as a plain string when you have no extra facts; Timbal still appends the call context.
+A callable system prompt can return `voice_prompt(...)` when the per-call fact comes from your own lookup. Return the instructions as a plain string when you have no extra fact; Timbal still appends the call context and the time.
 
 ## Move rare rules onto the tool
 
@@ -56,10 +56,10 @@ Register only the tools this call can use. Each tool's name, description, and pa
 
 ## What gets reused
 
-OpenAI, Groq, and Anthropic reuse an unchanged prefix of the request. Timbal sends the stable instructions and the tool list before the per-turn block.
+OpenAI, Groq, and Anthropic reuse an unchanged prefix of the request. Timbal sends the stable instructions and the tool list before the per-call lines, and those lines before the per-turn time and greeting note.
 
-- **OpenAI.** Prefixes of 1,024 tokens and longer can be cached. Timbal sends a stable key for the voice session (`prompt_cache_key`). On models before GPT-5.6 that key helps routing; from GPT-5.6 it separates cache accounting per session. A voice session on GPT-5.6 or later also marks the end of the stable instructions so the per-turn block does not have to match. Cached tokens are `input_cached_tokens` on the run's usage.
-- **Groq.** Exact-prefix caching is automatic on `groq/openai/gpt-oss-20b` and `groq/openai/gpt-oss-120b`, and an unused entry expires after 2 hours. There is no session key. Cached tokens are `input_cached_tokens`.
+- **OpenAI.** Prefixes of 1,024 tokens and longer can be cached. Timbal sends a stable key for the voice session (`prompt_cache_key`). On models before GPT-5.6 that key helps routing; from GPT-5.6 it separates cache accounting per session. On GPT-5.6 and later, the Responses API (the default) also marks the end of the stable instructions so the per-turn block does not have to match. `TIMBAL_OPENAI_API=chat_completions` does not send that marker; the static text is still the start of the system message. Cached tokens are `input_cached_tokens` on the run's usage.
+- **Groq.** Exact-prefix caching is automatic on `groq/openai/gpt-oss-20b`, `groq/openai/gpt-oss-120b`, and `groq/openai/gpt-oss-safeguard-20b`, and an unused entry expires after 2 hours. There is no session key. Cached tokens are `input_cached_tokens`.
 - **Anthropic**, including Claude on AWS Bedrock. Timbal turns on prompt caching. The stable instructions are one breakpoint and the growing conversation is another. Haiku 5.5 caches a prefix of at least 512 tokens; Haiku 4.5 needs 4,096. A shorter prefix is answered normally and is not an error. Cache reads are `cache_read_input_tokens` on the run's usage. The default lifetime is 5 minutes; pass `model_params={"cache_control": {"type": "ephemeral", "ttl": "1h"}}` for an hour. `model_params={"cache_control": None}` turns caching off.
 
 The first turn writes the prefix. Later turns in the same call read it when the instructions and tools are unchanged. A short prompt is still the faster one to process when it is under the model's minimum.

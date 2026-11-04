@@ -1,11 +1,11 @@
 """Cache-friendly voice system prompts.
 
-Static instructions stay a byte-stable prefix. Caller id, the clock, and
-customer fields — anything that changes per call or per turn — are appended
-after it. OpenAI and Groq cache an exact prefix, so the clock has to be the
-last of those lines or the caller line never sits inside the hit. Anthropic
-and Bedrock put the cache breakpoint on the static block instead, and the
-suffix is a following block with no breakpoint.
+The suffix after the static instructions is, in order: caller and customer
+fields (stable for the call), the ``voice_prompt`` dynamic text, the UTC
+time for this turn, then the already-greeted note. OpenAI and Groq cache an
+exact prefix, so per-call lines have to precede per-turn lines or the caller
+block falls out of the hit. Anthropic and Bedrock put the cache breakpoint
+on the static block; the suffix is a following block with no breakpoint.
 """
 
 from __future__ import annotations
@@ -25,13 +25,14 @@ def compose_voice_system_prompt(
     now: datetime,
     greeting_note: str | None = None,
 ) -> SystemPrompt:
-    """Static agent instructions, then caller and customer data, then this turn.
+    """Static instructions, then per-call lines, then per-turn lines.
 
-    ``now`` is captured once per turn so a tool loop does not move the clock
-    between LLM calls and break the prefix mid-turn. Caller and customer lines
-    are sorted so the same call renders the same bytes. The clock and an
-    already-greeted note change between turns, so they come after the facts
-    that do not.
+    Order of the suffix: caller and customer fields, the caller's ``dynamic``
+    text, the UTC clock, the already-greeted note. ``now`` is captured once
+    per turn so a tool loop does not move the clock between LLM calls.
+    Caller and customer lines are sorted so the same call renders the same
+    bytes. The clock and the greeting note change between turns, so they
+    come after the per-call lines.
     """
     if isinstance(resolved, SystemPrompt):
         static = resolved.static
