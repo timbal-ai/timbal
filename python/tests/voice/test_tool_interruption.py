@@ -99,10 +99,12 @@ async def _idle(session: VoiceSession) -> None:
     ``SessionInterrupted``. Tests that assert no barge-in have to outlast it.
     """
     await _until(
-        lambda: (session._current_turn_task is None or session._current_turn_task.done())
-        and not session._is_speaking
-        and not session.playback.is_playing
-        and not session._deferred_user_text
+        lambda: (
+            (session._current_turn_task is None or session._current_turn_task.done())
+            and not session._is_speaking
+            and not session.playback.is_playing
+            and not session._deferred_user_text
+        )
     )
 
 
@@ -328,6 +330,88 @@ async def test_speech_during_tool_is_merged_into_a_later_barge_in() -> None:
 
     await _run(session, stt, drive)
     assert script.calls[-1][-1].collect_text() == f"{DURING_TOOL} {BARGE}"
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_used_as_a_tool_can_block_barge_in() -> None:
+    """A nested agent's own tools do not drive the call. The nested agent's mode does."""
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def quote() -> str:
+        started.set()
+        await asyncio.sleep(0.25)
+        finished.set()
+        return "42 dollars"
+
+    pricing = Agent(
+        name="pricing",
+        description="Price a job",
+        model=TestModel(responses=[_tool_message(_call("quote", "q1")), "The job is 42 dollars."]),
+        tools=[quote],
+        interruption_mode="disable_during_tool",
+    )
+
+    class _Outer:
+        def __init__(self) -> None:
+            self.calls: list[list[Message]] = []
+            self.model = TestModel(handler=self._reply)
+
+        def _reply(self, messages: list[Message]) -> str | Message:
+            self.calls.append(list(messages))
+            text = messages[-1].collect_text() if messages[-1].role == "user" else ""
+            if DURING_TOOL in text:
+                return "Noted."
+            if any(block.type == "tool_result" for message in messages for block in message.content):
+                return REPLY
+            # An agent used as a tool takes a prompt, unlike a bare function.
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="pricing", input={"prompt": "price it"})],
+                stop_reason="tool_use",
+            )
+
+    session, stt = _voice(_Outer(), [pricing])
+
+    async def drive(events: list[VoiceSessionEvent]) -> None:
+        await stt.inject(TranscriptEvent(type="committed", text="price the job"))
+        await _until(lambda: started.is_set())
+        await stt.inject(TranscriptEvent(type="committed", text=DURING_TOOL))
+        await _until(lambda: finished.is_set(), timeout=2)
+        await _until(lambda: _texts(events)[:2] == [REPLY, "Noted."], timeout=4)
+        await _idle(session)
+
+    events = await _run(session, stt, drive, timeout=8)
+    assert not any(isinstance(event, SessionInterrupted) for event in events)
+    assert session.agent._tool_interruption_modes == {"pricing": "disable_during_tool"}
+
+
+def test_and_turn_protection_survives_an_approval_pause() -> None:
+    """A pause is not the end of the tool. The reply after the caller answers stays protected."""
+    script = _Script()
+    session, _stt = _voice(script, [])
+    session.agent._tool_interruption_modes = {"wire": "disable_during_tool_and_turn"}
+    session._is_speaking = True
+    session._note_tool_call("wire", "c1")
+    session._note_tool_output("voice_events.wire", paused=True)
+    # Still this turn: don't let a barge-in cancel the park.
+    assert session._interruptions_suppressed()
+    session._is_speaking = False
+    # The caller can speak while the call is waiting.
+    assert not session._interruptions_suppressed()
+    # The next turn speaks the reply.
+    session._reset_tool_interruption()
+    session._is_speaking = True
+    assert session._interruptions_suppressed()
+    assert session._active_interruption_mode() == "disable_during_tool_and_turn"
+    # A normal completion does not protect the turn after the reply.
+    session._and_turn_after_pause = False
+    session._turn_uninterruptible_reply = False
+    session._note_tool_call("wire", "c2")
+    session._note_tool_output("voice_events.wire", paused=False)
+    session._reset_tool_interruption()
+    session._is_speaking = True
+    assert not session._interruptions_suppressed()
 
 
 def test_dict_tool_definition_accepts_interruption_mode() -> None:

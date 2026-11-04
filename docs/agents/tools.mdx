@@ -248,7 +248,7 @@ The built-in `read_skill` tool sets this automatically. See [Pinned results](/ag
 
 ### Voice interruption mode
 
-On a voice call, `interruption_mode` chooses whether the caller can barge in around this tool. The default is `allow`. `disable_during_tool` and `disable_during_tool_and_turn` finish the tool, and the second also finishes the spoken reply. Words the caller says meanwhile are kept for the next turn. See [Keep a tool from being cut off](/voice/tools#keep-a-tool-from-being-cut-off).
+On a voice call, `interruption_mode` chooses whether the caller can barge in around this tool. The default is `allow`. `disable_during_tool` and `disable_during_tool_and_turn` both let the tool finish without barge-in, and `disable_during_tool_and_turn` also plays the reply that follows in full. Words the caller says meanwhile are kept for the next turn. The same field exists on an agent or workflow you pass in `tools`. See [Keep a tool from being cut off](/voice/tools#keep-a-tool-from-being-cut-off).
 
 ```python
 from timbal import Tool

@@ -28,8 +28,8 @@ from ..types.approval import Cancel
 from ..types.content import FileContent, TextContent
 from ..types.file import File
 from ..types.message import Message
-from .runnable import Runnable
-from .tool import InterruptionMode, Tool
+from .runnable import InterruptionMode, Runnable
+from .tool import Tool
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.mcp")

@@ -17,13 +17,6 @@ from ..utils import create_model_from_handler
 from .runnable import Runnable
 from .tool_result_offload import ToolResultLimit
 
-# ElevenLabs Agents tool interruption modes
-# (https://elevenlabs.io/docs/eleven-agents/customization/tools/tool-configuration/tool-interruptions).
-# ``allow`` is the default: the caller can barge in at any time. The other two
-# suppress barge-in while the tool runs, and ``disable_during_tool_and_turn``
-# also keeps the spoken reply that follows uninterruptible.
-InterruptionMode = Literal["allow", "disable_during_tool", "disable_during_tool_and_turn"]
-
 
 class Tool(Runnable):
     """A Tool is a Runnable that wraps a callable function or method.
@@ -65,18 +58,6 @@ class Tool(Runnable):
             "timbal.core.tool_result_offload). 'inherit' (default) uses the agent's "
             "tool_result_limit; an int is shorthand for ToolResultLimit(threshold=int); "
             "None exempts this tool entirely. Pinned tools (pin_result=True) are always exempt."
-        ),
-    )
-
-    interruption_mode: InterruptionMode = Field(
-        default="allow",
-        description=(
-            "Whether a voice caller can barge in around this tool. 'allow' (default) "
-            "interrupts at any time. 'disable_during_tool' ignores barge-in only while "
-            "the tool runs; the spoken reply after it can be interrupted. "
-            "'disable_during_tool_and_turn' also plays that reply through. Speech during "
-            "the protected window is still transcribed and opens the next turn. When "
-            "several tools run together, the strictest mode applies to that batch."
         ),
     )
 
@@ -241,14 +222,6 @@ class Tool(Runnable):
                 raise cred_error from None
             raise
         yield (None, output, None)
-
-    @override
-    def get_config(self) -> dict[str, Any]:
-        """See base class. Includes ``interruption_mode`` so tool definitions round-trip it."""
-        return {
-            **super().get_config(),
-            **self._annotate_config({"interruption_mode": self.interruption_mode}),
-        }
 
     @override
     def nest(self, parent_path: str) -> None:

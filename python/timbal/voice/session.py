@@ -622,8 +622,11 @@ class VoiceSession:
         self._turn_tool_batch_inflight = 0
         self._turn_tool_batch_mode = "allow"
         # Latched once a disable_during_tool_and_turn tool finishes, until this
-        # turn's playback ends. Not latched on an approval / ask_user pause.
+        # turn's playback ends. Also set for the rest of a turn that paused on
+        # approval / ask_user, and carried into the next turn so the reply
+        # after the caller answers is protected.
         self._turn_uninterruptible_reply = False
+        self._and_turn_after_pause = False
         # Caller speech accepted while barge-in was suppressed. Opens the next
         # turn once the protected tool and (if latched) its reply have played.
         self._deferred_user_text = ""
@@ -1882,13 +1885,20 @@ class VoiceSession:
         )
 
     def _reset_tool_interruption(self) -> None:
-        """Clear this turn's barge-in latch. Carried caller speech stays."""
+        """Clear this turn's barge-in latch. Carried caller speech stays.
+
+        A ``disable_during_tool_and_turn`` tool that paused for approval or
+        ``ask_user`` has not finished. The next turn is the one that speaks
+        the reply, so the latch comes with it.
+        """
+        carry = self._and_turn_after_pause
         self._turn_tool_call_ids = set()
         self._turn_open_tools = {}
         self._turn_unmatched_arms = {}
         self._turn_tool_batch_inflight = 0
         self._turn_tool_batch_mode = "allow"
-        self._turn_uninterruptible_reply = False
+        self._and_turn_after_pause = False
+        self._turn_uninterruptible_reply = carry
 
     def _tool_interruption_mode(self, name: str) -> str:
         """``allow`` unless this iteration's resolved tools say otherwise."""
@@ -1977,8 +1987,14 @@ class VoiceSession:
         else:
             self._turn_open_tools[name] = open_count - 1
         self._turn_tool_batch_inflight = max(0, self._turn_tool_batch_inflight - 1)
-        if self._tool_interruption_mode(name) == "disable_during_tool_and_turn" and not paused:
+        if self._tool_interruption_mode(name) == "disable_during_tool_and_turn":
+            # A pause is not the end of the tool. Protect the rest of this turn,
+            # and carry that into the next turn so the reply after the caller
+            # answers is protected too. A normal completion protects this turn's
+            # reply only.
             self._turn_uninterruptible_reply = True
+            if paused:
+                self._and_turn_after_pause = True
         if self._turn_tool_batch_inflight == 0:
             self._turn_tool_batch_mode = "allow"
 
