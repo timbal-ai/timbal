@@ -4806,16 +4806,35 @@ def _clause_boundary_ends(text: str) -> list[int]:
     return _outside_links(text, clause_boundary_ends(text))
 
 
+def _first_sentence_end(text: str) -> int | None:
+    """Index where the next sentence starts, or ``None`` when this buffer is one sentence."""
+    ends = _sentence_boundary_ends(text)
+    return ends[0] if ends else None
+
+
+def _comma_cut(text: str, min_words: int) -> int | None:
+    """Comma cut inside the first sentence only, after ``min_words``.
+
+    A comma in a later sentence must not steal the cut from an earlier
+    sentence, and must not split a finished multi-sentence reply.
+    """
+    first_sentence = _first_sentence_end(text)
+    for end in _clause_boundary_ends(text):
+        if first_sentence is not None and end > first_sentence:
+            continue
+        if word_count(text[:end]) >= min_words:
+            return end
+    return None
+
+
 def _first_segment_cut(text: str, min_words: int | None) -> int | None:
     """Earliest first-segment cut: a sentence, or a comma after ``min_words``.
 
     ``min_words is None`` leaves the comma path off.
     """
     candidates = [end for end in _sentence_boundary_ends(text) if end >= FIRST_SEGMENT_MIN_CHARS]
-    if min_words is not None:
-        for end in _clause_boundary_ends(text):
-            if word_count(text[:end]) >= min_words:
-                candidates.append(end)
+    if min_words is not None and (comma := _comma_cut(text, min_words)) is not None:
+        candidates.append(comma)
     return min(candidates) if candidates else None
 
 
@@ -4890,9 +4909,8 @@ def _flush_segment(
     if first_segment and not ends_clause and (cut := _first_segment_cut(text, first_flush_min_words)) is not None:
         return text[:cut]
     if first_segment and ends_clause and first_flush_min_words is not None:
-        for end in _clause_boundary_ends(text):
-            if word_count(text[:end]) >= first_flush_min_words:
-                return text[:end]
+        if (comma := _comma_cut(text, first_flush_min_words)) is not None:
+            return text[:comma]
 
     lo_clause = FIRST_SEGMENT_MIN_CHARS if first_segment else 2
     if ends_clause and len(stripped) >= lo_clause:

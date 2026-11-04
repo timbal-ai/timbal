@@ -166,6 +166,25 @@ class TestFirstSegmentComma:
             "so you can still send it back.",
         ]
 
+    def test_ellipsis_does_not_steal_the_comma(self) -> None:
+        assert sentence_boundary_ends("Well... I can check that order for you today") == []
+        text = "Well... I can check that order, and then explain the rest of it."
+        flushed = _flush(text, first_segment=True)
+        assert flushed is not None
+        assert flushed.rstrip().endswith("order,")
+        assert "Well..." in flushed
+
+    def test_finished_reply_ignores_a_comma_in_a_later_sentence(self) -> None:
+        text = "Hello! The return window is thirty days, so you can still send it back."
+        assert _flush(text, first_segment=True) == text
+
+    def test_comma_in_the_first_sentence_still_opens_a_finished_reply(self) -> None:
+        text = "The return window is thirty days, so you can still send it back. Thanks."
+        flushed = _flush(text, first_segment=True)
+        assert flushed is not None
+        assert flushed.rstrip().endswith("days,")
+        assert "Thanks" not in flushed
+
     def test_a_higher_word_count_keeps_a_shorter_clause(self) -> None:
         text = "The return window is thirty days, so you can still send it back."
         assert _flush(text, first_segment=True, first_flush_min_words=8) == text

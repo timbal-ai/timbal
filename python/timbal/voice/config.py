@@ -427,9 +427,9 @@ class VoiceConfig(BaseModel):
     commit. Same exposure rules as ``min_delay_secs``."""
     first_flush_min_words: int | None = Field(default=None, ge=1, le=40)
     """Unset → the first spoken segment waits for a sentence, like every later
-    segment. Set to a word count to let that first segment start at a comma
-    once it has that many words. 4 is the useful value: long enough to speak,
-    early enough in a long opening sentence. A caller hello cannot set it."""
+    segment. A whole number from 1 to 40 lets that first segment start at a
+    comma once it has that many words. 4 is the useful value: long enough to
+    speak, early enough in a long opening sentence. A caller hello cannot set it."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)

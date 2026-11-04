@@ -156,7 +156,10 @@ def _boundary_ends(text: str, dotted: list[tuple[int, int]], *, commas: bool) ->
 
 
 def _period_ends_sentence(text: str, i: int, dotted: list[tuple[int, int]]) -> bool:
-    if i + 1 < len(text) and text[i + 1] == ".":
+    # A run of dots ("Well...", "Wait...") is an ellipsis, not a sentence end.
+    # LiveKit protects every dot in the run; only the last one used to leak
+    # through here and flush "Well..." before a later comma could.
+    if (i > 0 and text[i - 1] == ".") or (i + 1 < len(text) and text[i + 1] == "."):
         return False
     prev = text[i - 1] if i else ""
     nxt = text[i + 1] if i + 1 < len(text) else ""
