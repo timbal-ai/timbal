@@ -50,6 +50,29 @@ Available modes are:
 
 `vad_endpointing=None` enables the local fast path when supported. Set it to `False` to disable it. A Python declaration may also supply a `TurnDetector` instance or zero-argument factory; clients may send supported mode names, and sessions own detector clones.
 
+## Speculative generation
+
+By default the model waits until the transcript is confirmed. Set `speculative_generation` to start it earlier, while the caller might still be pausing:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "speculative_generation": True},
+)
+```
+
+`True` uses the defaults. A dict sets the knobs: `eou_threshold` (default `0.5`) is the Smart Turn probability that treats a pause as probably complete, `eager_eot_threshold` (default `0.5`, range 0.3–0.9) is what Flux needs in order to emit `EagerEndOfTurn`, `max_retries` (default 3) caps attempts per caller turn, and `max_speech_duration` (default 10 seconds) skips long utterances. `preemptive_tts` defaults to false: the model runs early, and speech synthesis starts once the turn is confirmed. Set it to true to synthesize during the wait as well.
+
+Nothing is played until the turn is confirmed. A caller who keeps talking, or a Flux `TurnResumed`, drops the attempt and its audio. If the confirmed transcript is not the same words (case and punctuation aside), the attempt is dropped and the reply starts over on the final text. A matching transcript is reused, including when only capitalization or punctuation changed.
+
+Read-only tools run during that wait. A tool that books, charges, sends, or hangs up should set `defer_until_eot=True` so it does not run until the turn is confirmed; if the attempt is dropped, it never runs. See [Using tools](/voice/tools).
+
+Each turn's metrics carry `speculative`, plus the call's `speculative_generations_started` and `speculative_generations_discarded` counts. The setting is server-side. A client hello cannot turn it on.
+
 ## Custom clients
 
 WebSocket clients must report cumulative milliseconds of audio actually played and discard queued audio on `interrupted`. Reporting received bytes as played can preserve words the caller never heard. WebRTC and LiveKit use the server's paced media clock. See [Transports](/voice/transports) for the wire contract and [Events and usage](/voice/observability) for interruption metrics.

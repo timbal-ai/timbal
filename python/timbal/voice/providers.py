@@ -71,10 +71,17 @@ class AudioOutputConfig(BaseModel):
 
 
 class TranscriptEvent(BaseModel):
-    """Single event from an STT provider."""
+    """Single event from an STT provider.
 
-    type: Literal["partial", "committed", "error"]
-    text: str
+    ``eager`` is a tentative end of turn (Deepgram Flux ``EagerEndOfTurn``):
+    the session may start a speculative reply and hold its audio.
+    ``resumed`` (Flux ``TurnResumed``) cancels that attempt. Both are ignored
+    when speculative generation is off. ``resumed`` is delivered even when
+    ``text`` is empty — the cancellation does not need a transcript.
+    """
+
+    type: Literal["partial", "committed", "eager", "resumed", "error"]
+    text: str = ""
 
 
 class SpeechToText(VoiceUsageEmitter, ABC):

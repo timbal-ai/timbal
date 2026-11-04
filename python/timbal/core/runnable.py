@@ -345,6 +345,16 @@ class Runnable(ABC, BaseModel):
     approval_grantable: bool = True
     """Whether a human may remember an approval of this runnable for the rest of
     the session. ``False`` for decisions that must be taken every time."""
+    defer_until_eot: bool = False
+    """Hold this tool until a speculative voice turn is confirmed.
+
+    Deepgram's ``defer_until_eot``: a tool whose work cannot be undone (book,
+    charge, send, hang up) must not run on a transcript the caller may still
+    extend. The handler, its ``pre_hook``, and the approval gate all wait.
+    If the turn is discarded, the wait is cancelled and the handler never
+    starts. Outside a speculative voice turn this is a no-op, and tools left
+    ``False`` still run during the speculative window.
+    """
 
     schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
@@ -2225,6 +2235,17 @@ class Runnable(ABC, BaseModel):
                         _restore_context()
                     if guardrail_blocked:
                         return
+
+            # Speculative voice turns hold side-effecting tools until the
+            # transcript is confirmed (Deepgram defer_until_eot). Before the
+            # approval gate and pre_hook, so neither asks the caller nor fires
+            # a side effect for an attempt that gets thrown away. No-op when
+            # this runnable is not deferred or no speculative turn is active.
+            if self.defer_until_eot:
+                from ..voice.speculative import wait_for_turn_confirmation
+
+                await wait_for_turn_confirmation()
+                _restore_context()
 
             # Fast path: requires_approval=False (the default) skips the whole
             # gate — no policy resolution, no ApprovalPolicyDecision construction.

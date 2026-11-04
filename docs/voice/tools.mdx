@@ -177,6 +177,30 @@ When the agent takes a turn of its own, the client gets an `event_turn_started` 
 
 A text turn on the same conversation while the call is live (a chat tab continuing from the call's run) is let in only while the call is not mid-turn. While a call turn runs, the chat turn is refused, or queued with `"events": {"on_busy": "enqueue"}` in the server's `voice_config`. Once let in, the chat turn continues from the call's latest turn, even if the chat sent an older run as its parent, so neither side loses what the other said. A caller who speaks while the chat turn runs is answered after it, and the call continues from what the chat said. An `"interrupt"` event goes ahead of a queued chat turn, but waits for one that is already running.
 
+## Wait for a confirmed turn
+
+Speculative generation can run a tool before the caller has actually finished. That is what you want for a lookup. It is the wrong time to book, charge, send a message, or hang up. Set `defer_until_eot=True` on those tools. The call waits until the turn is confirmed; if the caller keeps talking, the tool never runs. Other tools in the same turn are not held.
+
+```python
+from timbal import Agent, Tool
+
+
+async def book_table(name: str) -> str:
+    """Reserve a table under this name."""
+    return f"Booked for {name}."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You book tables. Reply in one short spoken sentence.",
+    tools=[Tool(handler=book_table, defer_until_eot=True)],
+    voice_config={"language": "en", "speculative_generation": {"enabled": True}},
+)
+```
+
+`end_call` below should use the same flag when speculative generation is on. See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation).
+
 ## Let the caller end the call
 
 `session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply:
