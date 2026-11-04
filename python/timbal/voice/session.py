@@ -373,6 +373,9 @@ class VoiceSession:
         ignore_backchannels: bool = False,
         hold_unfinished_secs: float | None = None,
         tool_beat_secs: float | None = None,
+        max_tts_pause_secs: float | None = None,
+        tts_quiet_dbfs: float = -45.0,
+        tts_tempo: float | None = None,
         turn_timeout_secs: float = DEFAULT_TURN_TIMEOUT_SECS,
         turn_timeout_fallback: str | None = DEFAULT_TURN_TIMEOUT_FALLBACK,
         vad_endpointing: bool | VadEndpointer | None = None,
@@ -425,6 +428,33 @@ class VoiceSession:
         if tool_beat_secs is not None and (not math.isfinite(tool_beat_secs) or tool_beat_secs < 0):
             raise ValueError("tool_beat_secs must be finite and non-negative")
         self.tool_beat_secs = tool_beat_secs
+        # Both default off. Pause trimming runs before tempo so a capped gap is
+        # not first sped up, and neither touches audio unless the caller opts in.
+        if max_tts_pause_secs is not None and (
+            isinstance(max_tts_pause_secs, bool)
+            or not isinstance(max_tts_pause_secs, (int, float))
+            or not math.isfinite(max_tts_pause_secs)
+            or max_tts_pause_secs < 0
+        ):
+            raise ValueError("max_tts_pause_secs must be finite and non-negative")
+        self.max_tts_pause_secs = None if max_tts_pause_secs is None else float(max_tts_pause_secs)
+        if (
+            isinstance(tts_quiet_dbfs, bool)
+            or not isinstance(tts_quiet_dbfs, (int, float))
+            or not math.isfinite(tts_quiet_dbfs)
+        ):
+            raise ValueError("tts_quiet_dbfs must be finite")
+        self.tts_quiet_dbfs = float(tts_quiet_dbfs)
+        if tts_tempo is not None and (
+            isinstance(tts_tempo, bool)
+            or not isinstance(tts_tempo, (int, float))
+            or not math.isfinite(tts_tempo)
+            or tts_tempo <= 0
+        ):
+            raise ValueError("tts_tempo must be finite and positive")
+        self.tts_tempo = None if tts_tempo is None else float(tts_tempo)
+        # Logged once when pace is configured but the session audio is not PCM16.
+        self._tts_pace_encoding_warned = False
         self._turn_audio_playing_until = 0.0
         # Wall-clock cap for one agent turn. ``<= 0`` disables. On expiry the
         # session emits SessionError, speaks ``turn_timeout_fallback`` if no
@@ -4764,6 +4794,49 @@ class VoiceSession:
         task.add_done_callback(lambda done: self._tts_tasks.discard(done))
         self._tts_tail = task
 
+    def _postprocess_tts(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        """Pause trim, then tempo. Defaults return ``chunks`` unchanged.
+
+        Byte accounting (playback, ``_turn_audio_bytes``, the segment record,
+        the call recorder) runs on whatever this yields, which is the PCM the
+        caller can actually hear. Only PCM16 session audio is processed.
+        Anything else is returned unchanged and warned about once.
+        """
+        if not self._tts_pace_enabled():
+            return chunks
+        encoding = (self.audio_output.encoding or "").strip().lower()
+        if encoding not in ("", "pcm_s16le", "pcm16", "linear16"):
+            if not self._tts_pace_encoding_warned:
+                self._tts_pace_encoding_warned = True
+                logger.warning(
+                    "tts_pace_skipped",
+                    encoding=self.audio_output.encoding,
+                    reason="pause trimming and tempo require pcm_s16le",
+                )
+            return chunks
+        rate = self.audio_output.sample_rate
+        if self.max_tts_pause_secs is not None:
+            from .pauses import limit_pauses
+
+            chunks = limit_pauses(
+                chunks,
+                sample_rate=rate,
+                max_pause_secs=self.max_tts_pause_secs,
+                quiet_dbfs=self.tts_quiet_dbfs,
+            )
+        tempo = self.tts_tempo
+        if tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6):
+            from .tempo import change_tempo
+
+            chunks = change_tempo(chunks, sample_rate=rate, tempo=tempo)
+        return chunks
+
+    def _tts_pace_enabled(self) -> bool:
+        if self.max_tts_pause_secs is not None:
+            return True
+        tempo = self.tts_tempo
+        return tempo is not None and not math.isclose(tempo, 1.0, abs_tol=1e-6)
+
     def _note_turn_audio(self, num_bytes: int) -> None:
         self._turn_audio_bytes += num_bytes
         self._turn_audio_playing_until = max(time.monotonic(), self._turn_audio_playing_until) + (
@@ -4823,7 +4896,7 @@ class VoiceSession:
         total_bytes = 0
         records = [record]
         try:
-            async for chunk in stream.audio():
+            async for chunk in self._postprocess_tts(stream.audio()):
                 if self._cancel_turn.is_set():
                     # INFO on purpose: explains truncated audio_bytes in metrics.
                     logger.info(
@@ -4938,7 +5011,7 @@ class VoiceSession:
         else:
             self._turn_tts_segment_records.append(segment_record)
         try:
-            async for chunk in self.tts.synthesize(text):
+            async for chunk in self._postprocess_tts(self.tts.synthesize(text)):
                 # Turnless speech predates / sits outside every turn, so the
                 # per-turn cancel flag says nothing about it: stopping it is
                 # ``interrupt()``'s job, by cancelling this task.
