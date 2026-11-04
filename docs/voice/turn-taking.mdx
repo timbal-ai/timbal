@@ -60,7 +60,11 @@ agent.voice_config["predict_during_speech"] = True
 
 On transcription that does not decide the turn itself (ElevenLabs Scribe, Deepgram Nova, OpenAI), the local endpointer scores the live transcript and the recent audio while the caller is speaking. When the words read as a finished sentence and the audio agrees, the session confirms the turn after 0.16 seconds of silence. Otherwise it keeps the usual wait: 0.20 seconds of silence, then up to the 0.45 second floor when the score is confident.
 
-Deepgram Flux still owns the final boundary, and local VAD force-commit stays off, as described above. With this setting the session asks Flux for an early end-of-turn (`EagerEndOfTurn`) at an eager threshold below Flux's own end-of-turn threshold. That event can start the turn. `TurnResumed` cancels it. `EndOfTurn` confirms it, or starts the turn if the early start was held. When Smart Turn is available, an incomplete audio score holds the early start and `EndOfTurn` still commits.
+Deepgram Flux still owns the final boundary, and local VAD force-commit stays off, as described above. With this setting the session asks Flux for an early end-of-turn (`EagerEndOfTurn`). That event can start the turn. `TurnResumed` cancels it. `EndOfTurn` confirms it, or starts the turn if the early start was held. When Smart Turn is available, an incomplete audio score holds the early start and `EndOfTurn` still commits.
+
+The eager threshold defaults to 0.5. If `eot_threshold` is set close to that, the eager value is lowered so it stays below the end-of-turn threshold. Set `eager_eot_threshold` in `stt_extra` to choose it yourself.
+
+Munsit decides the turn itself and does not emit an early end-of-turn event, so `predict_during_speech` has no effect there.
 
 ## Custom clients
 
