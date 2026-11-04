@@ -512,7 +512,8 @@ class TestSpeculativeSession:
             await stt.inject(TranscriptEvent(type="resumed", text=""))
             await _until(lambda: session.speculative_generations_discarded == 1)
             await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
-            assert session._drop_speculative_context is False
+            # Abandon sets the flag before it joins the task. Wait out that gap.
+            await _until(lambda: session._drop_speculative_context is False)
             await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
             await _until(lambda: session._scheduler.head not in (None, prior) and model.call_count >= 1)
             real = session._scheduler.head
