@@ -613,6 +613,10 @@ _BACKCHANNEL_PHRASES = frozenset(
         "got it",
     }
 )
+# Longest first so "got it" is consumed as a phrase, not as two unknown words.
+_BACKCHANNEL_PHRASE_TOKENS = tuple(
+    tuple(phrase.split()) for phrase in sorted(_BACKCHANNEL_PHRASES, key=lambda item: len(item.split()), reverse=True)
+)
 # Closed commands that are complete turns even when they are also function
 # words ("para" is a preposition and "stop"). "sí, pero…" is not in this set:
 # it is unfinished when the assistant is idle, and an interrupt while it speaks.
@@ -764,11 +768,17 @@ _UNFINISHED_SINGLE = frozenset(
 _SPOKEN_PUNCT_RE = re.compile(r"[^\w\s']+", re.UNICODE)
 
 
-def _normalize_spoken(text: str) -> str:
-    """Casefold, strip accents and punctuation, turn hyphens into spaces."""
+def _normalize_spoken(text: str, *, strip_accents: bool = True) -> str:
+    """Casefold, strip punctuation, turn hyphens into spaces.
+
+    Accents are stripped for acknowledgement matching ("sí"/"si", "ajá"/"aja").
+    The unfinished-word check keeps them: "sí" and "él" are finished answers,
+    and folding them onto "si"/"el" would hold "creo que sí".
+    """
     folded = text.casefold().replace("’", "'").replace("‘", "'").replace("-", " ")
-    folded = unicodedata.normalize("NFD", folded)
-    folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Mn")
+    if strip_accents:
+        folded = unicodedata.normalize("NFD", folded)
+        folded = "".join(ch for ch in folded if unicodedata.category(ch) != "Mn")
     folded = _SPOKEN_PUNCT_RE.sub(" ", folded)
     return re.sub(r"\s+", " ", folded).strip()
 
@@ -782,14 +792,31 @@ def _backchannel_window_open(state: TurnState) -> bool:
 
 
 def _is_pure_backchannel(text: str) -> bool:
-    """True when every token is an acknowledgement ("yeah okay", "vale", "got it")."""
-    norm = _normalize_spoken(text)
-    if not norm:
+    """True when the utterance is only acknowledgements ("yeah okay", "okay got it").
+
+    Multi-word phrases ("got it", "uh huh") are consumed as a span, so stacking
+    them with other acknowledgements still matches. One other word ("okay stop")
+    does not.
+    """
+    words = _normalize_spoken(text).split()
+    if not words:
         return False
-    if norm in _BACKCHANNEL_PHRASES or norm in _BACKCHANNEL_WORDS:
-        return True
-    words = norm.split()
-    return bool(words) and all(word in _BACKCHANNEL_WORDS for word in words)
+    index = 0
+    while index < len(words):
+        matched = False
+        for phrase in _BACKCHANNEL_PHRASE_TOKENS:
+            size = len(phrase)
+            if tuple(words[index : index + size]) == phrase:
+                index += size
+                matched = True
+                break
+        if matched:
+            continue
+        if words[index] in _BACKCHANNEL_WORDS:
+            index += 1
+            continue
+        return False
+    return True
 
 
 def _is_interrupt_command(text: str) -> bool:
@@ -814,12 +841,13 @@ def _ends_unfinished(text: str) -> bool:
 
     A question mark is a finished turn ("And?", "So?"). A period is not: STT
     writes "because." on a fragment. A lone acknowledgement ("sí") is an
-    answer even though "si" is also the conjunction "if".
+    answer even though "si" is also the conjunction "if". Accents stay, so
+    "creo que sí" and "es él" are finished while "no sé si" and "dame el" are not.
     """
     stripped = text.strip()
     if not stripped or stripped.endswith(("?", "？")):
         return False
-    words = _normalize_spoken(stripped).split()
+    words = _normalize_spoken(stripped, strip_accents=False).split()
     if not words or words[-1] not in _UNFINISHED_TRAILING:
         return False
     if len(words) == 1:
@@ -1408,7 +1436,7 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
 
     def clone(self) -> LocalAudioTurnDetector:
         """Fresh PCM buffer per session; the ``audio_eou`` model stays shared."""
-        return type(self)(
+        cloned = type(self)(
             audio_eou=self.audio_eou,
             completion_threshold=self.completion_threshold,
             hold_timeout_secs=self.hold_timeout_secs,
@@ -1416,6 +1444,10 @@ class LocalAudioTurnDetector(HeuristicTurnDetector):
             text_incomplete_hold_timeout_secs=self.text_incomplete_hold_timeout_secs,
             fallback_text_eou=self.fallback_text_eou,
         )
+        # The constructor does not take this. copy.copy on the base class keeps
+        # an instance override; this rebuild must do the same.
+        cloned.ignore_backchannels = self.ignore_backchannels
+        return cloned
 
     def push_audio(self, chunk: bytes) -> None:
         if not chunk:

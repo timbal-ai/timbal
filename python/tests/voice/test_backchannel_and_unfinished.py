@@ -28,6 +28,7 @@ from timbal.voice.turn_detection import (
     CommitAction,
     HeuristicTurnDetector,
     LexicalTurnDetector,
+    LocalAudioTurnDetector,
     PartialDecision,
     ProviderTurnDetector,
     TurnState,
@@ -174,6 +175,14 @@ class TestIgnoreBackchannels:
             decision = await det.on_partial(text, _playing())
             assert decision is PartialDecision.BARGE_IN, text
 
+    @pytest.mark.parametrize("text", ["okay got it", "yeah, got it!", "got it yeah", "uh-huh, okay"])
+    async def test_stacked_acknowledgements_do_not_interrupt(self, text: str) -> None:
+        det = self._detector()
+        decision = await det.on_committed(text, _playing())
+        assert decision.action is CommitAction.IGNORE, text
+        assert decision.reason == "backchannel", text
+        assert await det.on_partial(text, _playing()) is PartialDecision.IGNORE
+
     async def test_a_content_word_keeps_the_interruption(self) -> None:
         det = self._detector()
         decision = await det.on_committed("okay stop", _playing())
@@ -313,6 +322,18 @@ class TestHoldUnfinished:
             assert decision.action is CommitAction.NEW_TURN, text
             assert decision.reason == "provider", text
 
+    @pytest.mark.parametrize("text", ["creo que sí", "Creo que sí.", "es él", "lo quiero a él"])
+    async def test_accented_closers_are_finished_turns(self, text: str) -> None:
+        decision = await self._detector().on_committed(text, _state())
+        assert decision.action is CommitAction.NEW_TURN, text
+        assert decision.reason == "provider", text
+
+    async def test_unaccented_si_and_el_still_hold(self) -> None:
+        for text in ("no sé si", "dame el"):
+            decision = await self._detector().on_committed(text, _state())
+            assert decision.action is CommitAction.HOLD, text
+            assert decision.reason == "unfinished", text
+
     async def test_trailing_preposition_inside_a_phrase_is_held(self) -> None:
         decision = await self._detector().on_committed("lo necesito para", _state())
         assert decision.action is CommitAction.HOLD
@@ -400,6 +421,19 @@ class TestVoiceConfigAndSession:
         assert session.turn_detector.hold_unfinished_secs == 1.2
         assert original.ignore_backchannels is False
         assert original.hold_unfinished_secs is None
+
+    def test_local_session_clone_keeps_ignore_backchannels(self) -> None:
+        original = LocalAudioTurnDetector()
+        original.ignore_backchannels = True
+        session = VoiceSession(
+            agent=Agent(name="t", model=TestModel(responses=["ok"]), tools=[]),
+            stt=MockSTT(script=[]),
+            tts=MockTTS(),
+            turn_detector=original,
+        )
+        assert session.turn_detector is not original
+        assert session.turn_detector.ignore_backchannels is True
+        assert original.ignore_backchannels is True
 
     def test_detector_timeout_survives_the_session_clone(self) -> None:
         original = ProviderTurnDetector(hold_unfinished_secs=1.2)
