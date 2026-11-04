@@ -496,7 +496,10 @@ class TestBuildVoiceSession:
     def test_threshold_stays_under_a_low_eot(self) -> None:
         assert flux_eager_threshold({}) == pytest.approx(0.5)
         assert flux_eager_threshold({"eot_threshold": 0.4}) == pytest.approx(0.3)
+        assert flux_eager_threshold({"eot_threshold": 0.3}) == pytest.approx(0.2)
+        assert flux_eager_threshold({"eot_threshold": 0.3}) < 0.3
         assert flux_eager_threshold({"eager_eot_threshold": "0.45"}) == pytest.approx(0.45)
+        assert flux_eager_threshold({"eot_threshold": 0.4, "eager_eot_threshold": 0.4}) < 0.4
 
     async def test_flux_eager_commits_resume_cancels_end_confirms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from timbal.server.voice import build_voice_session
@@ -551,6 +554,102 @@ class TestBuildVoiceSession:
         await session._handle_provider_commit("Hello there.")
         assert session._eager_unconfirmed is None
         assert [entry.text for entry in session.transcript if entry.role == "user"] == ["Hello there."]
+
+    async def test_ignored_eager_does_not_swallow_end_of_turn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        await session._handle_provider_prediction(TranscriptEvent(type="eager", text="Uh...", confidence=0.9))
+        assert session._eager_unconfirmed is None
+        await session._handle_provider_commit("I need the white one.")
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == ["I need the white one."]
+
+    async def test_longer_end_of_turn_replaces_the_short_eager_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there.", confidence=0.9)
+        )
+        await session._handle_provider_commit("Hello there. And fries.")
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == [
+            "Hello there. And fries.",
+        ]
+
+    async def test_resume_retracts_the_bubble_and_the_memory(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+        from timbal.voice import TranscriptCommitted
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        _stub_tts(session)
+        emitted: list = []
+        original = session._emit
+
+        async def capture(event: object) -> None:
+            emitted.append(event)
+            await original(event)
+
+        session._emit = capture  # type: ignore[method-assign]
+
+        class _Msg:
+            def __init__(self, role: str, text: str) -> None:
+                self.role = role
+                self.text = text
+
+            def collect_text(self) -> str:
+                return self.text
+
+        class _Span:
+            def __init__(self) -> None:
+                self.memory = [_Msg("user", "Hello there.")]
+
+        class _Ctx:
+            def __init__(self) -> None:
+                self.span = _Span()
+
+            def root_span(self) -> _Span:
+                return self.span
+
+        aligned: list[str] = []
+
+        async def align(*, fragment_user_text: str) -> None:
+            aligned.append(fragment_user_text)
+
+        session._align_continue_memory = align  # type: ignore[method-assign]
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="eager", text="Hello there.", confidence=0.9)
+        )
+        await session._handle_provider_prediction(
+            TranscriptEvent(type="resumed", text="Hello there more", confidence=0.1)
+        )
+        assert [entry.text for entry in session.transcript if entry.role == "user"] == []
+        assert aligned == ["Hello there."]
+        retracted = [
+            event
+            for event in emitted
+            if isinstance(event, TranscriptCommitted) and event.replace and event.text == ""
+        ]
+        assert retracted
+        ctx = _Ctx()
+        session._last_run_context = ctx  # type: ignore[assignment]
+        await VoiceSession._align_continue_memory(session, fragment_user_text="Hello there.")
+        assert ctx.span.memory == []
+
+    async def test_audio_vote_does_not_wait_for_a_cold_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from timbal.server.voice import build_voice_session
+
+        monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key")
+        session, _ = build_voice_session(_agent(), VoiceConfig(predict_during_speech=True), {})
+        session._predict_audio_model_loaded = False
+        session._push_predict_pcm(b"\x01\x00" * 8000)
+        started = time.monotonic()
+        assert await session._audio_vote() is None
+        assert time.monotonic() - started < 0.05
 
     async def test_scribe_keeps_the_local_endpointer_and_confirms_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from timbal.server.voice import build_voice_session

@@ -102,6 +102,7 @@ from .turn_detection import (
     TurnState,
     _is_same_user_utterance_refinement,
     _likely_stt_echo,
+    _normalize_echo,
     resolve_turn_detector,
 )
 
@@ -390,6 +391,7 @@ class VoiceSession:
         self._predict_pcm_bytes = 0
         self._predict_audio_model: Any = None
         self._predict_audio_model_loaded = False
+        self._predict_audio_load_task: asyncio.Task[None] | None = None
         self._endpointer: VadEndpointer | None = None
         # Whether Silero's speech history may be used as *evidence* about the
         # user (barge-in vetoes, hold extension), as opposed to merely driving
@@ -1223,6 +1225,11 @@ class VoiceSession:
         spec = self._vad_endpointing
         if self._predict_during_speech and self._eou_predictor is None:
             self._eou_predictor = self._build_eou_predictor()
+            # Flux has no audio detector. Load Smart Turn off the STT reader so
+            # the first EagerEndOfTurn does not stall TurnResumed / EndOfTurn
+            # behind the checkpoint load.
+            if getattr(self.turn_detector, "audio_eou", None) is None and self._predict_audio_load_task is None:
+                self._predict_audio_load_task = asyncio.create_task(self._preload_predict_audio())
         if spec is False:
             return
         explicit = spec is not None
@@ -1667,30 +1674,41 @@ class VoiceSession:
             dropped = self._predict_pcm.popleft()
             self._predict_pcm_bytes -= len(dropped)
 
-    def _lazy_predict_audio_model(self) -> Any:
-        if self._predict_audio_model_loaded:
-            return self._predict_audio_model
-        self._predict_audio_model_loaded = True
-        from .turn_detection import _default_audio_eou
+    async def _preload_predict_audio(self) -> None:
+        """Load Smart Turn before the first Flux eager event. Never raises."""
+        try:
+            from .turn_detection import _default_audio_eou
 
-        self._predict_audio_model = _default_audio_eou()
-        return self._predict_audio_model
+            model = _default_audio_eou()
+            if model is not None:
+                await model.start(sample_rate=int(self.audio_input.sample_rate or 16_000))
+            self._predict_audio_model = model
+        except Exception as exc:
+            logger.warning("predictive_audio_preload_failed", error=str(exc))
+            self._predict_audio_model = None
+        finally:
+            self._predict_audio_model_loaded = True
 
     async def _audio_vote(self) -> float | None:
         """Smart Turn ``P(complete)`` if a model and enough audio exist.
 
-        ``None`` means no vote (missing model or too little audio), not
-        "incomplete". A float below 0.5 holds an early Flux commit.
+        ``None`` means no vote (missing model, still loading, or too little
+        audio), not "incomplete". A float below 0.5 holds an early Flux commit.
+        A cold load is never awaited here: that would stall the STT reader.
         """
         detector = self.turn_detector
         score = getattr(detector, "score_recent_audio", None)
         if callable(score) and getattr(detector, "audio_eou", None) is not None:
             try:
-                return await score()
+                return await asyncio.wait_for(score(), 0.25)
+            except TimeoutError:
+                return None
             except Exception as exc:
                 logger.warning("predictive_audio_vote_failed", error=str(exc))
                 return None
-        model = self._lazy_predict_audio_model()
+        if not self._predict_audio_model_loaded:
+            return None
+        model = self._predict_audio_model
         if model is None or not self._predict_pcm:
             return None
         pcm = b"".join(self._predict_pcm)
@@ -1698,7 +1716,9 @@ class VoiceSession:
         if len(pcm) < rate:
             return None
         try:
-            return await model.predict_complete(pcm, sample_rate=rate)
+            return await asyncio.wait_for(model.predict_complete(pcm, sample_rate=rate), 0.25)
+        except TimeoutError:
+            return None
         except Exception as exc:
             logger.warning("predictive_audio_vote_failed", error=str(exc))
             return None
@@ -1714,9 +1734,9 @@ class VoiceSession:
     async def _cancel_unconfirmed_eager(self) -> None:
         """``TurnResumed``: the early turn was wrong. Stop it.
 
-        Drop the speculative user line when the assistant never answered it.
-        Leaving it in the transcript makes the real ``EndOfTurn`` look like a
-        late duplicate of a turn that was cancelled.
+        Drop the speculative user line when the assistant never answered it,
+        tell the client to retract that bubble, and remove it from the run
+        memory so the next turn does not answer a cancelled utterance.
         """
         text = self._eager_unconfirmed
         if not text:
@@ -1724,6 +1744,7 @@ class VoiceSession:
         self._eager_unconfirmed = None
         logger.info("flux_eager_cancelled")
         await self.interrupt()
+        retracted = False
         if (
             self._transcript
             and self._transcript[-1].role == "user"
@@ -1731,6 +1752,10 @@ class VoiceSession:
             and not self._active_turn_user_text
         ):
             self._transcript.pop()
+            retracted = True
+        if retracted:
+            await self._emit(TranscriptCommitted(text="", replace=True))
+        await self._align_continue_memory(fragment_user_text=text)
 
     async def _handle_provider_prediction(self, event: TranscriptEvent) -> None:
         """Flux ``EagerEndOfTurn`` / ``TurnResumed``.
@@ -1766,7 +1791,6 @@ class VoiceSession:
                 text_preview=text[:80],
             )
             return
-        self._eager_unconfirmed = text
         self._eager_commit = True
         try:
             logger.info(
@@ -1778,11 +1802,20 @@ class VoiceSession:
             await self._handle_committed(text)
         finally:
             self._eager_commit = False
+        # Only an accepted turn (not IGNORE / echo / hesitation) may suppress
+        # the later EndOfTurn. Set this after the detector decides.
+        if self._active_turn_user_text == text or self._held_user_text == text:
+            self._eager_unconfirmed = text
 
     async def _handle_provider_commit(self, text: str) -> None:
-        """``EndOfTurn`` / any committed transcript, confirming an eager turn."""
+        """``EndOfTurn`` / any committed transcript, confirming an eager turn.
+
+        Confirmation is an exact match of a turn that was actually accepted.
+        A longer final transcript cancels the short eager turn and starts
+        again, so an ignored or unfinished eager pass cannot swallow it.
+        """
         pending = self._eager_unconfirmed
-        if pending and _is_same_user_utterance_refinement(pending, text):
+        if pending and _normalize_echo(pending) == _normalize_echo(text):
             self._eager_unconfirmed = None
             logger.info("flux_eager_confirmed", text_preview=text[:80])
             return
@@ -4872,6 +4905,9 @@ class VoiceSession:
         if self._endpointer is not None:
             await self._endpointer.close()
             self._endpointer = None
+        if self._predict_audio_load_task is not None and not self._predict_audio_load_task.done():
+            self._predict_audio_load_task.cancel()
+        self._predict_audio_load_task = None
         if self._eou_predictor is not None:
             await self._eou_predictor.close()
             self._eou_predictor = None
