@@ -78,6 +78,25 @@ class TestToolCreation:
         # Should work with explicit name
         tool = Tool(name="add_ten", handler=partial_add)
         assert tool.name == "add_ten"
+
+    def test_interruption_mode_defaults_to_allow_and_round_trips(self):
+        """Voice barge-in policy is part of the tool definition."""
+        from pydantic import ValidationError
+
+        def confirm_payment(order_id: str) -> str:
+            """Confirm a payment."""
+            return order_id
+
+        plain = Tool(handler=confirm_payment)
+        assert plain.interruption_mode == "allow"
+        assert plain.get_config()["interruption_mode"]["value"] == "allow"
+
+        protected = Tool(handler=confirm_payment, interruption_mode="disable_during_tool_and_turn")
+        assert protected.interruption_mode == "disable_during_tool_and_turn"
+        assert protected.get_config()["interruption_mode"]["value"] == "disable_during_tool_and_turn"
+
+        with pytest.raises(ValidationError):
+            Tool(handler=confirm_payment, interruption_mode="never")
     
     def test_runnable_handler_rejected(self):
         """Test that Runnable instances cannot be used as handlers."""

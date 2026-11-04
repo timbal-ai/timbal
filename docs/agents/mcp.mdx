@@ -121,6 +121,8 @@ MCP tool results are converted so the LLM always receives something useful:
 
 ## Approval from Annotations
 
+`interruption_mode` on the server is copied onto every tool it exposes (`allow` by default). Set `disable_during_tool` or `disable_during_tool_and_turn` when a voice caller should not barge in through those tools. See [Keep a tool from being cut off](/voice/tools#keep-a-tool-from-being-cut-off).
+
 MCP tools carry [`ToolAnnotations`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) such as `readOnlyHint` and `destructiveHint`. `approval=` turns them into a client-side gate that runs through Timbal's normal approval flow — a server cannot skip it:
 
 ```python

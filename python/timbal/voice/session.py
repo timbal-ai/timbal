@@ -9,6 +9,13 @@ keeping VoiceSession provider-agnostic.
 
 Interruption policy:
     User barge-in cancels both TTS playback and the current agent turn.
+    A tool may opt out with ``interruption_mode`` (ElevenLabs Agents:
+    allow / disable_during_tool / disable_during_tool_and_turn; the strictest
+    mode in a parallel batch wins). While barge-in is suppressed the caller
+    is still transcribed, and those words open the next turn — LiveKit's
+    ``allow_interruptions=False`` with ``discard_audio_if_uninterruptible=False``
+    (Apache-2.0), not a dropped buffer. System interrupts (session close, an
+    ``announce="interrupt"`` event) still cut the turn.
     Background tasks (run_in_background) are NOT cancelled — the agent
     decides their lifecycle via get_background_task or explicit cancellation.
 
@@ -110,6 +117,14 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger("timbal.voice.session")
 
+# ElevenLabs tool interruption modes. Higher rank wins inside one parallel batch.
+_INTERRUPTION_RANK = {
+    "allow": 0,
+    "disable_during_tool": 1,
+    "disable_during_tool_and_turn": 2,
+}
+_PAUSE_OUTPUT_REASONS = frozenset({"approval_required", "input_required"})
+
 # Platform session-id contract (see server/recording_upload.py): the id is a
 # file stem and a URL path segment, so no separators and a bounded length.
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -198,7 +213,7 @@ def _strip_markdown(text: str, *, previous_text: str = "") -> str:
     # A punctuation-only segment may already have been sent to TTS when the
     # number arrives. Carry enough raw context to recognize that boundary.
     prefix = previous_text[-2:]
-    text = _LEAKED_DIGITS.sub(r"\1", prefix + text)[len(prefix):]
+    text = _LEAKED_DIGITS.sub(r"\1", prefix + text)[len(prefix) :]
     text = _MD_BOLD.sub(r"\1", text)
     text = _MD_HEADER.sub("", text)
     text = _MD_NUMBERED_LIST.sub("", text)
@@ -439,7 +454,9 @@ class VoiceSession:
         # once the agent has drained, at most ``max_count`` times, and ends the
         # session after ``hangup_after_secs`` without a word from the user.
         self.user_idle: UserIdleConfig | None = (
-            user_idle if isinstance(user_idle, UserIdleConfig) or user_idle is None else UserIdleConfig.model_validate(user_idle)
+            user_idle
+            if isinstance(user_idle, UserIdleConfig) or user_idle is None
+            else UserIdleConfig.model_validate(user_idle)
         )
         self._idle_agent: Agent | None = None
         self._idle_task: asyncio.Task[None] | None = None
@@ -598,6 +615,20 @@ class VoiceSession:
         # barge-in in that window must truncate the already-committed entry.
         self._turn_finalized_ok = False
 
+        # Per-tool barge-in (see ``_interruptions_suppressed``). Reset each turn.
+        self._turn_tool_call_ids: set[str] = set()
+        self._turn_open_tools: dict[str, int] = {}
+        self._turn_unmatched_arms: dict[str, int] = {}
+        self._turn_tool_batch_inflight = 0
+        self._turn_tool_batch_mode = "allow"
+        # Latched once a disable_during_tool_and_turn tool finishes, until this
+        # turn's playback ends. Not latched on an approval / ask_user pause.
+        self._turn_uninterruptible_reply = False
+        # Caller speech accepted while barge-in was suppressed. Opens the next
+        # turn once the protected tool and (if latched) its reply have played.
+        self._deferred_user_text = ""
+        self._deferred_turn_task: asyncio.Task[None] | None = None
+
         # -- Session recording --------------------------------------------------
         self._transcript: list[TranscriptEntry] = []
         self._record_audio = record_audio
@@ -702,7 +733,8 @@ class VoiceSession:
         A runnable that implements ``answer_interaction`` can bind the
         value to the exact parked id; otherwise the text is the utterance.
 
-        Returns whether a turn was started.
+        Returns whether the text was accepted. A turn starts immediately, or the
+        words are kept for the next turn when a tool is blocking barge-in.
         """
         text = (text or "").strip()
         if self._closed or not text:
@@ -721,9 +753,14 @@ class VoiceSession:
             self._cancel_hold()
             self._held_user_text = None
             self._hold_armed_timeout_secs = None
+            if self._interruptions_suppressed():
+                # A tap during a protected tool is caller speech, not a forced cut.
+                self._defer_user_speech(text)
+                return True
             # Cutting the reply finishes the call's turn: hold the session until the caller's starts.
             with self._scheduler.holding():
                 await self.interrupt()
+                text = self._take_deferred_prefix(text)
                 if self._closed:
                     return False
                 self._cancel_turn.clear()
@@ -1050,9 +1087,7 @@ class VoiceSession:
                 # unheard tail of this turn never reaches the file. The recorder
                 # clamps to its queue, so an estimate that lags the drain only
                 # over-keeps a fraction of a second.
-                self._recorder.drop_agent_tail(
-                    max(0, self._turn_audio_bytes - self._turn_heard_bytes)
-                )
+                self._recorder.drop_agent_tail(max(0, self._turn_audio_bytes - self._turn_heard_bytes))
         # Same rule as the reply's post-completion rewrite below: a real barge-in
         # rewrites what was left unheard, ``close()`` leaves the transcript alone.
         if was_active and truncate_completed and self._greeting_record is not None:
@@ -1139,6 +1174,11 @@ class VoiceSession:
         self._closed = True
         self._cancel_hold()
         self._held_user_text = None
+        # Words captured while barge-in was off must survive a hang-up. The
+        # carried turn will not start; the transcript is the record of them.
+        self._keep_deferred_transcript()
+        if self._deferred_turn_task is not None and not self._deferred_turn_task.done():
+            self._deferred_turn_task.cancel()
         self._stop_event_watch()
         self._stop_end_call()
         # A non-interruptible opener is deliberately outside ``_tts_tasks``, so
@@ -1618,16 +1658,27 @@ class VoiceSession:
                     else:
                         await self._emit(TranscriptPartial(text=text))
                     if decision is PartialDecision.BARGE_IN:
-                        # INFO on purpose: a barge-in cancels TTS and truncates the
-                        # committed reply — when debugging "the agent went silent /
-                        # the reply vanished", this is the first thing to look for.
-                        logger.info(
-                            "stt_partial_barge_in",
-                            text_preview=text[:80],
-                            assistant_chars=len(self._turn_assistant_text),
-                            audio_playing=self._assistant_audio_playing,
-                        )
-                        await self.interrupt()
+                        if self._interruptions_suppressed():
+                            # Keep the caption. The commit, not this partial, is what
+                            # opens the next turn — same as LiveKit keeping the
+                            # transcript while allow_interruptions is false.
+                            logger.info(
+                                "stt_partial_barge_in_suppressed",
+                                text_preview=text[:80],
+                                interruption_mode=self._active_interruption_mode(),
+                                **_trace_debug_fields(),
+                            )
+                        else:
+                            # INFO on purpose: a barge-in cancels TTS and truncates the
+                            # committed reply — when debugging "the agent went silent /
+                            # the reply vanished", this is the first thing to look for.
+                            logger.info(
+                                "stt_partial_barge_in",
+                                text_preview=text[:80],
+                                assistant_chars=len(self._turn_assistant_text),
+                                audio_playing=self._assistant_audio_playing,
+                            )
+                            await self.interrupt()
                 elif event.type == "committed" and event.text.strip():
                     await self._handle_committed(event.text.strip())
         except asyncio.CancelledError:
@@ -1773,12 +1824,17 @@ class VoiceSession:
                     timeout_secs=timeout_secs,
                     **_trace_debug_fields(),
                 )
+                if self._interruptions_suppressed():
+                    # The fragment is real speech. Do not cut the protected tool
+                    # or the uninterruptible reply to deliver it.
+                    self._defer_user_speech(held)
+                    return
                 with self._scheduler.holding():
                     await self.interrupt()
                     if self._closed:
                         return
                     self._cancel_turn.clear()
-                    await self._begin_user_turn(held, replace_user_entry=False)
+                    await self._begin_user_turn(self._take_deferred_prefix(held), replace_user_entry=False)
 
         self._hold_task = asyncio.create_task(_expire())
         logger.info(
@@ -1824,6 +1880,221 @@ class VoiceSession:
             text_preview=final_text[:120],
             **_trace_debug_fields(),
         )
+
+    def _reset_tool_interruption(self) -> None:
+        """Clear this turn's barge-in latch. Carried caller speech stays."""
+        self._turn_tool_call_ids = set()
+        self._turn_open_tools = {}
+        self._turn_unmatched_arms = {}
+        self._turn_tool_batch_inflight = 0
+        self._turn_tool_batch_mode = "allow"
+        self._turn_uninterruptible_reply = False
+
+    def _tool_interruption_mode(self, name: str) -> str:
+        """``allow`` unless this iteration's resolved tools say otherwise."""
+        modes = getattr(self.agent, "_tool_interruption_modes", None)
+        mode = modes.get(name) if isinstance(modes, dict) else None
+        if mode not in _INTERRUPTION_RANK:
+            mode = None
+            for tool in getattr(self.agent, "tools", None) or []:
+                if getattr(tool, "name", None) == name:
+                    candidate = getattr(tool, "interruption_mode", "allow")
+                    if candidate in _INTERRUPTION_RANK:
+                        mode = candidate
+                    break
+        return mode or "allow"
+
+    def _direct_tool_name(self, path: str) -> str | None:
+        """Tool name for a direct child of the session agent, else None.
+
+        Nested runnables (an agent used as a tool, its own LLM) keep their
+        events off this counter. The outer tool's start and output are the
+        window that matters.
+        """
+        agent_path = getattr(self.agent, "_path", None)
+        if not isinstance(agent_path, str) or not isinstance(path, str):
+            return None
+        prefix = agent_path + "."
+        if not path.startswith(prefix):
+            return None
+        rest = path[len(prefix) :]
+        if not rest or "." in rest or rest == "llm":
+            return None
+        return rest
+
+    def _note_tool_call(self, name: str, call_id: str) -> None:
+        """Count one LLM tool call toward this turn's parallel batch.
+
+        Called when the call is announced, before the tool starts, so a barge-in
+        in that gap cannot cancel a tool that opted out. ``call_id`` dedupes a
+        streaming ``ToolUse`` delta and the same call on the output message.
+        """
+        if not name or not call_id or call_id in self._turn_tool_call_ids:
+            return
+        self._turn_tool_call_ids.add(call_id)
+        self._turn_unmatched_arms[name] = self._turn_unmatched_arms.get(name, 0) + 1
+        self._arm_tool_batch(name)
+
+    def _note_tool_start(self, path: str, call_id: str) -> None:
+        """Count a tool execution that had no preceding tool-call announcement.
+
+        Resumed approvals and ``/command`` runs start here. A start that belongs
+        to a call already armed via :meth:`_note_tool_call` is not counted twice.
+        """
+        name = self._direct_tool_name(path)
+        if name is None or not call_id:
+            return
+        key = f"start:{call_id}"
+        if key in self._turn_tool_call_ids:
+            return
+        self._turn_tool_call_ids.add(key)
+        pending = self._turn_unmatched_arms.get(name, 0)
+        if pending > 0:
+            if pending == 1:
+                self._turn_unmatched_arms.pop(name, None)
+            else:
+                self._turn_unmatched_arms[name] = pending - 1
+            return
+        self._arm_tool_batch(name)
+
+    def _arm_tool_batch(self, name: str) -> None:
+        mode = self._tool_interruption_mode(name)
+        self._turn_open_tools[name] = self._turn_open_tools.get(name, 0) + 1
+        self._turn_tool_batch_inflight += 1
+        if _INTERRUPTION_RANK[mode] > _INTERRUPTION_RANK[self._turn_tool_batch_mode]:
+            self._turn_tool_batch_mode = mode
+
+    def _note_tool_output(self, path: str, *, paused: bool) -> None:
+        """One direct tool finished. A non-pause ``disable_during_tool_and_turn`` latches the reply."""
+        name = self._direct_tool_name(path)
+        if name is None:
+            return
+        open_count = self._turn_open_tools.get(name, 0)
+        if open_count <= 0:
+            return
+        if open_count == 1:
+            self._turn_open_tools.pop(name, None)
+        else:
+            self._turn_open_tools[name] = open_count - 1
+        self._turn_tool_batch_inflight = max(0, self._turn_tool_batch_inflight - 1)
+        if self._tool_interruption_mode(name) == "disable_during_tool_and_turn" and not paused:
+            self._turn_uninterruptible_reply = True
+        if self._turn_tool_batch_inflight == 0:
+            self._turn_tool_batch_mode = "allow"
+
+    def _active_interruption_mode(self) -> str:
+        if self._turn_tool_batch_inflight > 0 and self._turn_tool_batch_mode != "allow":
+            return self._turn_tool_batch_mode
+        if self._turn_uninterruptible_reply:
+            return "disable_during_tool_and_turn"
+        return "allow"
+
+    def _interruptions_suppressed(self) -> bool:
+        """Caller barge-in must not cut the current tool or its protected reply.
+
+        System interrupts (``close``, ``announce="interrupt"``) do not consult this.
+        """
+        if self._turn_tool_batch_inflight > 0 and self._turn_tool_batch_mode != "allow":
+            return True
+        # The reply after disable_during_tool_and_turn, including audio still
+        # queued after the turn task has finished generating it.
+        return self._turn_uninterruptible_reply and (self._is_speaking or self.playback.is_playing)
+
+    def _carried_commit_text(self, raw: str, decided: str) -> str:
+        """Words to keep from a commit the detector may have merged into the live prompt."""
+        carried = (decided or raw).strip()
+        active = (self._active_turn_user_text or "").strip()
+        if active and carried.startswith(active):
+            carried = carried[len(active) :].strip(" ,")
+        return carried or raw.strip()
+
+    def _defer_user_speech(self, text: str) -> None:
+        """Remember ``text`` and open a turn with it once barge-in is allowed again."""
+        text = text.strip()
+        if not text or self._closed:
+            return
+        prev = self._deferred_user_text
+        if not prev:
+            self._deferred_user_text = text
+        elif text.startswith(prev) or _is_same_user_utterance_refinement(prev, text):
+            self._deferred_user_text = text if len(text) >= len(prev) else prev
+        else:
+            self._deferred_user_text = f"{prev.rstrip()} {text.lstrip()}"
+        logger.info(
+            "stt_commit_deferred",
+            text_preview=self._deferred_user_text[:160],
+            interruption_mode=self._active_interruption_mode(),
+            **_trace_debug_fields(),
+        )
+        self._schedule_deferred_turn()
+
+    def _take_deferred_prefix(self, text: str) -> str:
+        """Prepend speech captured during a protected window, then clear it."""
+        extra = self._deferred_user_text.strip()
+        if not extra:
+            return text
+        self._deferred_user_text = ""
+        if text.startswith(extra):
+            return text
+        return f"{extra.rstrip()} {text.lstrip()}"
+
+    def _keep_deferred_transcript(self) -> None:
+        """Hang-up: the carried turn will not run, so record the words anyway."""
+        text = self._deferred_user_text.strip()
+        if not text:
+            return
+        self._deferred_user_text = ""
+        if self._transcript and self._transcript[-1].role == "user" and self._transcript[-1].text == text:
+            return
+        self._transcript.append(TranscriptEntry(role="user", text=text))
+
+    def _carried_turn_blocked(self) -> bool:
+        """The protected turn, its playback, or a hold still owns the line."""
+        task = self._current_turn_task
+        if task is not None and not task.done():
+            return True
+        if self._is_speaking or self.playback.is_playing or self._tts_tasks:
+            return True
+        if self._interruptions_suppressed() or self._held_user_text is not None:
+            return True
+        return False
+
+    def _schedule_deferred_turn(self) -> None:
+        if not self._deferred_user_text or self._closed:
+            return
+        task = self._deferred_turn_task
+        if task is not None and not task.done():
+            return
+        self._deferred_turn_task = self._spawn_session_task(self._deferred_turn_loop())
+
+    async def _deferred_turn_loop(self) -> None:
+        """Start one turn from speech that arrived while barge-in was off.
+
+        Waits until the protected tool, the uninterruptible reply, and its
+        playback have finished, so the words follow that reply instead of
+        cutting it. LiveKit appends the user message and skips the reply while
+        ``allow_interruptions`` is false; the next generation is this turn.
+        """
+        try:
+            while not self._closed and self._deferred_user_text:
+                if self._carried_turn_blocked():
+                    await asyncio.sleep(0.02)
+                    continue
+                async with self._user_turn_lock:
+                    if self._closed or not self._deferred_user_text or self._carried_turn_blocked():
+                        if self._closed or not self._deferred_user_text:
+                            return
+                        continue
+                    text = self._deferred_user_text
+                    self._deferred_user_text = ""
+                    self._cancel_hold()
+                    self._held_user_text = None
+                    self._hold_armed_timeout_secs = None
+                    self._cancel_turn.clear()
+                    await self._begin_user_turn(text, replace_user_entry=False)
+                return
+        except asyncio.CancelledError:
+            return
 
     def _measure_stt_latency(self, transcript_at: float) -> tuple[float, str] | None:
         """The user's ASR wait: last speech → this committed transcript, in ms.
@@ -1973,7 +2244,15 @@ class VoiceSession:
             # deferred fragment (echo-ish "Hello, hello." mid-TTS was wiping
             # greetings). Partials that meant barge-in already interrupted.
             # NEW_TURN / hold expiry / CONTINUE interrupt when the turn starts.
-            if self._assistant_audio_playing:
+            # A protected tool is the same: arm the hold, never cancel the call.
+            if self._interruptions_suppressed():
+                logger.info(
+                    "stt_hold_deferred",
+                    text_preview=final_text[:80],
+                    reason=decision.reason,
+                    interruption_mode=self._active_interruption_mode(),
+                )
+            elif self._assistant_audio_playing:
                 logger.info(
                     "stt_hold_defer_during_tts",
                     text_preview=final_text[:80],
@@ -1987,6 +2266,19 @@ class VoiceSession:
             await self._arm_hold(final_text, timeout)
             return
 
+        # A protected tool or uninterruptible reply keeps this utterance for the
+        # next turn. The detector may have glued it onto the in-flight prompt
+        # (CONTINUE_TURN); that prompt already has a turn, so only the new words
+        # are carried.
+        if self._interruptions_suppressed():
+            # The detector already folded a pending hold into ``final_text`` when
+            # it superseded one. Drop the hold itself so it cannot block the
+            # carried turn (its timer was cancelled at the top of this method).
+            self._held_user_text = None
+            self._hold_armed_timeout_secs = None
+            self._defer_user_speech(self._carried_commit_text(text, final_text))
+            return
+
         # A real accept cancels any pending HOLD, then interrupts so truncation
         # can append a heard assistant fragment *before* we rewrite the user
         # entry (CONTINUE_TURN must see that fragment to pop it).
@@ -1996,6 +2288,9 @@ class VoiceSession:
             self._cancel_hold()
             self._held_user_text = None
             self._hold_armed_timeout_secs = None
+            # Speech captured while a tool blocked barge-in rides along, so it
+            # is not dropped when the caller later interrupts the reply.
+            final_text = self._take_deferred_prefix(final_text)
             # Cutting the reply finishes the call's turn: hold the session until the caller's starts,
             # or a turn queued behind the cut one slips in (while CONTINUE_TURN rewrites its memory, too).
             with self._scheduler.holding():
@@ -2376,9 +2671,7 @@ class VoiceSession:
         self._turn_memory_baseline = 0
         self._turn_tts_boundary_chars = 0
         self._turn_started_at = time.monotonic()
-        self._turn_deadline = (
-            self._turn_started_at + self.turn_timeout_secs if self.turn_timeout_secs > 0 else None
-        )
+        self._turn_deadline = self._turn_started_at + self.turn_timeout_secs if self.turn_timeout_secs > 0 else None
         self._turn_index += 1
         self._turn_first_token_at = None
         self._turn_first_audio_at = None
@@ -2412,6 +2705,7 @@ class VoiceSession:
         self._turn_tool_seen = asyncio.Event()
         self._turn_tool_seen_at = None
         self._turn_tool_name = None
+        self._reset_tool_interruption()
         own_llm_path = self._own_llm_path()
         agen = None
         # Where we were when cancel / finally ran (loop_exit is only set on break/else/exception;
@@ -2538,9 +2832,7 @@ class VoiceSession:
                         # its live run context. Keep the caller turn's grace period,
                         # spoken phrases, repeat cadence, and remaining budget.
                         arm_think_filler = (
-                            self.filler is not None
-                            and self.filler.enabled
-                            and self.filler.think_delay_secs is not None
+                            self.filler is not None and self.filler.enabled and self.filler.think_delay_secs is not None
                         )
                         retry_kwargs = dict(agent_kwargs)
                         retry_kwargs.pop("prompt", None)
@@ -2571,6 +2863,7 @@ class VoiceSession:
                     self._on_turn_run_started(followup)
 
                 if isinstance(event, StartEvent):
+                    self._note_tool_start(event.path, event.call_id)
                     if event.path == own_llm_path:
                         llm_steps += 1
                         if llm_steps == 1:
@@ -2611,6 +2904,10 @@ class VoiceSession:
                     break
 
                 if isinstance(event, DeltaEvent) and isinstance(event.item, ToolUse) and event.item.name:
+                    # Arm before the emit await so a barge-in cannot land in the
+                    # gap between "the model called the tool" and the tool starting.
+                    if (own_llm_path is None or event.path == own_llm_path) and not event.item.is_server_tool_use:
+                        self._note_tool_call(event.item.name, event.item.id)
                     # Dead air while a tool runs — surface it so the playground
                     # doesn't look hung (live: get_datetime slept 3–5s with no UI).
                     await self._emit(AgentStatus(text=f"Calling {event.item.name}…"))
@@ -2734,6 +3031,8 @@ class VoiceSession:
                         text_buffer = tts_tail[len(flush_text) :]
 
                 elif isinstance(event, OutputEvent):
+                    paused = event.status.code == "cancelled" and event.status.reason in _PAUSE_OUTPUT_REASONS
+                    self._note_tool_output(event.path, paused=paused)
                     # Outer Agent OUTPUT mirrors the LLM message; handling both would
                     # double-run reconcile / optional suffix TTS. A nested agent's
                     # LLM output is skipped for the reason its deltas are.
@@ -2807,6 +3106,9 @@ class VoiceSession:
                             # above so spoken text this turn suppresses it.
                             # Also the backup UI status when there was no
                             # ToolUse delta.
+                            for block in out.content:
+                                if isinstance(block, ToolUseContent) and block.name and not block.is_server_tool_use:
+                                    self._note_tool_call(block.name, block.id)
                             for block in out.content:
                                 if isinstance(block, ToolUseContent) and block.name:
                                     await self._emit(AgentStatus(text=f"Calling {block.name}…"))
@@ -3339,9 +3641,7 @@ class VoiceSession:
         self._turn_filler_text = f"{self._turn_filler_text} {phrase}".strip()
         logger.info("filler_speak", phrase=phrase, tool=tool_name, **_trace_debug_fields())
         await self._speak(phrase, filler=True)
-        if self._cancel_turn.is_set() or (
-            (task := asyncio.current_task()) is not None and task.cancelling()
-        ):
+        if self._cancel_turn.is_set() or ((task := asyncio.current_task()) is not None and task.cancelling()):
             return
         # Everything below commits only after synthesis finishes: a turn
         # cancelled mid-speak must not count a filler that never reached the
@@ -3757,7 +4057,9 @@ class VoiceSession:
                 tracing_provider=None,
             )
         recent = " / ".join(e.text for e in self._transcript[-4:] if e.text)[-600:]
-        prompt = f"Conversation so far: {recent}\n\nThe user has gone quiet. Say your line." if recent else "Say your line."
+        prompt = (
+            f"Conversation so far: {recent}\n\nThe user has gone quiet. Say your line." if recent else "Say your line."
+        )
         ambient_ctx = get_run_context()
         set_run_context(None)
         try:
@@ -3973,11 +4275,7 @@ class VoiceSession:
         instructions = (self.greeting.instructions or "").strip()
         if not instructions:
             return None
-        parts = [
-            p
-            for p in (await self._agent_system_prompt(), DEFAULT_GREETING_SYSTEM_PROMPT, instructions)
-            if p
-        ]
+        parts = [p for p in (await self._agent_system_prompt(), DEFAULT_GREETING_SYSTEM_PROMPT, instructions) if p]
         # Kept on the session (like ``_filler_agent``) so the assembled prompt is
         # readable after the fact — it is the whole configuration surface of a
         # generated opener, and it runs exactly once per call.
@@ -4247,8 +4545,13 @@ class VoiceSession:
                 pass
 
     async def _speak(
-        self, text: str, *, filler: bool = False, greeting: bool = False,
-        idle: bool = False, previous_text: str = "",
+        self,
+        text: str,
+        *,
+        filler: bool = False,
+        greeting: bool = False,
+        idle: bool = False,
+        previous_text: str = "",
     ) -> None:
         """Synthesize ``text`` and emit its audio.
 
@@ -4472,7 +4775,7 @@ class VoiceSession:
                 not remaining_completed or remaining_completed[-1][1] != self._turn_iteration_prefix
             ):
                 prefix = self._turn_iteration_prefix
-                iteration_text = self._turn_assistant_text[len(prefix):]
+                iteration_text = self._turn_assistant_text[len(prefix) :]
                 if not iteration_text or not (text.startswith(iteration_text) or iteration_text.startswith(text)):
                     continue
             else:
@@ -4490,12 +4793,14 @@ class VoiceSession:
             spoken_text = _strip_markdown(text).strip()
             remaining = heard_text
             if spoken_prefix:
-                remaining = heard_text[len(spoken_prefix):].lstrip() if heard_text.startswith(spoken_prefix) else ""
-            heard_iteration = remaining[:len(spoken_text)].rstrip()
+                remaining = heard_text[len(spoken_prefix) :].lstrip() if heard_text.startswith(spoken_prefix) else ""
+            heard_iteration = remaining[: len(spoken_text)].rstrip()
             non_text = [c for c in message.content if not isinstance(c, TextContent)]
             content = [TextContent(text=heard_iteration), *non_text] if heard_iteration else non_text
             heard_reply = Message(
-                role="assistant", content=content, stop_reason=message.stop_reason,
+                role="assistant",
+                content=content,
+                stop_reason=message.stop_reason,
                 metadata={**message.metadata, "interrupted": True},
             )
             # Leave the LLM span's original Message intact for observability.
@@ -4504,7 +4809,9 @@ class VoiceSession:
             else:
                 root.memory.pop(index)
             output = root.output
-            if isinstance(output, Message) and (output is message or (index == last_index and output.collect_text() == text)):
+            if isinstance(output, Message) and (
+                output is message or (index == last_index and output.collect_text() == text)
+            ):
                 root.output = heard_reply
             rewritten = True
         return rewritten
@@ -4644,6 +4951,9 @@ class VoiceSession:
         if self._llm_warmup_task is not None and not self._llm_warmup_task.done():
             self._llm_warmup_task.cancel()
         self._llm_warmup_task = None
+        if self._deferred_turn_task is not None and not self._deferred_turn_task.done():
+            self._deferred_turn_task.cancel()
+        self._deferred_turn_task = None
         # The flow may be sleeping out ``delay_ms`` or waiting on a generation;
         # its speak task is cancelled with the rest of ``_tts_tasks`` below.
         if self._greeting_task is not None and not self._greeting_task.done():
