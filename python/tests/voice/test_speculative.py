@@ -495,6 +495,31 @@ class TestSpeculativeSession:
         assert session._scheduler.head != discarded
         assert model.call_count >= 2
 
+    async def test_cancel_before_start_does_not_mark_the_next_turn_discarded(self) -> None:
+        session, stt, _tts, model = _session(["After."])
+        original = session._spawn_session_task
+
+        def _cancel_speculative(coro, *, name: str | None = None):
+            task = original(coro, name=name)
+            if name == "speculative-turn":
+                task.cancel()
+            return task
+
+        session._spawn_session_task = _cancel_speculative
+        async with _Drive(session, stt):
+            prior = session._scheduler.head
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await stt.inject(TranscriptEvent(type="resumed", text=""))
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            assert session._drop_speculative_context is False
+            await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
+            await _until(lambda: session._scheduler.head not in (None, prior) and model.call_count >= 1)
+            real = session._scheduler.head
+            assert session._speculative_discarded_run_id != real
+            await session.interrupt()
+            assert session._scheduler.head == real
+
     async def test_confirm_appends_when_the_caller_repeats_the_previous_line(self) -> None:
         session, stt, _tts, model = _session(["First.", "Second."])
 

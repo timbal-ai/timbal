@@ -2095,10 +2095,16 @@ class VoiceSession:
         self._rewind_discarded_speculative_head()
 
     def _rewind_discarded_speculative_head(self) -> None:
-        """Drop a discarded speculative run that reclaimed ``scheduler.head``."""
+        """Drop a discarded speculative run that reclaimed ``scheduler.head``.
+
+        Also clears the discard flag. A task cancelled before its first step
+        never runs ``_run_turn``'s finally, and the next turn must not inherit
+        that flag or be recorded as the discarded run.
+        """
         run_id = self._speculative_discarded_run_id
         if run_id is not None and self._scheduler.head == run_id:
             self._scheduler.head = self._speculative_prior_head
+        self._drop_speculative_context = False
 
     async def _confirm_speculative(self, final_text: str, *, vad_endpointed: bool) -> None:
         """The committed transcript matches the attempt. Release its audio."""
@@ -2514,10 +2520,6 @@ class VoiceSession:
         # Before the run resumes: its session admission check must see it as the call's own.
         self._scheduler.mark_own(ctx)
         self._scheduler.note_run(ctx.id)
-        # Abandon may already have rewound the head. Remember this run so the
-        # turn finally can take it back off without touching a newer one.
-        if self._drop_speculative_context:
-            self._speculative_discarded_run_id = ctx.id
         if ctx._bg_store is None:
             previous = self._last_run_context._bg_store if self._last_run_context is not None else None
             store = previous or self._unbound_store
