@@ -1680,11 +1680,10 @@ class VoiceSession:
                         )
                         await self.interrupt()
                 elif event.type in ("eager", "resumed"):
-                    # Speculative generation owns these events when it is on:
-                    # the model starts, audio stays held. During-speech
-                    # prediction (``_handle_provider_prediction``) uses the same
-                    # events only when speculation is off, so the two do not
-                    # each start a turn.
+                    # Speculative generation owns these events when it is on.
+                    # The getattr below is a no-op until another feature sets
+                    # ``_predict_during_speech`` and ``_handle_provider_prediction``.
+                    # It does not read VoiceConfig, so this branch stands alone.
                     if self.speculative_generation.enabled:
                         if event.type == "eager" and event.text.strip():
                             await self._maybe_start_speculative(event.text.strip(), source="eager_eot")

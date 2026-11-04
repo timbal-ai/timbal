@@ -10,8 +10,8 @@ Two triggers, both opt-in via :class:`SpeculativeGeneration`:
 * Deepgram Flux ``EagerEndOfTurn``. ``TurnResumed`` cancels the attempt.
   Flux only emits those events when ``eager_eot_threshold`` is on the
   connection. The server sets it with
-  :func:`timbal.voice.predictive_eou.flux_eager_threshold` (the same helper
-  during-speech prediction uses). An explicit ``stt_extra`` value wins.
+  :func:`timbal.voice.predictive_eou.flux_eager_threshold`: no 0.3 floor,
+  strictly below ``eot_threshold``, and an explicit value lowered the same way.
 
 Transcript reuse follows LiveKit Agents' ``_transcripts_equivalent``
 (Apache-2.0, ``livekit/agents`` ``agent_activity.py``): exact match, otherwise

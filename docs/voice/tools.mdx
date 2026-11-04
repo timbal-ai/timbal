@@ -206,7 +206,7 @@ agent = Agent(
 `session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply:
 
 ```python agent.py
-from timbal import Tool
+from timbal import Agent, Tool
 from timbal.voice import current_voice_session
 
 
@@ -220,6 +220,12 @@ async def end_call() -> str:
 
 
 end_call_tool = Tool(handler=end_call, defer_until_eot=True)
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Say a short goodbye, then end the call when the caller is done.",
+    tools=[end_call_tool],
+)
 ```
 
 The session waits for the turn to finish and its audio to play, then closes itself, as `session.close()` does. Some models call the tool before writing the goodbye, so the tool's result asks for one; the goodbye then comes from a second model call in the same turn, and the session still waits for it. If the caller says something first, the call stays up. If the goodbye never finishes playing, the call ends after 20 seconds anyway. Calling it again changes nothing.

@@ -69,7 +69,7 @@ agent = Agent(
 
 Nothing is played until the turn is confirmed. A caller who keeps talking, or a Flux `TurnResumed`, drops the attempt and its audio. If the confirmed transcript is not the same words (case and punctuation aside), the attempt is dropped and the reply starts over on the final text. A matching transcript is reused, including when only capitalization or punctuation changed.
 
-Flux `EagerEndOfTurn` and `TurnResumed` are the same events `predict_during_speech` uses, and both features share one `eager_eot_threshold` (`stt_extra` wins; otherwise `min(0.5, max(0.3, eot_threshold - 0.1))`). When only prediction is on, an eager event can start a normal turn and `TurnResumed` cancels it. When speculative generation is on, that same eager event starts the held reply instead, so the two settings do not each start a turn. `TurnResumed` discards the held reply. `EndOfTurn` confirms it when the words match, and restarts it when they do not. Prediction on a transcriber that does not emit eager events is unchanged.
+On Flux the server sends `eager_eot_threshold` so `EagerEndOfTurn` and `TurnResumed` are emitted. There is no 0.3 floor. Omitted, the value is `min(0.5, eot_threshold - 0.1)`. An explicit value in `stt_extra` is lowered the same way when it is not already strictly below `eot_threshold`. `TurnResumed` discards the held reply. `EndOfTurn` confirms it when the words match, and restarts it when they do not.
 
 Read-only tools run during that wait. A tool that books, charges, sends, or hangs up should set `defer_until_eot=True` so it does not run until the turn is confirmed; if the attempt is dropped, it never runs. An MCP tool annotated destructive gets that flag whether or not `approval` gates it. See [Using tools](/voice/tools).
 

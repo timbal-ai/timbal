@@ -198,9 +198,10 @@ class TestFluxEagerQuery:
         assert flux_eager_threshold({}) == 0.5
         assert flux_eager_threshold({"eager_eot_threshold": 0.7}) == 0.7
         assert flux_eager_threshold({"eager_eot_threshold": "0.4"}) == 0.4
-        # eot 0.5 would put 0.5 next to itself; eager must stay strictly below.
+        # No 0.3 floor. eager stays strictly below eot, including an explicit value.
         assert flux_eager_threshold({"eot_threshold": 0.5}) == 0.4
-        assert flux_eager_threshold({"eot_threshold": "0.35"}) == 0.3
+        assert flux_eager_threshold({"eot_threshold": "0.35"}) == pytest.approx(0.25)
+        assert flux_eager_threshold({"eot_threshold": 0.8, "eager_eot_threshold": 0.9}) == pytest.approx(0.7)
         assert flux_eager_threshold({"eager_eot_threshold": "nope"}) == 0.5
 
     def test_voice_config_coerces_bool_and_stays_off_the_client_hello(self) -> None:

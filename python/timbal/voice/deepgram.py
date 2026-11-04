@@ -265,15 +265,13 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
       so far, matching how the session treats Scribe partials)
     * ``EndOfTurn`` → ``committed``
     * ``EagerEndOfTurn`` → ``eager`` and ``TurnResumed`` → ``resumed``, with
-      ``end_of_turn_confidence``. Predictions only: they do not commit. The
-      session uses them for speculative generation and, when that is off, for
-      during-speech prediction.
+      ``end_of_turn_confidence``. Predictions only: they do not commit.
 
     Flux emits the eager pair only when ``eager_eot_threshold`` is on the
-    connection. The server sets that from :func:`timbal.voice.predictive_eou.flux_eager_threshold`
-    when either feature is on. An explicit ``stt_extra`` value wins. Deepgram
-    guarantees the ``EndOfTurn`` transcript matches the preceding
-    ``EagerEndOfTurn`` unless ``TurnResumed`` came first.
+    connection. Speculative generation sets that from
+    :func:`timbal.voice.predictive_eou.flux_eager_threshold`, strictly below
+    ``eot_threshold``. Deepgram guarantees the ``EndOfTurn`` transcript matches
+    the preceding ``EagerEndOfTurn`` unless ``TurnResumed`` came first.
 
     ``commit()`` is a no-op: the Flux turn machine owns endpointing, there is
     no client-side force-commit. Run with ``turn_detector="provider"`` and

@@ -317,7 +317,6 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "stt_extra",
     "tts_extra",
     "vad_endpointing",
-    "predict_during_speech",
     "model",
     "tool_beat_secs",
     "turn_timeout_secs",
@@ -1074,17 +1073,10 @@ def build_voice_session(
         # (Flux, Munsit).
         for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
             stt_extra.pop(k, None)
-    # One Flux eager threshold, shared with during-speech prediction.
-    # Explicit stt_extra["eager_eot_threshold"] wins inside flux_eager_threshold.
+    # Speculative generation asks Flux for EagerEndOfTurn. Leave
+    # ``eager_eot_threshold`` alone when another feature already set it, so a
+    # later merge can fill that variable first without a second query value.
     eager_eot_threshold: float | None = None
-    if merged.predict_during_speech is True and stt_native_eou:
-        from ..voice.deepgram import DeepgramFluxSTT
-
-        if isinstance(stt, DeepgramFluxSTT):
-            from ..voice.predictive_eou import flux_eager_threshold
-
-            eager_eot_threshold = flux_eager_threshold(stt_extra)
-            stt_extra["eager_eot_threshold"] = str(eager_eot_threshold)
     if (
         eager_eot_threshold is None
         and merged.speculative_generation.enabled
