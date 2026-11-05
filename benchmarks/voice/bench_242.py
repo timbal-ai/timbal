@@ -50,6 +50,34 @@ RECOMMENDED: dict[str, Any] = {
     "max_tts_pause_secs": 0.2,
 }
 
+# Wave 3. BEFORE is the ship block above. AFTER adds the borrow knobs.
+# Tool hold is not a separate switch: with speculative generation on, #255
+# holds every tool until the turn is confirmed, on both sides.
+BORROWS: dict[str, Any] = {
+    **RECOMMENDED,
+    "hangup_grace_secs": 1.2,
+    "entity_patience": True,
+    "filler": {"enabled": True, "soft_timeout_secs": 0.8, "message": "One moment."},
+}
+
+# The wave-2 failures the borrows target, plus a small sanity set.
+WAVE3_IDS: tuple[str, ...] = (
+    "tools_slow",
+    "tools_two",
+    "hang_es_0_3",
+    "hang_es_0_6",
+    "hang_es_1_0",
+    "dict_phone_es",
+    "dict_name_es",
+    "dict_order_en",
+    "tel_phone_en",
+    "bc_si",
+    "bc_yeah",
+    "bc_mm",
+    "barge_mid_en",
+    "barge_stop",
+)
+
 # Candidate "best". Tempo stays off until a run shows it helps.
 BEST: dict[str, Any] = {
     "ignore_backchannels": True,
@@ -1091,9 +1119,16 @@ async def _run_one(
             state["replies_before_tail"] = len(state["replies"])
             state["commits_before_tail"] = len(state["commits"])
             await asyncio.sleep(spec.silence_tail)
+        if spec.kind == "destructive":
+            # Let a hang-up grace window elapse before we snapshot. Both sides
+            # get the same wait. The ship config closes as soon as the goodbye
+            # is heard; the borrow waits its confirmation window.
+            await asyncio.sleep(2.5)
+        state["hung_up"] = bool(getattr(session, "_closed", False))
         closing.set()
         feeder.stop()
-        await session.close()
+        if not state["hung_up"]:
+            await session.close()
 
     started = time.monotonic()
     async with aclosing(session.run(feeder.stream())) as stream:
@@ -1163,6 +1198,7 @@ async def _run_one(
         "premature_cutoff": state["premature"],
         "tool_calls": log,
         "end_call_calls": len(end_calls),
+        "hung_up": bool(state.get("hung_up")),
         "retractions": len(retractions),
         "speculative_started": int(getattr(session, "speculative_generations_started", 0) or 0),
         "speculative_discarded": discarded,
@@ -1721,11 +1757,77 @@ def _run_wave2(out: Path, flux_reps: int, other_reps: int) -> None:
         worker.wait(timeout=10)
 
 
+def _wave3_jobs(reps: int) -> list[dict[str, Any]]:
+    """Ship config vs ship-plus-borrows, interleaved, unique prompt prefix."""
+    import uuid
+
+    specs = {spec.id: spec for spec in WAVE2}
+    jobs: list[dict[str, Any]] = []
+    for sid in WAVE3_IDS:
+        spec = specs[sid]
+        for rep in range(reps):
+            order = ("before", "after") if rep % 2 == 0 else ("after", "before")
+            for side in order:
+                jobs.append(
+                    {
+                        "scenario": spec.id,
+                        "model": "openai/gpt-5.4-mini",
+                        "stt": "deepgram-flux",
+                        "profile": "ship" if side == "before" else "borrows",
+                        "overrides": RECOMMENDED if side == "before" else BORROWS,
+                        "cache_bust": False,
+                        "side": side,
+                        "rep": rep,
+                        "prompt_nonce": uuid.uuid4().hex,
+                    }
+                )
+    return jobs
+
+
+def _run_wave3(out: Path, reps: int) -> None:
+    """Both sides on this tree. The borrows are config, not a second checkout."""
+    clips = _wave2_clips()
+    jobs = _wave3_jobs(reps)
+    done = {_row_key(row) for row in _load_rows(out)}
+    pending = [job for job in jobs if _row_key(job) not in done]
+    print(f"wave3 {len(pending)} pending of {len(jobs)}", flush=True)
+    for index, job in enumerate(pending, start=1):
+        print(
+            f"[{index}/{len(pending)}] {job['side']} {job['stt']} {job['model']} {job['scenario']} rep {job['rep']}",
+            flush=True,
+        )
+        try:
+            row = _execute_job(job, clips)
+        except Exception as exc:
+            row = {
+                "side": job["side"],
+                "profile": job["profile"],
+                "model": job["model"],
+                "stt": job["stt"],
+                "scenario": job["scenario"],
+                "rep": job["rep"],
+                "errors": [f"{type(exc).__name__}: {exc}"],
+                "metrics": [],
+            }
+            print(f"  ERROR {row['errors'][0]}", flush=True)
+        else:
+            fillers = sum(int((m or {}).get("filler_count") or 0) for m in row.get("metrics") or [])
+            print(
+                f"  silence {row.get('caller_silence_to_first_audio_ms')} "
+                f"prem {row.get('premature_cutoff')} end {row.get('end_call_calls')} "
+                f"hung {row.get('hung_up')} filler {fillers} "
+                f"spec {row.get('speculative_started')}/{row.get('speculative_discarded')} "
+                f"errors {row.get('errors')}",
+                flush=True,
+            )
+        _append(out, row)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Measure #242 voice changes against main")
     parser.add_argument(
         "command",
-        choices=("all", "run", "synth", "summarize", "self-test", "wave2", "worker"),
+        choices=("all", "run", "synth", "summarize", "self-test", "wave2", "wave3", "worker"),
     )
     parser.add_argument("--side", choices=("before", "after"), default="after")
     parser.add_argument("--reps", type=int, default=5)
@@ -1740,6 +1842,10 @@ def main() -> None:
     if args.command == "wave2":
         out = args.out if args.out.name != "runs.jsonl" else OUT_DIR / "runs-wave2.jsonl"
         _run_wave2(out, args.flux_reps, args.other_reps)
+        return
+    if args.command == "wave3":
+        out = args.out if args.out.name != "runs.jsonl" else OUT_DIR / "runs-wave3.jsonl"
+        _run_wave3(out, args.flux_reps)
         return
     if args.command == "self-test":
         _self_test()

@@ -151,7 +151,10 @@ class TestFluxEventMapping:
         stt.eager_suppressed = False
         await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "415 555 1212"))
         assert seen == ["415 555 1212"]
-        assert _drain(stt) == []
+        # The session still sees the prediction. The listener is an extra hook,
+        # not a replacement for the eager event.
+        events = _drain(stt)
+        assert [(e.type, e.text) for e in events] == [("eager", "415 555 1212")]
 
     async def test_configure_turn_clamps_and_nests_thresholds(self) -> None:
         stt = DeepgramFluxSTT()
