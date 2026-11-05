@@ -418,7 +418,8 @@ class VoiceConfig(BaseModel):
     Off by default. While a partial or commit still ends in one of those, the
     session holds the turn for ``entity_patience_secs`` and, on Deepgram Flux,
     ignores eager end-of-turn for that stretch. A word after the entity, a
-    complete email, or the patience window closing resumes normal endpointing.
+    complete email, a trailing ``?`` or ``!``, or the patience window closing
+    resumes normal endpointing.
     """
     entity_patience_secs: float = Field(default=2.5, gt=0.0, le=10.0)
     """Silence budget while an entity is still open. Ignored when
