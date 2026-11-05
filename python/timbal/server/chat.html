@@ -96,6 +96,8 @@
   .card-title { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
 
   .timeline { flex: 1; overflow-y: auto; padding: 1rem 1.1rem 1.5rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  /* A full timeline scrolls; without this, flex shrinks overflow-hidden children (tool cards) to nothing. */
+  .timeline > * { flex-shrink: 0; }
   .empty { margin: auto; text-align: center; color: var(--text-muted); font-size: 0.875rem; line-height: 1.6; max-width: 420px; }
   .empty kbd { font-family: var(--mono); font-size: 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
 
@@ -406,7 +408,7 @@
     card.appendChild(head);
     card.appendChild(body);
     append(card);
-    const entry = { card, state, args, result, resultLabel, name, raw: "" };
+    const entry = { card, state, args, result, resultLabel, name, runId, raw: "" };
     if (toolUseId) S.tools[toolUseId] = entry;
     const key = `${runId}:${name}`;
     (S.toolQueue[key] = S.toolQueue[key] || []).push(entry);
@@ -488,6 +490,13 @@
         if (d.parked) { text = st.reason === "approval_required" ? "waiting for approval" : "waiting for input"; cls = "park"; }
         else if (st.code === "cancelled") { text = st.reason || "cancelled"; cls = "bad"; }
         else if (st.code !== "success") { text = st.reason ? `${st.code} · ${st.reason}` : st.code; cls = "bad"; }
+        // A cut turn leaves its running tools without a final OUTPUT.
+        Object.values(S.toolByCall).forEach((t) => {
+          if (t.runId === d.run_id && t.state.classList.contains("run")) {
+            t.state.className = "state bad";
+            t.state.textContent = st.reason === "interrupted" ? "interrupted" : "not finished";
+          }
+        });
         divider(`end of turn ${turn ? turn.n : "?"}`, text, cls);
         refreshState();
         break;
