@@ -183,6 +183,25 @@ class TestIgnoreBackchannels:
         assert decision.reason == "backchannel", text
         assert await det.on_partial(text, _playing()) is PartialDecision.IGNORE
 
+    @pytest.mark.parametrize("text", ["M.", "Mm.", "mm", "mhm", "mmm", "MHM."])
+    async def test_flux_mm_spellings_are_ignored_when_enabled(self, text: str) -> None:
+        """Flux commits the listener noise "mm" as "M." / "Mm.". Punctuation folds those to "m" / "mm"."""
+        det = self._detector()
+        decision = await det.on_committed(text, _playing())
+        assert decision.action is CommitAction.IGNORE, text
+
+    async def test_flux_m_still_cuts_when_the_filter_is_off(self) -> None:
+        det = ProviderTurnDetector()
+        decision = await det.on_committed("M.", _playing())
+        assert decision.action is CommitAction.NEW_TURN
+        assert decision.reason == "provider"
+
+    @pytest.mark.parametrize("text", ["no", "stop", "yes"])
+    async def test_short_answers_are_not_treated_as_mm(self, text: str) -> None:
+        det = self._detector()
+        decision = await det.on_committed(text, _playing())
+        assert decision.action is CommitAction.NEW_TURN, text
+
     async def test_a_content_word_keeps_the_interruption(self) -> None:
         det = self._detector()
         decision = await det.on_committed("okay stop", _playing())

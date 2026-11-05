@@ -585,10 +585,16 @@ def _looks_like_finished_utterance(text: str) -> bool:
 _BACKCHANNEL_GRACE_SECS = 1.0
 
 # Orthographic variants of the EN/ES acknowledgements. "sí"/"ajá" lose their
-# accent under :func:`_normalize_spoken`. Hesitation tokens ("uh", "mhm") stay
-# out of this set so they keep the existing "hesitation" reason.
+# accent under :func:`_normalize_spoken`. LiveKit's filler filter (agents#4492)
+# treats mm / mhm / hmm-style listener noises as backchannels, not as answers.
+# Flux often commits that sound as "M." or "Mm."; punctuation folds those to
+# "m" and "mm". "no", "yes", and "sí" stay out — they are real short turns.
 _BACKCHANNEL_WORDS = frozenset(
     {
+        "m",
+        "mm",
+        "mmm",
+        "mhm",
         "mhmm",
         "mmhmm",
         "uhhuh",
