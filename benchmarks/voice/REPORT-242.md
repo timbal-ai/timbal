@@ -376,3 +376,83 @@ Not fixed here.
 **#249 prompt cache.** Cold is real when the prefix is unique: hit rate 0 on turn 1, ~96% after that on OpenAI, ~40–49% on Groq. After's cold TTFT on the long call is worse (757 → 1324), not better. One `long_10_en` after run timed out waiting for a reply.
 
 **#250 speculative generation.** 1026 attempts started, 213 discarded, on Flux × mini × after. Discarded runs still do not carry output tokens on the trace (3 rows recorded 37632 cached input tokens and 0 output). The regressions that show up only after, and that line up with a discarded attempt, are street-noise latency, `tools_slow` dead air, and `tools_two` dropping the second tool (9/10 → 5/10). Scribe's order-id dictation going from 0/5 premature to 3/5 is the production-STT version of the same early commit. `end_call` on a retraction got somewhat better and is still wrong at 0.6 s and 1.0 s, because Flux confirms the hang-up turn before the retraction arrives. `defer_until_eot` cannot help a turn that has already ended.
+
+## Wave 3 — borrows against the wave-2 failures
+
+Same clips, same Flux × `gpt-5.4-mini`, n=10. Both sides run on this branch. `before` is the wave-2 ship block (`ignore_backchannels`, speculative generation with preemptive TTS, `max_tts_pause_secs=0.2`). `after` is that block plus `hangup_grace_secs=1.2`, `entity_patience=True` (default 2.5 s), and `filler={"enabled": true, "soft_timeout_secs": 0.8, "message": "One moment."}`. Tool hold is not a separate knob: with speculation on, #255 holds every tool until the turn is confirmed, so it is on for both sides. Latest #243 (`mm` / `M.`) is on the branch for both sides too. 280 rows in `benchmarks/voice/242-results/runs-wave3.jsonl`. Four Deepgram 503s are dropped from the percentiles (`dict_phone_es` before, `dict_name_es` both, `dict_order_en` after). Reproduce with `uv run python benchmarks/voice/bench_242.py wave3 --flux-reps 10`.
+
+### 1. Slow tool
+
+We had ~5 s of dead air and `filler_spoken` 0. When the model actually calls `slow_check` (4 s), that is now a spoken line.
+
+| | Runs | Called `slow_check` | `filler_spoken` | Dead-air p50 | Dead-air p90 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before | 10 | 4 | 0 | 3156 | 5244 |
+| after | 10 | 2 | 4 | 785 | 941 |
+| before, `slow_check` only | 4 | 4 | 0 | 5007 | 5440 |
+| after, `slow_check` only | 2 | 2 | 2 | 762 | 780 |
+
+The overall p50 mixes in instant `lookup_order` calls. The model calls `slow_check` on 4/10 before and 2/10 after. On those calls the filler is 0/4 → 2/2 and the gap falls from about 5 s to about 0.8 s, which is the soft-timeout window. `filler_spoken` is 4/10 after and 0/10 before. Speculative starts/discards: 10/0 both sides.
+
+### 2. Two tools
+
+We had both tools on 9/10 before the ship block and 5/10 after it. Tool hold is on both sides here. Discards are 0.
+
+| | Both tools | Dead-air p50 | Silence p50 |
+| --- | ---: | ---: | ---: |
+| before | 7/10 | 1244 | 2935 |
+| after | 6/10 | 902 | 2171 |
+
+Not fixed. The misses are the model answering "arrives Thursday" from the lookup string and never calling `delivery_window`. Nothing in the trace shows a second tool started and then discarded.
+
+### 3. Spanish hang-up, then retract
+
+Gap after "Cuelga la llamada", before "No, espera…". `end_call` is the tool running. `hung_up` is the session actually closing before the harness does.
+
+| Gap | Tool before | Tool after | Session closed |
+| --- | ---: | ---: | ---: |
+| 0.3 s | 0/10 | 0/10 | 0 / 0 |
+| 0.6 s | 8/10 | 10/10 | 0 / 0 |
+| 1.0 s | 10/10 | 9/10 | 0 / 0 |
+
+Not fixed. The tool still runs at 0.6 s and 1.0 s. Grace does not stop it, and 0.6 s got worse (8/10 → 10/10). The line stayed up on both sides: a later commit cancels teardown even when `hangup_grace_secs` is unset, which is why `hung_up` is 0 on the ship block too. The sample replies are "Hasta luego" / "Adiós, cuelgo" and then "Claro, dime en qué te ayudo." The destructive call still happened.
+
+### 4. Dictation
+
+`entity_patience` holds digits, single letters, emails, and mixed codes. These clips are spoken words: "seis cinco cinco", "four eight" / "two one", "jota" / "o" / "ene". Flux commits them as words. Patience never sees an open entity.
+
+| Scenario | Premature | Read-back miss |
+| --- | ---: | ---: |
+| phone, Spanish | 9/9 → 10/10 | 9/9 → 10/10 |
+| spelled name | 9/9 → 9/9 | 9/9 → 9/9 |
+| order id | 10/10 → 9/9 | 4/10 → 6/9 |
+
+Not fixed. Same splits as wave 2. One before order-id commit is still "four eight." / "two one." / "nine zero."
+
+### 5. Ship-config sanity
+
+`mm` is fixed on this branch, both sides. Wave 2's after side cut on `mm` 10/10. False cuts here:
+
+| | sí | yeah | mm |
+| --- | ---: | ---: | ---: |
+| before | 0/10 | 0/10 | 0/10 |
+| after | 0/10 | 0/10 | 0/10 |
+
+Clean English phone, silence p50 926 → 827, p90 1204 → 1121. Wave 2's ship cell was 711. This run is slower and still in the same band. Borrows do not make it worse.
+
+Barge misses 0/10. Stop-audio p50: mid-reply 425 → 460, "stop" 683 → 629. The ship win (wave 2 after, about 0.6 s) is intact.
+
+## What to ship after wave 3
+
+Keep the wave-2 block. Add the spoken soft timeout when a tool can run for seconds:
+
+```python
+voice_config = {
+    "ignore_backchannels": True,
+    "speculative_generation": {"enabled": True, "preemptive_tts": True},
+    "max_tts_pause_secs": 0.2,
+    "filler": {"enabled": True, "soft_timeout_secs": 0.8, "message": "One moment."},
+}
+```
+
+Leave `hangup_grace_secs` unset. It did not stop `end_call` at 0.6 s or 1.0 s. Leave `entity_patience` unset for these dictation scripts. It does not match spoken number words or Spanish letter names. Tool hold stays on automatically with speculative generation. It did not bring the second tool back to 9/10.
