@@ -323,6 +323,7 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "max_tts_pause_secs",
     "tts_quiet_dbfs",
     "tts_tempo",
+    "hangup_grace_secs",
     "turn_timeout_secs",
     "turn_timeout_fallback",
     "filler",
@@ -486,6 +487,16 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
             del updates["tool_beat_secs"]
     for field in ("max_tts_pause_secs", "tts_quiet_dbfs", "tts_tempo"):
         _coerce_client_number(updates, field)
+    if "hangup_grace_secs" in updates:
+        # Same as tool_beat_secs: telephony parameters arrive as strings, and
+        # model_copy below skips validation. A bad value keeps the server's.
+        try:
+            if isinstance(updates["hangup_grace_secs"], bool):
+                raise TypeError("a boolean is not a grace duration")
+            updates["hangup_grace_secs"] = VoiceConfig(hangup_grace_secs=updates["hangup_grace_secs"]).hangup_grace_secs
+        except (ValueError, TypeError):
+            logger.info("voice_client_hangup_grace_invalid")
+            del updates["hangup_grace_secs"]
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
@@ -1191,6 +1202,7 @@ def build_voice_session(
         direction=direction,
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
+        hangup_grace_secs=merged.hangup_grace_secs,
     )
 
     session_kwargs: dict[str, Any] = {}
@@ -1228,6 +1240,8 @@ def build_voice_session(
     session_kwargs["max_tts_pause_secs"] = merged.max_tts_pause_secs
     session_kwargs["tts_quiet_dbfs"] = merged.tts_quiet_dbfs
     session_kwargs["tts_tempo"] = merged.tts_tempo
+    if merged.hangup_grace_secs is not None:
+        session_kwargs["hangup_grace_secs"] = merged.hangup_grace_secs
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)

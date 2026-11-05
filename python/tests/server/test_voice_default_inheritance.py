@@ -157,3 +157,47 @@ def test_voice_session_rejects_bad_pace_values():
     assert session.max_tts_pause_secs is None
     assert session.tts_tempo is None
     assert session.tts_quiet_dbfs == -45.0
+
+
+def test_hangup_grace_defaults_off():
+    assert VoiceConfig().hangup_grace_secs is None
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(agent, VoiceConfig(turn_detector="heuristic"), {})
+    assert session.hangup_grace_secs == 0
+
+
+@pytest.mark.parametrize("grace", [0, 1.5])
+def test_hangup_grace_reaches_voice_session(grace):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    session, _ = build_voice_session(
+        agent,
+        VoiceConfig(turn_detector="heuristic", hangup_grace_secs=grace),
+        {},
+    )
+    assert session.hangup_grace_secs == grace
+
+
+@pytest.mark.parametrize("grace", [-1, 31, float("nan"), float("inf"), True])
+def test_invalid_hangup_grace_is_rejected(grace):
+    with pytest.raises(ValueError):
+        VoiceConfig(hangup_grace_secs=grace)
+
+
+@pytest.mark.parametrize("grace", ["1.5", "0", " 0.25 "])
+def test_numeric_client_hangup_grace_is_coerced(grace):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", hangup_grace_secs=0.4)
+    merged = merge_client_voice_overrides(defaults, {"hangup_grace_secs": grace})
+    assert merged.hangup_grace_secs == float(grace)
+    session, _ = build_voice_session(agent, defaults, {"hangup_grace_secs": grace})
+    assert session.hangup_grace_secs == float(grace)
+
+
+@pytest.mark.parametrize(
+    "grace", [-1, "-1", "oops", "", "nan", "inf", "31", float("nan"), float("inf"), [], {}, True]
+)
+def test_invalid_client_hangup_grace_preserves_server_default(grace):
+    agent = Agent(name="voice_test", model=TestModel(responses=["hi"]))
+    defaults = VoiceConfig(turn_detector="heuristic", hangup_grace_secs=0.4)
+    session, _ = build_voice_session(agent, defaults, {"hangup_grace_secs": grace})
+    assert session.hangup_grace_secs == 0.4

@@ -264,6 +264,20 @@ agent = Agent(
 )
 ```
 
-The session waits for the turn to finish and its audio to play, then closes itself, as `session.close()` does. Some models call the tool before writing the goodbye, so the tool's result asks for one; the goodbye then comes from a second model call in the same turn, and the session still waits for it. If the caller says something first, the call stays up. If the goodbye never finishes playing, the call ends after 20 seconds anyway. Calling it again changes nothing.
+The session waits for the turn to finish and its audio to play, then closes itself, as `session.close()` does. Some models call the tool before writing the goodbye, so the tool's result asks for one; the goodbye then comes from a second model call in the same turn, and the session still waits for it. If the caller says something first, the call stays up. If the goodbye never finishes playing, the call ends after 20 seconds anyway, without an extra wait. Calling it again changes nothing.
+
+A turn can be confirmed before the caller has really finished. `hangup_grace_secs` (unset by default) keeps the line up for that many seconds after the goodbye has been heard. Silence through the window hangs up. Any further caller speech in the window cancels the hangup and the call continues: a new transcript (even a partial one that is not an echo of the goodbye), or audible speech when local VAD endpointing is on, in whatever language they are speaking. The assistant can call `end_call` again on a later turn. `session.end_call(grace_secs=1.5)` sets the window for that one call; `grace_secs=0` hangs up as soon as the goodbye has been heard, even when the session configured a window. Allowed values are from 0 to 30 seconds. A client hello may set `hangup_grace_secs` the same way it sets `tool_beat_secs`.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="When the caller is done, say a short goodbye and call end_call.",
+    tools=[end_call],
+    voice_config={"hangup_grace_secs": 1.5},
+)
+```
 
 Continue to [Thinking sounds](/voice/thinking-sounds).

@@ -21,6 +21,22 @@ from .ambience import validate_ambient_source
 # are account-specific).
 DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 
+# ``end_call`` confirmation window. None/0 keeps the historical immediate
+# hangup. Capped so a client hello cannot pin the line open after goodbye.
+HANGUP_GRACE_MAX_SECS = 30.0
+
+
+def normalize_hangup_grace_secs(value: float | None) -> float:
+    """Seconds to wait after a goodbye. ``None`` and ``0`` wait nothing."""
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("hangup_grace_secs must be a number of seconds")
+    number = float(value)
+    if number != number or number < 0 or number > HANGUP_GRACE_MAX_SECS:
+        raise ValueError(f"hangup_grace_secs must be between 0 and {HANGUP_GRACE_MAX_SECS:g} seconds")
+    return number
+
 
 def _default_stt_extra() -> dict[str, Any]:
     return {
@@ -502,6 +518,16 @@ class VoiceConfig(BaseModel):
     """Pitch-preserving speaking rate. ``None`` (default) and ``1.0`` leave
     the audio unchanged; ``1.1`` is a little faster. Requires the
     ``timbal[voice]`` extra when it is not 1. Applied after pause trimming."""
+    hangup_grace_secs: float | None = Field(default=None, ge=0, le=HANGUP_GRACE_MAX_SECS)
+    """Seconds to keep the line up after a goodbye has been heard, before
+    ``end_call`` tears the session down.
+
+    Unset or ``0`` hangs up as soon as that audio has played. A positive value
+    is a confirmation window: any further caller speech cancels the hangup
+    and the call continues; silence through the window hangs up. Speech is a
+    new transcript or audible caller audio, not a list of phrases. One call
+    can override it with ``end_call(grace_secs=...)``.
+    """
 
     turn_timeout_secs: float | None = None
     """None → ``VoiceSession`` default."""
@@ -571,6 +597,14 @@ class VoiceConfig(BaseModel):
         # removed before this runs (see omit_empty_voice_blocks).
         if isinstance(v, dict) and "enabled" not in v:
             return {**v, "enabled": True}
+        return v
+
+    @field_validator("hangup_grace_secs", mode="before")
+    @classmethod
+    def _hangup_grace_not_bool(cls, v: Any) -> Any:
+        # ``bool`` is an ``int``; without this, ``True`` becomes ``1.0``.
+        if isinstance(v, bool):
+            raise ValueError("hangup_grace_secs must be a number of seconds")
         return v
 
 
