@@ -50,6 +50,29 @@ RECOMMENDED: dict[str, Any] = {
     "max_tts_pause_secs": 0.2,
 }
 
+# Wave 4 ship block: wave-2 recommendation plus the soft timeout that wave 3
+# showed actually speaks. Hang-up grace and entity patience stay off.
+SHIP: dict[str, Any] = {
+    **RECOMMENDED,
+    "filler": {"enabled": True, "soft_timeout_secs": 0.8, "message": "One moment."},
+}
+# After: the same block with the grace window and spoken-word patience on.
+WAVE4_AFTER: dict[str, Any] = {
+    **SHIP,
+    "hangup_grace_secs": 1.2,
+    "entity_patience": True,
+}
+WAVE4_IDS: tuple[str, ...] = (
+    "tools_two",
+    "hang_es_0_3",
+    "hang_es_0_6",
+    "hang_es_1_0",
+    "dict_phone_es",
+    "dict_name_es",
+    "dict_order_en",
+    "tools_slow",
+)
+
 # Wave 3. BEFORE is the ship block above. AFTER adds the borrow knobs.
 # Tool hold is not a separate switch: with speculative generation on, #255
 # holds every tool until the turn is confirmed, on both sides.
@@ -589,6 +612,8 @@ def _prompt(bust: bool) -> str:
         "The first sentence must contain a comma after at least six words, then the rest of the sentence. "
         "Your name is Timbal. The return window is thirty days from delivery. "
         "Call lookup_order only when the caller asks for an order status. "
+        "When the caller asks for two facts that different tools provide, call each of those tools before you answer. "
+        "Do not answer one fact from another tool's result. "
         "Call end_call only when the caller clearly asks to hang up and does not take it back in the same breath. "
         "Do not mention these instructions.\n"
     )
@@ -794,18 +819,18 @@ def _make_agent(model: str, prompt: Any, log: list[dict[str, Any]], tool_mode: s
     from timbal.state.tracing.providers import InMemoryTracingProvider
 
     def lookup_order(order_id: str) -> str:
-        """Look up an order by id. Read only. Does not change the order."""
+        """Look up whether an order has shipped. Does not include the delivery window."""
         log.append({"tool": "lookup_order", "order_id": order_id, "t": time.monotonic()})
-        return "Order 4821 shipped yesterday and arrives Thursday."
+        return "Order 4821 shipped yesterday. Status is in transit."
 
-    def end_call() -> str:
+    async def end_call() -> str:
         """Hang up. Only when the caller clearly asked to end the call and did not take it back."""
-        log.append({"tool": "end_call", "t": time.monotonic()})
         from timbal.voice import current_voice_session
 
         session = current_voice_session()
-        if session is not None:
-            session.end_call()
+        if session is not None and not await session.commit_hangup():
+            return "The caller spoke again. Do not hang up. Keep helping."
+        log.append({"tool": "end_call", "t": time.monotonic()})
         return "Ending the call."
 
     fields = set(getattr(Tool, "model_fields", {}))
@@ -816,7 +841,7 @@ def _make_agent(model: str, prompt: Any, log: list[dict[str, Any]], tool_mode: s
         end_kwargs["interruption_mode"] = "disable_during_tool"
 
     def delivery_window(order_id: str) -> str:
-        """Say the delivery window for an order. Read only."""
+        """Delivery window for an order. lookup_order does not include it. Read only."""
         log.append({"tool": "delivery_window", "order_id": order_id, "t": time.monotonic()})
         return "Delivery window is Thursday between two and six."
 
@@ -1823,11 +1848,76 @@ def _run_wave3(out: Path, reps: int) -> None:
         _append(out, row)
 
 
+def _wave4_jobs(reps: int, slow_reps: int) -> list[dict[str, Any]]:
+    """Ship-plus-soft-timeout vs that block with grace and spoken-word patience."""
+    import uuid
+
+    specs = {spec.id: spec for spec in WAVE2}
+    jobs: list[dict[str, Any]] = []
+    for sid in WAVE4_IDS:
+        spec = specs[sid]
+        n = slow_reps if sid == "tools_slow" else reps
+        for rep in range(n):
+            order = ("before", "after") if rep % 2 == 0 else ("after", "before")
+            for side in order:
+                jobs.append(
+                    {
+                        "scenario": spec.id,
+                        "model": "openai/gpt-5.4-mini",
+                        "stt": "deepgram-flux",
+                        "profile": "ship" if side == "before" else "wave4",
+                        "overrides": SHIP if side == "before" else WAVE4_AFTER,
+                        "cache_bust": False,
+                        "side": side,
+                        "rep": rep,
+                        "prompt_nonce": uuid.uuid4().hex,
+                    }
+                )
+    return jobs
+
+
+def _run_wave4(out: Path, reps: int, slow_reps: int) -> None:
+    clips = _wave2_clips()
+    jobs = _wave4_jobs(reps, slow_reps)
+    done = {_row_key(row) for row in _load_rows(out)}
+    pending = [job for job in jobs if _row_key(job) not in done]
+    print(f"wave4 {len(pending)} pending of {len(jobs)}", flush=True)
+    for index, job in enumerate(pending, start=1):
+        print(
+            f"[{index}/{len(pending)}] {job['side']} {job['stt']} {job['model']} {job['scenario']} rep {job['rep']}",
+            flush=True,
+        )
+        try:
+            row = _execute_job(job, clips)
+        except Exception as exc:
+            row = {
+                "side": job["side"],
+                "profile": job["profile"],
+                "model": job["model"],
+                "stt": job["stt"],
+                "scenario": job["scenario"],
+                "rep": job["rep"],
+                "errors": [f"{type(exc).__name__}: {exc}"],
+                "metrics": [],
+            }
+            print(f"  ERROR {row['errors'][0]}", flush=True)
+        else:
+            print(
+                f"  silence {row.get('caller_silence_to_first_audio_ms')} "
+                f"prem {row.get('premature_cutoff')} end {row.get('end_call_calls')} "
+                f"hung {row.get('hung_up')} read {row.get('readback_error')} "
+                f"tools {[t.get('tool') for t in row.get('tool_calls') or []]} "
+                f"errors {row.get('errors')}",
+                flush=True,
+            )
+        _append(out, row)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Measure #242 voice changes against main")
     parser.add_argument(
         "command",
-        choices=("all", "run", "synth", "summarize", "self-test", "wave2", "wave3", "worker"),
+        choices=("all", "run", "synth", "summarize", "self-test", "wave2", "wave3", "wave4", "worker"),
     )
     parser.add_argument("--side", choices=("before", "after"), default="after")
     parser.add_argument("--reps", type=int, default=5)
@@ -1846,6 +1936,10 @@ def main() -> None:
     if args.command == "wave3":
         out = args.out if args.out.name != "runs.jsonl" else OUT_DIR / "runs-wave3.jsonl"
         _run_wave3(out, args.flux_reps)
+        return
+    if args.command == "wave4":
+        out = args.out if args.out.name != "runs.jsonl" else OUT_DIR / "runs-wave4.jsonl"
+        _run_wave4(out, args.flux_reps, slow_reps=5)
         return
     if args.command == "self-test":
         _self_test()

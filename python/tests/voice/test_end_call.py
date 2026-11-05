@@ -560,3 +560,58 @@ class TestEndCall:
         with pytest.raises((TypeError, ValueError)):
             session.end_call(grace_secs=True)  # type: ignore[arg-type]
         assert session._end_call_task is None
+
+
+class TestCommitHangup:
+    async def test_caller_speech_skips_the_tool_side_effect(self) -> None:
+        committed: list[bool] = []
+
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            ok = await session.commit_hangup()
+            committed.append(ok)
+            return "ended" if ok else "cancelled"
+
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE, "Dime."),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.2,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Cuelga la llamada."))
+        await asyncio.sleep(0.15)
+        # A new commit interrupts the turn that is still inside commit_hangup.
+        # The handler must not reach the hangup, either because the wait
+        # returns false or because the interruption cancels it first.
+        await stt.inject(TranscriptEvent(type="committed", text="No, espera, todavía necesito ayuda."))
+        tracker.playing = False
+        await asyncio.sleep(0.4)
+        assert committed == [] or committed == [False]
+        assert session._end_call_task is None
+        assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_quiet_window_then_requests_hangup(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.2)
+        session._last_commit_at = time.monotonic()
+        assert await session.commit_hangup() is True
+        assert session._end_call_task is not None
+
+    async def test_a_later_commit_does_not_request_hangup(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        session._last_commit_at = time.monotonic()
+
+        async def retract() -> None:
+            await asyncio.sleep(0.05)
+            session._last_commit_at = time.monotonic()
+
+        asyncio.create_task(retract())
+        assert await session.commit_hangup() is False
+        assert session._end_call_task is None

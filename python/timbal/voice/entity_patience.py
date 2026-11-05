@@ -34,6 +34,7 @@ Sources (semantics, not copied code):
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .turn_detection import (
     _HESITATION_TOKENS,
@@ -59,9 +60,75 @@ _CODE_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]*\Z")
 _TOKEN_RE = re.compile(r"\S+")
 _HESITATION_TAIL = re.compile(r"([^\s,.;:!?]+)(?:[,.;:!?]+)?\s*$")
 
+# Spoken digits. AssemblyAI holds formatted entities; callers say the digits
+# as words, and Flux then commits words rather than numerals. English and
+# Spanish are both in the set because those are the languages the voice
+# stack already endpoints. One word is not enough (see ``entity_capture``):
+# a sentence that merely ends in "one" or "una" stays a normal turn.
+_NUMBER_WORDS = frozenset(
+    {
+        "zero",
+        "oh",
+        "nought",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "cero",
+        "uno",
+        "una",
+        "dos",
+        "tres",
+        "cuatro",
+        "cinco",
+        "seis",
+        "siete",
+        "ocho",
+        "nueve",
+    }
+)
+
+# Letter names that are not also everyday function words ("a", "i", "de",
+# "en", "te"). A single one of these opens a spelling hold. Bare letters
+# still need two, so a sentence ending in "o" or "a" does not.
+_LETTER_NAMES = frozenset(
+    {
+        "aitch",
+        "jay",
+        "kay",
+        "zee",
+        "zed",
+        "wye",
+        "double",
+        "jota",
+        "hache",
+        "ene",
+        "ese",
+        "efe",
+        "ele",
+        "eme",
+        "eñe",
+        "erre",
+        "equis",
+        "zeta",
+        "uve",
+        "ge",
+        "ka",
+        "cu",
+    }
+)
+
 
 def entity_capture(text: str) -> str | None:
     """``"digits"`` / ``"spelling"`` / ``"email"`` / ``"code"`` when ``text`` ends in an open entity.
+
+    Digits include numerals and spoken number words (English and Spanish).
+    Spelling includes a letter name ("jota", "aitch") or two bare letters.
 
     ``None`` when it does not: ordinary prose, a complete email, a trailing
     ``?`` or ``!``, or a number/code the caller has already left (a word
@@ -83,6 +150,7 @@ def entity_capture(text: str) -> str | None:
 
     digits = 0
     letters = 0
+    letter_names = 0
     saw_code = False
     consumed = 0
     for tok in reversed(tokens):
@@ -92,6 +160,8 @@ def entity_capture(text: str) -> str | None:
         kind, d, n_letters = atom
         digits += d
         letters += n_letters
+        if kind == "letter_name":
+            letter_names += 1
         saw_code = saw_code or kind == "code"
         consumed += 1
     if consumed == 0:
@@ -100,7 +170,9 @@ def entity_capture(text: str) -> str | None:
         return "code"
     if digits >= 2:
         return "digits"
-    if letters >= 2:
+    # A named letter ("jota", "aitch") is already a spelling. Two bare letters
+    # ("J O") are too. One bare letter is a word ("a", "I", "o").
+    if letter_names >= 1 or letters >= 2:
         return "spelling"
     return None
 
@@ -209,6 +281,12 @@ def _email_state(token: str) -> str | None:
     return "open"
 
 
+def _fold_token(token: str) -> str:
+    core = token.strip().strip(".,;:|#*_/\"'")
+    decomposed = unicodedata.normalize("NFKD", core)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
+
+
 def _atom(token: str) -> tuple[str, int, int] | None:
     """``(kind, n_digits, n_letters)`` or ``None`` when the token ends the span."""
     core = token.strip().strip(".,;:|#*_/")
@@ -216,6 +294,11 @@ def _atom(token: str) -> tuple[str, int, int] | None:
         return None
     if _DIGIT_RUN.fullmatch(core):
         return ("digit", sum(c.isdigit() for c in core), 0)
+    folded = _fold_token(core)
+    if folded in _NUMBER_WORDS:
+        return ("digit", 1, 0)
+    if folded in _LETTER_NAMES:
+        return ("letter_name", 0, 1)
     if len(core) == 1 and core.isalpha():
         return ("letter", 0, 1)
     if _CODE_RUN.fullmatch(core) and any(c.isalpha() for c in core) and any(c.isdigit() for c in core):

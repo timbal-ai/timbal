@@ -167,6 +167,7 @@ def _same_spoken_words(a: str, b: str) -> bool:
     right = " ".join(_SPOKEN_WORD_RE.findall(b.lower()))
     return bool(left) and left == right
 
+
 # Wall-clock cap on a single agent turn (LLM stream + in-turn TTS drains).
 # Without this a hung provider leaves the caller in silence forever.
 DEFAULT_TURN_TIMEOUT_SECS = 60.0
@@ -1067,6 +1068,83 @@ class VoiceSession:
             self._end_call_when_heard(baseline),
             name="voice-end-call",
         )
+
+    def _hangup_audio_pending(self) -> bool:
+        """Goodbye audio still going out. Ignores the turn task.
+
+        A tool awaiting :meth:`commit_hangup` *is* the turn task. Counting
+        that task as busy would wait forever. Playback, TTS tasks, and the
+        speaking flag are the goodbye. LiveKit's EndCallTool waits on the
+        speech handle the same way, not on the tool task itself.
+        """
+        if self._is_speaking or self._tts_tasks or self.playback.is_playing:
+            return True
+        if self._greeting_speaking or self._idle_prompt_speaking or self._greeting_pending_bytes() > 0:
+            return True
+        return self._greeting_task is not None and not self._greeting_task.done()
+
+    def _caller_retracted_since(self, commit_at: float) -> bool:
+        """New caller speech after ``commit_at``, in any language.
+
+        A later commit, or a partial that is not an echo of the goodbye.
+        Not a list of phrases. Echo of the assistant's own line does not count.
+        """
+        if self._last_commit_at > commit_at:
+            return True
+        text = (self._latest_partial_text or "").strip()
+        return bool(
+            text and self._last_partial_at > commit_at and not _likely_stt_echo(text, self._hangup_echo_reference())
+        )
+
+    async def commit_hangup(self) -> bool:
+        """Perform the hangup only if the caller stays quiet through the grace window.
+
+        LiveKit's EndCallTool waits until the goodbye speech handle has played,
+        then shuts down; speech during that wait keeps the call up. Pipecat
+        does not commit an irreversible tool on an early turn. With
+        ``hangup_grace_secs`` unset or 0 this is :meth:`end_call` and returns
+        True. With a window, the goodbye (if any) plays out, then that many
+        quiet seconds pass, and only then is teardown requested. Any new
+        caller speech in that span returns False and does not call
+        :meth:`end_call`.
+
+        Await this from the hangup tool *before* treating the hangup as done.
+        The tool's own side effects belong after a True result.
+        """
+        if self._closed:
+            return False
+        grace = self.hangup_grace_secs
+        if grace <= 0:
+            self.end_call()
+            return True
+        baseline = self._last_commit_at
+        give_up = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
+        while not self._closed and self._hangup_audio_pending():
+            if self._caller_retracted_since(baseline):
+                logger.info("end_call_cancelled", reason="caller_spoke", phase="before_commit")
+                return False
+            if time.monotonic() > give_up:
+                break
+            await asyncio.sleep(0.05)
+        deadline = time.monotonic() + grace
+        while not self._closed and time.monotonic() < deadline:
+            if self._caller_retracted_since(baseline):
+                logger.info("end_call_cancelled", reason="caller_spoke", phase="grace")
+                return False
+            if self._hangup_audio_pending():
+                # The goodbye started after the window opened. Quiet time
+                # counts from when it finishes, not from the tool call.
+                deadline = time.monotonic() + grace
+                if deadline > give_up:
+                    deadline = give_up
+            await asyncio.sleep(0.05)
+        if self._closed or self._caller_retracted_since(baseline):
+            if not self._closed:
+                logger.info("end_call_cancelled", reason="caller_spoke", phase="grace")
+            return False
+        # The quiet window already elapsed. Do not open a second one.
+        self.end_call(grace_secs=0)
+        return True
 
     def _stop_end_call(self) -> None:
         if (

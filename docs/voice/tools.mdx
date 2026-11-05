@@ -239,7 +239,7 @@ agent = Agent(
 
 ## Let the caller end the call
 
-`session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply:
+`session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply. When `hangup_grace_secs` is set, the tool should await `session.commit_hangup()` and only then treat the hangup as done. That waits out the goodbye and the quiet window before requesting teardown. If the caller speaks in that span, it returns false and does not hang up. `session.end_call()` on its own still requests teardown immediately and lets the window cancel the close afterwards; the irreversible step has already been asked for.
 
 ```python agent.py
 from timbal import Agent, Tool
@@ -251,7 +251,8 @@ async def end_call() -> str:
     session = current_voice_session()
     if session is None:
         return "There is no call to end."
-    session.end_call()
+    if not await session.commit_hangup():
+        return "The caller spoke again. Do not hang up. Keep helping."
     return "If you have not said goodbye yet, say it now in one short sentence. The call ends once it has been heard."
 
 
