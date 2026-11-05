@@ -125,7 +125,10 @@ class FillerConfig(BaseModel):
     @classmethod
     def _disabled_soft_timeout(cls, v: Any) -> Any:
         # ElevenLabs uses -1 for "disabled". Omit / None is the same switch here.
-        if v == -1 or v == -1.0:
+        # Env vars arrive as strings, before coercion, so "-1" must count too.
+        if isinstance(v, str):
+            v = v.strip()
+        if v in (-1, -1.0, "-1", "-1.0"):
             return None
         return v
 

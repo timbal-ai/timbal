@@ -84,7 +84,10 @@ def default_voice_config_from_env() -> VoiceConfig:
     if v := os.environ.get("TIMBAL_VOICE_FILLER_THINK_DELAY_SECS"):
         filler["think_delay_secs"] = v
     if v := os.environ.get("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS"):
-        filler["soft_timeout_secs"] = v
+        # "-1" is the disabled sentinel (ElevenLabs). It must not count as a
+        # detail var: a lone disable would otherwise turn the classic filler on.
+        if v.strip() not in ("-1", "-1.0"):
+            filler["soft_timeout_secs"] = v
     if v := os.environ.get("TIMBAL_VOICE_FILLER_MESSAGE"):
         filler["message"] = v
     # TIMBAL_VOICE_FILLER=1 enables with defaults; any detail var implies it.

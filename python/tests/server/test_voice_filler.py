@@ -108,6 +108,8 @@ class TestFillerConfig:
     def test_soft_timeout_defaults_off_and_minus_one_disables(self) -> None:
         assert FillerConfig().soft_timeout_secs is None
         assert FillerConfig(soft_timeout_secs=-1).soft_timeout_secs is None
+        assert FillerConfig(soft_timeout_secs="-1").soft_timeout_secs is None
+        assert FillerConfig(soft_timeout_secs=" -1.0 ").soft_timeout_secs is None
         assert FillerConfig(message="  ").message is None
 
     def test_negative_soft_timeout_fails(self) -> None:
@@ -788,6 +790,19 @@ class TestFillerEnvDefaults:
         assert cfg.filler is not None
         assert cfg.filler.soft_timeout_secs == 1.5
         assert cfg.filler.message == "One moment."
+
+    def test_soft_timeout_env_minus_one_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The env value is a string. "-1" disables and must not enable fillers."""
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS", "-1")
+        assert voice_routes.default_voice_config_from_env().filler is None
+
+    def test_soft_timeout_env_minus_one_with_filler_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER", "1")
+        monkeypatch.setenv("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS", "-1")
+        cfg = voice_routes.default_voice_config_from_env()
+        assert cfg.filler is not None
+        assert cfg.filler.enabled is True
+        assert cfg.filler.soft_timeout_secs is None
 
     def test_explicit_off_wins_over_detail_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TIMBAL_VOICE_FILLER", "0")
