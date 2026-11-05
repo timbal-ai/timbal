@@ -218,6 +218,8 @@ class RunContext(BaseModel):
     #   _foreign_turn_of: SessionScheduler | None — the scheduler that admitted this
     #       root run into a session it owns, told when the run ends (strong until
     #       then: a release it defers completes there)
+    #   _steering: bool — the channel that started this run asks its root agent to
+    #       take ``lane="next"`` session events between steps (``Agent.steering=None``)
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a
@@ -332,6 +334,7 @@ class RunContext(BaseModel):
             _trace=Trace(),
             _continuation_owner=None,
             _foreign_turn_of=None,
+            _steering=False,
         )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
