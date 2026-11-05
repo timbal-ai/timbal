@@ -83,6 +83,10 @@ def default_voice_config_from_env() -> VoiceConfig:
         filler["repeat_secs"] = v
     if v := os.environ.get("TIMBAL_VOICE_FILLER_THINK_DELAY_SECS"):
         filler["think_delay_secs"] = v
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS"):
+        filler["soft_timeout_secs"] = v
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_MESSAGE"):
+        filler["message"] = v
     # TIMBAL_VOICE_FILLER=1 enables with defaults; any detail var implies it.
     enabled = os.environ.get("TIMBAL_VOICE_FILLER", "").strip().lower()
     if enabled in ("1", "true", "yes", "on") or (filler and enabled not in ("0", "false", "no", "off")):
