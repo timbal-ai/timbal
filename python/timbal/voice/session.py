@@ -579,6 +579,9 @@ class VoiceSession:
         # Segments/bytes as of the last filler — "spoken since then" checks.
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
+        # Audio counters when the current soft-timeout quiet window opened.
+        self._soft_audio_baseline = 0
+        self._soft_segments_baseline = 0
         # The turn's first tool call (when, and the latest tool's name): the
         # flow armed at turn start (``think_delay_secs``) waits on it too.
         self._turn_tool_seen = asyncio.Event()
@@ -3709,6 +3712,8 @@ class VoiceSession:
         self._turn_filler_text = ""
         self._turn_filler_segments_baseline = 0
         self._turn_filler_audio_baseline = 0
+        self._soft_audio_baseline = 0
+        self._soft_segments_baseline = 0
         self._turn_tool_seen = asyncio.Event()
         self._turn_tool_seen_at = None
         self._turn_tool_name = None
@@ -4552,6 +4557,11 @@ class VoiceSession:
         """
         spoken = self._turn_filler_spoken
         try:
+            if self.filler.soft_timeout_secs is not None:
+                # Opt-in progress line. The classic delay/think path below is
+                # unchanged when this is unset.
+                await self._soft_timeout_flow(spoken)
+                return
             if spoken:
                 # An empty retry is only allowed before any tool call, so
                 # earlier phrases covered thinking and may still need a tool filler.
@@ -4655,12 +4665,180 @@ class VoiceSession:
             return
         await self._speak_filler(phrase, self._turn_tool_name or "")
 
+    def _turn_still_open(self) -> bool:
+        return not self._cancel_turn.is_set() and not self._turn_finalized_ok
+
+    def _progress_audio_busy(self) -> bool:
+        """True while agent audio is in flight or a reply is about to take the wire.
+
+        A preamble that has finished synthesizing is not busy: the quiet window
+        starts after it. Unscheduled reply text is busy so a filler does not
+        start in the gap before that text is handed to speech.
+        """
+        if self._tts_tasks or self.playback.is_playing:
+            return True
+        text = self._turn_assistant_text
+        scheduled = self._turn_tts_scheduled_text
+        return bool(text.strip()) and len(scheduled) < len(text) and bool(text[len(scheduled) :].strip())
+
+    def _soft_timeout_still_quiet(self) -> bool:
+        return (
+            self._turn_still_open()
+            and not self._progress_audio_busy()
+            and self._turn_audio_bytes == self._soft_audio_baseline
+            and self._turn_tts_segments == self._soft_segments_baseline
+        )
+
+    async def _await_continuous_quiet(self, window: float) -> bool:
+        """True after ``window`` seconds with no agent audio.
+
+        LiveKit ``with_filler``: the delay is continuous idle. Speech resets
+        the dwell instead of talking over a preamble or the answer. ElevenLabs
+        soft timeout: if the response arrives first, nothing is spoken.
+        Returning false means the turn ended or was interrupted before a full
+        quiet window.
+        """
+        while self._turn_still_open():
+            while self._turn_still_open() and self._progress_audio_busy():
+                await asyncio.sleep(0.01)
+            if not self._turn_still_open():
+                return False
+            self._soft_audio_baseline = self._turn_audio_bytes
+            self._soft_segments_baseline = self._turn_tts_segments
+            deadline = time.monotonic() + window
+            reset = False
+            while time.monotonic() < deadline:
+                if not self._turn_still_open():
+                    return False
+                if not self._soft_timeout_still_quiet():
+                    reset = True
+                    break
+                remaining = deadline - time.monotonic()
+                await asyncio.sleep(min(0.01, remaining))
+            if not reset and self._soft_timeout_still_quiet():
+                return True
+        return False
+
+    def _static_progress_phrase(self, spoken: list[str]) -> tuple[str | None, bool]:
+        """``(phrase, from_phrase_list)`` when no model call is needed.
+
+        ``message`` wins for every progress line. Otherwise the first line can
+        be a ready-made ``phrases`` entry; follow-ups are generated.
+        """
+        if self.filler.message:
+            return self.filler.message, False
+        if not spoken:
+            phrase = self._instant_filler_phrase()
+            if phrase:
+                return phrase, True
+        return None, False
+
+    async def _speak_think_filler_if_due(self, spoken: list[str]) -> None:
+        """Pre-tool cover when soft timeout is on and ``think_delay_secs`` is set.
+
+        Soft timeout itself waits for a tool. A tool that arrives during this
+        wait skips the think line and is covered by the progress line instead.
+        """
+        think = self.filler.think_delay_secs
+        if think is None or spoken or self._turn_tool_seen_at is not None:
+            return
+        wait = max(0.0, self._turn_started_at + think - time.monotonic())
+        try:
+            await asyncio.wait_for(self._turn_tool_seen.wait(), timeout=wait)
+        except TimeoutError:
+            pass
+        if self._turn_tool_seen_at is not None or not self._filler_ok_to_speak():
+            return
+        phrase, ready_made = self._static_progress_phrase(spoken)
+        if phrase is None:
+            try:
+                async with asyncio.timeout(self.filler.timeout_secs):
+                    phrase = await self._generate_filler(None, spoken)
+            except TimeoutError:
+                logger.debug("filler_generation_timeout", tool=None, **_trace_debug_fields())
+                return
+        if not phrase or not self._filler_ok_to_speak():
+            return
+        if ready_made:
+            self._record_filler_phrase(phrase)
+        await self._speak_filler(phrase, "")
+
+    async def _soft_timeout_flow(self, spoken: list[str]) -> None:
+        """Speak a progress line after a quiet tool wait, then keep waiting.
+
+        ElevenLabs ``soft_timeout_config``: after ``timeout_seconds`` with no
+        response, speak ``message`` (or a generated line) and continue waiting
+        for the real response. One line unless ``repeat_secs`` re-arms, their
+        ``max_soft_timeouts_per_generation`` default of 1. LiveKit
+        ``ctx.with_filler(delay=)``: the line goes straight to speech, is not
+        added to the reply, and is cancelled if the wait ends first.
+
+        The line is normal turn speech. ``interrupt()`` sets ``_cancel_turn``
+        and cancels the TTS task, so barge-in cuts it the same way it cuts a
+        reply. A per-tool interruption mode that suppresses that cancel (when
+        one is configured) holds the filler with the rest of the tool's speech.
+
+        Pipecat's ``on_function_calls_started`` speaks immediately. This wait
+        does not: a tool that finishes inside the window stays silent.
+        """
+        await self._speak_think_filler_if_due(spoken)
+        if not self._turn_still_open():
+            return
+        if self._turn_tool_seen_at is None:
+            await self._turn_tool_seen.wait()
+        if not self._turn_still_open():
+            return
+
+        first = True
+        while len(spoken) < self.filler.max_per_turn and self._turn_still_open():
+            window = self.filler.soft_timeout_secs if first else self.filler.repeat_secs
+            if window is None:
+                return
+            if not await self._emit_soft_timeout_line(spoken, window):
+                return
+            first = False
+            if self.filler.repeat_secs is None:
+                return
+
+    async def _emit_soft_timeout_line(self, spoken: list[str], window: float) -> bool:
+        """Speak one progress line after ``window`` of silence. False → stop."""
+        phrase, ready_made = self._static_progress_phrase(spoken)
+        gen: asyncio.Task[str | None] | None = None
+        if phrase is None:
+            # Overlap the model call with the quiet window, same as a tool filler.
+            gen = asyncio.create_task(self._generate_filler(self._turn_tool_name, spoken))
+        try:
+            if not await self._await_continuous_quiet(window):
+                return False
+            if phrase is None:
+                assert gen is not None
+                try:
+                    async with asyncio.timeout(self.filler.timeout_secs):
+                        phrase = await asyncio.shield(gen)
+                except TimeoutError:
+                    logger.debug("filler_generation_timeout", tool=self._turn_tool_name, **_trace_debug_fields())
+                    return False
+            if not phrase or not self._soft_timeout_still_quiet():
+                return False
+            if ready_made:
+                self._record_filler_phrase(phrase)
+            await self._speak_filler(phrase, self._turn_tool_name or "")
+            return True
+        finally:
+            if gen is not None and not gen.done():
+                gen.cancel()
+
     async def _speak_filler(self, phrase: str, tool_name: str) -> None:
         """Synthesize one filler phrase as a dedicated task on the TTS chain.
 
         A *separate* task claims ``_tts_tail`` (not the flow task, which lives
         through repeat windows) so reply text scheduled mid-filler waits only
         for the speech, never for a sleeping repeat loop.
+
+        This is caller-audible speech (``AudioOutput``), not ``AgentStatus``.
+        A speculative hold that keeps reply audio until end of turn must not
+        wrap ``filler=True`` — the caller is waiting on a tool and the line
+        is the thing they should hear.
         """
         # No await between the caller's ok-check and this claim.
         speak_task = asyncio.create_task(self._speak_filler_task(phrase, tool_name))
