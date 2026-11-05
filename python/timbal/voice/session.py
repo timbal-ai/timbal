@@ -2289,6 +2289,7 @@ class VoiceSession:
         # while ``on_committed`` yields, and the decision was scored against
         # this utterance.
         pending_speculative = None
+        pending_turn = self._current_turn_task
         if self._speculative_attempt is not None and not self._speculative_attempt.settled:
             pending_speculative = self._speculative_attempt.text
         self._partials_since_last_commit = 0
@@ -2345,12 +2346,39 @@ class VoiceSession:
                     if confirmed:
                         return
                     # Discarded while the detector ran, or while this waited
-                    # for the lock. The transcript is still a finished turn.
-                    decision = CommitDecision(
-                        action=CommitAction.NEW_TURN,
-                        text=candidate,
-                        reason="speculative_confirm_lost",
+                    # for the lock. Start a turn only when nothing else has
+                    # already taken it: a typed message, or a hold expiry that
+                    # confirmed this same utterance.
+                    live = self._current_turn_task
+                    replaced = live is not None and live is not pending_turn and not live.done()
+                    already_confirmed = (
+                        live is pending_turn
+                        and live is not None
+                        and not live.done()
+                        and (
+                            (
+                                self._speculative_final_text is not None
+                                and transcripts_equivalent(self._speculative_final_text, candidate)
+                            )
+                            or (
+                                bool(self._transcript)
+                                and self._transcript[-1].role == "user"
+                                and transcripts_equivalent(self._transcript[-1].text, candidate)
+                            )
+                        )
                     )
+                    if replaced or already_confirmed:
+                        decision = CommitDecision(
+                            action=CommitAction.IGNORE,
+                            text=candidate,
+                            reason="speculative_confirm_superseded",
+                        )
+                    else:
+                        decision = CommitDecision(
+                            action=CommitAction.NEW_TURN,
+                            text=candidate,
+                            reason="speculative_confirm_lost",
+                        )
             elif (
                 not same_words
                 and decision.action is CommitAction.IGNORE

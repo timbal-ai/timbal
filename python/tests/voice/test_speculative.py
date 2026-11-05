@@ -756,6 +756,47 @@ class TestSpeculativeSession:
         assert "Held" in drive.assistant_text()
         assert session.speculative_generations_discarded >= 1
 
+    async def test_confirm_during_detector_does_not_start_a_second_turn(self) -> None:
+        session, stt, _tts, model = _session(["Held."])
+        original = session.turn_detector.on_committed
+
+        async def on_committed(text, state):
+            decision = await original(text, state)
+            async with session._user_turn_lock:
+                if session._speculative_matches(text):
+                    await session._confirm_speculative(text, vad_endpointed=False)
+            return decision
+
+        session.turn_detector.on_committed = on_committed
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: drive.audio())
+            await asyncio.sleep(0.05)
+        user_lines = [row.text for row in session.transcript if row.role == "user"]
+        assert user_lines == ["book a table"]
+        assert model.call_count == 1
+
+    async def test_typed_turn_during_detector_is_not_replaced(self) -> None:
+        session, stt, _tts, model = _session(["Held."])
+        original = session.turn_detector.on_committed
+
+        async def on_committed(text, state):
+            decision = await original(text, state)
+            await session.submit_user_text("typed instead")
+            return decision
+
+        session.turn_detector.on_committed = on_committed
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: drive.audio())
+            await asyncio.sleep(0.05)
+        user_lines = [row.text for row in session.transcript if row.role == "user"]
+        assert user_lines == ["typed instead"]
+
 
 class _FakeVad:
     async def start(self, *, sample_rate: int) -> None:
