@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
@@ -441,6 +442,72 @@ class TestEndCall:
         tracker.playing = False
         await asyncio.wait_for(call, timeout=session.END_CALL_TAIL_SECS + 1.2)
         assert session.closed
+
+    async def test_vad_in_the_unanchored_lookback_does_not_abort_grace(self) -> None:
+        """Energy the 0.5s lookback already holds must not skip the window.
+
+        A short follow-up only fills the anchored window once it has been open
+        for a moment. Aborting on the first unanchored sample used to drop it.
+        """
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        session._end_call_grace_secs = 1.0
+
+        class LengthGated:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.2 if window_secs >= 0.12 else 0.0
+
+        session._endpointer = LengthGated()  # type: ignore[assignment]
+        assert await session._end_call_grace(0.0)
+        assert not session.closed
+
+    async def test_pre_grace_vad_still_waits_out_the_window(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.3)
+        session._end_call_grace_secs = 0.3
+
+        class OnlyUnanchored:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.4 if window_secs >= 0.45 else 0.0
+
+        session._endpointer = OnlyUnanchored()  # type: ignore[assignment]
+        started = time.monotonic()
+        assert not await session._end_call_grace(0.0)
+        assert time.monotonic() - started >= 0.25
+        assert not session.closed
+
+    async def test_vad_after_the_goodbye_cancels_without_a_commit(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.2,
+        )
+
+        class LengthGated:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                return 0.25 if window_secs >= 0.15 else 0.0
+
+            def push(self, _chunk: bytes) -> None:
+                pass
+
+            def notify_committed(self) -> None:
+                pass
+
+            async def close(self) -> None:
+                pass
+
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        session._endpointer = LengthGated()  # type: ignore[assignment]
+        await _until(lambda: session._end_call_task is None)
+        assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
 
     def test_bad_grace_does_not_start_a_hangup(self) -> None:
         session, _stt, _tts = _session(_Model())

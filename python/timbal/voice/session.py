@@ -846,7 +846,8 @@ class VoiceSession:
             self._end_call_task.cancel()
         self._end_call_task = None
 
-    def _end_call_busy(self, commit_at: float) -> bool:
+    def _end_call_output_busy(self) -> bool:
+        """The goodbye, or another turn, is still going out. Not caller audio."""
         turn = self._current_turn_task
         if (turn is not None and not turn.done()) or self._is_speaking or self._tts_tasks or self.playback.is_playing:
             return True
@@ -854,7 +855,10 @@ class VoiceSession:
             return True
         if self._greeting_task is not None and not self._greeting_task.done():
             return True
-        if self._held_user_text is not None or self._commits_in_flight > 0:
+        return self._held_user_text is not None or self._commits_in_flight > 0
+
+    def _end_call_busy(self, commit_at: float) -> bool:
+        if self._end_call_output_busy():
             return True
         now = time.monotonic()
         if (
@@ -911,8 +915,11 @@ class VoiceSession:
         hangup when the caller speaks before teardown. The window is off
         unless ``hangup_grace_secs`` or ``end_call(grace_secs=)`` opts in.
 
-        False means the window elapsed in silence, grace is off, or the line
-        became busy again and the caller should re-check before closing.
+        False means the window elapsed in silence, grace is off, or our own
+        audio started again and the caller should re-check before closing.
+        Caller VAD does not abort the window: the unanchored lookback still
+        contains audio from before it opened, and treating that as "busy"
+        drops a retraction that has not committed yet.
         """
         grace = self._end_call_grace_secs
         if grace <= 0 or self._closed:
@@ -924,7 +931,7 @@ class VoiceSession:
             if self._hangup_grace_speech(commit_at, since=started):
                 logger.info("end_call_cancelled", reason="caller_spoke")
                 return True
-            if self._end_call_busy(commit_at):
+            if self._end_call_output_busy():
                 return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -935,13 +942,31 @@ class VoiceSession:
             await asyncio.sleep(min(0.05, remaining))
         return False
 
+    def _cancel_hangup_for_speech(self, commit_at: float, since: float | None) -> bool:
+        """True when an opted-in grace should retract, now that the goodbye is heard."""
+        if since is None or self._end_call_grace_secs <= 0:
+            return False
+        if not self._hangup_grace_speech(commit_at, since=since):
+            return False
+        logger.info("end_call_cancelled", reason="caller_spoke")
+        return True
+
     async def _end_call_when_heard(self, commit_at: float) -> None:
         give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
+        # When the goodbye first finished. VAD before this is the utterance
+        # that asked to hang up; VAD after it, with grace on, is a retraction.
+        heard_since: float | None = None
         try:
             while not self._closed:
                 await asyncio.sleep(0.1)
                 if self._last_commit_at > commit_at:
                     logger.info("end_call_cancelled", reason="caller_spoke")
+                    return
+                if self._end_call_output_busy():
+                    heard_since = None
+                elif heard_since is None:
+                    heard_since = time.monotonic()
+                if self._cancel_hangup_for_speech(commit_at, heard_since):
                     return
                 busy = self._end_call_busy(commit_at)
                 if busy and time.monotonic() < give_up_at:
@@ -950,6 +975,12 @@ class VoiceSession:
                 await asyncio.sleep(self.END_CALL_TAIL_SECS)
                 if self._last_commit_at > commit_at:
                     logger.info("end_call_cancelled", reason="caller_spoke")
+                    return
+                if self._end_call_output_busy():
+                    heard_since = None
+                elif heard_since is None:
+                    heard_since = time.monotonic()
+                if self._cancel_hangup_for_speech(commit_at, heard_since):
                     return
                 busy = self._end_call_busy(commit_at)
                 if busy and time.monotonic() < give_up_at:
@@ -962,6 +993,10 @@ class VoiceSession:
                 if await self._end_call_grace(commit_at):
                     return
                 if self._closed:
+                    return
+                if self._end_call_output_busy():
+                    heard_since = None
+                if self._cancel_hangup_for_speech(commit_at, heard_since):
                     return
                 if self._end_call_busy(commit_at) and time.monotonic() < give_up_at:
                     continue
