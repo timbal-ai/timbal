@@ -3,7 +3,7 @@
 
 The session starts the agent on Flux ``EagerEndOfTurn`` or a Smart Turn score,
 holds audio until the committed transcript matches (LiveKit's word comparison),
-and keeps ``defer_until_eot`` tools from running until then.
+and does not start any tool call until that confirmation.
 """
 
 from __future__ import annotations
@@ -221,6 +221,76 @@ class TestFluxEagerQuery:
         assert "speculative_generation" not in VoiceConfig.model_validate({}).model_fields_set
 
 
+class TestToolHoldGate:
+    """The runnable gate, without a voice session. Speculation off is no gate."""
+
+    async def test_confirm_runs_handler_and_side_effects(self) -> None:
+        effects: list[str] = []
+        tool = _side_effect_tool(effects)
+        gate, token = _install_gate()
+        try:
+            task = asyncio.create_task(tool().collect())
+            await asyncio.sleep(0.05)
+            assert effects == []
+            gate.confirm()
+            result = await asyncio.wait_for(task, timeout=2)
+        finally:
+            _reset_gate(token)
+        assert result.status.code == "success"
+        assert effects == ["default", "pre", "handler", "card"]
+
+    async def test_discard_runs_nothing(self) -> None:
+        effects: list[str] = []
+        tool = _side_effect_tool(effects)
+        gate, token = _install_gate()
+        try:
+            task = asyncio.create_task(tool().collect())
+            await asyncio.sleep(0.05)
+            assert effects == []
+            gate.discard()
+            result = await asyncio.wait_for(task, timeout=2)
+        finally:
+            _reset_gate(token)
+        assert effects == []
+        assert result.status.code == "cancelled"
+
+    async def test_no_gate_runs_immediately(self) -> None:
+        effects: list[str] = []
+        result = await _side_effect_tool(effects, defer=True)().collect()
+        assert result.status.code == "success"
+        assert effects == ["default", "pre", "handler", "card"]
+
+
+def _side_effect_tool(effects: list[str], *, defer: bool = False) -> Tool:
+    def leak() -> str:
+        effects.append("default")
+        return "card"
+
+    def pre() -> None:
+        effects.append("pre")
+
+    async def charge(note: str) -> str:
+        """Charge the card."""
+        effects.append("handler")
+        effects.append(note)
+        return "charged"
+
+    return Tool(handler=charge, pre_hook=pre, default_params={"note": leak}, defer_until_eot=defer)
+
+
+def _install_gate():
+    from timbal.core.speculative_gate import SpeculativeGate, install_speculative_gate
+
+    gate = SpeculativeGate()
+    return gate, install_speculative_gate(gate)
+
+
+def _reset_gate(token) -> None:
+    from timbal.core.speculative_gate import reset_speculative_gate
+
+    reset_speculative_gate(token)
+
+
 # ---------------------------------------------------------------------------
 # Session paths
 # ---------------------------------------------------------------------------
@@ -239,6 +309,38 @@ class TestSpeculativeSession:
             await _until(lambda: drive.audio())
         assert session.speculative_generations_started == 0
         assert session.transcript[0].text == "book a table"
+
+    async def test_speculation_off_runs_tool_on_commit_only(self) -> None:
+        effects: list[str] = []
+
+        def leak() -> str:
+            effects.append("default")
+            return "card"
+
+        def pre() -> None:
+            effects.append("pre")
+
+        async def charge(note: str) -> str:
+            """Charge the card."""
+            effects.append("handler")
+            effects.append(note)
+            return "charged"
+
+        session, stt, _tts, model = _session(
+            [_tool_call("charge"), "Done."],
+            speculative=False,
+            tools=[Tool(handler=charge, pre_hook=pre, default_params={"note": leak}, defer_until_eot=True)],
+        )
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="charge it"))
+            await asyncio.sleep(0.05)
+            assert model.call_count == 0
+            assert effects == []
+            await stt.inject(TranscriptEvent(type="committed", text="charge it"))
+            await _until(lambda: effects == ["default", "pre", "handler", "card"])
+            await _until(lambda: drive.audio() or "Done" in drive.assistant_text())
+        assert session.speculative_generations_started == 0
+        assert effects == ["default", "pre", "handler", "card"]
 
     async def test_confirm_reuses_attempt_and_holds_audio(self) -> None:
         session, stt, tts, model = _session(["The blue one."])
@@ -343,36 +445,98 @@ class TestSpeculativeSession:
             await _until(lambda: any(isinstance(e, SessionInterrupted) for e in drive.events))
         assert session.speculative_generations_discarded == 0
 
-    async def test_read_tool_runs_before_confirm_and_side_effect_waits(self) -> None:
-        lookup_ran = asyncio.Event()
-        charge_ran = asyncio.Event()
+    async def test_tools_wait_until_confirm(self) -> None:
+        effects: list[str] = []
+
+        def pre() -> None:
+            effects.append("pre")
 
         async def lookup() -> str:
             """Look up the table."""
-            lookup_ran.set()
+            effects.append("lookup")
             return "blue"
 
         async def charge() -> str:
             """Charge the card."""
-            charge_ran.set()
+            effects.append("charge")
             return "charged"
 
         session, stt, _tts, model = _session(
             [_tool_call("lookup"), _tool_call("charge", "c2"), "All set."],
             tools=[
-                Tool(handler=lookup),
+                Tool(handler=lookup, pre_hook=pre),
                 Tool(handler=charge, defer_until_eot=True),
             ],
         )
         async with _Drive(session, stt) as drive:
             await stt.inject(TranscriptEvent(type="eager", text="book a table"))
-            await asyncio.wait_for(lookup_ran.wait(), timeout=2)
+            await _until(lambda: model.call_count >= 1)
             await asyncio.sleep(0.05)
-            assert not charge_ran.is_set()
+            assert effects == []
             assert drive.audio() == []
             await stt.inject(TranscriptEvent(type="committed", text="book a table"))
-            await asyncio.wait_for(charge_ran.wait(), timeout=2)
+            await _until(lambda: effects == ["pre", "lookup", "charge"])
             await _until(lambda: "All set" in drive.assistant_text() or drive.audio())
+
+    async def test_turn_resumed_does_not_leave_a_half_run_tool(self) -> None:
+        effects: list[str] = []
+        release = asyncio.Event()
+
+        def leak() -> str:
+            effects.append("default")
+            return "card"
+
+        def pre() -> None:
+            effects.append("pre")
+
+        async def charge(note: str) -> str:
+            """Charge the card."""
+            effects.append("entered")
+            try:
+                await asyncio.wait_for(release.wait(), timeout=0.2)
+            except TimeoutError:
+                effects.append("finished")
+            effects.append(note)
+            return "charged"
+
+        session, stt, _tts, model = _session(
+            [_tool_call("charge"), "After."],
+            tools=[Tool(handler=charge, pre_hook=pre, default_params={"note": leak})],
+        )
+        async with _Drive(session, stt):
+            await stt.inject(TranscriptEvent(type="eager", text="charge it"))
+            await _until(lambda: model.call_count >= 1)
+            await asyncio.sleep(0.05)
+            assert effects == []
+            await stt.inject(TranscriptEvent(type="resumed", text=""))
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await asyncio.sleep(0.05)
+            assert effects == []
+        assert effects == []
+
+    async def test_long_utterance_does_not_start_a_tool(self) -> None:
+        effects: list[str] = []
+
+        async def lookup() -> str:
+            """Look up the table."""
+            effects.append("lookup")
+            return "blue"
+
+        session, stt, _tts, model = _session(
+            [_tool_call("lookup"), "Done."],
+            tools=[Tool(handler=lookup)],
+        )
+        async with _Drive(session, stt) as drive:
+            session._caller_speech_started_at = time.monotonic() - 30
+            await stt.inject(TranscriptEvent(type="eager", text="a very long dictation"))
+            await asyncio.sleep(0.05)
+            assert model.call_count == 0
+            assert effects == []
+            assert session.speculative_generations_started == 0
+            await stt.inject(TranscriptEvent(type="committed", text="a very long dictation"))
+            await _until(lambda: effects == ["lookup"])
+            await _until(lambda: drive.audio() or "Done" in drive.assistant_text())
+        assert effects == ["lookup"]
 
     async def test_deferred_tool_is_dropped_when_the_turn_resumes(self) -> None:
         ran = asyncio.Event()
@@ -495,6 +659,32 @@ class TestSpeculativeSession:
         assert session._scheduler.head != discarded
         assert model.call_count >= 2
 
+    async def test_cancel_before_start_does_not_mark_the_next_turn_discarded(self) -> None:
+        session, stt, _tts, model = _session(["After."])
+        original = session._spawn_session_task
+
+        def _cancel_speculative(coro, *, name: str | None = None):
+            task = original(coro, name=name)
+            if name == "speculative-turn":
+                task.cancel()
+            return task
+
+        session._spawn_session_task = _cancel_speculative
+        async with _Drive(session, stt):
+            prior = session._scheduler.head
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await stt.inject(TranscriptEvent(type="resumed", text=""))
+            await _until(lambda: session.speculative_generations_discarded == 1)
+            await _until(lambda: session._current_turn_task is None or session._current_turn_task.done())
+            # Abandon sets the flag before it joins the task. Wait out that gap.
+            await _until(lambda: session._drop_speculative_context is False)
+            await stt.inject(TranscriptEvent(type="committed", text="something else entirely"))
+            await _until(lambda: session._scheduler.head not in (None, prior) and model.call_count >= 1)
+            real = session._scheduler.head
+            assert session._speculative_discarded_run_id != real
+            await session.interrupt()
+            assert session._scheduler.head == real
+
     async def test_confirm_appends_when_the_caller_repeats_the_previous_line(self) -> None:
         session, stt, _tts, model = _session(["First.", "Second."])
 
@@ -524,6 +714,88 @@ class TestSpeculativeSession:
             await stt.inject(TranscriptEvent(type="committed", text="a very long dictation"))
             await _until(lambda: drive.audio())
         assert session.speculative_generations_started == 0
+
+    async def test_stt_end_discards_an_unconfirmed_turn(self) -> None:
+        effects: list[str] = []
+
+        async def lookup() -> str:
+            """Look up the table."""
+            effects.append("lookup")
+            return "blue"
+
+        session, stt, _tts, model = _session(
+            [_tool_call("lookup"), "Done."],
+            tools=[Tool(handler=lookup)],
+        )
+        async with _Drive(session, stt):
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await asyncio.sleep(0.05)
+            assert effects == []
+            await stt.finish()
+            await asyncio.wait_for(_until(lambda: session._closed), timeout=2)
+        assert effects == []
+        assert session.speculative_generations_discarded == 1
+
+    async def test_commit_after_discard_still_starts_a_turn(self) -> None:
+        session, stt, _tts, model = _session(["Held."])
+        original = session.turn_detector.on_committed
+
+        async def on_committed(text, state):
+            decision = await original(text, state)
+            session._abandon_speculative_attempt(reason="speech_resumed")
+            return decision
+
+        session.turn_detector.on_committed = on_committed
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: model.call_count >= 2)
+            await _until(lambda: drive.audio())
+        assert "Held" in drive.assistant_text()
+        assert session.speculative_generations_discarded >= 1
+
+    async def test_confirm_during_detector_does_not_start_a_second_turn(self) -> None:
+        session, stt, _tts, model = _session(["Held."])
+        original = session.turn_detector.on_committed
+
+        async def on_committed(text, state):
+            decision = await original(text, state)
+            async with session._user_turn_lock:
+                if session._speculative_matches(text):
+                    await session._confirm_speculative(text, vad_endpointed=False)
+            return decision
+
+        session.turn_detector.on_committed = on_committed
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: drive.audio())
+            await asyncio.sleep(0.05)
+        user_lines = [row.text for row in session.transcript if row.role == "user"]
+        assert user_lines == ["book a table"]
+        assert model.call_count == 1
+
+    async def test_typed_turn_during_detector_is_not_replaced(self) -> None:
+        session, stt, _tts, model = _session(["Held."])
+        original = session.turn_detector.on_committed
+
+        async def on_committed(text, state):
+            decision = await original(text, state)
+            await session.submit_user_text("typed instead")
+            return decision
+
+        session.turn_detector.on_committed = on_committed
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: drive.audio())
+            await asyncio.sleep(0.05)
+        user_lines = [row.text for row in session.transcript if row.role == "user"]
+        assert user_lines == ["typed instead"]
 
 
 class _FakeVad:

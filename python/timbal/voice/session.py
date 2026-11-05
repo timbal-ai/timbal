@@ -2110,6 +2110,11 @@ class VoiceSession:
             logger.error("stt_event_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"STT error: {e}"))
         # STT stream ended (exhausted, error, or connection lost).
+        # An unconfirmed speculative turn is blocked on the tool gate or on
+        # held audio. Nothing else will confirm it, so drop it first or this
+        # wait sits until the turn timeout.
+        if self._speculative_attempt is not None and not self._speculative_attempt.settled:
+            await self._discard_speculative(reason="stt_ended")
         # Wait for the last turn to finish before closing so AgentTextDone is emitted.
         if self._current_turn_task is not None and not self._current_turn_task.done():
             try:
@@ -2739,10 +2744,16 @@ class VoiceSession:
         self._rewind_discarded_speculative_head()
 
     def _rewind_discarded_speculative_head(self) -> None:
-        """Drop a discarded speculative run that reclaimed ``scheduler.head``."""
+        """Drop a discarded speculative run that reclaimed ``scheduler.head``.
+
+        Also clears the discard flag. A task cancelled before its first step
+        never runs ``_run_turn``'s finally, and the next turn must not inherit
+        that flag or be recorded as the discarded run.
+        """
         run_id = self._speculative_discarded_run_id
         if run_id is not None and self._scheduler.head == run_id:
             self._scheduler.head = self._speculative_prior_head
+        self._drop_speculative_context = False
 
     async def _confirm_speculative(self, final_text: str, *, vad_endpointed: bool) -> None:
         """The committed transcript matches the attempt. Release its audio."""
@@ -2921,6 +2932,13 @@ class VoiceSession:
             self._partials_since_last_commit = 0
             return
         state = self._turn_state()
+        # Captured before the detector await. A resume can discard the attempt
+        # while ``on_committed`` yields, and the decision was scored against
+        # this utterance.
+        pending_speculative = None
+        pending_turn = self._current_turn_task
+        if self._speculative_attempt is not None and not self._speculative_attempt.settled:
+            pending_speculative = self._speculative_attempt.text
         self._partials_since_last_commit = 0
         # Cancel the hold *timer* before awaiting the detector. Local audio EOU
         # yields to the event loop (executor), and a racing hold-expiry task can
@@ -2955,22 +2973,59 @@ class VoiceSession:
         # reports the confirming commit as a refinement IGNORE and a longer
         # final transcript as one too. Equivalent words confirm the attempt.
         # A real extension is a new turn on the final text.
-        if self._speculative_attempt is not None and not self._speculative_attempt.settled:
+        if pending_speculative is not None:
             candidate = decision.text or text
-            same_words = transcripts_equivalent(self._speculative_attempt.text, candidate)
+            same_words = transcripts_equivalent(pending_speculative, candidate)
             if same_words and decision.action is not CommitAction.HOLD:
                 noise = decision.action is CommitAction.IGNORE and decision.reason not in (
                     "refinement",
                     "early_duplicate",
                 )
                 if not noise:
-                    # Measured above the detector await; the later assignment is
-                    # skipped because this return confirms immediately.
+                    # Measured above the detector await; a successful confirm
+                    # returns here and skips the later assignment.
                     self._pending_stt_latency = stt_latency
+                    confirmed = False
                     async with self._user_turn_lock:
                         if self._speculative_matches(candidate):
                             await self._confirm_speculative(candidate, vad_endpointed=vad_endpointed)
-                    return
+                            confirmed = True
+                    if confirmed:
+                        return
+                    # Discarded while the detector ran, or while this waited
+                    # for the lock. Start a turn only when nothing else has
+                    # already taken it: a typed message, or a hold expiry that
+                    # confirmed this same utterance.
+                    live = self._current_turn_task
+                    replaced = live is not None and live is not pending_turn and not live.done()
+                    already_confirmed = (
+                        live is pending_turn
+                        and live is not None
+                        and not live.done()
+                        and (
+                            (
+                                self._speculative_final_text is not None
+                                and transcripts_equivalent(self._speculative_final_text, candidate)
+                            )
+                            or (
+                                bool(self._transcript)
+                                and self._transcript[-1].role == "user"
+                                and transcripts_equivalent(self._transcript[-1].text, candidate)
+                            )
+                        )
+                    )
+                    if replaced or already_confirmed:
+                        decision = CommitDecision(
+                            action=CommitAction.IGNORE,
+                            text=candidate,
+                            reason="speculative_confirm_superseded",
+                        )
+                    else:
+                        decision = CommitDecision(
+                            action=CommitAction.NEW_TURN,
+                            text=candidate,
+                            reason="speculative_confirm_lost",
+                        )
             elif (
                 not same_words
                 and decision.action is CommitAction.IGNORE
@@ -3190,10 +3245,6 @@ class VoiceSession:
         # Before the run resumes: its session admission check must see it as the call's own.
         self._scheduler.mark_own(ctx)
         self._scheduler.note_run(ctx.id)
-        # Abandon may already have rewound the head. Remember this run so the
-        # turn finally can take it back off without touching a newer one.
-        if self._drop_speculative_context:
-            self._speculative_discarded_run_id = ctx.id
         if ctx._bg_store is None:
             previous = self._last_run_context._bg_store if self._last_run_context is not None else None
             store = previous or self._unbound_store

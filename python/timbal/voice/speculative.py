@@ -19,17 +19,23 @@ casefolded words with punctuation removed and CJK/Thai characters split.
 A confirmed transcript that is not equivalent discards the attempt and the
 turn starts over on the final text.
 
-Side-effecting tools (``Runnable.defer_until_eot``, Deepgram's
-``defer_until_eot``) do not run until confirmation. Read-only tools run
-immediately — that is where the latency win is. A discarded attempt cancels
-the wait, so a deferred handler never starts.
+No tool call starts until confirmation. The model still runs, which is the
+latency win, but the handler, its ``pre_hook``, the approval gate, argument
+guardrails, and default-parameter callables wait. A discarded attempt
+cancels that wait, so none of them start. ``defer_until_eot`` marks a tool
+whose work cannot be undone; it is not an opt-out, and it does nothing when
+speculative generation is off. The gate itself is
+:class:`timbal.core.speculative_gate.SpeculativeGate`, so the tool path does
+not import this package.
 
 ``max_speech_duration`` and ``max_retries`` match LiveKit's
-``PreemptiveGenerationOptions`` (10s, 3 per user turn). ``preemptive_tts``
-defaults to false, also matching LiveKit: the model runs early, speech
-synthesis starts once the turn is confirmed. Audio that does get produced
-(a filler, or synthesis when ``preemptive_tts`` is on) stays buffered until
-confirmation.
+``PreemptiveGenerationOptions`` (10s, 3 per user turn). Speculation is
+skipped once the caller has already been speaking longer than
+``max_speech_duration``, because a long utterance is still likely to change.
+``preemptive_tts`` defaults to false, also matching LiveKit: the model runs
+early, speech synthesis starts once the turn is confirmed. Audio that does
+get produced (a filler, or synthesis when ``preemptive_tts`` is on) stays
+buffered until confirmation.
 """
 
 from __future__ import annotations
@@ -37,9 +43,25 @@ from __future__ import annotations
 import asyncio
 import re
 import string
-from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
+
+from ..core.speculative_gate import (
+    SpeculativeGate,
+    install_speculative_gate,
+    reset_speculative_gate,
+    wait_for_turn_confirmation,
+)
+
+__all__ = [
+    "AudioHold",
+    "SpeculativeAttempt",
+    "SpeculativeGate",
+    "install_speculative_gate",
+    "reset_speculative_gate",
+    "transcripts_equivalent",
+    "wait_for_turn_confirmation",
+]
 
 # LiveKit ``split_words(..., split_character=True)`` treats these as their own
 # words. Arabic and Indic stay whitespace-delimited; only CJK and Thai split.
@@ -103,68 +125,6 @@ def _words(text: str) -> list[str]:
             word_start = pos + 1
     _add(word_start, len(text))
     return words
-
-
-class SpeculativeGate:
-    """Blocks ``defer_until_eot`` tools until the voice turn is confirmed.
-
-    ``confirm`` lets every waiter run the handler. ``discard`` cancels them
-    so the handler never starts. Outside a speculative turn there is no gate
-    and :func:`wait_for_turn_confirmation` returns immediately.
-    """
-
-    def __init__(self) -> None:
-        self._confirmed = asyncio.Event()
-        self._discarded = asyncio.Event()
-
-    @property
-    def confirmed(self) -> bool:
-        return self._confirmed.is_set()
-
-    def confirm(self) -> None:
-        self._confirmed.set()
-
-    def discard(self) -> None:
-        self._discarded.set()
-
-    async def wait(self) -> None:
-        if self._confirmed.is_set():
-            return
-        if self._discarded.is_set():
-            raise asyncio.CancelledError
-        confirm_task = asyncio.create_task(self._confirmed.wait())
-        discard_task = asyncio.create_task(self._discarded.wait())
-        try:
-            await asyncio.wait(
-                {confirm_task, discard_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        finally:
-            for task in (confirm_task, discard_task):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(confirm_task, discard_task, return_exceptions=True)
-        if self._discarded.is_set() and not self._confirmed.is_set():
-            raise asyncio.CancelledError
-
-
-_GATE: ContextVar[SpeculativeGate | None] = ContextVar("timbal_speculative_gate", default=None)
-
-
-def install_speculative_gate(gate: SpeculativeGate) -> Token[SpeculativeGate | None]:
-    return _GATE.set(gate)
-
-
-def reset_speculative_gate(token: Token[SpeculativeGate | None]) -> None:
-    _GATE.reset(token)
-
-
-async def wait_for_turn_confirmation() -> None:
-    """No-op without a speculative gate; otherwise block until confirm or discard."""
-    gate = _GATE.get()
-    if gate is None:
-        return
-    await gate.wait()
 
 
 @dataclass

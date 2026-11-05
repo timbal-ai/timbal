@@ -47,7 +47,7 @@ The stored trace follows the same rule. For an interrupted turn, the agent run's
 - `vad_endpointed`: whether Silero endpointing forced the commit.
 - `predictive_endpoint`: whether that commit used a during-speech end-of-turn prediction. It is true only when `vad_endpointed` is also true.
 - `speculative`: true when this turn started before the transcript was confirmed. `eou_to_first_audio_ms` is still measured from that confirmation, so 0 means audio was already waiting.
-- `speculative_generations_started` and `speculative_generations_discarded`: running totals for the call. A discarded attempt is one the caller resumed, or whose confirmed transcript did not match, or that was interrupted. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded` on the turn's run.
+- `speculative_generations_started` and `speculative_generations_discarded`: running totals for the call. A discarded attempt is one the caller resumed, or whose confirmed transcript did not match, or that was interrupted, or the STT stream ended. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded` on the turn's run.
 
 ## Silence to first audio
 

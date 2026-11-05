@@ -1085,6 +1085,9 @@ class MCPServer(ToolSet):
             tool_annotations=annotations,
             interruption_mode=self.interruption_mode,
             requires_approval=approval_policy,
+            # Destructive tools are marked. Speculative generation holds every
+            # tool until EndOfTurn, not only this flag. The flag does nothing
+            # when speculation is off.
             defer_until_eot=_is_destructive(mcp_tool),
             approval_prompt=f"Run {title or exposed_name}?" if requires_approval else None,
             approval_description=(mcp_tool.description or None) if requires_approval else None,
