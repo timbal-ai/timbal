@@ -887,6 +887,16 @@ class VoiceSession:
                 break
         return " ".join(part for part in parts if part)
 
+    def _hangup_grace_transcript(self, commit_at: float, *, since: float) -> bool:
+        """A commit or non-echo partial after ``since``. Not a phrase list."""
+        if self._last_commit_at > commit_at:
+            return True
+        anchor = max(commit_at, self._commit_event_at, since)
+        text = self._latest_partial_text.strip()
+        return bool(
+            text and self._last_partial_at > anchor and not _likely_stt_echo(text, self._hangup_echo_reference())
+        )
+
     def _hangup_grace_speech(self, commit_at: float, *, since: float) -> bool:
         """Caller speech during the confirmation window.
 
@@ -894,13 +904,7 @@ class VoiceSession:
         after ``since``, or local VAD energy after ``since``. Any of those
         retracts the hangup. There is no phrase list.
         """
-        if self._last_commit_at > commit_at:
-            return True
-        anchor = max(commit_at, self._commit_event_at, since)
-        text = self._latest_partial_text.strip()
-        if text and self._last_partial_at > anchor and not _likely_stt_echo(text, self._hangup_echo_reference()):
-            return True
-        return self._vad_hears_speech_now(since)
+        return self._hangup_grace_transcript(commit_at, since=since) or self._vad_hears_speech_now(since)
 
     async def _end_call_grace(self, commit_at: float) -> bool:
         """Wait out the opt-in confirmation window. True when the caller spoke.
@@ -943,18 +947,29 @@ class VoiceSession:
         return False
 
     def _cancel_hangup_for_speech(self, commit_at: float, since: float | None) -> bool:
-        """True when an opted-in grace should retract, now that the goodbye is heard."""
+        """Retract an opted-in hangup once the goodbye has been heard.
+
+        A transcript counts immediately: partials that are just the goodbye
+        coming back are filtered. Local VAD does not count during
+        ``END_CALL_TAIL_SECS``. That interval is leftover playback the tracker
+        has already marked done, and residual speaker echo trips VAD with no
+        transcript to reject. Energy that continues after the tail is a
+        retraction, same as energy inside the confirmation window.
+        """
         if since is None or self._end_call_grace_secs <= 0:
             return False
-        if not self._hangup_grace_speech(commit_at, since=since):
+        tail_end = since + self.END_CALL_TAIL_SECS
+        transcript = self._hangup_grace_transcript(commit_at, since=since)
+        vad = time.monotonic() >= tail_end and self._vad_hears_speech_now(tail_end)
+        if not transcript and not vad:
             return False
         logger.info("end_call_cancelled", reason="caller_spoke")
         return True
 
     async def _end_call_when_heard(self, commit_at: float) -> None:
         give_up_at = time.monotonic() + self.END_CALL_MAX_WAIT_SECS
-        # When the goodbye first finished. VAD before this is the utterance
-        # that asked to hang up; VAD after it, with grace on, is a retraction.
+        # When playback first reported done. The tail after this is still
+        # goodbye audio. VAD anchored here would treat that echo as the caller.
         heard_since: float | None = None
         try:
             while not self._closed:

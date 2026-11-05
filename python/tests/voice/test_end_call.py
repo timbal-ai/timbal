@@ -15,6 +15,7 @@ from timbal.voice import (
     CommitDecision,
     HeuristicTurnDetector,
     SessionStarted,
+    TranscriptEntry,
     TranscriptEvent,
     TurnState,
     VoiceSessionEvent,
@@ -473,6 +474,48 @@ class TestEndCall:
         assert not await session._end_call_grace(0.0)
         assert time.monotonic() - started >= 0.25
         assert not session.closed
+
+    def _arm_grace(self, session) -> None:
+        session._end_call_grace_secs = session.hangup_grace_secs
+
+    def test_vad_during_the_playback_tail_is_not_a_retraction(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+        session._endpointer = _FakeEndpointer(speech_secs=0.4)  # type: ignore[assignment]
+        # 0.2s into the 0.4s tail: this energy is leftover goodbye, not a new turn.
+        assert not session._cancel_hangup_for_speech(0.0, time.monotonic() - 0.2)
+
+    def test_vad_that_continues_past_the_tail_cancels(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+        session._endpointer = _FakeEndpointer(speech_secs=0.4)  # type: ignore[assignment]
+        since = time.monotonic() - (session.END_CALL_TAIL_SECS + 0.2)
+        assert session._cancel_hangup_for_speech(0.0, since)
+
+    def test_echo_that_aged_out_of_the_tail_does_not_cancel(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+
+        class AgedOut:
+            def speech_secs_in_window(self, window_secs: float) -> float:
+                # Still inside a 0.5s lookback, gone from a window that starts at the tail.
+                return 0.4 if window_secs >= 0.35 else 0.0
+
+        session._endpointer = AgedOut()  # type: ignore[assignment]
+        since = time.monotonic() - (session.END_CALL_TAIL_SECS + 0.05)
+        assert not session._cancel_hangup_for_speech(0.0, since)
+
+    def test_a_partial_during_the_tail_still_cancels(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        self._arm_grace(session)
+        session._transcript.append(TranscriptEntry(role="assistant", text=GOODBYE))
+        session._endpointer = _FakeEndpointer(speech_secs=0.4)  # type: ignore[assignment]
+        session._latest_partial_text = "hold on"
+        session._last_partial_at = time.monotonic()
+        assert session._cancel_hangup_for_speech(0.0, time.monotonic() - 0.2)
+        session._latest_partial_text = "hasta luego"
+        session._last_partial_at = time.monotonic()
+        assert not session._cancel_hangup_for_speech(0.0, time.monotonic() - 0.2)
 
     async def test_vad_after_the_goodbye_cancels_without_a_commit(self) -> None:
         tracker = FakePlaybackTracker()
