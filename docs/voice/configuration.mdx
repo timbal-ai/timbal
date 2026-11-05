@@ -46,7 +46,9 @@ Use the chosen provider's voice ID. `language` controls transcription; it does n
 
 The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate=16000`, `encoding="pcm_s16le"`). Transports convert their wire formats where needed. OpenAI uses 24 kHz on the provider connection and requires the voice extra to resample other session rates.
 
-`stt_extra` defaults to ElevenLabs-oriented VAD keys (`commit_strategy`, `min_speech_duration_ms`, `vad_silence_threshold_secs`, `vad_threshold`). The server strips those keys for adapters that own end-of-turn. `tts_extra` defaults to `{"auto_mode": true}`. `VoiceConfig.model` is a per-session text-model override (`provider/model`), separate from `stt_model` and `tts_model`.
+`stt_extra` defaults to ElevenLabs-oriented VAD keys (`commit_strategy`, `min_speech_duration_ms`, `vad_silence_threshold_secs`, `vad_threshold`). The server strips those keys for adapters that own end-of-turn. For Deepgram Flux, `eot_threshold`, `eot_timeout_ms`, and `eager_eot_threshold` in `stt_extra` are the connect-time end-of-turn knobs. `tts_extra` defaults to `{"auto_mode": true}`. `VoiceConfig.model` is a per-session text-model override (`provider/model`), separate from `stt_model` and `tts_model`.
+
+`entity_patience` (default false) and `entity_patience_secs` (default 2.5, maximum 10) hold a turn that still ends in a number, spelled letters, an email, or an alphanumeric code. See [Turn-taking and interruptions](/voice/turn-taking#entity-and-spelling-patience).
 
 ## Pace synthesized speech
 
@@ -67,7 +69,7 @@ agent = Agent(
 
 ## What a client may override
 
-A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
 Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, and `first_flush_min_words` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
 

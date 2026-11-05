@@ -244,6 +244,24 @@ class TestVadEndpointer:
         await _settle(0.05)
         assert rec.commit_calls == 0
 
+    async def test_patience_floor_holds_a_confident_score(self):
+        """An open entity uses the long timeout even when audio looks finished.
+
+        Same shape as Pipecat's long incomplete timeout versus the short one:
+        the floor outlives the confident-score delay, and resumed speech still
+        cancels it.
+        """
+        rec = _Recorder(p=0.99)
+        ep = await _started(_endpointer(min_delay_secs=0.0, max_delay_secs=0.05), rec)
+        ep.patience_floor_secs = 0.35
+        ep.push(b"SSS")
+        ep.push(b"\x00\x00")
+        await _settle(0.1)
+        assert rec.score_calls == 1
+        assert rec.commit_calls == 0
+        await _settle(0.4)
+        assert rec.commit_calls == 1
+
     async def test_text_incomplete_bumps_delay(self):
         """Audio-complete + hedge text → delay floored at TEXT_INCOMPLETE_DELAY,
         so a continuation can cancel before commit (live: "I don't know" → story)."""

@@ -539,6 +539,18 @@ class VoiceConfig(BaseModel):
     EagerEndOfTurn at or above the eager threshold can start the turn;
     TurnResumed cancels it and EndOfTurn confirms it. Local VAD force-commit
     stays off for Flux."""
+    entity_patience: bool = False
+    """Wait out numbers, spelled letters, emails, and alphanumeric codes.
+
+    Off by default. While a partial or commit still ends in one of those, the
+    session holds the turn for ``entity_patience_secs`` and, on Deepgram Flux,
+    ignores eager end-of-turn for that stretch. A word after the entity, a
+    complete email, a trailing ``?`` or ``!``, or the patience window closing
+    resumes normal endpointing.
+    """
+    entity_patience_secs: float = Field(default=2.5, gt=0.0, le=10.0)
+    """Silence budget while an entity is still open. Ignored when
+    ``entity_patience`` is off."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)

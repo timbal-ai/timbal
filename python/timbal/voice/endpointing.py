@@ -169,6 +169,10 @@ class VadEndpointer:
         # endpoint — not when a commit does.
         self._on_score: Callable[[float, bool], Awaitable[None]] | None = None
         self._on_speech_resume: Callable[[], None] | None = None
+        # Session sets this while an entity/spelling capture is open
+        # (AssemblyAI min_turn_silence bump, Pipecat long incomplete timeout).
+        # None → the delay map above is unchanged.
+        self.patience_floor_secs: float | None = None
 
         self._started = False
         self._closed = False
@@ -421,6 +425,12 @@ class VadEndpointer:
                     bumped = max(delay, self.text_incomplete_delay_secs)
                     text_bumped = bumped > delay
                     delay = bumped
+            floor = self.patience_floor_secs
+            if floor is not None and floor > delay:
+                # Open number / spelling / code: don't force-commit on a
+                # confident score, and don't take the short predictive wait.
+                delay = floor
+                early = False
             if early:
                 assert self._predictor is not None
                 heard = max(self._silence_run, silence_at_arm + (time.monotonic() - t0))
@@ -444,6 +454,7 @@ class VadEndpointer:
                 p_text=round(p_text, 3) if p_text is not None else None,
                 text_incomplete_bump=text_bumped,
                 predictive=early,
+                patience_floor_secs=None if floor is None else round(floor, 3),
             )
             # Smart Turn only. A text-driven or predictive-early score is not
             # "Smart Turn says the pause is probably complete". ``remaining``
