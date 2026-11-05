@@ -35,14 +35,14 @@ agent.voice_config["filler"] = {
     "delay_secs": 1.0,
     "timeout_secs": 5.0,
     "system_prompt": (
-        "Write one brief, natural waiting phrase in the caller's language. "
+        "Write one brief, natural waiting phrase. "
         "Do not answer the question or claim the lookup succeeded. "
         "Return only the phrase, without quotes."
     ),
 }
 ```
 
-Generation starts when the tool call is detected and overlaps the delay. The phrase is spoken only while the turn still needs a filler and no substantive reply has started. Omit `model` to use the session's LLM, or set a full `provider/model` ID to choose a separate generator.
+The session appends the [reply-language policy](/voice/configuration#reply-language) after this prompt. Generation starts when the tool call is detected and overlaps the delay. The phrase is spoken only while the turn still needs a filler and no substantive reply has started. Omit `model` to use the session's LLM, or set a full `provider/model` ID to choose a separate generator.
 
 ## Longer waits
 
