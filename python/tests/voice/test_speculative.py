@@ -715,6 +715,47 @@ class TestSpeculativeSession:
             await _until(lambda: drive.audio())
         assert session.speculative_generations_started == 0
 
+    async def test_stt_end_discards_an_unconfirmed_turn(self) -> None:
+        effects: list[str] = []
+
+        async def lookup() -> str:
+            """Look up the table."""
+            effects.append("lookup")
+            return "blue"
+
+        session, stt, _tts, model = _session(
+            [_tool_call("lookup"), "Done."],
+            tools=[Tool(handler=lookup)],
+        )
+        async with _Drive(session, stt):
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await asyncio.sleep(0.05)
+            assert effects == []
+            await stt.finish()
+            await asyncio.wait_for(_until(lambda: session._closed), timeout=2)
+        assert effects == []
+        assert session.speculative_generations_discarded == 1
+
+    async def test_commit_after_discard_still_starts_a_turn(self) -> None:
+        session, stt, _tts, model = _session(["Held."])
+        original = session.turn_detector.on_committed
+
+        async def on_committed(text, state):
+            decision = await original(text, state)
+            session._abandon_speculative_attempt(reason="speech_resumed")
+            return decision
+
+        session.turn_detector.on_committed = on_committed
+        async with _Drive(session, stt) as drive:
+            await stt.inject(TranscriptEvent(type="eager", text="book a table"))
+            await _until(lambda: model.call_count >= 1)
+            await stt.inject(TranscriptEvent(type="committed", text="book a table"))
+            await _until(lambda: model.call_count >= 2)
+            await _until(lambda: drive.audio())
+        assert "Held" in drive.assistant_text()
+        assert session.speculative_generations_discarded >= 1
+
 
 class _FakeVad:
     async def start(self, *, sample_rate: int) -> None:

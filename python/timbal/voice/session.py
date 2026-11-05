@@ -1711,6 +1711,11 @@ class VoiceSession:
             logger.error("stt_event_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"STT error: {e}"))
         # STT stream ended (exhausted, error, or connection lost).
+        # An unconfirmed speculative turn is blocked on the tool gate or on
+        # held audio. Nothing else will confirm it, so drop it first or this
+        # wait sits until the turn timeout.
+        if self._speculative_attempt is not None and not self._speculative_attempt.settled:
+            await self._discard_speculative(reason="stt_ended")
         # Wait for the last turn to finish before closing so AgentTextDone is emitted.
         if self._current_turn_task is not None and not self._current_turn_task.done():
             try:
@@ -2280,6 +2285,12 @@ class VoiceSession:
             self._partials_since_last_commit = 0
             return
         state = self._turn_state()
+        # Captured before the detector await. A resume can discard the attempt
+        # while ``on_committed`` yields, and the decision was scored against
+        # this utterance.
+        pending_speculative = None
+        if self._speculative_attempt is not None and not self._speculative_attempt.settled:
+            pending_speculative = self._speculative_attempt.text
         self._partials_since_last_commit = 0
         # Cancel the hold *timer* before awaiting the detector. Local audio EOU
         # yields to the event loop (executor), and a racing hold-expiry task can
@@ -2314,22 +2325,32 @@ class VoiceSession:
         # reports the confirming commit as a refinement IGNORE and a longer
         # final transcript as one too. Equivalent words confirm the attempt.
         # A real extension is a new turn on the final text.
-        if self._speculative_attempt is not None and not self._speculative_attempt.settled:
+        if pending_speculative is not None:
             candidate = decision.text or text
-            same_words = transcripts_equivalent(self._speculative_attempt.text, candidate)
+            same_words = transcripts_equivalent(pending_speculative, candidate)
             if same_words and decision.action is not CommitAction.HOLD:
                 noise = decision.action is CommitAction.IGNORE and decision.reason not in (
                     "refinement",
                     "early_duplicate",
                 )
                 if not noise:
-                    # Measured above the detector await; the later assignment is
-                    # skipped because this return confirms immediately.
+                    # Measured above the detector await; a successful confirm
+                    # returns here and skips the later assignment.
                     self._pending_stt_latency = stt_latency
+                    confirmed = False
                     async with self._user_turn_lock:
                         if self._speculative_matches(candidate):
                             await self._confirm_speculative(candidate, vad_endpointed=vad_endpointed)
-                    return
+                            confirmed = True
+                    if confirmed:
+                        return
+                    # Discarded while the detector ran, or while this waited
+                    # for the lock. The transcript is still a finished turn.
+                    decision = CommitDecision(
+                        action=CommitAction.NEW_TURN,
+                        text=candidate,
+                        reason="speculative_confirm_lost",
+                    )
             elif (
                 not same_words
                 and decision.action is CommitAction.IGNORE
