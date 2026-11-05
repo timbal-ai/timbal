@@ -456,3 +456,61 @@ voice_config = {
 ```
 
 Leave `hangup_grace_secs` unset. It did not stop `end_call` at 0.6 s or 1.0 s. Leave `entity_patience` unset for these dictation scripts. It does not match spoken number words or Spanish letter names. Tool hold stays on automatically with speculative generation. It did not bring the second tool back to 9/10.
+
+## Wave 4 — the three gaps
+
+Same Flux × `gpt-5.4-mini`. `before` is the wave-2 ship block plus the soft timeout (`soft_timeout_secs=0.8`, message "One moment."). `after` adds `hangup_grace_secs=1.2` and `entity_patience=True`. The lookup tool no longer returns the arrival day, on both sides. Hang-up tools await `commit_hangup()` and log `end_call` only when that returns true. n=10 except `tools_slow` n=5 and `dict_order_en` before n=9 (one Deepgram 503). 150 rows in `benchmarks/voice/242-results/runs-wave4.jsonl`.
+
+### Hang-up then retract
+
+We had the tool run at 0.6 s and 1.0 s. `commit_hangup` waits out the goodbye and the quiet window, and a new caller utterance cancels the wait before `end_call` is requested. LiveKit's EndCallTool waits on the speech handle the same way; Pipecat does not commit an irreversible tool on an early turn.
+
+| Gap | Tool before | Tool after |
+| --- | ---: | ---: |
+| 0.3 s | 0/10 | 0/10 |
+| 0.6 s | 10/10 | 0/10 |
+| 1.0 s | 10/10 | 0/10 |
+
+The session did not close on either side. The difference is the tool. With grace on, the handler is still inside the wait when the retraction commits, so the interruption cancels it and the log never happens.
+
+### Spoken-word dictation
+
+Number words in English and Spanish, letter names, and a trailing single letter after other words now count as an open entity. Flux often writes "jota" as "J". A one-word "a" or "o" still does not hold.
+
+| Scenario | Premature | Read-back miss |
+| --- | ---: | ---: |
+| phone, Spanish | 10/10 → 0/10 | 10/10 → 10/10 |
+| spelled name | 10/10 → 0/10 | 10/10 → 10/10 |
+| order id | 9/9 → 0/10 | 6/9 → 8/10 |
+
+The turn holds. One after phone commit is "seis cinco cinco cero uno dos tres cuatro." One after name commit is "me ha apellido J. O. N A A S A." The agent still does not read that string back as the number or the name. That miss is the reply, not the split.
+
+### Two tools
+
+Wave 3 was 7/10 and 6/10, with discards at 0. The lookup result said "arrives Thursday", so the model answered the window from that string. The result is now ship status only, and the prompt says to call each tool that owns a fact. Both sides of this run use that schema.
+
+| | Both tools |
+| --- | ---: |
+| before | 10/10 |
+| after | 10/10 |
+
+Not a config knob. The tool return was the cause.
+
+### Soft timeout still speaks
+
+`tools_slow`, n=5. `filler_spoken` 5/5 before and 1/5 after. The one after run that called `slow_check` did speak (dead air 977 ms). The others returned without the slow tool. The filler path is unchanged.
+
+## What to ship
+
+```python
+voice_config = {
+    "ignore_backchannels": True,
+    "speculative_generation": {"enabled": True, "preemptive_tts": True},
+    "max_tts_pause_secs": 0.2,
+    "filler": {"enabled": True, "soft_timeout_secs": 0.8, "message": "One moment."},
+    "hangup_grace_secs": 1.2,
+    "entity_patience": True,
+}
+```
+
+The hang-up tool has to await `session.commit_hangup()` and treat a false result as "do not hang up". `session.end_call()` alone still only delays teardown after the tool has already run. No new dependencies.

@@ -43,6 +43,8 @@ from .test_turn_detection import _state
         ("cero uno dos", "digits"),
         ("tres, cuatro", "digits"),
         ("Me apellido jota", "spelling"),
+        ("me apellido J", "spelling"),
+        ("apellido J.", "spelling"),
         ("ene e ese", "spelling"),
         ("jota o", "spelling"),
         ("aitch jay", "spelling"),

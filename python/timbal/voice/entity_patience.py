@@ -171,8 +171,10 @@ def entity_capture(text: str) -> str | None:
     if digits >= 2:
         return "digits"
     # A named letter ("jota", "aitch") is already a spelling. Two bare letters
-    # ("J O") are too. One bare letter is a word ("a", "I", "o").
-    if letter_names >= 1 or letters >= 2:
+    # ("J O") are too. One bare letter alone is a word ("a", "I", "o"). A
+    # bare letter after other words is how providers write a spelled name
+    # ("apellido J" for "jota").
+    if letter_names >= 1 or letters >= 2 or (letters == 1 and len(tokens) > consumed):
         return "spelling"
     return None
 
