@@ -46,7 +46,8 @@ integrations should use the default.
 
 STT tuning lives in `stt_extra`: `prompt`, `threshold` (default `0.5`),
 `prefix_padding_ms` (`300`), `silence_duration_ms` (`500`), and
-`noise_reduction` (`"near_field"`, `"far_field"`, or `None`). The session's
+`noise_reduction` (`"near_field"`, `"far_field"`, or `None`).
+
 The session's `language` pins spoken replies and is this adapter's transcription hint. Default `gpt-transcribe` sends it as `languages: [tag]`; other accepted models send `language`. See [Reply language](/voice/configuration#reply-language).
 
 `OpenAIStreamTTS` uses the Speech API with streaming PCM audio. It defaults to
