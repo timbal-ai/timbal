@@ -700,7 +700,8 @@ class TestSpeculativeSession:
             await stt.inject(TranscriptEvent(type="eager", text="book a table"))
             await _until(lambda: model.call_count >= 2)
             await stt.inject(TranscriptEvent(type="committed", text="Book a table."))
-            await _until(lambda: sum(1 for row in session.transcript if row.role == "user") >= 2)
+            # Windows CI is slower to append the confirmed user line.
+            await _until(lambda: sum(1 for row in session.transcript if row.role == "user") >= 2, timeout=5.0)
         user_lines = [row.text for row in session.transcript if row.role == "user"]
         assert user_lines == ["book a table", "Book a table."]
 
