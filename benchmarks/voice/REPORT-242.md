@@ -120,3 +120,259 @@ Merged in PR order onto `origin/main`. Clean merges: #244 into #243, #246 into #
 - `python/timbal/voice/__init__.py` exports both `SpeechEouPredictor` and `SpeculativeGeneration`.
 
 If #250 merges first, #247 must not replace `predictive_eou.py` with the stub, must not drop `predict_during_speech` from the client list, and must not let a second `eager_eot_threshold` assignment overwrite the first.
+
+## Wave 2 — recommended config, the rest of the calls
+
+Same branch against the same `origin/main`. `before` is main with default `VoiceConfig`. `after` is **only** the recommended block from the section above (`ignore_backchannels`, speculative generation with preemptive TTS, `max_tts_pause_secs=0.2`). Not the everything-on candidate. Each run gets its own `Call id <uuid>` prefix on the ~7k-token prompt, and even reps run before-then-after while odd reps run after-then-before, so the two sides do not warm each other.
+
+Flux × `openai/gpt-5.4-mini` is n=10 (51 scenarios × 2 sides = 1020). ElevenLabs Scribe on the same 51 scenarios, and Groq `openai/gpt-oss-120b` on 8 of them, are n=5. A full n=10 on Scribe as well is another ~510 realtime calls on top of a matrix that already took 5.6 hours; n=5 is the floor the request allowed, and it is what those two cells are. 1610 rows in `benchmarks/voice/242-results/runs-wave2.jsonl`. Reproduce with `uv run python benchmarks/voice/bench_242.py wave2 --flux-reps 10 --other-reps 5` (resumes rows already in that file). Two runs timed out and are excluded from the percentiles below: `long_10_en` after rep 7, and `en_after_es_greet` after Flux rep 0.
+
+Caller audio is still synthetic `gpt-4o-mini-tts`. Telephony rows go through `benchmarks/voice/degrade.py`: G.711 μ-law, 300–3400 Hz, 8 kHz, then back up. Street is pink noise at 8 dB SNR, office pink at 18 dB, TV white at 12 dB. The clock in the tables is the same wall clock as wave 1 (last paced caller frame → first emitted agent byte), in milliseconds.
+
+The first cut of `en_after_es_greet` treated the Spanish greeting as the agent's answer and closed 0.8 s after the caller. Those 30 rows were deleted and rerun after the harness started waiting for playback to finish and for a reply that arrives after the greeting. Everything else is from the original pass.
+
+### 1. Telephony
+
+Flux, `gpt-5.4-mini`, n=10. Quality column is replies whose language does not match the caller.
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 | Before | After |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **all five** | 1465 | 1086 | 2181 | 1805 | lang 11/50 | lang 14/50 |
+| phone, English | 1038 | 711 | 1397 | 1023 | 6/10 | 7/10 |
+| phone, Spanish | 1587 | 1074 | 1773 | 1308 | 0/10 | 0/10 |
+| street 8 dB, English | 1244 | 1768 | 1318 | 1949 | 3/10 | 2/10 |
+| office 18 dB, Spanish | 1563 | 968 | 2095 | 1147 | 0/10 | 0/10 |
+| TV 12 dB, English | 2148 | 1536 | 3126 | 1761 | 2/10 | 5/10 |
+
+Clean phone and office get faster. Street gets slower: after started 20 speculative attempts and discarded 10, and the silence samples spread from a tight 1073–1338 ms to 953–2205 ms. The language misses are English audio, committed in English, answered in Spanish. Spanish telephony was 0/10 both sides. Detail under "Language" below.
+
+Scribe, n=5, same five: before p50 2104 / p90 2762, after p50 1910 / p90 2963. Slower than Flux, and the p90 does not improve. Language misses 9/25 → 5/25, same English-answered-in-Spanish shape.
+
+### 2. Hesitations
+
+Gap 1.5–1.8 s inside the sentence. Quality is premature cut-off: agent audio before the continuation was fed.
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 | Premature |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **Flux, all three** | 1892 | 2030 | 2704 | 3082 | 30/30 → 30/30 |
+| "um", English | 1780 | 2372 | 2114 | 2906 | 10/10 → 10/10 |
+| "eh", Spanish | 2584 | 1935 | 3141 | 2466 | 10/10 → 10/10 |
+| "o sea", Spanish | 1680 | 2170 | 2267 | 3202 | 10/10 → 10/10 |
+
+The recommended config does not hold the turn. Flux ends it during the pause on both sides, then the continuation is a second turn. After is slower on "um" and "o sea" because that second turn follows a discarded speculation. Scribe holds the Spanish ones (0/5 premature both sides) and still splits "um" 5/5. Scribe overall p50 2773 → 2391.
+
+### 3. Dictation
+
+Pauses 0.45–0.8 s between groups. Quality is premature cut-off, then whether any reply contains the read-back needle (`4821`, `655` / "seis cinco cinco", "alex" and "example", "jones" / "jota").
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 | Before | After |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Flux, all four** | 1275 | 1190 | 2318 | 2180 | prem 40/40, read-back 34/40 | prem 40/40, read-back 31/40 |
+| order id, English | 190 | 281 | 2330 | 2604 | 10/10, 6/10 | 10/10, 4/10 |
+| phone, Spanish | 1107 | 976 | 2341 | 1688 | 10/10, 10/10 | 10/10, 10/10 |
+| email, English | 1398 | 1198 | 1859 | 2076 | 10/10, 8/10 | 10/10, 7/10 |
+| spelled name, Spanish | 1275 | 1228 | 1658 | 2240 | 10/10, 10/10 | 10/10, 10/10 |
+
+Flux splits every dictation into one turn per group, both sides. A later reply sometimes contains the digits (order id read-back fails 6/10 → 4/10), the phone number and the spelled name never come back whole. One after Flux order-id run committed "four eight." / "two one." / "nine zero." as three turns and the second reply asked the caller to repeat "4821", which counts as a read-back hit and is still a broken dictation. Scribe merged the English order id 5/5 before and only 2/5 after (premature 0/5 → 3/5). That is a regression on the production STT.
+
+### 4. Long monologue
+
+Four sentences, 0.55 s gaps, about 20 s of speech.
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 | Premature |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| English, Flux | 1420 | 805 | 2026 | 1670 | 10/10 → 10/10 |
+| Spanish, Flux | 2493 | 2310 | 2638 | 2550 | 0/10 → 0/10 |
+
+Same split as wave 1's unfinished phrases: English breaks, Spanish does not, and the recommended config does not change it. The English p50 drop is the early reply, not a held monologue. Scribe held both languages, 0/5 both sides (p50 2539 → 2376).
+
+### 5. Fast and slow
+
+`ash` at 1.2× English, `sage` at 0.85× Spanish.
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 | Lang misses |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fast English | 1555 | 1045 | 1755 | 1288 | 9/10 → 10/10 |
+| slow Spanish | 1099 | 754 | 1356 | 932 | 0/10 → 0/10 |
+
+Latency moves the right way. The fast English caller was transcribed in English and answered in Spanish on 19 of 20 Flux runs. Scribe fast-English language misses 2/5 → 4/5, and slow-Spanish p50 got worse (1231 → 1874).
+
+### 6. Backchannels
+
+Spoken over the agent after 400 ms of playback. Quality is a false cut (`SessionInterrupted` before the scenario closed).
+
+| Utterance | Before Flux | After Flux | Before Scribe | After Scribe |
+| --- | ---: | ---: | ---: | ---: |
+| sí | 10/10 | 0/10 | 5/5 | 0/5 |
+| ajá | 0/10 | 0/10 | 5/5 | 0/5 |
+| claro | 10/10 | 0/10 | 5/5 | 0/5 |
+| vale vale | 2/10 | 0/10 | 5/5 | 0/5 |
+| uh-huh | 5/10 | 0/10 | 5/5 | 0/5 |
+| right | 10/10 | 0/10 | 5/5 | 0/5 |
+| yeah | 10/10 | 0/10 | 5/5 | 0/5 |
+| mm | 9/10 | 10/10 | 4/5 | 5/5 |
+| **all** | **56/80** | **10/80** | **39/40** | **5/40** |
+
+Silence p50 on Flux for the whole group: 2632 → 1657, p90 2904 → 1842. That drop is the agent not restarting after the cut. `ajá` never interrupted on Flux to begin with (it was not committed as its own turn). Every remaining false cut is `mm`. Flux commits it as `M.`, and `_BACKCHANNEL_WORDS` has `mhmm` / `mm hmm` but not `mm` or `m`.
+
+### 7. Barge-in
+
+Miss rate is an interrupt that never fired. Stop-audio is interrupt time minus the moment the barge clip started.
+
+| | Misses | Stop p50 | Stop p90 |
+| --- | ---: | ---: | ---: |
+| Flux before | 0/80 | 2319 | 3307 |
+| Flux after | 0/80 | 644 | 868 |
+| Scribe before | 0/40 | 2499 | 3452 |
+| Scribe after | 0/40 | 1448 | 1724 |
+
+Short ones included, Flux n=10: "no" stop p50 1674 → 657, "stop" 2005 → 644, "wait" 1944 → 752, "espera" 2489 → 780, start / mid / end of the reply all 0 misses. Nothing in this set got worse. Overlap (caller starts as the agent starts) is the same miss rate, 0/20 Flux and 0/10 Scribe, both sides. Flux overlap stop p50 1343 → 1104. Scribe overlap stop stays about 2.2 s.
+
+### 8. Self-corrections and hang-up retractions
+
+Correction gap is 0.4 s. Quality is premature cut-off, and whether a reply contains "Wednesday" / "miércoles".
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 | Premature | Read-back miss |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| English, Flux | 1074 | 380 | 1462 | 777 | 10/10 → 10/10 | 7/10 → 8/10 |
+| Spanish, Flux | 1353 | 582 | 1565 | 770 | 10/10 → 10/10 | 5/10 → 1/10 |
+
+The p50 collapse is the premature reply getting faster under speculation. The turn still ends before "no, Wednesday". Spanish read-back is the one quality win in this group. Scribe held the Spanish correction (premature 0/5 both sides) and split the English one 5/5.
+
+Hang-up then retract. The caller says "please hang up" and takes it back after the gap. Quality is `end_call` invocations. Fewer is better. Every one of these is a retraction, so an `end_call` is a wrong tool execution. `destructive_on_retracted` in the row stays 0: that flag requires an empty replacement commit or a discarded speculation on the same row, and a turn Flux already confirmed does not look like either.
+
+| Gap | Flux before | Flux after | Scribe before | Scribe after |
+| --- | ---: | ---: | ---: | ---: |
+| English 0.3 s | 10/10 | 6/10 | 0/5 | 0/5 |
+| English 0.6 s | 8/10 | 6/10 | 4/5 | 1/5 |
+| English 1.0 s | 10/10 | 7/10 | 5/5 | 2/5 |
+| Spanish 0.3 s | 0/10 | 0/10 | 0/5 | 0/5 |
+| Spanish 0.6 s | 10/10 | 9/10 | 0/5 | 0/5 |
+| Spanish 1.0 s | 10/10 | 8/10 | 0/5 | 0/5 |
+
+Spanish 0.3 s is one Flux commit ("cuelga la llamada. No, espera…") and the model does not hang up. At 0.6 s and 1.0 s Flux has already closed the turn and `end_call` runs before the retraction is heard. After hangs up a bit less often. It does not fix it. Scribe keeps the Spanish retraction inside one turn out to 1.0 s (0 hang-ups) and is the better English result too, especially after.
+
+### 9. Language
+
+Three different things were getting called "the agent answered English in Spanish."
+
+**Ordinary English turns.** `VoiceConfig.language` is `en`. Flux's commit is English. `gpt-5.4-mini` still replies in Spanish on 90/280 of those turns before and 101/279 after. Fast English is 9/10 → 10/10. The warranty tool is 9/10 and 10/10. The system prompt says "Reply in the caller's language" and never pins English. Groq `gpt-oss-120b` on the clean English phone line was 0/5 both sides, same Flux transcript. This is the model, not STT and not the recommended config.
+
+**Code-switch.** "Quiero el refund del order cuatro ocho dos uno, please." Expect Spanish. Flux language misses 0/10 both sides. Read-back of the order id missed 4/10 → 5/10. Silence p50 3209 → 2123. Scribe language misses 1/5 → 0/5, but silence p50 3694 → 4929. After is slower there.
+
+**English caller after a Spanish greeting.** The harness sets `VoiceConfig.language` from the scenario language, and this scenario is tagged `es` because the greeting is Spanish, so STT is hinted Spanish. That is the config leg.
+
+Flux committed only the tail, `in English, please.`, on 19/20 runs (the 20th after-run timed out with no commit). The model then answered in English, 19/19. It did not answer in Spanish. The full sentence "I need the return window in English please" was not in the commit. Scribe committed the full sentence, often with a hallucinated leading `Sí.` (language hint `es`), and answered in English 4/5 before and 4/5 after. The two misses are real model slips on a correct English transcript: one before reply is entirely Spanish, one after reply starts "La ventana de devolución…" and finishes in English.
+
+So: the systematic "English in, Spanish out" on normal turns is `gpt-5.4-mini` ignoring an English transcript. The greeting case is not that bug. Under `language=es`, Flux drops the front of the English sentence, and Scribe invents a `Sí`. Neither side's recommended config causes it. Pinning the prompt ("if the transcript is English, answer in English") would be the fix for the model half. Not hinting STT as `es` on a call that may switch would be the fix for the truncation and the phantom `Sí`.
+
+### 10. Long call, cold cache
+
+Ten turns, Flux, unique prefix per run. `long_10_en` after rep 7 timed out, so after latency is n=9.
+
+| | Silence p50 | Silence p90 | Cold hit | Cold TTFT p50 | Warm hit | Warm TTFT p50 | Warm TTFT p90 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| before | 608 | 1178 | 0.0 (n=10, ~12700 uncached) | 757 | 0.968 (n=91) | 730 | 930 |
+| after | 583 | 1492 | 0.0 (n=9, ~12790 uncached) | 1324 | 0.958 (n=82) | 532 | 1528 |
+
+Turn 1 is actually cold this time. Wave 1's "before was already warm" result was the shared prefix. Hit rate on later turns is ~96% on OpenAI either side. Warm TTFT median improves (730 → 532). The tails do not: silence p90 1178 → 1492, warm TTFT p90 930 → 1528, and cold TTFT is worse after because turn 1's speculation is discarded and the confirmed call pays for it. Per-turn silence medians bounce between ~100 ms and ~1400 ms with no upward drift across the 10 turns.
+
+Groq on the same call, n=5: silence p50 1186 → 912, p90 1733 → 1404. Cold hit 0 both sides (TTFT p50 1648 → 1173). Warm hit only 0.404 → 0.493. Groq is not caching this prefix the way OpenAI is.
+
+### 11. Tools
+
+Dead air is tool-start → next emitted audio. `filler_spoken` was 0 on every Flux run, both sides. An `agent_status` event (`Calling slow_check…`) is emitted at tool start. It is not audio. The 4 s `slow_check` is uncovered unless the model already spoke.
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 | Dead-air p50 | What happened |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| two tools | 3470 | 2301 | 3973 | 3356 | 1330 → 873 | both tools called 9/10 → 5/10 |
+| slow, 4 s | 3157 | 4197 | 3796 | 6571 | 970 → 2796 | after has a cluster at 4.8–5.7 s |
+| error | 3444 | 2553 | 3900 | 2764 | 983 → 928 | tool raised, model apologised, 10/10 both |
+
+`tools_two` asking for a lookup and then the delivery window: before called both tools 9/10, after 5/10 (the other 5 called only `lookup_order`). That is a real regression. `tools_slow` dead air is the other one: before sits around 1 s, after splits into a fast cluster (~0.4–0.8 s) and a cluster that covers the whole tool. Scribe shows the same slow-tool dead-air jump (980 → 2883 ms). No filler audio on either STT.
+
+### 12. Silence after a question
+
+8 s of caller silence after the agent answers. `user_idle` is unset, which is the default, so the session does not re-prompt. Phantom turns (new reply or commit during the tail): 0 on Flux (20/20) and 0 on Scribe (10/10), both sides. Nobody got a reprompt because nothing is configured to speak one. The 8 s tail is exactly `UserIdleConfig.timeout_secs`'s default, so this does not measure the prompt text. It measures that the default leaves the line quiet.
+
+Silence-to-first-audio for the answer itself, Flux: English 1210 → 1044 (p90 1324 → 1294), Spanish 1286 → 2303 (p90 1334 → 2712). The Spanish one is worse after. Scribe English 1810 → 1668, Spanish 3172 → 3319.
+
+### 13. Overlap
+
+Covered with barge-in. Miss rate 0 everywhere. Flux stop p50 1343 → 1104. Scribe does not get the fast stop (2209 → 2144).
+
+## Scribe vs Flux
+
+Scribe is the production STT and it is slower on the clean turns (telephony p50 ~2.1 s vs Flux ~1.5 s before, and after only shaves it to ~1.9 s). It is the one that holds a turn. Spanish hesitations, both monologues, the Spanish self-correction, and Spanish hang-up retractions out to 1.0 s stay one turn on Scribe and split on Flux. The recommended config undoes one of those: the English order-id dictation was premature 0/5 on Scribe before and 3/5 after. Backchannel suppression works on Scribe the same way it works on Flux, including the `mm` hole (5/5 after). Barge-in is caught on both; the stop-audio win is smaller on Scribe (2.5 s → 1.4 s, vs Flux 2.3 s → 0.64 s).
+
+## Groq vs OpenAI
+
+Subset, Flux, n=5: `tel_phone_en`, `hesit_um_en`, `dict_order_en`, `bc_yeah`, `barge_mid_en`, `lang_en_control`, `long_10_en`, `tools_slow`.
+
+| Scenario | Before p50 | After p50 | Before p90 | After p90 |
+| --- | ---: | ---: | ---: | ---: |
+| phone, English | 1733 | 1462 | 1944 | 2881 |
+| "um" | 2099 | 2035 | 2679 | 2238 |
+| order id | 501 | 182 | 1355 | 2520 |
+| "yeah" | 2925 | 2152 | 3337 | 2598 |
+| barge mid | 2866 | 1666 | 3712 | 1856 |
+| English control | 876 | 115 | 1533 | 426 |
+| 10-turn | 1186 | 912 | 1733 | 1404 |
+| slow tool | 3982 | 3384 | 6775 | 3702 |
+
+Medians move the same direction as mini, and `bc_yeah` false cuts go 5/5 → 0/5. The phone p90 goes the wrong way (1944 → 2881), and the order-id p90 does too (1355 → 2520). Language misses on the phone line: 0/5 both sides, which mini does not manage. Warm cache hit on the long call is ~40–49%, not the 96% OpenAI gets. Wave 1's warning was `gpt-oss-20b` p90 3603 → 4935. This is a different model and a short subset. The tail is still the reason not to copy the speculative block onto Groq blindly. `tools_slow` dead-air p50 1446 → 1340, which is the one place Groq did not pick up mini's dead-air regression.
+
+## Where after is worse
+
+Plainly:
+
+- Street noise, Flux, silence p50 1244 → 1768. Half the speculative attempts were discarded.
+- "um" and "o sea" hesitations are slower, and still cut 10/10.
+- Scribe English order-id dictation starts getting cut (0/5 → 3/5 premature).
+- `tools_two` calls both tools 9/10 → 5/10 on Flux.
+- `tools_slow` dead-air p50 970 → 2796 on Flux, 980 → 2883 on Scribe. No filler audio.
+- Spanish silence-after-question p50 1286 → 2303.
+- Long-call p90 1178 → 1492, cold TTFT 757 → 1324, one after run timed out.
+- Code-switch on Scribe p50 3694 → 4929.
+- Groq phone p90 1944 → 2881.
+- `mm` is not fixed. 9/10 → 10/10 false cuts on Flux.
+- Fast English answered in Spanish 9/10 → 10/10. Both sides do it; after does not help.
+- English hang-up retractions still fire `end_call` most of the time. The count dropped (48/60 → 36/60 on Flux across the six gaps) and that is not a fix.
+
+## Revised recommended config
+
+Keep it for Flux + `gpt-5.4-mini`:
+
+```python
+voice_config = {
+    "ignore_backchannels": True,
+    "speculative_generation": {"enabled": True, "preemptive_tts": True},
+    "max_tts_pause_secs": 0.2,
+}
+```
+
+That is the backchannel result (56/80 → 10/80, everything except `mm`) and the barge stop-audio result (2.3 s → 0.64 s) and the clean-phone latency result (1038 → 711). It is not a turn-holding config. `hold_unfinished_secs` was left unset on purpose, and this run says the pauses in dictation, hesitation, and self-correction still end the turn. Turning it on was already tested in wave 1 and did not merge the English unfinished cut on Flux. Scribe is what holds those turns, and speculation made Scribe's order-id dictation worse, so do not assume the block is free on the production STT.
+
+Do not expect filler audio during a multi-second tool. Nothing in this config speaks into that gap. `filler` is a separate switch and it was left at whatever the server default already is; `filler_spoken` was 0.
+
+Leave Groq off this block until someone looks at the phone p90.
+
+## Bugs, by owning PR
+
+Not fixed here.
+
+**#243 backchannels.** `mm` is outside `_BACKCHANNEL_WORDS`. Flux transcribes it as `M.` and it cuts the agent 10/10 with the filter on (9/10 with it off). Scribe 5/5 with the filter on. `sí`, `claro`, `vale vale`, `uh-huh`, `right`, `yeah` drop to 0. `ajá` was already 0 on Flux. The word list is the hole.
+
+**#244 latency suite.** No product bug. The wall clock reads ~50 ms p50 on `lang_en_control` before because the first audio byte often lands before the feeder arms the timer. `eou_to_first_audio_ms` is in the row for that case. Both clocks are in the JSON.
+
+**#245 floors and first flush.** Not in this config. English monologue and English unfinished-style pauses still split 10/10 on Flux, both sides. Spanish monologue splits 0/10. Same result as wave 1. The floors are not what moves Flux.
+
+**#246 interruption modes.** Barge miss stayed 0/80 including "no", "stop", "wait", "espera". No new miss. The faster stop is real and was not isolated to this PR.
+
+**#247 predict during speech.** Left off. Nothing new to attribute.
+
+**#248 pause trim.** On, at 0.2 s, and not separated from speculation in this wave. No listener score, same as wave 1.
+
+**#249 prompt cache.** Cold is real when the prefix is unique: hit rate 0 on turn 1, ~96% after that on OpenAI, ~40–49% on Groq. After's cold TTFT on the long call is worse (757 → 1324), not better. One `long_10_en` after run timed out waiting for a reply.
+
+**#250 speculative generation.** 1026 attempts started, 213 discarded, on Flux × mini × after. Discarded runs still do not carry output tokens on the trace (3 rows recorded 37632 cached input tokens and 0 output). The regressions that show up only after, and that line up with a discarded attempt, are street-noise latency, `tools_slow` dead air, and `tools_two` dropping the second tool (9/10 → 5/10). Scribe's order-id dictation going from 0/5 premature to 3/5 is the production-STT version of the same early commit. `end_call` on a retraction got somewhat better and is still wrong at 0.6 s and 1.0 s, because Flux confirms the hang-up turn before the retraction arrives. `defer_until_eot` cannot help a turn that has already ended.

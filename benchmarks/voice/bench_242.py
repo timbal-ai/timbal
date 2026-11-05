@@ -102,10 +102,24 @@ class ScenarioSpec:
 
 
 SCENARIOS: tuple[ScenarioSpec, ...] = (
-    ScenarioSpec("en_statement", "en", "latency", (("The return window is thirty days, so I can still send it back.", "say"),)),
-    ScenarioSpec("es_statement", "es", "latency", (("La ventana de devolución es de treinta días, así que todavía puedo enviarlo.", "say"),)),
-    ScenarioSpec("en_question", "en", "latency", (("Can you check whether order four eight two one has already shipped?", "say"),)),
-    ScenarioSpec("es_question", "es", "latency", (("¿Puedes mirar si el pedido cuatro ocho dos uno ya ha salido?", "say"),)),
+    ScenarioSpec(
+        "en_statement", "en", "latency", (("The return window is thirty days, so I can still send it back.", "say"),)
+    ),
+    ScenarioSpec(
+        "es_statement",
+        "es",
+        "latency",
+        (("La ventana de devolución es de treinta días, así que todavía puedo enviarlo.", "say"),),
+    ),
+    ScenarioSpec(
+        "en_question",
+        "en",
+        "latency",
+        (("Can you check whether order four eight two one has already shipped?", "say"),),
+    ),
+    ScenarioSpec(
+        "es_question", "es", "latency", (("¿Puedes mirar si el pedido cuatro ocho dos uno ya ha salido?", "say"),)
+    ),
     ScenarioSpec(
         "en_unfinished",
         "en",
@@ -210,11 +224,41 @@ _POLICY_ES = "Explícame la política de devoluciones en dos frases."
 
 # Wave 2. AFTER uses the recommended config, not the everything-on candidate.
 WAVE2: tuple[ScenarioSpec, ...] = (
-    _s("tel_phone_en", "en", "telephony", (("The return window is thirty days, so I can still send it back.", "say"),), mic="phone"),
-    _s("tel_phone_es", "es", "telephony", (("La ventana de devolución es de treinta días, así que todavía puedo enviarlo.", "say"),), mic="phone"),
-    _s("tel_street_en", "en", "telephony", (("The return window is thirty days, so I can still send it back.", "say"),), mic="street"),
-    _s("tel_office_es", "es", "telephony", (("La ventana de devolución es de treinta días, así que todavía puedo enviarlo.", "say"),), mic="office"),
-    _s("tel_tv_en", "en", "telephony", (("Can you check whether order four eight two one has already shipped?", "say"),), mic="tv"),
+    _s(
+        "tel_phone_en",
+        "en",
+        "telephony",
+        (("The return window is thirty days, so I can still send it back.", "say"),),
+        mic="phone",
+    ),
+    _s(
+        "tel_phone_es",
+        "es",
+        "telephony",
+        (("La ventana de devolución es de treinta días, así que todavía puedo enviarlo.", "say"),),
+        mic="phone",
+    ),
+    _s(
+        "tel_street_en",
+        "en",
+        "telephony",
+        (("The return window is thirty days, so I can still send it back.", "say"),),
+        mic="street",
+    ),
+    _s(
+        "tel_office_es",
+        "es",
+        "telephony",
+        (("La ventana de devolución es de treinta días, así que todavía puedo enviarlo.", "say"),),
+        mic="office",
+    ),
+    _s(
+        "tel_tv_en",
+        "en",
+        "telephony",
+        (("Can you check whether order four eight two one has already shipped?", "say"),),
+        mic="tv",
+    ),
     _s(
         "hesit_um_en",
         "en",
@@ -289,8 +333,14 @@ WAVE2: tuple[ScenarioSpec, ...] = (
         "en",
         "monologue",
         (
-            ("I bought a jacket last month and the zipper broke the second time I wore it, so I want to send it back.", "say"),
-            ("The order number is on the email, I think, and I still have the receipt in the kitchen drawer.", "continuation"),
+            (
+                "I bought a jacket last month and the zipper broke the second time I wore it, so I want to send it back.",
+                "say",
+            ),
+            (
+                "The order number is on the email, I think, and I still have the receipt in the kitchen drawer.",
+                "continuation",
+            ),
             ("I do not need a replacement, I just want the refund on the same card I paid with.", "continuation"),
             ("Please tell me the return window and the address I should ship the box to.", "continuation"),
         ),
@@ -301,8 +351,14 @@ WAVE2: tuple[ScenarioSpec, ...] = (
         "es",
         "monologue",
         (
-            ("Compré una chaqueta el mes pasado y la cremallera se rompió la segunda vez que la usé, así que quiero devolverla.", "say"),
-            ("El número de pedido está en el correo, creo, y todavía tengo el recibo en el cajón de la cocina.", "continuation"),
+            (
+                "Compré una chaqueta el mes pasado y la cremallera se rompió la segunda vez que la usé, así que quiero devolverla.",
+                "say",
+            ),
+            (
+                "El número de pedido está en el correo, creo, y todavía tengo el recibo en el cajón de la cocina.",
+                "continuation",
+            ),
             ("No necesito un cambio, solo el reembolso en la misma tarjeta con la que pagué.", "continuation"),
             ("Dime el plazo de devolución y la dirección a la que tengo que enviar la caja.", "continuation"),
         ),
@@ -333,7 +389,13 @@ WAVE2: tuple[ScenarioSpec, ...] = (
     _s("bc_yeah", "en", "backchannel", ((_POLICY, "say"), ("yeah", "backchannel"))),
     _s("bc_mm", "en", "backchannel", ((_POLICY, "say"), ("mm", "backchannel"))),
     _s("barge_start_en", "en", "barge", ((_POLICY, "say"), ("wait, stop", "barge")), barge_at="start"),
-    _s("barge_mid_en", "en", "barge", ((_POLICY, "say"), ("wait, stop, I need the order status", "barge")), barge_at="mid"),
+    _s(
+        "barge_mid_en",
+        "en",
+        "barge",
+        ((_POLICY, "say"), ("wait, stop, I need the order status", "barge")),
+        barge_at="mid",
+    ),
     _s("barge_end_en", "en", "barge", ((_POLICY, "say"), ("wait, stop", "barge")), barge_at="end"),
     _s("barge_start_es", "es", "barge", ((_POLICY_ES, "say"), ("espera, para", "barge")), barge_at="start"),
     _s("barge_no", "en", "barge", ((_POLICY, "say"), ("no", "barge")), barge_at="mid"),
@@ -657,9 +719,7 @@ def _scenario_texts() -> list[str]:
     return seen
 
 
-def _voice_config(
-    overrides: dict[str, Any], lang: str, stt: str, *, greeting: str = ""
-) -> tuple[Any, list[str]]:
+def _voice_config(overrides: dict[str, Any], lang: str, stt: str, *, greeting: str = "") -> tuple[Any, list[str]]:
     from timbal.voice.config import VoiceConfig
 
     data: dict[str, Any] = {"stt_provider": stt}
@@ -685,8 +745,14 @@ def _readback_ok(needles: tuple[str, ...], replies: list[str]) -> bool:
 
 def _guess_lang(text: str) -> str:
     """Crude EN/ES label from function words and Spanish diacritics. Not a translator."""
-    es = len(re.findall(r"[áéíóúñ¿¡]|\b(el|la|los|las|que|para|una|es|está|de|en|por|con|quiero|puede|hola|sí|tengo)\b", text, re.I))
-    en = len(re.findall(r"\b(the|is|are|you|your|order|return|window|please|can|have|and|to|what|where|how)\b", text, re.I))
+    es = len(
+        re.findall(
+            r"[áéíóúñ¿¡]|\b(el|la|los|las|que|para|una|es|está|de|en|por|con|quiero|puede|hola|sí|tengo)\b", text, re.I
+        )
+    )
+    en = len(
+        re.findall(r"\b(the|is|are|you|your|order|return|window|please|can|have|and|to|what|where|how)\b", text, re.I)
+    )
     if es > en:
         return "es"
     if en > es:
@@ -921,7 +987,9 @@ async def _run_one(
             if state["pending_continuations"] > 0:
                 state["first_audio_before_continuation"] = True
         elif isinstance(event, TranscriptCommitted):
-            state["commits"].append({"text": event.text, "replace": bool(getattr(event, "replace", False)), "t": time.monotonic()})
+            state["commits"].append(
+                {"text": event.text, "replace": bool(getattr(event, "replace", False)), "t": time.monotonic()}
+            )
         elif isinstance(event, AgentTextDone):
             state["replies"].append(event.text)
             assistant_speaking.clear()
@@ -956,9 +1024,21 @@ async def _run_one(
 
     async def drive() -> None:
         if spec.greeting:
+            # Let the greeting finish playing before the caller speaks. A fixed
+            # 2 s sleep from the first byte cut into the greeting, and the
+            # later "any reply" wait treated the greeting itself as the answer.
             await wait_for(assistant_speaking.is_set, 25.0, "greeting")
-            await asyncio.sleep(2.0)
+            await wait_for(lambda: bool(state["replies"]), 25.0, "greeting text")
+            await wait_for(
+                lambda: playback._playing_until <= time.monotonic() + 0.05,
+                20.0,
+                "greeting playback",
+                record=False,
+            )
+            await asyncio.sleep(0.5)
             state["greet_waited"] = True
+            state["greeting_replies"] = len(state["replies"])
+            state["greeting_commits"] = len(state["commits"])
             assistant_speaking.clear()
         for text, role in spec.lines:
             if role == "continuation":
@@ -969,7 +1049,9 @@ async def _run_one(
                 await wait_for(assistant_speaking.is_set, 25.0, "assistant audio")
             elif role == "barge" and spec.barge_at == "end":
                 await wait_for(assistant_speaking.is_set, 25.0, "assistant audio")
-                await wait_for(lambda n=len(state["replies"]): len(state["replies"]) > n, 30.0, "reply text", record=False)
+                await wait_for(
+                    lambda n=len(state["replies"]): len(state["replies"]) > n, 30.0, "reply text", record=False
+                )
             elif role in {"backchannel", "barge"}:
                 await wait_for(assistant_speaking.is_set, 25.0, "assistant audio")
                 await wait_for(lambda: playback.played_ms >= 400, 20.0, "400ms of playback")
@@ -995,7 +1077,15 @@ async def _run_one(
             await wait_for(lambda: state["interrupted"] > 0, 8.0, "barge-in", record=False)
             await asyncio.sleep(1.5)
         elif spec.kind not in {"cache", "long"}:
-            await wait_for(lambda: bool(state["replies"]) or bool(state["errors"]), 40.0, "any reply")
+            if state.get("greet_waited"):
+                floor = state.get("greeting_replies", 0)
+                await wait_for(
+                    lambda: len(state["replies"]) > floor or bool(state["errors"]),
+                    40.0,
+                    "reply after greeting",
+                )
+            else:
+                await wait_for(lambda: bool(state["replies"]) or bool(state["errors"]), 40.0, "any reply")
             await asyncio.sleep(0.8)
         if spec.silence_tail:
             state["replies_before_tail"] = len(state["replies"])
@@ -1031,6 +1121,12 @@ async def _run_one(
                 if task is not None:
                     await asyncio.gather(task, return_exceptions=True)
 
+    scored_replies = (
+        state["replies"][state.get("greeting_replies", 0) :] if state.get("greet_waited") else state["replies"]
+    )
+    scored_commits = (
+        state["commits"][state.get("greeting_commits", 0) :] if state.get("greet_waited") else state["commits"]
+    )
     has_cont = any(role == "continuation" for _text, role in spec.lines)
     if has_cont:
         state["premature"] = bool(state["first_audio_before_continuation"])
@@ -1083,14 +1179,14 @@ async def _run_one(
             else None
         ),
         "notices": state["notices"],
-        "reply_lang": _guess_lang(" ".join(state["replies"])),
-        "commit_lang": _guess_lang(" ".join(c["text"] for c in state["commits"])),
+        "reply_lang": _guess_lang(" ".join(scored_replies)),
+        "commit_lang": _guess_lang(" ".join(c["text"] for c in scored_commits)),
         "language_error": bool(spec.expect_lang or spec.lang in {"en", "es"})
-        and _guess_lang(" ".join(state["replies"]))
-        not in {(spec.expect_lang or spec.lang), "unk"},
+        and _guess_lang(" ".join(scored_replies)) not in {(spec.expect_lang or spec.lang), "unk"},
         "readback_error": bool(spec.readback) and not _readback_ok(spec.readback, state["replies"]),
         "phantom_turns": (
-            len(state["replies"]) - state.get("replies_before_tail", len(state["replies"]))
+            len(state["replies"])
+            - state.get("replies_before_tail", len(state["replies"]))
             + max(0, len(state["commits"]) - state.get("commits_before_tail", len(state["commits"])))
             if spec.silence_tail
             else 0
@@ -1670,7 +1766,17 @@ def main() -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(worktree / "python") + os.pathsep + env.get("PYTHONPATH", "")
     subprocess.check_call(
-        [sys.executable, str(HERE / "bench_242.py"), "run", "--side", "before", "--reps", str(args.reps), "--out", str(args.out)],
+        [
+            sys.executable,
+            str(HERE / "bench_242.py"),
+            "run",
+            "--side",
+            "before",
+            "--reps",
+            str(args.reps),
+            "--out",
+            str(args.out),
+        ],
         cwd=REPO,
         env=env,
     )
