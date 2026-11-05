@@ -282,6 +282,7 @@
     messages: {},     // event_id -> { row, badge, mode }
     segs: {},         // `${call_id}:${item_id}` -> element
     llmDeltas: {},    // llm call_id -> true once a delta arrived
+    llmTools: {},     // llm call_id -> tool cards its stream created, in order
     tools: {},        // tool_use id -> card
     toolQueue: {},    // `${run_id}:${name}` -> [cards waiting for their START]
     toolByCall: {},   // tool call_id -> card
@@ -531,7 +532,11 @@
           case "text": segment(d.call_id, item.id, "text").textContent = item.text; break;
           case "thinking_delta": segment(d.call_id, item.id, "thinking").textContent += item.thinking_delta; break;
           case "thinking": segment(d.call_id, item.id, "thinking").textContent = item.thinking; break;
-          case "tool_use": toolCard(d.run_id, item.id, item.name, item.input); break;
+          case "tool_use": {
+            const t = toolCard(d.run_id, item.id, item.name, item.input);
+            (S.llmTools[d.call_id] = S.llmTools[d.call_id] || []).push(t);
+            break;
+          }
           case "tool_use_delta": {
             const t = S.tools[item.id];
             if (t) { t.raw += item.input_delta; t.args.textContent = t.raw; }
@@ -551,8 +556,11 @@
           else if (c.type === "thinking" && c.thinking) segment(d.call_id, `out${i}`, "thinking").textContent = c.thinking;
         });
       }
-      content.filter((c) => c.type === "tool_use" && !c.is_server_tool_use).forEach((c) => {
-        const t = toolCard(d.run_id, c.id, c.name, c.input);
+      // Streamed tool calls already have cards; providers may id the stream block differently.
+      const streamed = S.llmTools[d.call_id] || [];
+      content.filter((c) => c.type === "tool_use" && !c.is_server_tool_use).forEach((c, i) => {
+        const t = streamed[i] || toolCard(d.run_id, c.id, c.name, c.input);
+        S.tools[c.id] = t;
         t.args.textContent = pretty(c.input);
       });
       if (d.status && d.status.code === "error") note(`model error: ${d.error ? d.error.message || "" : ""}`.slice(0, 200), "warn");
@@ -638,7 +646,7 @@
   function resetView() {
     if (S.es) S.es.close();
     Object.assign(S, {
-      busy: false, parked: false, runId: null, turnNo: 0, turns: {}, messages: {}, segs: {}, llmDeltas: {},
+      busy: false, parked: false, runId: null, turnNo: 0, turns: {}, messages: {}, segs: {}, llmDeltas: {}, llmTools: {},
       tools: {}, toolQueue: {}, toolByCall: {}, asks: {}, logRows: 0,
     });
     $("timeline").innerHTML = "";
