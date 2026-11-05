@@ -51,6 +51,8 @@ agent = Agent(
 
 `voice_config` configures the server's speech session. The defaults are Deepgram Flux (`flux-general-multi`) for transcription and for deciding when your turn ends, and ElevenLabs `eleven_v4_turbo` for speech. It can be a dict, a `VoiceConfig`, or a callable returning configuration. Unknown keys fail validation at server startup.
 
+`"language": "en"` pins spoken replies to English and hints transcription toward English. Omit `language` when the agent should follow the caller's latest substantive message. A Spanish-first line keeps `"es"`. To change language mid-call, see [Reply language](/voice/configuration#reply-language).
+
 ## Start and speak
 
 ```bash

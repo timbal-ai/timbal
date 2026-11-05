@@ -81,6 +81,8 @@ The line said on the previous turn is avoided when there is another to choose. A
 
 The language is the session's configured `language`, not one the speech-to-text provider detects. With `language` unset (auto-detect), only the `"*"` lines are used, so set it per call when callers speak different languages.
 
+A generated filler uses the same reply-language policy as the conversation. A configured `language` pins the phrase. With `language` unset, the phrase follows the user's latest substantive message. See [Reply language](/voice/configuration#reply-language).
+
 Only the session agent's own reply is spoken. An agent it calls as a tool streams its text through the same run, and that text — working notes, a document being drafted — is never read aloud.
 
 Repeats are bounded and stop being useful once the answer arrives or the turn is interrupted. Test with representative tool latency; repeated acknowledgements can distract from the actual answer. Fillers consume LLM and TTS usage and appear in transcripts as fillers. First-audio latency can measure a filler instead of the useful answer; see [Events and usage](/voice/observability).

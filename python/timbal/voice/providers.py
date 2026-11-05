@@ -110,6 +110,16 @@ class SpeechToText(VoiceUsageEmitter, ABC):
     @abstractmethod
     async def close(self) -> None: ...
 
+    async def update_language(self, language: str | None) -> bool:  # noqa: ARG002
+        """Apply ``language`` on an already-open socket.
+
+        ``None`` clears a hint where the provider can. Return True only when
+        the live connection was updated. The default does nothing: the next
+        :meth:`connect` reads ``AudioInputConfig.language``. Deepgram Flux
+        ``flux-general-multi`` is the adapter that updates in place.
+        """
+        return False
+
 
 class TTSStream(ABC):
     """One streaming synthesis unit (e.g. an ElevenLabs *context*): text is fed
