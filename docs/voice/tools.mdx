@@ -239,7 +239,9 @@ agent = Agent(
 
 ## Let the caller end the call
 
-`session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply. When `hangup_grace_secs` is set, the tool should await `session.commit_hangup()` and only then treat the hangup as done. That waits out the goodbye and the quiet window before requesting teardown. If the caller speaks in that span, it returns false and does not hang up. `session.end_call()` on its own still requests teardown immediately and lets the window cancel the close afterwards; the irreversible step has already been asked for.
+Give the model a tool that ends the call, and have it say goodbye in that same reply, before the tool runs. Two calls do different jobs.
+
+`await session.commit_hangup()` is the one to use when `hangup_grace_secs` is set. It waits until any goodbye already playing has finished, then for that many quiet seconds. Speech in that span — a new transcript, or a partial that is not an echo of the goodbye — returns false and does not hang up. True means the window already passed: it then calls `end_call(grace_secs=0)`, so there is no second quiet window after the tool returns. Return a short "Ending the call." Do not ask for a goodbye in that success result. A goodbye spoken only after True has no retract window left.
 
 ```python agent.py
 from timbal import Agent, Tool
@@ -247,38 +249,39 @@ from timbal.voice import current_voice_session
 
 
 async def end_call() -> str:
-    """End the call when the caller asks to. Say a short goodbye in this same reply."""
+    """End the call after the goodbye in this same reply has been heard."""
     session = current_voice_session()
     if session is None:
         return "There is no call to end."
     if not await session.commit_hangup():
         return "The caller spoke again. Do not hang up. Keep helping."
-    return "If you have not said goodbye yet, say it now in one short sentence. The call ends once it has been heard."
+    return "Ending the call."
 
-
-end_call_tool = Tool(handler=end_call)
-agent = Agent(
-    name="voice_assistant",
-    model="openai/gpt-5-mini",
-    system_prompt="Say a short goodbye, then end the call when the caller is done.",
-    tools=[end_call_tool],
-)
-```
-
-The session waits for the turn to finish and its audio to play, then closes itself, as `session.close()` does. Some models call the tool before writing the goodbye, so the tool's result asks for one; the goodbye then comes from a second model call in the same turn, and the session still waits for it. If the caller says something first, the call stays up. If the goodbye never finishes playing, the call ends after 20 seconds anyway, without an extra wait. Calling it again changes nothing.
-
-A turn can be confirmed before the caller has really finished. `hangup_grace_secs` (unset by default) keeps the line up for that many seconds after the goodbye has been heard. Silence through the window hangs up. Any further caller speech in the window cancels the hangup and the call continues: a new transcript (even a partial one that is not an echo of the goodbye), or audible speech when local VAD endpointing is on, in whatever language they are speaking. The assistant can call `end_call` again on a later turn. `session.end_call(grace_secs=1.5)` sets the window for that one call; `grace_secs=0` hangs up as soon as the goodbye has been heard, even when the session configured a window. Allowed values are from 0 to 30 seconds. A client hello may set `hangup_grace_secs` the same way it sets `tool_beat_secs`.
-
-```python
-from timbal import Agent
 
 agent = Agent(
     name="voice_assistant",
     model="openai/gpt-5-mini",
-    system_prompt="When the caller is done, say a short goodbye and call end_call.",
-    tools=[end_call],
+    system_prompt="When the caller is done, say a short goodbye and then call end_call.",
+    tools=[Tool(handler=end_call)],
     voice_config={"hangup_grace_secs": 1.5},
 )
 ```
+
+`session.end_call()` requests teardown immediately and returns. The session still waits for the goodbye to finish playing, including a goodbye the model speaks on a later step of the same turn. If `hangup_grace_secs` is set, that wait is followed by the quiet window, and speech then cancels the close. The tool has already returned, so the irreversible request is already in flight. Use this when you want the result itself to ask for a goodbye the model has not said yet.
+
+```python agent.py
+from timbal.voice import current_voice_session
+
+
+async def end_call() -> str:
+    """End the call when the caller asks to."""
+    session = current_voice_session()
+    if session is None:
+        return "There is no call to end."
+    session.end_call()
+    return "If you have not said goodbye yet, say it now in one short sentence. The call ends once it has been heard."
+```
+
+If the goodbye never finishes playing, the call ends after 20 seconds, without an extra wait. Calling `end_call` again changes nothing. Speech that cancels the close is any new transcript, or a partial that is not an echo of the goodbye, in whatever language the caller is speaking. Audible speech counts too when local VAD endpointing is on. The assistant can call the tool again on a later turn. `session.end_call(grace_secs=1.5)` sets the window for that one call; `grace_secs=0` hangs up as soon as the goodbye has been heard, even when the session configured a window. Allowed values are from 0 to 30 seconds. A client hello may set `hangup_grace_secs` the same way it sets `tool_beat_secs`. Unset is the default, and then `commit_hangup()` is the same as `end_call()`.
 
 Continue to [Thinking sounds](/voice/thinking-sounds).

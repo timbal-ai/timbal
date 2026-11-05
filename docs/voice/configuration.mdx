@@ -48,7 +48,7 @@ The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate
 
 `stt_extra` defaults to ElevenLabs-oriented VAD keys (`commit_strategy`, `min_speech_duration_ms`, `vad_silence_threshold_secs`, `vad_threshold`). The server strips those keys for adapters that own end-of-turn. For Deepgram Flux, `eot_threshold`, `eot_timeout_ms`, and `eager_eot_threshold` in `stt_extra` are the connect-time end-of-turn knobs. `tts_extra` defaults to `{"auto_mode": true}`. `VoiceConfig.model` is a per-session text-model override (`provider/model`), separate from `stt_model` and `tts_model`.
 
-`entity_patience` (default false) and `entity_patience_secs` (default 2.5, maximum 10) hold a turn that still ends in a number, spelled letters, an email, or an alphanumeric code. See [Turn-taking and interruptions](/voice/turn-taking#entity-and-spelling-patience).
+`entity_patience` (default false) and `entity_patience_secs` (default 2.5, maximum 10) hold a turn that still ends in a number, spoken number words, letter names, spelled letters, an email, or an alphanumeric code. See [Turn-taking and interruptions](/voice/turn-taking#entity-and-spelling-patience).
 
 ## Pace synthesized speech
 
@@ -100,11 +100,11 @@ This assignment replaces the agent's declared config. Keep any greetings or othe
 
 ## Speculative generation
 
-`speculative_generation` is off unless you set it. `True` uses the defaults. A dict turns the feature on as well, unless that dict sets `enabled` to false: `{"eou_threshold": 0.6}` enables it at that threshold, and `{"enabled": false}` leaves it off. The dict keys are `enabled`, `preemptive_tts`, `max_retries`, `max_speech_duration`, and `eou_threshold`. A Smart Turn pause below `eou_threshold`, or one the text scorer calls incomplete, does not start a reply. On Flux it shares the eager threshold with during-speech prediction. With it on, every tool call waits until the turn is confirmed. See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation).
+See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation). `speculative_generation` is off unless you set it. It is server-side. A caller hello cannot turn it on.
 
 ## Ending the call
 
-`hangup_grace_secs` waits after the goodbye before `end_call` hangs up. Unset (the default) hangs up once that audio has played. The value is from 0 to 30 seconds. See [Let the caller end the call](/voice/tools#let-the-caller-end-the-call).
+`hangup_grace_secs` is the quiet window after a goodbye, from 0 to 30 seconds. Unset hangs up once that audio has played. When it is set, the hangup tool should await `session.commit_hangup()` so the window is spent before teardown. Bare `session.end_call()` still requests teardown immediately and then opens this window. See [Let the caller end the call](/voice/tools#let-the-caller-end-the-call).
 
 ## Turn detection
 

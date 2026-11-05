@@ -134,10 +134,6 @@ Tool calls wait with the audio. The model may choose a function during the pause
 
 Each turn's metrics carry `speculative`, plus the call's `speculative_generations_started` and `speculative_generations_discarded` counts. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded`. The setting is server-side. A client hello cannot turn it on.
 
-## Flux eager threshold
-
-`predict_during_speech` and `speculative_generation` share one helper. There is no 0.3 floor. Omitted, `eager_eot_threshold` is `min(0.5, eot_threshold - 0.1)`. An explicit value in `stt_extra` is lowered the same way when it is not already strictly below `eot_threshold`. Deepgram rejects an eager threshold at or above the end-of-turn threshold. If both features are on, the query parameter is set once.
-
 ## Entity and spelling patience
 
 Turn this on when callers read a phone number, a spelled name, an email address, or an order code and pause between groups. It is off unless you set it.
