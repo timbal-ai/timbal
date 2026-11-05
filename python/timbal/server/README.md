@@ -74,6 +74,40 @@ A run whose process dies has nothing to replay. A replayable log is a ring: defa
 
 ---
 
+## Chat sessions: `/chat/sessions`
+
+A run is one turn. A chat session is a conversation that stays open while its turns run: post messages at any time, and the session decides what happens to each one that arrives while a turn is running (`timbal.core.ChatSession`; the served runnable must be an `Agent`).
+
+| Route | Purpose |
+|---|---|
+| `GET /chat/` | The chat playground (below). |
+| `POST /chat/sessions` | Open a session. Body: `{"parent_id"?, "busy_mode"?, "collect_window"?}` → `201` state. |
+| `POST /chat/sessions/{id}/messages` | `{"text", "mode"?}` → `202` with the message receipt. |
+| `POST /chat/sessions/{id}/interrupt` | Cut the running turn. `{"interrupted": false}` when none runs. |
+| `POST /chat/sessions/{id}/resume` | Answer a parked turn: `{"resume": {approval_id: true \| {...}, interaction_id: value}}`. `409` when nothing waits. |
+| `GET /chat/sessions/{id}/events?after=` | The session log as SSE (a `GET`, so `EventSource` works; `Last-Event-ID` is honored). |
+| `GET /chat/sessions/{id}/log?after=&wait_ms=` | The same log as JSON pages, long-polled. |
+| `GET` / `DELETE /chat/sessions/{id}` | State (`busy`, `parked`, `head`, `pending`, pending approvals while parked) / close. |
+
+**Modes** for a message sent while a turn runs (`busy_mode` when the body names none, default `steer`):
+
+- `steer` — the running turn takes it after its current tool call, as a user message, and does not end before answering it. Messages a turn ends without taking start the next turn together.
+- `followup` — a turn of its own once the running one ends.
+- `collect` — one turn for every collected message, once none has arrived for `collect_window` seconds.
+- `interrupt` — cancels the running turn (it ends `cancelled` / `interrupted`, keeping what it produced) and runs this message first.
+
+With nothing running, any mode starts a turn. A turn that ends waiting on an approval or `ask_user` parks the session: new messages wait until `/resume` answers it.
+
+**The log** holds every event of every turn in order (the same `START` / `DELTA` / `OUTPUT` / `APPROVAL` / … events `/stream` sends) plus session records `{"type": "SESSION", "kind": ...}`: `message` (sent, with `mode` and whether a turn was running), `message_settled` (`delivered` with the `run_id` that took it — recorded before anything that run does next — or `superseded`), `turn_started` (`run_id`, `parent_id`, `trigger`: `user_message` with its `event_ids`, `resume`, `session_event`, `background_completion`), `turn_finished` (`status`, `parked`), `interrupt`, `closed`. A message whose id is not in its turn's `trigger.event_ids` was steered into it. SSE frames carry the cursor as `id:`; `event: gapped` means the ring dropped entries past your cursor. The JSON route returns `{events: [{seq, data}], next_cursor, gapped, closed}`.
+
+Same limits as runs: single process (a session another worker holds is a `404`), no authorization. Sessions idle for `TIMBAL_CHAT_SESSION_TTL_S` (default 3600) are closed when the next one opens.
+
+### Bundled chat playground
+
+`GET /chat` on a running `timbal.server` (`python -m timbal.server --import_spec path/to/agent.py::agent`). One timeline per session: user bubbles with live badges (`queued · followup`, `↳ steered into turn 2`, `started turn 3`), streamed assistant text and thinking, tool cards (input, result, timing), approval and `ask_user` cards that resume the turn, turn dividers with their final status. The composer's mode picker applies while a turn runs; `Esc` interrupts. The right panel is the raw log (deltas hidden unless ticked). The session id lives in the URL hash, so a reload re-attaches and replays.
+
+---
+
 ### Bundled voice playground
 
 - **Embedded** (served by a running agent): `GET /voice` on a `timbal.server` — auto-dials that agent; the page injects the runnable meta at serve time.

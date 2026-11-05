@@ -53,6 +53,7 @@ from ..state.background import (
     READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
     format_session_notice,
+    format_user_message,
 )
 from ..types.content import (
     CustomContent,
@@ -334,6 +335,13 @@ class Agent(Runnable):
     """When True, register ``read_background_transcript`` for the LLM once this
     session has background tasks. Default off — summaries via
     ``get_background_task`` are enough for most agents."""
+    steering: bool | None = None
+    """Let what is posted to the session while a turn runs join that turn after its current
+    tool batch, instead of waiting for the next one: session events on ``lane="next"`` and user
+    messages sent with ``mode="steer"`` (``ChatSession.send``). A user message joins as a user
+    message (input guardrails screen it, and it restores the ``max_iter`` budget); an event as a
+    runtime notice. The turn does not end while one is waiting: it calls the model once more.
+    ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Root agents only."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -1069,10 +1077,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _inject_background_completions(self, current_span: Any) -> None:
         """Drain finished-task notices and posted session events into memory at turn start.
 
-        Delivered between turns only — never mid-loop — so the parent is not
-        interrupted while talking. Skipped for subagents and approval/suspend
-        resumes (must not insert a user message between tool_use and tool_result).
-        Peek APIs are unchanged; notices are one-shot after drain.
+        Delivered between turns only so the parent is not interrupted while
+        talking; a turn that steers also takes ``lane="next"`` events after a
+        tool batch (:meth:`_take_steering`). User messages stay pending: they
+        start turns of their own (``take_followup``) or steer one. Skipped for
+        subagents and approval/suspend resumes (must not insert a user message
+        between tool_use and tool_result). Peek APIs are unchanged; notices are
+        one-shot after drain.
         """
         if current_span.parent_call_id is not None:
             return
@@ -1082,7 +1093,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if store is None:
             return
         notifications = store.drain_completions()
-        events = store.drain_events(settle=False)
+        events = store.drain_events(settle=False, where=lambda event: event.source != "user")
         if not notifications and not events:
             return
         notice = format_session_notice(notifications, events)
@@ -1096,6 +1107,36 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             memory.insert(-1, notice)
         else:
             memory.append(notice)
+
+    def _steers(self, run_context: Any, current_span: Any) -> bool:
+        """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""
+        if current_span.parent_call_id is not None:
+            return False
+        if self.steering is not None:
+            return self.steering
+        return run_context._steering
+
+    def _take_steering(self, run_context: Any, current_span: Any) -> list[Any]:
+        """The messages posted for the running turn (``lane="next"``), settled as delivered to it.
+
+        A runtime notice for events, then one user message for what the user sent.
+        """
+        store = current_background_store()
+        if store is None:
+            return []
+        events = store.drain_events(settle=False, where=lambda event: event.lane == "next")
+        if not events:
+            return []
+        current_span.metadata.setdefault("steered_events", []).extend(event.id for event in events)
+        record_delivery(run_context, current_span, events)
+        messages = []
+        others = [event for event in events if event.source != "user"]
+        if others:
+            messages.append(format_session_notice([], others))
+        users = [event for event in events if event.source == "user"]
+        if users:
+            messages.append(format_user_message(users, steered=True))
+        return messages
 
     def _apply_background_limits(self, run_context: Any) -> None:
         """Push Agent concurrent/depth caps onto the session BG store."""
@@ -1882,6 +1923,26 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             tool_result_dump = await dump(tool_result)
             current_span._memory_dump.append(tool_result_dump)
 
+        steering = self._steers(run_context, current_span)
+        # Set by _steer: whether it added messages, and whether the user wrote one of them.
+        steered = steered_user = False
+
+        async def _steer() -> AsyncGenerator[BaseEvent, None]:
+            """Bring in what was posted for the running turn, screening user text like a prompt."""
+            nonlocal steered, steered_user
+            messages = self._take_steering(run_context, current_span)
+            steered = bool(messages)
+            steered_user = any(not message.is_runtime() for message in messages)
+            for message in messages:
+                await _append_memory(message)
+            if (
+                steered_user
+                and self._guardrail_runner is not None
+                and self._guardrail_runner.has_stage(GuardrailStage.INPUT)
+            ):
+                async for guardrail_event in self._run_input_guardrails(run_context, current_span, _append_memory):
+                    yield guardrail_event
+
         i = 0
         need_retry = False
         _llm_memory_saved = False
@@ -2036,6 +2097,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if first_pending is not None:
                         raise PauseRequired(first_pending)
                     i += 1
+                    if steering:
+                        async for steer_event in _steer():
+                            yield steer_event
+                        if steered_user:
+                            i, max_iter_handled = 0, False
                     continue
 
                 # Mid-loop compaction: a single turn that makes many (or large) tool calls
@@ -2356,6 +2422,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 ]
 
                 if not tool_calls:
+                    if steering:
+                        async for steer_event in _steer():
+                            yield steer_event
+                        if steered:
+                            # Something arrived for this turn before it ended: answer it too.
+                            i, max_iter_handled = (0, False) if steered_user else (i + 1, max_iter_handled)
+                            continue
                     break
 
                 first_pending: OutputEvent | None = None
@@ -2383,6 +2456,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if first_pending is not None:
                     raise PauseRequired(first_pending)
                 i += 1
+                if steering:
+                    async for steer_event in _steer():
+                        yield steer_event
+                    if steered_user:
+                        # A user message is a new request: it gets the full tool budget.
+                        i, max_iter_handled = 0, False
         finally:
             try:
                 if active_events is not None:

@@ -23,6 +23,8 @@ _EMPTY_METADATA: MappingProxyType[str, Any] = MappingProxyType({})
 RUNTIME_SOURCE = "runtime"
 BACKGROUND_TASK_COMPLETED_KIND = "background_task_completed"
 SESSION_EVENT_KIND = "session_event"
+# A message the user posted to a session (not runtime: transcripts show it).
+USER_MESSAGE_KIND = "user_message"
 
 
 def _append_anthropic_content_blocks(

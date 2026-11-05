@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Chat playground · Timbal AI</title>
+<style>
+  :root {
+    --bg: #f4f4f5;
+    --surface: #ffffff;
+    --surface-2: #fafafa;
+    --text: #09090b;
+    --text-muted: #71717a;
+    --border: #e4e4e7;
+    --border-strong: #d4d4d8;
+    --primary: #000000;
+    --primary-fg: #ffffff;
+    --success: #15803d;
+    --success-soft: #dcfce7;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --info: #1d4ed8;
+    --info-soft: #dbeafe;
+    --danger: #dc2626;
+    --danger-bg: #fef2f2;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 1px 3px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.06);
+    --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { height: 100%; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    height: 100%;
+    max-height: 100dvh;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; }
+  .shell {
+    max-width: 1320px;
+    margin: 0 auto;
+    height: 100%;
+    max-height: 100dvh;
+    padding: 1.25rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    overflow: hidden;
+  }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 0.5rem; font-size: 1rem; letter-spacing: -0.03em; }
+  .brand-mark { width: 28px; height: 28px; border-radius: 8px; object-fit: contain; display: block; }
+  .brand .logo { font-weight: 700; }
+  .top-right { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    font-size: 0.75rem; color: var(--text-muted);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+    padding: 0.3rem 0.65rem; white-space: nowrap;
+  }
+  .chip strong { color: var(--text); font-weight: 600; }
+  .chip.clickable { cursor: pointer; }
+  .chip.clickable:hover { border-color: var(--border-strong); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #a1a1aa; }
+  .dot.on { background: var(--success); }
+  .dot.err { background: var(--danger); }
+  .btn {
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+    border-radius: var(--radius-sm); padding: 0.45rem 0.8rem; font-size: 0.8125rem; font-weight: 500; cursor: pointer;
+  }
+  .btn:hover:not(:disabled) { background: var(--surface-2); }
+  .btn:disabled { opacity: 0.45; cursor: default; }
+  .btn.primary { background: var(--primary); color: var(--primary-fg); border-color: var(--primary); }
+  .btn.primary:hover:not(:disabled) { background: #27272a; }
+  .btn.danger { color: var(--danger); border-color: #fecaca; }
+  .btn.danger:hover:not(:disabled) { background: var(--danger-bg); }
+  .btn.small { padding: 0.25rem 0.55rem; font-size: 0.75rem; }
+
+  .layout { flex: 1; display: flex; gap: 1rem; min-height: 0; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); display: flex; flex-direction: column; min-height: 0;
+  }
+  .chat { flex: 1; min-width: 0; }
+  .log-panel { flex: 0 0 400px; }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+    padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+  }
+  .card-title { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+
+  .timeline { flex: 1; overflow-y: auto; padding: 1rem 1.1rem 1.5rem; display: flex; flex-direction: column; gap: 0.6rem; }
+  .empty { margin: auto; text-align: center; color: var(--text-muted); font-size: 0.875rem; line-height: 1.6; max-width: 420px; }
+  .empty kbd { font-family: var(--mono); font-size: 0.75rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+
+  .row { display: flex; }
+  .row.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 78%; padding: 0.6rem 0.85rem; border-radius: 14px; font-size: 0.9rem; line-height: 1.5;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .row.user .bubble { background: var(--primary); color: var(--primary-fg); border-bottom-right-radius: 4px; }
+  .row.user.waiting .bubble { background: #3f3f46; }
+  .row.assistant .bubble { background: var(--surface-2); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .user-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 0.25rem; max-width: 78%; }
+  .user-wrap .bubble { max-width: 100%; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.6875rem; font-weight: 600;
+    border-radius: 999px; padding: 0.1rem 0.5rem; color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .badge.queued { color: var(--warn); background: var(--warn-soft); border-color: #fde68a; }
+  .badge.steered { color: var(--info); background: var(--info-soft); border-color: #bfdbfe; }
+  .badge.started { color: var(--success); background: var(--success-soft); border-color: #bbf7d0; }
+  .badge.superseded { text-decoration: line-through; }
+
+  .thinking {
+    align-self: flex-start; max-width: 78%; font-size: 0.8125rem; color: var(--text-muted); white-space: pre-wrap;
+    border-left: 2px solid var(--border-strong); padding: 0.1rem 0 0.1rem 0.7rem; font-style: italic;
+  }
+  .divider { display: flex; align-items: center; gap: 0.6rem; color: var(--text-muted); font-size: 0.6875rem; margin: 0.4rem 0 0.1rem; }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .divider .label { font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  .divider .status { font-weight: 600; }
+  .divider .status.ok { color: var(--success); }
+  .divider .status.bad { color: var(--danger); }
+  .divider .status.park { color: var(--warn); }
+  .note { align-self: center; font-size: 0.75rem; color: var(--text-muted); background: var(--surface-2); border: 1px dashed var(--border-strong); border-radius: 999px; padding: 0.2rem 0.7rem; }
+  .note.warn { color: var(--warn); border-color: #fcd34d; background: var(--warn-soft); }
+
+  .tool {
+    align-self: flex-start; width: min(78%, 560px); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--surface); font-size: 0.8125rem; overflow: hidden;
+  }
+  .tool-head { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.7rem; cursor: pointer; user-select: none; }
+  .tool-head .name { font-family: var(--mono); font-weight: 600; }
+  .tool-head .state { margin-left: auto; font-size: 0.6875rem; color: var(--text-muted); }
+  .tool-head .state.ok { color: var(--success); }
+  .tool-head .state.bad { color: var(--danger); }
+  .tool-head .state.run { color: var(--info); }
+  .tool-body { display: none; border-top: 1px solid var(--border); padding: 0.5rem 0.7rem; background: var(--surface-2); }
+  .tool.open .tool-body { display: block; }
+  .tool-body .k { font-size: 0.625rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 0.3rem 0 0.15rem; }
+  pre { font-family: var(--mono); font-size: 0.75rem; white-space: pre-wrap; word-break: break-word; }
+
+  .ask {
+    align-self: flex-start; width: min(78%, 560px); border: 1px solid #fcd34d; background: var(--warn-soft);
+    border-radius: var(--radius-sm); padding: 0.65rem 0.8rem; font-size: 0.8125rem; display: flex; flex-direction: column; gap: 0.5rem;
+  }
+  .ask .title { font-weight: 700; color: var(--warn); }
+  .ask .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .ask textarea { width: 100%; min-height: 52px; font: inherit; font-size: 0.8125rem; border: 1px solid var(--border-strong); border-radius: 6px; padding: 0.4rem; resize: vertical; }
+  .ask.done { opacity: 0.6; }
+
+  .composer { border-top: 1px solid var(--border); padding: 0.75rem 1rem 0.9rem; display: flex; flex-direction: column; gap: 0.55rem; }
+  .modes { display: flex; gap: 0.35rem; align-items: center; flex-wrap: wrap; }
+  .modes .label { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-right: 0.25rem; }
+  .seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden; }
+  .seg button { border: 0; background: var(--surface); padding: 0.3rem 0.7rem; font-size: 0.75rem; font-weight: 500; cursor: pointer; color: var(--text-muted); }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button.on { background: var(--primary); color: var(--primary-fg); }
+  .hint { font-size: 0.75rem; color: var(--text-muted); margin-left: 0.5rem; }
+  .input-row { display: flex; gap: 0.5rem; align-items: flex-end; }
+  .input-row textarea {
+    flex: 1; font: inherit; font-size: 0.9rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+    padding: 0.55rem 0.7rem; resize: none; min-height: 44px; max-height: 180px; line-height: 1.4; outline: none;
+  }
+  .input-row textarea:focus { border-color: var(--primary); }
+  .status-pill { font-size: 0.75rem; font-weight: 600; }
+  .status-pill.idle { color: var(--text-muted); }
+  .status-pill.busy { color: var(--info); }
+  .status-pill.park { color: var(--warn); }
+
+  .log { flex: 1; overflow-y: auto; font-family: var(--mono); font-size: 0.6875rem; }
+  .log-row { border-bottom: 1px solid #f4f4f5; }
+  .log-line { display: flex; gap: 0.5rem; padding: 0.28rem 0.75rem; cursor: pointer; white-space: nowrap; overflow: hidden; }
+  .log-line:hover { background: var(--surface-2); }
+  .log-line .seq { color: #a1a1aa; min-width: 2.6rem; text-align: right; }
+  .log-line .type { font-weight: 700; min-width: 5.2rem; }
+  .log-line .type.SESSION { color: #7c3aed; }
+  .log-line .type.START { color: var(--success); }
+  .log-line .type.OUTPUT { color: var(--info); }
+  .log-line .type.DELTA { color: #a1a1aa; }
+  .log-line .type.APPROVAL, .log-line .type.INTERACTION { color: var(--warn); }
+  .log-line .what { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+  .log-row pre { display: none; padding: 0.4rem 0.75rem 0.6rem 3.85rem; background: var(--surface-2); color: var(--text); }
+  .log-row.open pre { display: block; }
+  .log-tools { display: flex; align-items: center; gap: 0.6rem; font-size: 0.75rem; color: var(--text-muted); }
+  .log-tools label { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+  @media (max-width: 960px) { .log-panel { display: none; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <img class="brand-mark" src="https://content.timbal.ai/assets/timbal_favicon.png" alt="" width="28" height="28" decoding="async" />
+      <span class="logo">Chat playground</span>
+    </div>
+    <div class="top-right">
+      <span class="chip" id="agent-chip">agent <strong id="agent-name">…</strong></span>
+      <span class="chip clickable" id="session-chip" title="Copy session id"><span class="dot" id="conn-dot"></span> session <strong id="session-id">—</strong></span>
+      <span class="chip">head <strong id="head-id">—</strong></span>
+      <button class="btn" id="btn-new" type="button" title="Start a fresh conversation">New session</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <section class="card chat" aria-label="Conversation">
+      <div class="card-head">
+        <span class="card-title">Conversation</span>
+        <span class="status-pill idle" id="status">Idle</span>
+      </div>
+      <div class="timeline" id="timeline">
+        <div class="empty" id="empty">
+          Send a message to start a turn. While a turn runs, keep typing: the mode decides what happens to new
+          messages — <b>steer</b> joins the running turn after its current tool call, <b>follow-up</b> waits for a
+          turn of its own, <b>collect</b> merges into one later turn, <b>interrupt</b> cuts the turn and goes first.
+          <br><br><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>Esc</kbd> stop the turn
+        </div>
+      </div>
+      <div class="composer">
+        <div class="modes">
+          <span class="label">While busy</span>
+          <div class="seg" id="modes" role="radiogroup" aria-label="Busy mode">
+            <button type="button" data-mode="steer" class="on" title="Join the running turn after its current tool batch">Steer</button>
+            <button type="button" data-mode="followup" title="Wait for a turn of its own">Follow-up</button>
+            <button type="button" data-mode="collect" title="Merge with other collected messages into one later turn">Collect</button>
+            <button type="button" data-mode="interrupt" title="Cancel the running turn and run this first">Interrupt</button>
+          </div>
+          <span class="hint" id="mode-hint"></span>
+        </div>
+        <div class="input-row">
+          <textarea id="input" rows="1" placeholder="Message the agent…" autocomplete="off"></textarea>
+          <button class="btn danger" id="btn-stop" type="button" disabled title="Interrupt the running turn (Esc)">Stop</button>
+          <button class="btn primary" id="btn-send" type="button">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="card log-panel" aria-label="Event log">
+      <div class="card-head">
+        <span class="card-title">Events</span>
+        <div class="log-tools">
+          <label><input type="checkbox" id="show-deltas"> deltas</label>
+          <span id="log-count">0</span>
+          <button class="btn small" id="btn-clear-log" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="log" id="log"></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const api = (path) => new URL(`sessions${path}`, new URL("./", location.href)).toString();
+  const MODE_HINTS = {
+    steer: "joins the running turn after its current tool call",
+    followup: "gets a turn of its own after the running one",
+    collect: "waits for a quiet moment, then one turn for all collected",
+    interrupt: "cuts the running turn and runs first",
+  };
+
+  const S = {
+    sessionId: null,
+    es: null,
+    mode: "steer",
+    busy: false,
+    parked: false,
+    runId: null,
+    turnNo: 0,
+    turns: {},        // run_id -> { n, rootCallId, eventIds }
+    messages: {},     // event_id -> { row, badge, mode }
+    segs: {},         // `${call_id}:${item_id}` -> element
+    llmDeltas: {},    // llm call_id -> true once a delta arrived
+    tools: {},        // tool_use id -> card
+    toolQueue: {},    // `${run_id}:${name}` -> [cards waiting for their START]
+    toolByCall: {},   // tool call_id -> card
+    asks: {},         // approval/interaction id -> card
+    logRows: 0,
+  };
+
+  // ---------- small DOM helpers ----------
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function short(id) { return id ? String(id).slice(-8) : "—"; }
+  function pretty(value) {
+    if (value === undefined || value === null) return "";
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+  }
+  function textOf(message) {
+    if (!message) return "";
+    if (typeof message === "string") return message;
+    const content = message.content || [];
+    return content.filter((c) => c.type === "text").map((c) => c.text).join("");
+  }
+  function nearBottom() {
+    const t = $("timeline");
+    return t.scrollHeight - t.scrollTop - t.clientHeight < 120;
+  }
+  function append(node) {
+    $("empty")?.remove();
+    const stick = nearBottom();
+    $("timeline").appendChild(node);
+    if (stick) $("timeline").scrollTop = $("timeline").scrollHeight;
+    return node;
+  }
+  function keepBottom(fn) {
+    const stick = nearBottom();
+    fn();
+    if (stick) $("timeline").scrollTop = $("timeline").scrollHeight;
+  }
+
+  // ---------- status ----------
+  function setStatus() {
+    const pill = $("status");
+    if (S.parked) { pill.className = "status-pill park"; pill.textContent = "Waiting for your answer"; }
+    else if (S.busy) { pill.className = "status-pill busy"; pill.textContent = `Running turn ${S.turnNo}`; }
+    else { pill.className = "status-pill idle"; pill.textContent = "Idle"; }
+    $("btn-stop").disabled = !S.busy;
+    $("mode-hint").textContent = S.busy
+      ? `→ ${MODE_HINTS[S.mode]}`
+      : (S.parked ? "messages wait until the pending question is answered" : "idle: any message starts a turn");
+  }
+
+  // ---------- timeline pieces ----------
+  function userRow(eventId, text, mode, busy) {
+    const row = el("div", "row user");
+    const wrap = el("div", "user-wrap");
+    wrap.appendChild(el("div", "bubble", text));
+    const badge = el("span", "badge");
+    if (busy || S.parked) { badge.className = "badge queued"; badge.textContent = `queued · ${mode}`; row.classList.add("waiting"); }
+    else { badge.textContent = "sent"; }
+    wrap.appendChild(badge);
+    row.appendChild(wrap);
+    append(row);
+    S.messages[eventId] = { row, badge, mode };
+  }
+  function settleMessage(record) {
+    const m = S.messages[record.event_id];
+    if (!m) return;
+    m.row.classList.remove("waiting");
+    const turn = S.turns[record.run_id];
+    if (record.state === "superseded") { m.badge.className = "badge superseded"; m.badge.textContent = "superseded"; return; }
+    if (!turn) { m.badge.className = "badge"; m.badge.textContent = "delivered"; return; }
+    if (turn.eventIds.includes(record.event_id)) {
+      m.badge.className = "badge started"; m.badge.textContent = `started turn ${turn.n}`;
+    } else {
+      m.badge.className = "badge steered"; m.badge.textContent = `↳ steered into turn ${turn.n}`;
+    }
+  }
+  function divider(label, statusText, statusCls) {
+    const d = el("div", "divider");
+    d.appendChild(el("span", "label", label));
+    if (statusText) d.appendChild(el("span", `status ${statusCls || ""}`, statusText));
+    return append(d);
+  }
+  function note(text, cls) { return append(el("div", `note ${cls || ""}`, text)); }
+
+  function segment(callId, itemId, kind) {
+    const key = `${callId}:${itemId}:${kind}`;
+    let node = S.segs[key];
+    if (!node) {
+      if (kind === "thinking") node = append(el("div", "thinking", ""));
+      else {
+        const row = el("div", "row assistant");
+        node = el("div", "bubble", "");
+        row.appendChild(node);
+        append(row);
+      }
+      S.segs[key] = node;
+    }
+    return node;
+  }
+
+  function toolCard(runId, toolUseId, name, input) {
+    if (toolUseId && S.tools[toolUseId]) return S.tools[toolUseId];
+    const card = el("div", "tool");
+    const head = el("div", "tool-head");
+    head.appendChild(el("span", "", "⚙"));
+    head.appendChild(el("span", "name", name || "tool"));
+    const state = el("span", "state", "called");
+    head.appendChild(state);
+    const body = el("div", "tool-body");
+    const args = el("pre", "", pretty(input));
+    const result = el("pre", "", "");
+    body.appendChild(el("div", "k", "input"));
+    body.appendChild(args);
+    const resultLabel = el("div", "k", "result");
+    resultLabel.hidden = true;
+    body.appendChild(resultLabel);
+    body.appendChild(result);
+    head.addEventListener("click", () => card.classList.toggle("open"));
+    card.appendChild(head);
+    card.appendChild(body);
+    append(card);
+    const entry = { card, state, args, result, resultLabel, name, raw: "" };
+    if (toolUseId) S.tools[toolUseId] = entry;
+    const key = `${runId}:${name}`;
+    (S.toolQueue[key] = S.toolQueue[key] || []).push(entry);
+    return entry;
+  }
+
+  function askCard(kind, d) {
+    const id = kind === "approval" ? d.approval_id : d.interaction_id;
+    if (S.asks[id]) return;
+    const card = el("div", "ask");
+    const what = d.runnable_name || d.runnable_path || "tool";
+    card.appendChild(el("div", "title", kind === "approval" ? `Approve ${what}?` : `${what} asks (${d.kind || "input"})`));
+    if (d.prompt) card.appendChild(el("div", "", d.prompt));
+    const details = kind === "approval" ? d.input : d.payload;
+    if (details && Object.keys(details).length) card.appendChild(el("pre", "", pretty(details)));
+    const actions = el("div", "actions");
+    let field = null;
+    if (kind === "interaction") {
+      field = el("textarea");
+      field.placeholder = "Answer (JSON or plain text)";
+      card.appendChild(field);
+    }
+    const done = () => { card.classList.add("done"); actions.querySelectorAll("button").forEach((b) => (b.disabled = true)); };
+    const answer = async (value) => {
+      done();
+      await post(`/${S.sessionId}/resume`, { resume: { [id]: value } }).catch((e) => note(`resume failed: ${e.message}`, "warn"));
+    };
+    if (kind === "approval") {
+      const yes = el("button", "btn primary small", "Approve");
+      yes.onclick = () => answer(true);
+      const always = el("button", "btn small", "Approve for session");
+      always.onclick = () => answer({ approved: true, scope: "session" });
+      always.hidden = d.grantable === false;
+      const no = el("button", "btn danger small", "Deny");
+      no.onclick = () => answer({ approved: false, reason: "Denied in the playground." });
+      actions.append(yes, always, no);
+    } else {
+      const send = el("button", "btn primary small", "Answer");
+      send.onclick = () => {
+        const raw = field.value.trim();
+        let value = raw;
+        try { value = JSON.parse(raw); } catch { /* plain text */ }
+        answer(value);
+      };
+      const cancel = el("button", "btn danger small", "Decline");
+      cancel.onclick = () => answer(false);
+      actions.append(send, cancel);
+    }
+    card.appendChild(actions);
+    append(card);
+    S.asks[id] = card;
+  }
+
+  // ---------- event routing ----------
+  function onSession(d) {
+    switch (d.kind) {
+      case "message":
+        userRow(d.event_id, d.text, d.mode, d.busy);
+        break;
+      case "message_settled":
+        settleMessage(d);
+        break;
+      case "turn_started": {
+        S.turnNo += 1;
+        const trigger = d.trigger || {};
+        S.turns[d.run_id] = { n: S.turnNo, rootCallId: null, eventIds: trigger.event_ids || [] };
+        S.busy = true; S.parked = false; S.runId = d.run_id;
+        const why = trigger.kind === "user_message" ? "" : ` · ${String(trigger.kind || "").replace("_", " ")}`;
+        divider(`turn ${S.turnNo}${why}`);
+        // Messages this turn started with are delivered now.
+        (trigger.event_ids || []).forEach((id) => settleMessage({ event_id: id, state: "delivered", run_id: d.run_id }));
+        break;
+      }
+      case "turn_finished": {
+        const turn = S.turns[d.run_id];
+        const st = d.status || {};
+        S.busy = false; S.runId = null; S.parked = !!d.parked;
+        let text = st.code, cls = "ok";
+        if (d.parked) { text = st.reason === "approval_required" ? "waiting for approval" : "waiting for input"; cls = "park"; }
+        else if (st.code === "cancelled") { text = st.reason || "cancelled"; cls = "bad"; }
+        else if (st.code !== "success") { text = st.reason ? `${st.code} · ${st.reason}` : st.code; cls = "bad"; }
+        divider(`end of turn ${turn ? turn.n : "?"}`, text, cls);
+        refreshState();
+        break;
+      }
+      case "interrupt":
+        note("✂ interrupted");
+        break;
+      case "closed":
+        note("session closed", "warn");
+        break;
+    }
+    setStatus();
+  }
+
+  function onRunEvent(d) {
+    const turn = S.turns[d.run_id];
+    if (!turn) return;
+    if (d.type === "START" && d.parent_call_id === null) { turn.rootCallId = d.call_id; return; }
+    const direct = turn.rootCallId && d.parent_call_id === turn.rootCallId;
+    const isLlm = direct && d.path.endsWith(".llm");
+
+    if (d.type === "DELTA") {
+      const item = d.item || {};
+      if (!isLlm) {
+        if (item.type === "custom") note(`custom: ${pretty(item.data).slice(0, 140)}`);
+        return;
+      }
+      S.llmDeltas[d.call_id] = true;
+      keepBottom(() => {
+        switch (item.type) {
+          case "text_delta": segment(d.call_id, item.id, "text").textContent += item.text_delta; break;
+          case "text": segment(d.call_id, item.id, "text").textContent = item.text; break;
+          case "thinking_delta": segment(d.call_id, item.id, "thinking").textContent += item.thinking_delta; break;
+          case "thinking": segment(d.call_id, item.id, "thinking").textContent = item.thinking; break;
+          case "tool_use": toolCard(d.run_id, item.id, item.name, item.input); break;
+          case "tool_use_delta": {
+            const t = S.tools[item.id];
+            if (t) { t.raw += item.input_delta; t.args.textContent = t.raw; }
+            break;
+          }
+        }
+      });
+      return;
+    }
+
+    if (d.type === "OUTPUT" && isLlm) {
+      const message = d.output || {};
+      const content = message.content || [];
+      if (!S.llmDeltas[d.call_id]) {
+        content.forEach((c, i) => {
+          if (c.type === "text" && c.text) segment(d.call_id, `out${i}`, "text").textContent = c.text;
+          else if (c.type === "thinking" && c.thinking) segment(d.call_id, `out${i}`, "thinking").textContent = c.thinking;
+        });
+      }
+      content.filter((c) => c.type === "tool_use" && !c.is_server_tool_use).forEach((c) => {
+        const t = toolCard(d.run_id, c.id, c.name, c.input);
+        t.args.textContent = pretty(c.input);
+      });
+      if (d.status && d.status.code === "error") note(`model error: ${d.error ? d.error.message || "" : ""}`.slice(0, 200), "warn");
+      return;
+    }
+
+    if (direct && !isLlm && (d.type === "START" || d.type === "OUTPUT")) {
+      const name = d.path.split(".").pop();
+      let t = S.toolByCall[d.call_id];
+      if (!t && d.type === "START") {
+        const queue = S.toolQueue[`${d.run_id}:${name}`] || [];
+        t = queue.shift() || toolCard(d.run_id, null, name, d.input);
+        S.toolByCall[d.call_id] = t;
+      }
+      if (!t) return;
+      if (d.type === "START") { t.state.className = "state run"; t.state.textContent = "running…"; return; }
+      const st = d.status || {};
+      t.resultLabel.hidden = false;
+      t.result.textContent = d.error ? pretty(d.error.message || d.error) : pretty(d.output);
+      if (st.code === "success") { t.state.className = "state ok"; t.state.textContent = `done · ${d.t1 - d.t0} ms`; }
+      else { t.state.className = "state bad"; t.state.textContent = st.reason || st.code; }
+      return;
+    }
+
+    if (d.type === "APPROVAL") { askCard("approval", d); return; }
+    if (d.type === "INTERACTION") { askCard("interaction", d); return; }
+    if (d.type === "GUARDRAIL") { note(`🛡 ${d.rail || d.name || "guardrail"} · ${d.action || ""} · ${d.stage || ""}`, "warn"); return; }
+    if (d.type === "OUTPUT" && d.parent_call_id === null && d.status && d.status.code === "error") {
+      note(`turn error: ${d.error ? d.error.message || d.error.type : ""}`.slice(0, 240), "warn");
+    }
+  }
+
+  // ---------- event log panel ----------
+  function logItem(seq, d) {
+    if (d.type === "DELTA" && !$("show-deltas").checked) return;
+    const row = el("div", "log-row");
+    const line = el("div", "log-line");
+    line.appendChild(el("span", "seq", String(seq)));
+    line.appendChild(el("span", `type ${d.type}`, d.type === "SESSION" ? d.kind : d.type));
+    let what = d.path || "";
+    if (d.type === "SESSION") what = d.text || (d.status ? `${d.status.code}${d.status.reason ? " · " + d.status.reason : ""}` : "") || short(d.run_id || d.event_id);
+    else if (d.type === "DELTA" && d.item) what += ` ${d.item.type}`;
+    else if (d.type === "OUTPUT" && d.status) what += ` · ${d.status.code}${d.status.reason ? " / " + d.status.reason : ""}`;
+    line.appendChild(el("span", "what", what));
+    const pre = el("pre", "", "");
+    line.addEventListener("click", () => {
+      if (!pre.textContent) pre.textContent = pretty(d);
+      row.classList.toggle("open");
+    });
+    row.append(line, pre);
+    const log = $("log");
+    const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+    log.appendChild(row);
+    if (stick) log.scrollTop = log.scrollHeight;
+    $("log-count").textContent = String(++S.logRows);
+  }
+
+  // ---------- network ----------
+  async function post(path, body) {
+    const res = await fetch(api(path), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    return data;
+  }
+
+  async function refreshState() {
+    if (!S.sessionId) return;
+    try {
+      const res = await fetch(api(`/${S.sessionId}`));
+      if (!res.ok) return;
+      const state = await res.json();
+      $("head-id").textContent = short(state.head);
+      $("head-id").title = state.head || "";
+      S.parked = state.parked;
+      setStatus();
+    } catch { /* the stream will say if the server went away */ }
+  }
+
+  function resetView() {
+    if (S.es) S.es.close();
+    Object.assign(S, {
+      busy: false, parked: false, runId: null, turnNo: 0, turns: {}, messages: {}, segs: {}, llmDeltas: {},
+      tools: {}, toolQueue: {}, toolByCall: {}, asks: {}, logRows: 0,
+    });
+    $("timeline").innerHTML = "";
+    $("log").innerHTML = "";
+    $("log-count").textContent = "0";
+    const empty = el("div", "empty");
+    empty.id = "empty";
+    empty.innerHTML = "New session. Send a message to start a turn.";
+    $("timeline").appendChild(empty);
+  }
+
+  function attach(sessionId) {
+    resetView();
+    S.sessionId = sessionId;
+    $("session-id").textContent = short(sessionId);
+    $("session-chip").title = `${sessionId} (click to copy)`;
+    history.replaceState(null, "", `#s=${sessionId}`);
+    const es = new EventSource(api(`/${sessionId}/events?after=0`));
+    S.es = es;
+    es.onopen = () => { $("conn-dot").className = "dot on"; };
+    es.onerror = () => { $("conn-dot").className = "dot err"; };
+    es.onmessage = (msg) => {
+      let d;
+      try { d = JSON.parse(msg.data); } catch { return; }
+      logItem(msg.lastEventId, d);
+      if (d.type === "SESSION") onSession(d);
+      else onRunEvent(d);
+    };
+    es.addEventListener("gapped", () => note("the event log dropped older entries", "warn"));
+    refreshState();
+    setStatus();
+  }
+
+  async function newSession() {
+    const state = await post("", { busy_mode: S.mode === "interrupt" ? "steer" : S.mode });
+    attach(state.session_id);
+  }
+
+  async function send() {
+    const input = $("input");
+    const text = input.value.trim();
+    if (!text || !S.sessionId) return;
+    input.value = "";
+    autosize();
+    try {
+      await post(`/${S.sessionId}/messages`, { text, mode: S.mode });
+    } catch (e) {
+      note(`send failed: ${e.message}`, "warn");
+      if (/No chat session/.test(e.message)) { await newSession(); }
+    }
+  }
+
+  async function stop() {
+    if (!S.sessionId || !S.busy) return;
+    await post(`/${S.sessionId}/interrupt`).catch((e) => note(`stop failed: ${e.message}`, "warn"));
+  }
+
+  function autosize() {
+    const t = $("input");
+    t.style.height = "auto";
+    t.style.height = `${Math.min(t.scrollHeight, 180)}px`;
+  }
+
+  // ---------- wiring ----------
+  $("modes").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-mode]");
+    if (!b) return;
+    S.mode = b.dataset.mode;
+    $("modes").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    setStatus();
+  });
+  $("btn-send").addEventListener("click", send);
+  $("btn-stop").addEventListener("click", stop);
+  $("btn-new").addEventListener("click", () => newSession().catch((e) => note(`could not open a session: ${e.message}`, "warn")));
+  $("btn-clear-log").addEventListener("click", () => { $("log").innerHTML = ""; S.logRows = 0; $("log-count").textContent = "0"; });
+  $("session-chip").addEventListener("click", () => S.sessionId && navigator.clipboard?.writeText(S.sessionId));
+  $("input").addEventListener("input", autosize);
+  $("input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+    if (e.key === "Escape") { e.preventDefault(); stop(); }
+  });
+
+  (async () => {
+    try {
+      const meta = await (await fetch(new URL("meta", new URL("./", location.href)))).json();
+      $("agent-name").textContent = meta.agent || "?";
+      $("agent-chip").title = meta.model ? `model: ${meta.model}` : "";
+      if (!meta.is_agent) { note("the served runnable is not an Agent: chat sessions are unavailable", "warn"); return; }
+    } catch { $("agent-name").textContent = "?"; }
+    const match = location.hash.match(/s=([0-9a-f]+)/);
+    if (match) {
+      const res = await fetch(api(`/${match[1]}`));
+      if (res.ok) { attach(match[1]); return; }
+    }
+    newSession().catch((e) => note(`could not open a session: ${e.message}`, "warn"));
+  })();
+  setStatus();
+  $("input").focus();
+})();
+</script>
+</body>
+</html>
