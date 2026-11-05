@@ -82,6 +82,10 @@ def _resolve_api_key(explicit: str | SecretStr | None) -> str:
     return key
 
 
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return min(hi, max(lo, value))
+
+
 def _encoding_param(config: AudioInputConfig) -> str:
     """Timbal speaks PCM16LE mono end-to-end; Deepgram calls that ``linear16``."""
     if config.encoding in ("pcm_s16le", "linear16", ""):
@@ -108,6 +112,15 @@ class _DeepgramSTTBase(SpeechToText):
         self._receiver: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[TranscriptEvent | None] = asyncio.Queue()
         self._input_config: AudioInputConfig | None = None
+        # Entity patience sets ``eager_suppressed`` while a number, spelled
+        # sequence, email, or code is still open. EagerEndOfTurn is then not
+        # handed to ``on_eager_end_of_turn`` (speculative generation must not
+        # start on a fragment). Default off: eager stays log-only, as before.
+        self.eager_suppressed = False
+        self.eager_suppressed_count = 0
+        self.on_eager_end_of_turn: Any = None
+        self.patient_thresholds_live = False
+        self._patient_pending = False
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -250,8 +263,11 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
     * ``Update`` / ``StartOfTurn`` → ``partial`` (transcript is the whole turn
       so far, matching how the session treats Scribe partials)
     * ``EndOfTurn`` → ``committed``
-    * ``EagerEndOfTurn`` / ``TurnResumed`` → logged only (speculative-LLM
-      lifecycle is a follow-up)
+    * ``EagerEndOfTurn`` / ``TurnResumed`` → logged only, unless
+      ``on_eager_end_of_turn`` is set. While ``eager_suppressed`` is set
+      (entity / spelling patience), eager events are dropped so a speculative
+      reply cannot start on a half-read number. Deepgram's guidance is to
+      leave eager off for dictation.
 
     ``commit()`` is a no-op: the Flux turn machine owns endpointing, there is
     no client-side force-commit. Run with ``turn_detector="provider"`` and
@@ -301,6 +317,42 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
     async def commit(self) -> None:
         """No-op: Flux's turn machine owns endpointing (no force-commit API)."""
 
+    async def configure_turn(
+        self,
+        *,
+        eot_threshold: float | None = None,
+        eot_timeout_ms: int | None = None,
+        eager_eot_threshold: float | None = None,
+        patient: bool = False,
+    ) -> None:
+        """Push Flux turn knobs mid-call (``Configure`` control message).
+
+        Thresholds are nested under ``thresholds``, per Deepgram's Configure
+        docs. Omitted keys are left unchanged on the socket. Values are
+        clamped to the documented ranges (``eot_threshold`` 0.5–1.0,
+        ``eager_eot_threshold`` 0.3–0.9 and ≤ ``eot_threshold`` when both are
+        sent, ``eot_timeout_ms`` 500–60000). ``patient`` is local: the matching
+        ``ConfigureSuccess`` sets :attr:`patient_thresholds_live`.
+
+        https://developers.deepgram.com/docs/flux/configure
+        """
+        thresholds: dict[str, float | int] = {}
+        if eot_threshold is not None:
+            thresholds["eot_threshold"] = _clamp(float(eot_threshold), 0.5, 1.0)
+        if eot_timeout_ms is not None:
+            thresholds["eot_timeout_ms"] = int(_clamp(float(eot_timeout_ms), 500, 60_000))
+        if eager_eot_threshold is not None:
+            eager = _clamp(float(eager_eot_threshold), 0.3, 0.9)
+            eot = thresholds.get("eot_threshold")
+            if isinstance(eot, (int, float)) and eager > eot:
+                eager = float(eot)
+            if eager >= 0.3:
+                thresholds["eager_eot_threshold"] = eager
+        if not thresholds:
+            return
+        self._patient_pending = patient
+        await self._send_json({"type": "Configure", "thresholds": thresholds})
+
     async def _handle_message(self, msg: dict[str, Any]) -> None:
         mt = msg.get("type", "")
         if mt == "Connected":
@@ -321,13 +373,36 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 if text:
                     await self._queue.put(TranscriptEvent(type="partial", text=text))
             elif event in ("EagerEndOfTurn", "TurnResumed"):
-                # Speculative reply lifecycle not wired yet — visibility only.
+                if event == "EagerEndOfTurn" and self.eager_suppressed:
+                    self.eager_suppressed_count += 1
+                    logger.info(
+                        "dg_flux_eager_suppressed",
+                        eou_confidence=msg.get("end_of_turn_confidence"),
+                        text_preview=text[:80],
+                    )
+                    return
+                # Speculative reply is opt-in via ``on_eager_end_of_turn``.
+                # With no callback this is visibility only — the previous
+                # behavior.
                 logger.info(
                     "dg_flux_eager_event",
                     turn_event=event,
                     eou_confidence=msg.get("end_of_turn_confidence"),
                     text_preview=text[:80],
                 )
+                if event == "EagerEndOfTurn" and self.on_eager_end_of_turn is not None:
+                    self.on_eager_end_of_turn(text)
+            return
+        if mt == "ConfigureSuccess":
+            self.patient_thresholds_live = self._patient_pending
+            logger.info("dg_flux_configure_ok", patient=self.patient_thresholds_live)
+            return
+        if mt == "ConfigureFailure":
+            self.patient_thresholds_live = False
+            logger.warning(
+                "dg_flux_configure_failed",
+                description=msg.get("description") or msg.get("message") or msg.get("error"),
+            )
             return
         if mt in ("Error", "FatalError"):
             err = msg.get("description") or msg.get("message") or "Unknown Flux error"

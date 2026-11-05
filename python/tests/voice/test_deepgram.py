@@ -129,6 +129,37 @@ class TestFluxEventMapping:
         await stt._handle_message(_flux_turn_info("TurnResumed"))
         assert _drain(stt) == []
 
+    async def test_eager_suppressed_does_not_call_listener(self) -> None:
+        stt = DeepgramFluxSTT()
+        seen: list[str] = []
+        stt.on_eager_end_of_turn = seen.append
+        stt.eager_suppressed = True
+        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "415 555"))
+        assert seen == []
+        assert stt.eager_suppressed_count == 1
+        assert _drain(stt) == []
+        stt.eager_suppressed = False
+        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "415 555 1212"))
+        assert seen == ["415 555 1212"]
+        assert _drain(stt) == []
+
+    async def test_configure_turn_clamps_and_nests_thresholds(self) -> None:
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=2.0, eot_timeout_ms=10, eager_eot_threshold=0.95, patient=True)
+        payload = json.loads(stt._ws.sent[-1])
+        assert payload["type"] == "Configure"
+        assert payload["thresholds"]["eot_threshold"] == 1.0
+        assert payload["thresholds"]["eot_timeout_ms"] == 500
+        # Eager cannot exceed eot_threshold, and 0.95 is above the 0.9 cap
+        # before the eot clamp. 1.0 eot still leaves eager at its own max.
+        assert payload["thresholds"]["eager_eot_threshold"] == 0.9
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is True
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
+        assert stt.patient_thresholds_live is False
+
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()
         await stt._handle_message(_flux_turn_info("Update", ""))

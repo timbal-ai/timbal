@@ -339,6 +339,20 @@ class TestMergeClientVoiceOverrides:
         assert voice_routes.CLIENT_SETTABLE_VOICE_FIELDS <= set(VoiceConfig.model_fields)
         assert "recording" not in voice_routes.CLIENT_SETTABLE_VOICE_FIELDS
 
+    def test_entity_patience_hello_overrides_and_rejects_garbage(self) -> None:
+        base = VoiceConfig()
+        assert base.entity_patience is False
+        out = voice_routes.merge_client_voice_overrides(
+            base, {"entity_patience": True, "entity_patience_secs": "3.5"}
+        )
+        assert out.entity_patience is True
+        assert out.entity_patience_secs == 3.5
+        kept = voice_routes.merge_client_voice_overrides(
+            out, {"entity_patience": "yes", "entity_patience_secs": 0}
+        )
+        assert kept.entity_patience is True
+        assert kept.entity_patience_secs == 3.5
+
 
 _HOSTILE_HELLO = {
     "stt_extra": {"stt_host": "evil.example", "callback": "https://evil.example/t", "eot_threshold": 0.9},
