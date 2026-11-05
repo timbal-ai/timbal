@@ -179,7 +179,7 @@ A text turn on the same conversation while the call is live (a chat tab continui
 
 ## Wait for a confirmed turn
 
-Speculative generation can run a tool before the caller has actually finished. That is what you want for a lookup. It is the wrong time to book, charge, send a message, or hang up. Set `defer_until_eot=True` on those tools. The call waits until the turn is confirmed; if the caller keeps talking, the tool never runs. Other tools in the same turn are not held. An MCP tool whose annotations say it is destructive gets `defer_until_eot=True` on its own, whether or not `approval` also gates it. Unannotated MCP tools do not.
+With speculative generation on, the model can decide on a tool while the caller might still be pausing, but the tool does not start until the turn is confirmed. That includes lookups. The handler waits, and so do its pre-hook, any approval question, and a default parameter that calls another service. If the caller keeps talking, the wait is cancelled and none of them run. `defer_until_eot=True` marks a tool whose work cannot be undone, such as booking, charging, sending, or hanging up. Speculative generation holds every tool the same way, so the flag is not what turns the hold on. An MCP tool annotated destructive still gets the flag, whether or not `approval` also gates it. With speculative generation off, tools run when the model calls them, which is already after a confirmed transcript.
 
 ```python
 from timbal import Agent, Tool
