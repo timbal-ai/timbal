@@ -53,6 +53,7 @@ from ...core.models import (
     uses_long_context_pricing,
 )
 from ...state import get_billing_id, get_run_context
+from ...types.content.custom import CustomContent
 from ...types.content.text import TextContent
 from ..harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED, contains_leak, leak_state, parse_leaked_tool_calls
 from ...types.content.thinking import ThinkingContent
@@ -598,12 +599,22 @@ class ResponseCollector(BaseCollector):
 
     def _handle_output_item_added(self, event: ResponseOutputItemAddedEvent) -> None:
         """Handle output item added events from OpenAI."""
+        if getattr(event.item, "type", None) in CustomContent.OPENAI_ITEMS:
+            # Hosted tool search. Checked before the isinstance branches: an SDK without
+            # these item types parses them as ResponseOutputMessage.
+            self.content[event.item.id] = {"type": "openai_item", "value": None}
+            self.content_blocks.add(event.item.id)
+            if event.item.type == "tool_search_call":
+                return TimbalToolUse(id=event.item.id, name="tool_search", input="", is_server_tool_use=True)
+            return None
         if isinstance(event.item, ResponseFunctionToolCall):
             self.content[event.item.id] = {
                 "type": "tool_use",
                 "id": event.item.call_id,
                 "name": event.item.name,
                 "input": event.item.arguments,  # openai sends an empty string here
+                # Not on older SDK models, so read loosely; set for functions tool search loaded.
+                "namespace": getattr(event.item, "namespace", None),
             }
             content_block_id = event.item.id
             self.content_blocks.add(content_block_id)
@@ -793,6 +804,16 @@ class ResponseCollector(BaseCollector):
 
     def _handle_output_item_done(self, event: ResponseOutputItemDoneEvent) -> None:
         """Handle output item done events from OpenAI."""
+        if getattr(event.item, "type", None) in CustomContent.OPENAI_ITEMS:
+            # Stored verbatim: the next request replays them so the loaded tools stay callable.
+            item = event.item
+            value = item.model_dump(mode="json", exclude_none=True) if hasattr(item, "model_dump") else dict(item)
+            if value.get("type") == "tool_search_output":
+                bid = self._usage_billing_id()
+                if bid:
+                    get_run_context().update_usage(f"{bid}:tool_search_requests", 1)
+            self.content[item.id] = {"type": "openai_item", "value": value}
+            return TimbalContentBlockStop(id=item.id) if item.id in self.content_blocks else None
         if isinstance(event.item, ResponseFunctionWebSearch):
             bid = self._usage_billing_id()
             if bid:
@@ -829,6 +850,9 @@ class ResponseCollector(BaseCollector):
             return None
         elif isinstance(event.item, ResponseFunctionToolCall):
             content_block_id = event.item.id
+            namespace = getattr(event.item, "namespace", None)
+            if namespace and content_block_id in self.content:
+                self.content[content_block_id]["namespace"] = namespace
             if content_block_id in self.content_blocks:
                 return TimbalContentBlockStop(id=content_block_id)
             else:
@@ -918,12 +942,16 @@ class ResponseCollector(BaseCollector):
                         id=content_block["id"],
                         name=content_block["name"],
                         input=content_block["input"],
+                        namespace=content_block.get("namespace"),
                     )
                 )
             elif content_block["type"] == "server_tool_use":
                 continue
             elif content_block["type"] == "server_tool_result":
                 continue
+            elif content_block["type"] == "openai_item":
+                if content_block["value"] is not None:
+                    content.append(CustomContent(value=content_block["value"]))
             elif content_block["type"] == "thinking":
                 thinking = content_block.get("thinking") or ""
                 encrypted = content_block.get("encrypted_content")

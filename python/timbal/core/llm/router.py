@@ -160,7 +160,9 @@ async def _llm_router(
     if provider == "anthropic":
         create_stream, context = prepare_messages_request(**request_kwargs, deferred_tools=deferred_tools)
     elif provider in ("openai", "xai") and TIMBAL_OPENAI_API == "responses":
-        create_stream, context = prepare_responses_request(provider=provider, **request_kwargs)
+        create_stream, context = prepare_responses_request(
+            provider=provider, **request_kwargs, deferred_tools=deferred_tools
+        )
     else:
         # OpenAI Chat Completions compatible providers
         create_stream, context = prepare_chat_completions_request(

@@ -1081,6 +1081,7 @@ class MCPServer(ToolSet):
             tool_annotations=annotations,
             read_only=bool(annotations and annotations.get("readOnlyHint") is True),
             defer_loading=self.defer_loading,
+            search_group=self.name,
             requires_approval=approval_policy,
             approval_prompt=f"Run {title or exposed_name}?" if requires_approval else None,
             approval_description=(mcp_tool.description or None) if requires_approval else None,

@@ -13,7 +13,7 @@ from timbal.guardrails import Verdict, guardrail
 from timbal.state import get_run_context, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
-from timbal.types.content import ToolUseContent
+from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.message import Message
 
 
@@ -319,3 +319,108 @@ class TestIdleWatchdog:
         assert agent._llm.default_params["stream_idle_timeout"] == 300.0
         agent = Agent(name="a", model="openai/gpt-4o-mini", stream_idle_timeout=None)
         assert "stream_idle_timeout" not in agent._llm.default_params
+
+
+# -- Empty answer at the output limit ----------------------------------------------
+
+
+def thinking_only(stop_reason="max_tokens"):
+    from timbal.types.content import ThinkingContent
+
+    return Message(role="assistant", content=[ThinkingContent(thinking="hmm " * 50)], stop_reason=stop_reason)
+
+
+def in_order(*responses):
+    """A TestModel answering by call order (its default counts assistant turns, which a dropped reply resets)."""
+    calls = iter(responses)
+
+    def handler(_messages):
+        return next(calls)
+
+    return TestModel(handler=handler)
+
+
+async def llm_inputs(output):
+    trace = await RunContext(tracing_provider=InMemoryTracingProvider)._get_parent_trace(output.run_id)
+    return [s.input for s in sorted(trace.values(), key=lambda s: s.t0) if s.path.endswith(".llm")]
+
+
+class TestEmptyAtLimit:
+    async def test_retried_once_with_a_larger_budget(self):
+        agent = Agent(
+            name="agent",
+            model=in_order(thinking_only(), "The answer."),
+            max_tokens=1000,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="q").collect()
+        assert out.status.code == "success", out.error
+        assert out.output.collect_text() == "The answer."
+        assert out.metadata["max_tokens_retry"] == {"from": 1000, "to": 4000}
+        assert [i.get("max_tokens") for i in await llm_inputs(out)] == [1000, 4000]
+        memory = await memory_of(out)
+        assert [m.role for m in memory] == ["user", "assistant"]  # the empty reply is gone
+        assert memory[-1].collect_text() == "The answer."
+
+    @pytest.mark.parametrize("stop_reason", ["max_tokens", "max_output_tokens", "length"])
+    async def test_still_empty_after_the_retry_fails_clearly(self, stop_reason):
+        agent = Agent(
+            name="agent",
+            model=TestModel(
+                responses=[thinking_only(stop_reason), Message(role="assistant", content=[], stop_reason=stop_reason)]
+            ),
+            max_tokens=1000,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="q").collect()
+        assert out.status.code == "error"
+        assert out.error["type"] == "ModelOutputTruncated"
+        assert "max_tokens=4000" in out.error["message"]
+
+    async def test_truncated_text_is_kept(self):
+        partial = Message(role="assistant", content=[TextContent(text="Half an ans")], stop_reason="max_tokens")
+        agent = Agent(
+            name="agent",
+            model=TestModel(responses=[partial]),
+            max_tokens=1000,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="q").collect()
+        assert out.status.code == "success" and out.status.reason == "max_tokens"
+        assert "max_tokens_retry" not in out.metadata
+
+    async def test_no_budget_to_raise_fails_without_retrying(self):
+        model = TestModel(responses=[thinking_only("max_output_tokens"), "never"])
+        agent = Agent(name="agent", model=model, tracing_provider=InMemoryTracingProvider)
+        out = await agent(prompt="q").collect()
+        assert out.error["type"] == "ModelOutputTruncated"
+        assert "provider's default limit" in out.error["message"]
+        assert model.call_count == 1
+
+    async def test_cap(self):
+        agent = Agent(
+            name="agent",
+            model=in_order(thinking_only(), "ok"),
+            max_tokens=20_000,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await agent(prompt="q").collect()
+        assert out.metadata["max_tokens_retry"] == {"from": 20_000, "to": 32_000}
+
+    async def test_a_sub_agent_that_runs_out_is_an_error_result_for_its_parent(self):
+        child = Agent(
+            name="child",
+            model=TestModel(responses=[thinking_only(), thinking_only()]),
+            max_tokens=500,
+            tracing_provider=InMemoryTracingProvider,
+        )
+        parent = Agent(
+            name="parent",
+            model=TestModel(responses=[call("child", prompt="go"), "Child failed; I'll answer myself."]),
+            tools=[child],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await parent(prompt="q").collect()
+        assert out.status.code == "success", out.error
+        result = tool_results(await memory_of(out))[0].content[0]
+        assert "output budget" in result.content[0].text
