@@ -1,0 +1,54 @@
+---
+title: "Timbal Connect"
+description: "Connect databases and file shares on your own network to Timbal without opening inbound ports"
+---
+
+Timbal Connect is a small service you install on a server inside your network, next to the databases or file shares you want to use in Timbal. It opens one outbound, encrypted connection to Timbal and waits for instructions: browse a schema, run a read-only query, sync a table into a knowledge base, or copy files.
+
+You never open an inbound port, and **database credentials never leave the server**. Timbal only knows each connection by the name you give it; the connection string lives in a file on the server.
+
+## How it works
+
+1. You create an **enrollment token** in Timbal: a single-use key, valid for 24 hours by default, that lets one server register itself.
+2. You run the installer on the server. It checks the network path, downloads the connector, and registers it as a system service (a Windows service, a systemd unit or a launchd job).
+3. On first start the connector trades the token for its own credential and connects. The token is consumed and can't be reused.
+4. You list your databases in a local `connections.json` file. From then on, Timbal can use them by name.
+
+The connector updates itself when Timbal pushes a new version, and rolls back automatically if the new version can't connect.
+
+## What it can reach
+
+| Source | Notes |
+| ------ | ----- |
+| PostgreSQL | Any version with a standard wire protocol |
+| SQL Server | SQL logins, Windows-integrated authentication and NTLM, named instances |
+| MySQL / MariaDB | Standard user/password |
+| File shares | Local or mounted directories you list explicitly |
+
+Supported platforms: Windows Server 2016 or newer (x64 and ARM64), Linux (x86_64 and aarch64, any distribution) and macOS (Intel and Apple silicon).
+
+## Before you start
+
+<Steps>
+  <Step title="Check the network">
+    The server needs direct outbound HTTPS (TCP 443) to `api.timbal.ai`, with WebSocket allowed and no TLS inspection on that host. This is the most common blocker, so check it first: [Network requirements](/connect/network-requirements).
+  </Step>
+  <Step title="Get an enrollment token">
+    Ask your Timbal contact for one, or create it with the API: [Create enrollment token](/api-reference/connectors/enrollment-tokens/create). The token is shown once and expires after 24 hours unless you set `ttl_secs` (up to 30 days).
+  </Step>
+  <Step title="Install">
+    Follow the guide for your server: [Windows](/connect/install-windows) or [Linux and macOS](/connect/install-linux-macos).
+  </Step>
+  <Step title="Add your connections">
+    Tell the connector which databases it may use: [Configure connections](/connect/connections).
+  </Step>
+</Steps>
+
+<CardGroup cols={2}>
+  <Card title="Network requirements" icon="network-wired" href="/connect/network-requirements">
+    What to ask your IT team for, and how to check it.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    Every installer message and what to do about it.
+  </Card>
+</CardGroup>

@@ -1,0 +1,117 @@
+---
+title: "Configure connections"
+description: "Tell Timbal Connect which databases it may use, and how to authenticate to them"
+---
+
+The connector only uses databases you list in `connections.json` on the server. Each entry has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, never leaves the server.
+
+| Platform | File |
+| -------- | ---- |
+| Windows | `C:\ProgramData\TimbalConnect\connections.json` |
+| Linux / macOS | `/etc/timbal-connect/connections.json` |
+
+```json
+{
+  "erp": {
+    "kind": "sql_server",
+    "dsn": "Server=tcp:sql01.corp.local,1433;Database=ERP;Encrypt=true;TrustServerCertificate=true",
+    "auth": { "mode": "integrated" }
+  },
+  "warehouse": {
+    "kind": "postgres",
+    "dsn": "postgres://timbal_ro:secret@10.0.0.12:5432/warehouse"
+  },
+  "shop": {
+    "kind": "mysql",
+    "dsn": "mysql://timbal_ro:secret@127.0.0.1:3306/shop"
+  }
+}
+```
+
+After editing, restart the service and check the result:
+
+<Tabs>
+  <Tab title="Windows">
+    ```powershell
+    Restart-Service timbal-connect
+    & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" doctor
+    ```
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    sudo systemctl restart timbal-connect
+    sudo bash -c 'set -a; . /etc/timbal-connect/connector.env; exec /opt/timbal-connect/current/timbal-connect doctor'
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    sudo launchctl kickstart -k system/ai.timbal.connect
+    sudo /opt/timbal-connect/current/timbal-connect doctor
+    ```
+  </Tab>
+</Tabs>
+
+`doctor` really connects to every database in the file and reports, per connection, whether it worked and why not.
+
+<Warning>
+Save the file as **UTF-8 without BOM**. Notepad on older Windows versions and PowerShell's `Set-Content -Encoding utf8` add a byte-order mark, and the file then fails to parse. Also remember that `\` must be doubled inside JSON strings: write `"CORP\\svc_timbal"`, not `"CORP\svc_timbal"`.
+</Warning>
+
+## Fields
+
+| Field | Required | Meaning |
+| ----- | -------- | ------- |
+| `kind` | Yes | `postgres`, `sql_server` or `mysql` (MySQL and MariaDB) |
+| `dsn` | Yes | Connection string. URL form for PostgreSQL and MySQL, ADO.NET form for SQL Server |
+| `auth` | No | SQL Server only. How to log in, see below. Default: credentials from the `dsn` |
+| `query` | No | What ad-hoc queries from Timbal may do on this connection: `"none"`, `"read"` (default) or `"write"`. This setting on the server always wins over what Timbal asks for |
+
+Use a database account with **read-only** permissions unless you need writes.
+
+## SQL Server authentication
+
+| `auth.mode` | Logs in as | Works on |
+| ----------- | ---------- | -------- |
+| `sql` (default) | `User Id` and `Password` from the `dsn` | All platforms |
+| `integrated` | The Windows account the service runs as, no password stored | Windows |
+| `windows` | An explicit domain account, `{"mode": "windows", "user": "CORP\\svc", "password": "..."}` | Windows |
+
+Many Business Central and NAV databases only allow Windows logins, so `sql` fails with `Login failed for user`. Use `integrated` with a dedicated service account:
+
+<Steps>
+  <Step title="Run the service as a domain account">
+    A group managed service account (gMSA) is best because no password is stored. Note the trailing `$` and the empty password:
+
+    ```powershell
+    sc.exe config timbal-connect obj= "CORP\svc_timbal$" password= ""
+    Restart-Service timbal-connect
+    ```
+
+    For a normal domain user, pass its password instead of `""`.
+  </Step>
+  <Step title="Grant it read access in SQL Server">
+    ```sql
+    CREATE LOGIN [CORP\svc_timbal$] FROM WINDOWS;
+    CREATE USER  [CORP\svc_timbal$] FOR LOGIN [CORP\svc_timbal$];
+    ALTER ROLE db_datareader ADD MEMBER [CORP\svc_timbal$];
+    ```
+  </Step>
+</Steps>
+
+By default the service runs as `NT AUTHORITY\NetworkService`, which reaches a SQL Server on *another* machine as the computer account (`CORP\SERVERNAME$`). That account rarely has a login, hence `Login failed for user 'CORP\SERVERNAME$'`.
+
+### Reaching the server
+
+| `Server=` | Use when |
+| --------- | -------- |
+| `tcp:sql01.corp.local,1433` | Default instance. Always prefer an explicit port |
+| `tcp:sql01.corp.local,52001` | Named instance whose static port you know (SQL Server Configuration Manager, TCP/IP, IPAll) |
+| `tcp:sql01.corp.local\INSTANCE` | Named instance on a dynamic port. Needs the SQL Browser service and UDP 1434 open |
+
+### Encryption
+
+| In the `dsn` | Meaning |
+| ------------ | ------- |
+| `Encrypt=true;TrustServerCertificate=true` | Encrypted, certificate not verified. The usual choice for on-premises servers with self-signed certificates |
+| `Encrypt=true;TrustServerCertificate=false` | Encrypted and verified. The certificate must be trusted and match the `Server=` host name |
+| `Encrypt=false` | Not encrypted. Avoid |

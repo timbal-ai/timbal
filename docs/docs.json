@@ -120,6 +120,17 @@
               "deployment/platform",
               "deployment/self-hosted"
             ]
+          },
+          {
+            "group": "Timbal Connect",
+            "pages": [
+              "connect/index",
+              "connect/network-requirements",
+              "connect/install-windows",
+              "connect/install-linux-macos",
+              "connect/connections",
+              "connect/troubleshooting"
+            ]
           }
         ]
       },

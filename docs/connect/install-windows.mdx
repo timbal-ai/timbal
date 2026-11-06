@@ -1,0 +1,165 @@
+---
+title: "Install on Windows"
+description: "Install Timbal Connect as a Windows service with the setup file, a script, or the standalone binary"
+---
+
+## Requirements
+
+- Windows Server 2016 or newer (or Windows 10/11), x64 or ARM64
+- An account with local **Administrator** rights
+- The [network requirements](/connect/network-requirements) in place: direct outbound TCP 443 to `api.timbal.ai`, no TLS inspection
+- An [enrollment token](/api-reference/connectors/enrollment-tokens/create), unused and less than 24 hours old (unless created with a longer `ttl_secs`)
+
+## Install with the setup file
+
+<Steps>
+  <Step title="Download the setup file">
+    Download it **on the server**, or copy it there unchanged:
+
+    [`TimbalConnectSetup.cmd`](https://api.timbal.ai/v1/connect/releases/TimbalConnectSetup.cmd)
+
+    Your browser may warn about the download because it's a script. Choose **Keep**.
+
+    <Warning>
+    Don't edit, rename-and-resave, or forward the file through chat apps, email bodies or AI assistants. The installer is embedded at the end of the file, and any of those can strip or re-encode it. The setup then stops with "missing its embedded installer". Download a fresh copy if in doubt.
+    </Warning>
+  </Step>
+  <Step title="Unblock it">
+    If Windows says **"Windows protected your PC"**, or nothing happens on double-click: right-click the file, choose **Properties**, tick **Unblock**, then **OK**.
+  </Step>
+  <Step title="Run it">
+    Double-click `TimbalConnectSetup.cmd`. In the setup window:
+
+    - **Control plane:** leave **Production** selected unless Timbal gave you a different URL
+    - **Enrollment token:** paste your token
+    - **Download proxy:** leave empty unless downloads must go through a proxy. This only affects the download; the service itself always connects directly
+
+    Click **Install**, then **Yes** on the administrator prompt.
+  </Step>
+  <Step title="Wait for the result">
+    The installer checks the network, downloads and verifies the connector, and registers and starts the `timbal-connect` service. You get a success or failure message either way. On failure, the message names the cause; look it up in [Troubleshooting](/connect/troubleshooting).
+  </Step>
+  <Step title="Add your connections">
+    Edit `C:\ProgramData\TimbalConnect\connections.json` and restart the service. See [Configure connections](/connect/connections).
+  </Step>
+</Steps>
+
+### What the setup checks first
+
+Before downloading anything, the setup checks the path the service will use and stops at the first problem, with an explanation:
+
+| Check | Fails when |
+| ----- | ---------- |
+| PowerShell | It is locked down by AppLocker, WDAC or Group Policy (see [Locked-down servers](#locked-down-servers)) |
+| DNS | The server can't resolve `api.timbal.ai` |
+| TCP 443 | A firewall blocks or drops the connection |
+| TLS certificate | A firewall inspects TLS traffic and re-signs it |
+| WebSocket | A proxy or IPS strips the WebSocket upgrade |
+
+If the firewall rule is approved but not live yet, you can install anyway with `-SkipNetworkCheck` (see below). The service keeps retrying and connects once the rule lands, as long as the enrollment token hasn't expired by then. Create the token with a longer `ttl_secs` if the change may take days.
+
+## Scripted install
+
+For remote sessions, RMM tools or install scripts, pass the token on the command line. This skips the setup window. Run from an elevated command prompt in the folder that contains the file:
+
+```bat
+TimbalConnectSetup.cmd -Token <TOKEN>
+```
+
+| Option | Effect |
+| ------ | ------ |
+| `-Token <token>` | Enrollment token. Required on first install. Omit it to upgrade; pass a new one to [re-enroll](#re-enroll) |
+| `-Url <wss://...>` | Control plane, if Timbal gave you a non-default one |
+| `-Version <vX.Y.Z>` | Pin a connector version (default `latest`) |
+| `-Proxy <http://host:port>` | Proxy for the downloads only |
+| `-SkipNetworkCheck` | Install even if the network check fails |
+
+Exit code `0` means installed and started; anything else is a failure, with the cause printed and logged.
+
+## Locked-down servers
+
+On servers where AppLocker, Windows Defender Application Control (WDAC) or Group Policy blocks unsigned PowerShell scripts, the setup file can't run and says so. Install the connector binary directly instead; it is its own installer and needs no PowerShell.
+
+<Steps>
+  <Step title="Download the binary and checksums">
+    On any machine with internet access, download the binary for your server's architecture and the checksum list:
+
+    - x64: [`timbal-connect-x86_64-windows.exe`](https://api.timbal.ai/v1/connect/releases/latest/timbal-connect-x86_64-windows.exe)
+    - ARM64: [`timbal-connect-aarch64-windows.exe`](https://api.timbal.ai/v1/connect/releases/latest/timbal-connect-aarch64-windows.exe)
+    - [`SHA256SUMS`](https://api.timbal.ai/v1/connect/releases/latest/SHA256SUMS)
+  </Step>
+  <Step title="Verify and copy it to the server">
+    The hash must match the line for that file in `SHA256SUMS`:
+
+    ```powershell
+    (Get-FileHash .\timbal-connect-x86_64-windows.exe -Algorithm SHA256).Hash.ToLower()
+    ```
+  </Step>
+  <Step title="Install the service">
+    From an elevated command prompt on the server:
+
+    ```bat
+    timbal-connect-x86_64-windows.exe service install --url wss://api.timbal.ai/v1/connect/channel --token <TOKEN>
+    ```
+
+    The binary copies itself to `C:\Program Files\TimbalConnect\`, writes its configuration and starts the service.
+  </Step>
+</Steps>
+
+If application control also blocks running the `.exe` from your Downloads folder, ask IT to allow it by its SHA-256 hash or to run it from a location your policy allows. This path skips the installer's network check, so run [`doctor`](/connect/troubleshooting#run-doctor) right after installing.
+
+## Check that it's running
+
+In an elevated PowerShell:
+
+```powershell
+Get-Service timbal-connect
+Get-Content -Wait C:\ProgramData\TimbalConnect\timbal-connect.log
+```
+
+You want to see `connector enrolled and connected` in the log. For a full check of the network and every configured database:
+
+```powershell
+& "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" doctor
+```
+
+## Upgrade
+
+The connector normally updates itself when Timbal pushes a new version. To upgrade by hand, run the setup file again and leave the token empty (or run `TimbalConnectSetup.cmd` with no `-Token`). Configuration and credentials are kept.
+
+## Re-enroll
+
+Run the setup file again **with a new enrollment token** when:
+
+- The first attempt used a token that had expired, was already used, or belongs to another environment
+- The connector was revoked in Timbal and should come back
+
+The server then registers as a **new** connector. The installer writes the new token into the existing configuration, moves the previous identity aside (`state.json` becomes `state.json.pre-reenroll-<number>`, kept as a backup), and restarts the service. Your connections and other settings are kept. If the server had been connected before, its old connector stays offline in Timbal; revoke it.
+
+## Uninstall
+
+In an elevated PowerShell:
+
+```powershell
+# Remove the service, keep configuration and credentials for a later reinstall
+& "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" service uninstall
+
+# Remove everything
+& "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" service uninstall --purge
+```
+
+Uninstalling doesn't revoke the connector in Timbal; it just goes offline. Revoke it too if the server leaves your control: [Revoke connector](/api-reference/connectors/revoke). Reinstalling always needs a new enrollment token.
+
+## Files on the server
+
+| Path | Contents |
+| ---- | -------- |
+| `C:\Program Files\TimbalConnect\` | Connector binaries |
+| `C:\ProgramData\TimbalConnect\config.json` | Control-plane URL and enrollment token |
+| `C:\ProgramData\TimbalConnect\connections.json` | Your database connections |
+| `C:\ProgramData\TimbalConnect\state.json` | The connector's credential and sync progress |
+| `C:\ProgramData\TimbalConnect\timbal-connect.log` | Service log |
+| `C:\ProgramData\TimbalConnect\setup.log` | Installer log. The enrollment token is recorded only as a fingerprint (`sha256:...`) |
+| `%TEMP%\timbal-connect-setup.log` | Setup-file log, in the temp folder of the user who ran it |
+
+The service runs as `NT AUTHORITY\NetworkService`. To use Windows-integrated authentication with SQL Server, run it as a domain account instead: see [Configure connections](/connect/connections#sql-server-authentication).

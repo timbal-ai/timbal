@@ -1,0 +1,132 @@
+---
+title: "Network requirements"
+description: "What the Timbal Connect server needs from your network, and how to check it before installing"
+---
+
+Timbal Connect needs exactly one thing from your network: a **direct, outbound, long-lived HTTPS connection to `api.timbal.ai`**. No inbound ports, no VPN, no public IP.
+
+| Requirement | Value |
+| ----------- | ----- |
+| Destination | `api.timbal.ai` (or the host in the URL Timbal gave you) |
+| Port | TCP 443, outbound only |
+| Protocol | HTTPS (TLS 1.2 or newer) carrying a WebSocket connection (`wss://api.timbal.ai/v1/connect/channel`) |
+| Proxy | None: the connection must go out directly |
+| TLS inspection | Must be **off** for this host |
+| Connection length | Stays open indefinitely. The connector reconnects on its own if it drops |
+
+The installer, the connector binary, its updates and the live connection all use this same host and port, so one firewall rule covers everything.
+
+<Warning>
+**Opening port 443 is often not enough.** Two common firewall features break the connection even when the port is open:
+
+- **TLS inspection** (also called SSL inspection or HTTPS decryption, available on Fortinet, Sophos, Palo Alto, Check Point and Zscaler, among others). The firewall replaces Timbal's certificate with one signed by your company's own certificate authority. Browsers on your network trust that authority; the connector deliberately does not, so the connection fails. `api.timbal.ai` must be excluded from inspection.
+- **Proxies.** The connector doesn't support HTTP proxies for its connection yet. If your servers only reach the internet through a proxy, the server running Timbal Connect needs a direct-egress exception for `api.timbal.ai`. The installer's proxy option only covers its own downloads.
+</Warning>
+
+## What to send your IT team
+
+Copy this into a ticket or email.
+
+<Tabs>
+  <Tab title="English">
+    ```text
+    Subject: Firewall rule for Timbal Connect on <server name>
+
+    We are installing Timbal Connect on <server name>. It makes one outbound
+    connection to Timbal and needs no inbound access. Please allow, for that
+    server only:
+
+      - Outbound TCP 443 to api.timbal.ai (HTTPS + WebSocket, long-lived)
+      - Direct connection, not through a proxy
+      - api.timbal.ai excluded from TLS/SSL inspection
+      - WebSocket upgrades allowed (do not strip the "Upgrade: websocket" header)
+
+    Documentation: https://docs.timbal.ai/connect/network-requirements
+    ```
+  </Tab>
+  <Tab title="Español">
+    ```text
+    Asunto: Regla de firewall para Timbal Connect en <nombre del servidor>
+
+    Vamos a instalar Timbal Connect en <nombre del servidor>. Abre una única
+    conexión saliente hacia Timbal y no necesita ningún acceso entrante.
+    Por favor, permitid solo para ese servidor:
+
+      - Salida TCP 443 hacia api.timbal.ai (HTTPS + WebSocket, conexión persistente)
+      - Conexión directa, sin pasar por proxy
+      - api.timbal.ai excluido de la inspección TLS/SSL
+      - Upgrades de WebSocket permitidos (sin eliminar la cabecera "Upgrade: websocket")
+
+    Documentación: https://docs.timbal.ai/connect/network-requirements
+    ```
+  </Tab>
+</Tabs>
+
+## Check it yourself
+
+The installer runs these checks for you before installing anything and stops with a message naming the layer that failed. To check by hand, run them **on the server itself**: a laptop on the same network may have different firewall rules.
+
+<Tabs>
+  <Tab title="Windows (PowerShell)">
+    **1. Port 443 is reachable.** Look for `TcpTestSucceeded : True`.
+
+    ```powershell
+    Test-NetConnection api.timbal.ai -Port 443
+    ```
+
+    **2. Nothing inspects TLS.** Prints the certificate issuer. It should name a public certificate authority (for example `O=Amazon`). If it names your firewall vendor or your company, or the command fails with a certificate error, TLS inspection is on.
+
+    ```powershell
+    $c = New-Object Net.Sockets.TcpClient('api.timbal.ai', 443)
+    $s = New-Object Net.Security.SslStream($c.GetStream())
+    $s.AuthenticateAsClient('api.timbal.ai', $null, 'Tls12', $false)
+    $s.RemoteCertificate.Issuer
+    $c.Close()
+    ```
+
+    **3. WebSocket gets through.** The first line must be `HTTP/1.1 101 Switching Protocols`. Use `curl.exe`, not `curl`: in Windows PowerShell, `curl` is an alias for a different command.
+
+    ```powershell
+    curl.exe -si --http1.1 --max-time 5 -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" https://api.timbal.ai/v1/connect/channel
+    ```
+
+    **4. Is a proxy configured?** If this shows a proxy server, the server's traffic probably goes through it and needs a direct-egress exception.
+
+    ```powershell
+    netsh winhttp show proxy
+    ```
+  </Tab>
+  <Tab title="Linux / macOS">
+    **1. Port 443 is reachable.**
+
+    ```bash
+    nc -vz -w 5 api.timbal.ai 443
+    ```
+
+    **2. Nothing inspects TLS.** The issuer should be a public certificate authority (for example `O = Amazon`), not your firewall vendor or your company.
+
+    ```bash
+    echo | openssl s_client -connect api.timbal.ai:443 -servername api.timbal.ai 2>/dev/null | grep -i issuer
+    ```
+
+    **3. WebSocket gets through.** The first line must be `HTTP/1.1 101 Switching Protocols`.
+
+    ```bash
+    curl -si --http1.1 --max-time 5 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+      -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+      https://api.timbal.ai/v1/connect/channel
+    ```
+
+    **4. Is a proxy configured?**
+
+    ```bash
+    env | grep -i _proxy
+    ```
+  </Tab>
+</Tabs>
+
+After installing, `timbal-connect doctor` repeats the reachability check from the service's point of view. See [Troubleshooting](/connect/troubleshooting#run-doctor).
+
+## Database side
+
+The connector reaches your databases from the server it runs on, so it needs the usual access from that server: for example TCP 1433 for SQL Server, 5432 for PostgreSQL and 3306 for MySQL, plus UDP 1434 for SQL Server named instances that rely on SQL Browser. These are internal connections and never leave your network. See [Configure connections](/connect/connections).

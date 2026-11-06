@@ -1,0 +1,100 @@
+---
+title: "Troubleshooting"
+description: "Installer messages, connection problems and how to fix them"
+---
+
+Every installer failure stops with a message that names the cause, plus the location of a log file. Find the message below.
+
+| Log | Where |
+| --- | ----- |
+| Setup file (Windows) | `%TEMP%\timbal-connect-setup.log` of the user who ran it |
+| Installer (Windows) | `C:\ProgramData\TimbalConnect\setup.log` |
+| Service (Windows) | `C:\ProgramData\TimbalConnect\timbal-connect.log` |
+| Service (Linux) | `journalctl -u timbal-connect` |
+| Service (macOS) | `/Library/Logs/timbal-connect.log` |
+
+When asking Timbal for help, send the message you saw and these log files.
+
+## Installer messages
+
+<AccordionGroup>
+  <Accordion title="Cannot reach api.timbal.ai:443 / Timed out connecting">
+    The server can't open a connection to Timbal: a firewall blocks (refused) or silently drops (timed out) outbound port 443. Ask IT for the rule in [Network requirements](/connect/network-requirements#what-to-send-your-it-team). Configuring a proxy doesn't help: the service connects directly.
+  </Accordion>
+  <Accordion title="The certificate is issued by ..., not by a public CA / TLS handshake failed">
+    A firewall on your network inspects TLS traffic and presents its own certificate instead of Timbal's. The connector only trusts public certificate authorities, so it would never connect. Ask IT to exclude `api.timbal.ai` from TLS inspection (SSL inspection / HTTPS decryption).
+  </Accordion>
+  <Accordion title="refused the WebSocket upgrade">
+    The connection reaches a proxy or intrusion-prevention system that removes the WebSocket upgrade. Ask IT to allow WebSocket traffic to `api.timbal.ai`.
+  </Accordion>
+  <Accordion title="DNS lookup for api.timbal.ai failed">
+    The server can't resolve public host names. Check its DNS servers, or ask IT whether servers in that network resolve external names at all.
+  </Accordion>
+  <Accordion title="PowerShell runs in ConstrainedLanguage mode / Group Policy enforces the AllSigned execution policy">
+    Application control (AppLocker, WDAC or Device Guard) or Group Policy blocks unsigned PowerShell scripts, which the setup file relies on. Install the connector binary directly instead: [Locked-down servers](/connect/install-windows#locked-down-servers).
+  </Accordion>
+  <Accordion title="This file is incomplete: it is missing its embedded installer">
+    The setup file was changed on the way to the server: edited, re-saved with a different encoding, or passed through a chat app, email body or AI assistant. Download a fresh copy directly from [`TimbalConnectSetup.cmd`](https://api.timbal.ai/v1/connect/releases/TimbalConnectSetup.cmd) and run it unchanged.
+  </Accordion>
+  <Accordion title="Unknown argument / needs a value">
+    The command line has a typo. Options start with a single dash (`-Token`, not `--token`) and each one except `-SkipNetworkCheck` takes a value. See [Scripted install](/connect/install-windows#scripted-install).
+  </Accordion>
+  <Accordion title="Could not unpack the installer embedded in this file">
+    The setup file couldn't write to your temp folder. Check that `%TEMP%` exists and is writable, and that antivirus isn't quarantining files written there.
+  </Accordion>
+  <Accordion title="Administrator rights are required and were denied">
+    The administrator prompt was declined or the account isn't a local administrator. Run it again and accept the prompt, or ask an administrator to run it.
+  </Accordion>
+  <Accordion title="The console window opens and closes immediately">
+    Older versions of the setup file could exit without a message, usually on servers that block PowerShell scripts or when the file was altered in transit. Download a fresh copy: the current version always stops and explains what went wrong. On a server that blocks PowerShell, go straight to [Locked-down servers](/connect/install-windows#locked-down-servers).
+  </Accordion>
+  <Accordion title="Windows protected your PC / nothing happens on double-click">
+    Windows marks downloaded files as coming from the internet. Right-click the file, choose **Properties**, tick **Unblock**, then **OK**, and run it again.
+  </Accordion>
+</AccordionGroup>
+
+## After installing
+
+<AccordionGroup>
+  <Accordion title="The connector shows as offline in Timbal">
+    The service is installed but can't keep a connection to Timbal. Run [`doctor`](#run-doctor) on the server, and check the [network requirements](/connect/network-requirements) from the server itself. The installer checks the network once; a firewall change after installation can still break it.
+  </Accordion>
+  <Accordion title="The log says: invalid or expired enrollment token">
+    The token is older than its lifetime (24 hours by default), was already used by another installation, or belongs to a different environment than the one selected during setup. Create a new token and run the installer again with it: on a server that already has Timbal Connect, a new token re-enrolls it. See [Re-enroll](/connect/install-windows#re-enroll).
+  </Accordion>
+  <Accordion title="Login failed for user 'CORP\SERVERNAME$'">
+    The service runs as `NetworkService`, which reaches SQL Server on another machine as the computer account. Run the service as a domain account and grant it a login: [SQL Server authentication](/connect/connections#sql-server-authentication).
+  </Accordion>
+  <Accordion title="connections.json doesn't parse">
+    Usually a byte-order mark: save the file as UTF-8 **without** BOM. Also check that backslashes are doubled inside strings (`"CORP\\svc"`). `doctor` prints the exact parse error.
+  </Accordion>
+  <Accordion title="A SQL Server named instance doesn't connect">
+    `Server=host\INSTANCE` needs the SQL Browser service and UDP 1434. If either is off or firewalled, use the instance's port instead: `Server=tcp:host,PORT`.
+  </Accordion>
+</AccordionGroup>
+
+## Run doctor
+
+`doctor` is a read-only check you can run any time on the server. It validates the configuration, checks that the server can reach Timbal, and connects to every database in `connections.json`. It exits with a non-zero code if anything fails.
+
+<Tabs>
+  <Tab title="Windows">
+    In an elevated PowerShell:
+
+    ```powershell
+    & "$env:ProgramFiles\TimbalConnect\current\timbal-connect.exe" doctor
+    ```
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    sudo bash -c 'set -a; . /etc/timbal-connect/connector.env; exec /opt/timbal-connect/current/timbal-connect doctor'
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    sudo /opt/timbal-connect/current/timbal-connect doctor
+    ```
+  </Tab>
+</Tabs>
+
+Add `--connection <name>` to check one connection, and `--connection <name> --table <schema.table>` to list a table's columns.
