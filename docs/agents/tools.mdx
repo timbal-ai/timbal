@@ -216,6 +216,20 @@ Each value resolves tool field → `Integration("snowflake")` → env: `SNOWFLAK
 The Snowflake role is the real permission boundary. `SnowflakeQuery`'s read-only check is only a guardrail. Put write tools (`SnowflakeExecute`, `SnowflakeInsertRows`) behind `requires_approval`. See [Approval gates](/human-in-the-loop/approval-gates).
 </Warning>
 
+To use a [Snowflake-managed MCP server](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp) (Cortex Search, Cortex Analyst, custom tools) with the same credentials, pass `SnowflakeAuth` as the `MCPServer`'s `auth`. It refreshes key-pair tokens before they expire, so long sessions keep working.
+
+```python
+from timbal.core import MCPServer
+from timbal.tools.snowflake import SnowflakeAuth
+
+snowflake_mcp = MCPServer(
+    name="snowflake",
+    transport="http",
+    url="https://myorg-myaccount.snowflakecomputing.com/api/v2/databases/ANALYTICS/schemas/PUBLIC/mcp-servers/ANALYST",
+    auth=SnowflakeAuth(),
+)
+```
+
 ## Agent as a Tool
 
 You can use an Agent as a tool within another Agent, enabling hierarchical agent compositions where specialized agents handle specific tasks.
