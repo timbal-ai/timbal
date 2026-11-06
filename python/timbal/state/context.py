@@ -225,6 +225,8 @@ class RunContext(BaseModel):
     #       tools every agent in this run offers its model (``Agent._tool_allowed``)
     #   _silence_token: str | None — a root agent whose final answer is exactly this
     #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
+    #   _cut: asyncio.Event | None — set by the channel on a 'now' message: the steering
+    #       root agent cuts its answer or its interruptible tools and takes the message
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a
@@ -342,6 +344,7 @@ class RunContext(BaseModel):
             _steering=None,
             _tool_policy=None,
             _silence_token=None,
+            _cut=None,
         )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.

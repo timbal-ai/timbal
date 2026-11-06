@@ -69,6 +69,15 @@ class Tool(Runnable):
         ),
     )
 
+    interruptible: bool | None = Field(
+        default=None,
+        description=(
+            "Whether a 'now' message (ChatSession.send(mode='now')) may cancel this tool mid-run; it then "
+            "returns an interrupted result. None follows read_only: readers are cut, anything that acts "
+            "runs to the end before the message is delivered."
+        ),
+    )
+
     search_group: str | None = Field(
         default=None,
         description=(
