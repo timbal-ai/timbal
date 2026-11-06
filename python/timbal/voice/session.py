@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import inspect
 import math
 import random
 import re
@@ -107,6 +108,7 @@ from .events import (
     VoiceSessionEvent,
     VoiceUsageEvent,
 )
+from .language import normalize_language_tag, reply_language_instruction, with_reply_language
 from .metrics import TurnMetrics, TurnMetricsEvent
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
 from .providers import (
@@ -1358,6 +1360,43 @@ class VoiceSession:
             await self._close_prepared_adapters()
             raise
         self._prepared = True
+
+    async def set_language(self, language: str | None) -> bool:
+        """Set the conversation language for later replies and the STT hint.
+
+        The reply instruction changes on the next turn either way. The return
+        value is whether the open speech-to-text socket accepted it. Deepgram
+        Flux ``flux-general-multi`` does, via ``Configure`` ``language_hints``
+        (``[]`` when ``language`` is ``None`` or ``""``, which clears a sticky
+        hint). Scribe, Nova, Munsit, and OpenAI transcription keep the new
+        value for their next ``connect`` and do not retarget the open socket.
+
+        ``None`` or blank clears a configured language: the model is told to
+        follow the user's latest substantive message, unless the agent's own
+        prompt already names one reply language.
+        """
+        raw = None if language is None else str(language)
+        if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
+            raise ValueError(f"language must be a BCP-47 tag, got {language!r}")
+        tag = normalize_language_tag(raw)
+        if tag == normalize_language_tag(self.audio_input.language):
+            return False
+        self.audio_input.language = tag
+        update = getattr(self.stt, "update_language", None)
+        if update is None:
+            logger.info("voice_language_set", language=tag, stt_live=False)
+            return False
+        try:
+            result = update(tag)
+            if not inspect.isawaitable(result):
+                logger.info("voice_language_set", language=tag, stt_live=False)
+                return False
+            applied = bool(await result)
+        except Exception as e:  # noqa: BLE001 — a language change must not drop the call
+            logger.warning("voice_stt_language_update_failed", language=tag, error=str(e))
+            return False
+        logger.info("voice_language_set", language=tag, stt_live=applied)
+        return applied
 
     @property
     def closed(self) -> bool:
@@ -3934,6 +3973,7 @@ class VoiceSession:
         # The task's done callback clears it if this is cancelled before the try below.
         self._scheduler.turn_started()
         speculative_token = None
+        voice_token = None
         self._turn_speculative = speculative
         if speculative:
             # Confirmation stamps this. Until then the eou clocks stay unset
@@ -4007,6 +4047,11 @@ class VoiceSession:
         # This task's run, not ``_turn_run_context`` (a newer turn can replace that).
         speculative_run_id: str | None = None
         try:
+            # Direct ``_run_turn`` callers (and anything that did not enter
+            # through ``run``) still need this session current so the
+            # reply-language line and the greeting note are applied.
+            if current_voice_session() is None:
+                voice_token = _current_voice_session.set(self)
             if speculative and self._speculative_gate is not None:
                 speculative_token = install_speculative_gate(self._speculative_gate)
             if self._last_run_context is not None:
@@ -4057,6 +4102,9 @@ class VoiceSession:
             # What the caller *heard*, not what was configured: an interruptible
             # opener cut mid-sentence leaves a prefix, and one cut before a
             # single word landed leaves nothing to not-repeat.
+            # The reply-language line is not a call kwarg. ``prompt_for_turn``
+            # appends it after the greeting note, so the static prefix can
+            # still cache and the pin stays last.
             agen = self.agent(**agent_kwargs)
             # Armed at turn start rather than at the first tool call: a model
             # that thinks for seconds before calling anything is dead air too.
@@ -4541,6 +4589,8 @@ class VoiceSession:
             logger.error("turn_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"Turn failed: {e}"))
         finally:
+            if voice_token is not None:
+                _current_voice_session.reset(voice_token)
             if speculative_token is not None:
                 reset_speculative_gate(speculative_token)
             # Cancel-hard: ``interrupt()`` may cancel this task while finally is
@@ -5176,7 +5226,10 @@ class VoiceSession:
                 f"\nThe work is taking a while and you already told the caller: {said}. "
                 "Say a different short follow-up so they know you're still there."
             )
-        out = await self._filler_agent(prompt=prompt).collect()
+        out = await self._filler_agent(
+            prompt=prompt,
+            system_prompt=with_reply_language(self.filler.system_prompt, self.audio_input.language),
+        ).collect()
         if out.status.code != "success" or out.output is None:
             logger.debug("filler_generation_failed", status=out.status.code, error=out.error)
             return None
@@ -5540,11 +5593,12 @@ class VoiceSession:
         if not instructions:
             return None
         parts = [p for p in (await self._agent_system_prompt(), DEFAULT_USER_IDLE_SYSTEM_PROMPT, instructions) if p]
+        idle_prompt = with_reply_language("\n\n".join(parts), self.audio_input.language)
         if self._idle_agent is None:
             self._idle_agent = Agent(
                 name="voice_user_idle",
                 model=cfg.model or self.model or self.agent.model,
-                system_prompt="\n\n".join(parts),
+                system_prompt=idle_prompt,
                 max_tokens=96,
                 tracing_provider=None,
             )
@@ -5555,7 +5609,7 @@ class VoiceSession:
         ambient_ctx = get_run_context()
         set_run_context(None)
         try:
-            out = await self._idle_agent(prompt=prompt).collect()
+            out = await self._idle_agent(prompt=prompt, system_prompt=idle_prompt).collect()
         finally:
             set_run_context(ambient_ctx)
         if out.status.code != "success" or out.output is None:
@@ -5756,8 +5810,9 @@ class VoiceSession:
 
         Called from ``Agent.handler`` once the turn's run context exists, so a
         callable system prompt still sees the session. The already-greeted note
-        is turn one only and lives in the dynamic suffix, so turn two's static
-        prefix matches turn one.
+        is turn one only. The reply-language line is every turn and comes last.
+        Both live in the dynamic suffix, so turn two's static prefix matches
+        turn one.
         """
         from .prompt import compose_voice_system_prompt
 
@@ -5771,6 +5826,7 @@ class VoiceSession:
             call_context=self.call_context,
             now=now,
             greeting_note=note,
+            reply_language=reply_language_instruction(self.audio_input.language),
         )
 
     async def _generate_greeting(self) -> str | None:
@@ -5791,6 +5847,10 @@ class VoiceSession:
         if not instructions:
             return None
         parts = [p for p in (await self._agent_system_prompt(), DEFAULT_GREETING_SYSTEM_PROMPT, instructions) if p]
+        # No user utterance yet, so the unset "match the latest message" policy
+        # does not apply. A configured language still pins the opener.
+        if self.audio_input.language:
+            parts.append(reply_language_instruction(self.audio_input.language))
         # Kept on the session (like ``_filler_agent``) so the assembled prompt is
         # readable after the fact — it is the whole configuration surface of a
         # generated opener, and it runs exactly once per call.

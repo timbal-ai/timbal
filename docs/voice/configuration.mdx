@@ -17,7 +17,7 @@ Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech 
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
 - **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD. It does not report native end-of-turn, so the session uses local turn detection when `timbal[voice]` is installed and lexical detection otherwise. Flux and Munsit are the adapters that force `provider` mode.
 
-Set `language` to a provider-supported language hint or omit it for automatic detection. Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
+Set `language` to the conversation language. It hints transcription and, when set, tells the model to reply in that language. Omit it to follow the user's latest substantive message. See [Reply language](#reply-language). Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
 
 ## Speech providers
 
@@ -42,7 +42,7 @@ agent = Agent(
 )
 ```
 
-Use the chosen provider's voice ID. `language` controls transcription; it does not select a Deepgram Aura voice. Output style options belong in `tts_extra`. See [Speech examples](/examples/agents/tts) for detailed OpenAI and Deepgram settings.
+Use the chosen provider's voice ID. `language` sets the reply language and the transcription hint. It does not select a Deepgram Aura voice. Output style options belong in `tts_extra`. See [Speech examples](/examples/agents/tts) for detailed OpenAI and Deepgram settings.
 
 The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate=16000`, `encoding="pcm_s16le"`). Transports convert their wire formats where needed. OpenAI uses 24 kHz on the provider connection and requires the voice extra to resample other session rates.
 
@@ -97,6 +97,46 @@ agent.voice_config = {
 ```
 
 This assignment replaces the agent's declared config. Keep any greetings or other behavior fields you want to retain. The earlier lessons use a dict and add individual keys to preserve previous behavior; a `VoiceConfig` instance or callable needs its own update pattern.
+
+## Reply language
+
+`voice_config["language"]` is the conversation language, not only a transcription hint.
+
+- **Set** (`"en"`, `"es"`, `"es-ES"`, any BCP-47 tag the provider accepts): the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`.
+- **Unset**: the model follows the language of the user's latest substantive message (a full request, question, or correction). Accent, fillers, names, and a single word from another language do not switch the reply. If the agent's own system prompt already names one reply language, that instruction stands.
+- **Explicit switch**: the pin yields when the user asks to use another language. Saying a sentence in another language is not, by itself, that request. Call `set_language` when the conversation language should actually change, so the next turn's instruction and the transcription hint move together.
+
+Deepgram Flux applies the new hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. `flux-general-en` does not accept a language hint. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` still changes the reply instruction immediately and stores the tag for the next connection. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
+
+From a tool on the call, `current_voice_session()` is the live session. The tool is not registered for you. Add it only on agents that should be able to switch.
+
+```python
+from timbal import Agent
+from timbal.voice import current_voice_session
+
+
+async def set_conversation_language(language: str) -> str:
+    """Set the language for the rest of the call.
+
+    Use the BCP-47 tag the caller asked for, such as en or es.
+    """
+    session = current_voice_session()
+    if session is None:
+        return "No active call."
+    await session.set_language(language)
+    return f"Conversation language is now {language}."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    tools=[set_conversation_language],
+    voice_config={"language": "es"},
+)
+```
+
+`set_language` returns true when the open transcriber accepted the hint. The reply instruction changes on the next turn either way. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
 
 ## Speculative generation
 

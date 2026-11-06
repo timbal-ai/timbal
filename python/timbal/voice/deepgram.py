@@ -338,6 +338,26 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
     async def commit(self) -> None:
         """No-op: Flux's turn machine owns endpointing (no force-commit API)."""
 
+    async def update_language(self, language: str | None) -> bool:
+        """Replace ``language_hints`` on the open Flux socket.
+
+        Query-string ``language_hint`` is fixed at connect. Flux's ``Configure``
+        message replaces it mid-stream: a non-empty list locks the new hint,
+        ``[]`` clears it and the model goes back to auto-detect. Already
+        transcribed audio is not reprocessed. ``flux-general-en`` rejects
+        language hints, so this returns False there and the stored config is
+        what a later ``connect`` would use.
+        """
+        config = self._input_config
+        if config is None or self._ws is None or self._stop.is_set():
+            return False
+        model = config.model if is_flux_model(config.model) else DEFAULT_FLUX_MODEL
+        if not str(model).endswith("-multi"):
+            return False
+        hint = (language or "").strip()
+        await self._send_json({"type": "Configure", "language_hints": [hint] if hint else []})
+        return True
+
     async def configure_turn(
         self,
         *,

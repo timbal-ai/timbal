@@ -62,6 +62,19 @@ WAVE4_AFTER: dict[str, Any] = {
     "hangup_grace_secs": 1.2,
     "entity_patience": True,
 }
+# Wave 5. The reply-language pin cannot be turned off while ``language`` is
+# set, and leaving it unset still installs the match-latest instruction. Both
+# are #252. The historical before is wave 2 (STT hint, no reply pin). This
+# run is the after cell: wave-4 ship config, ``en`` on English lines, ``es``
+# on the Spanish code-switch, unset only for the match-latest greeting case.
+WAVE5_LANG: dict[str, str | None] = {
+    "tel_phone_en": "en",
+    "fast_en": "en",
+    "tools_error": "en",
+    "lang_en_control": "en",
+    "codeswitch_es": "es",
+    "en_after_es_greet": None,
+}
 WAVE4_IDS: tuple[str, ...] = (
     "tools_two",
     "hang_es_0_3",
@@ -1876,6 +1889,73 @@ def _wave4_jobs(reps: int, slow_reps: int) -> list[dict[str, Any]]:
     return jobs
 
 
+def _wave5_jobs(reps: int) -> list[dict[str, Any]]:
+    """Wave-4 ship config plus the reply-language pin, one language per scenario."""
+    import uuid
+
+    specs = {spec.id: spec for spec in WAVE2}
+    jobs: list[dict[str, Any]] = []
+    for sid, language in WAVE5_LANG.items():
+        spec = specs[sid]
+        label = language or "unset"
+        for rep in range(reps):
+            jobs.append(
+                {
+                    "scenario": spec.id,
+                    "model": "openai/gpt-5.4-mini",
+                    "stt": "deepgram-flux",
+                    "profile": f"wave5-{label}",
+                    "overrides": {**WAVE4_AFTER, "language": language},
+                    "cache_bust": False,
+                    "side": "after",
+                    "rep": rep,
+                    "prompt_nonce": uuid.uuid4().hex,
+                }
+            )
+    return jobs
+
+
+def _run_wave5(out: Path, reps: int) -> None:
+    clips = _wave2_clips()
+    jobs = _wave5_jobs(reps)
+    done = {_row_key(row) for row in _load_rows(out)}
+    pending = [job for job in jobs if _row_key(job) not in done]
+    print(f"wave5 {len(pending)} pending of {len(jobs)}", flush=True)
+    for index, job in enumerate(pending, start=1):
+        print(
+            f"[{index}/{len(pending)}] {job['profile']} {job['scenario']} rep {job['rep']}",
+            flush=True,
+        )
+        try:
+            row = _execute_job(job, clips)
+        except Exception as exc:
+            row = {
+                "side": job["side"],
+                "profile": job["profile"],
+                "model": job["model"],
+                "stt": job["stt"],
+                "scenario": job["scenario"],
+                "rep": job["rep"],
+                "errors": [f"{type(exc).__name__}: {exc}"],
+                "metrics": [],
+            }
+            print(f"  ERROR {row['errors'][0]}", flush=True)
+        else:
+            print(
+                f"  commit {row.get('commit_lang')} reply {row.get('reply_lang')} "
+                f"lang_err {row.get('language_error')} "
+                f"commits {[c.get('text') for c in row.get('commits') or []]} "
+                f"replies {row.get('replies')} errors {row.get('errors')}",
+                flush=True,
+            )
+        if row.get("errors") and not row.get("replies"):
+            # Transport failures are not a language result. Leave the key open
+            # so a resume replaces them.
+            print("  skipped write (no reply)", flush=True)
+            continue
+        _append(out, row)
+
+
 def _run_wave4(out: Path, reps: int, slow_reps: int) -> None:
     clips = _wave2_clips()
     jobs = _wave4_jobs(reps, slow_reps)
@@ -1917,7 +1997,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Measure #242 voice changes against main")
     parser.add_argument(
         "command",
-        choices=("all", "run", "synth", "summarize", "self-test", "wave2", "wave3", "wave4", "worker"),
+        choices=("all", "run", "synth", "summarize", "self-test", "wave2", "wave3", "wave4", "wave5", "worker"),
     )
     parser.add_argument("--side", choices=("before", "after"), default="after")
     parser.add_argument("--reps", type=int, default=5)
@@ -1940,6 +2020,10 @@ def main() -> None:
     if args.command == "wave4":
         out = args.out if args.out.name != "runs.jsonl" else OUT_DIR / "runs-wave4.jsonl"
         _run_wave4(out, args.flux_reps, slow_reps=5)
+        return
+    if args.command == "wave5":
+        out = args.out if args.out.name != "runs.jsonl" else OUT_DIR / "runs-wave5-language.jsonl"
+        _run_wave5(out, args.flux_reps)
         return
     if args.command == "self-test":
         _self_test()
