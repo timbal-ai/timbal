@@ -21,6 +21,22 @@ from .ambience import validate_ambient_source
 # are account-specific).
 DEFAULT_VOICE_ID = "1SM7GgM6IMuvQlz2BwM3"
 
+# ``end_call`` confirmation window. None/0 keeps the historical immediate
+# hangup. Capped so a client hello cannot pin the line open after goodbye.
+HANGUP_GRACE_MAX_SECS = 30.0
+
+
+def normalize_hangup_grace_secs(value: float | None) -> float:
+    """Seconds to wait after a goodbye. ``None`` and ``0`` wait nothing."""
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("hangup_grace_secs must be a number of seconds")
+    number = float(value)
+    if number != number or number < 0 or number > HANGUP_GRACE_MAX_SECS:
+        raise ValueError(f"hangup_grace_secs must be between 0 and {HANGUP_GRACE_MAX_SECS:g} seconds")
+    return number
+
 
 def _default_stt_extra() -> dict[str, Any]:
     return {
@@ -37,7 +53,7 @@ def _default_stt_extra() -> dict[str, Any]:
 DEFAULT_FILLER_SYSTEM_PROMPT = (
     "You write the one short phrase a voice assistant says out loud while it looks something "
     "up for the user. Reply with ONLY the phrase: a few natural spoken words, no quotes. "
-    "Match the language the user is speaking. Do not answer the question and do not mention "
+    "Do not answer the question and do not mention "
     'tool or function names — just signal you are on it (like "One sec, let me check that.").'
 )
 
@@ -48,13 +64,18 @@ def language_key(code: str | None) -> str:
 
 
 class FillerConfig(BaseModel):
-    """Spoken tool-call filler: a short LLM-generated phrase masks tool dead air.
+    """Spoken tool-call filler: a short phrase masks tool silence.
 
     Generation starts the moment a tool call is detected; the phrase is only
     spoken if the tool is still running after ``delay_secs`` and nothing else
     has been said this turn. ``think_delay_secs`` extends the same cover to the
     silence before the model has said or called anything, and ``phrases``
     makes the first filler instant instead of an LLM round trip.
+
+    ``soft_timeout_secs`` is a separate, opt-in progress line for a tool that
+    is still running after the caller has heard no agent audio for that long
+    (ElevenLabs ``soft_timeout_config``, LiveKit ``ctx.with_filler(delay=)``).
+    Unset, tool waits keep the rules above.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -97,6 +118,42 @@ class FillerConfig(BaseModel):
     Follow-ups are always generated, with the request in hand, so they can
     say what the assistant is working on. The line said on the previous turn
     is avoided when there is another to choose."""
+    soft_timeout_secs: float | None = Field(default=None, ge=0.0)
+    """Progress line during a tool wait. ``None`` (default) leaves tool waits
+    on the rules above — ElevenLabs' ``timeout_seconds: -1`` (disabled).
+
+    Set → once a tool call is in flight and the caller has heard no agent
+    audio for this many seconds, speak one progress line and keep waiting.
+    The wait is continuous silence: audio already playing (a preamble, the
+    answer, an earlier filler) resets it, matching LiveKit
+    ``ctx.with_filler(delay=)``. A tool that returns first stays silent.
+    Their recommended range is 0.5–8 seconds; any non-negative value is
+    accepted so a session can sit closer to its own tool latency.
+    ``-1`` is accepted and means unset."""
+    message: str | None = None
+    """Exact progress line for ``soft_timeout_secs``, spoken with no extra
+    model call. ElevenLabs ``message``; LiveKit ``with_filler("...")``.
+    Blank is dropped. ``None`` uses ``phrases`` when one matches the call's
+    language, otherwise the filler generator (their
+    ``use_llm_generated_message``). Ignored unless ``soft_timeout_secs`` is set."""
+
+    @field_validator("soft_timeout_secs", mode="before")
+    @classmethod
+    def _disabled_soft_timeout(cls, v: Any) -> Any:
+        # ElevenLabs uses -1 for "disabled". Omit / None is the same switch here.
+        # Env vars arrive as strings, before coercion, so "-1" must count too.
+        if isinstance(v, str):
+            v = v.strip()
+        if v in (-1, -1.0, "-1", "-1.0"):
+            return None
+        return v
+
+    @field_validator("message")
+    @classmethod
+    def _strip_message(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return v.strip() or None
 
     @field_validator("phrases")
     @classmethod
@@ -180,9 +237,8 @@ class GreetingConfig(BaseModel):
 
 DEFAULT_USER_IDLE_SYSTEM_PROMPT = (
     "The other person on this live call has gone quiet after your last sentence. Say ONE short "
-    "spoken line to check they are still there or to gently move the conversation on — matching the "
-    "language of the conversation so far. Reply with only the words to say out loud; no quotes, no "
-    "stage directions."
+    "spoken line to check they are still there or to gently move the conversation on. Reply with "
+    "only the words to say out loud; no quotes, no stage directions."
 )
 
 
@@ -230,7 +286,9 @@ class UserIdleConfig(BaseModel):
     @model_validator(mode="after")
     def _has_something_to_do(self) -> UserIdleConfig:
         has_line = bool(self.instructions and self.instructions.strip()) or bool(
-            self.text if isinstance(self.text, str) and self.text.strip() else [t for t in (self.text or []) if str(t).strip()]
+            self.text
+            if isinstance(self.text, str) and self.text.strip()
+            else [t for t in (self.text or []) if str(t).strip()]
         )
         if self.max_count > 0 and not has_line:
             raise ValueError("user_idle needs 'text' or 'instructions' (or max_count=0 with hangup_after_secs)")
@@ -315,6 +373,36 @@ class RecordingConfig(BaseModel):
     """Async callable invoked with the ``RecordingResult``. Python-only."""
 
 
+class SpeculativeGeneration(BaseModel):
+    """Start the reply before the turn is confirmed. Off unless ``enabled``.
+
+    LiveKit Agents' ``PreemptiveGenerationOptions``, with Timbal's triggers:
+    Smart Turn scoring a pause as probably complete, or Deepgram Flux
+    ``EagerEndOfTurn``. Audio stays buffered until the committed transcript
+    matches. See :mod:`timbal.voice.speculative`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    """``False`` (the default) waits for a confirmed transcript, as before."""
+    preemptive_tts: bool = False
+    """Also synthesize speech before confirmation. Off by default: the model
+    runs early and synthesis starts once the turn is confirmed, so a resumed
+    utterance does not spend a TTS request. Audio is held either way."""
+    max_speech_duration: float = Field(default=10.0, gt=0)
+    """Skip speculation once the caller has been speaking longer than this.
+    Long utterances change more often. LiveKit's default is 10 seconds."""
+    max_retries: int = Field(default=3, ge=0)
+    """Speculative attempts per caller turn. The counter resets when a turn
+    is confirmed. LiveKit's default is 3."""
+    eou_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Smart Turn ``P(complete)`` at or above which a pause starts a
+    speculative reply. 0.5 is the model's complete/incomplete boundary.
+    A pause the text scorer calls incomplete does not start one, even above
+    this."""
+
+
 class VoiceEventsConfig(BaseModel):
     """Event turns (see ``VoiceSession.notify``). Server-side only — never client-settable."""
 
@@ -340,6 +428,7 @@ _OPTIONAL_VOICE_BLOCKS = {
     "filler": FillerConfig,
     "recording": RecordingConfig,
     "events": VoiceEventsConfig,
+    "speculative_generation": SpeculativeGeneration,
 }
 
 
@@ -394,11 +483,29 @@ class VoiceConfig(BaseModel):
     tts_model: str = "eleven_v4_turbo"
     voice: str = DEFAULT_VOICE_ID
     language: str | None = None
-    """None → provider auto-detect."""
+    """Conversation language (BCP-47, e.g. ``"en"``, ``"es"``, ``"es-ES"``).
+
+    When set, the speech-to-text adapter receives it as a language hint and
+    the text model is told to reply in that language. ``None`` leaves
+    detection to the provider and tells the model to follow the user's latest
+    substantive message, unless the agent's own prompt already names one
+    reply language. It does not select a TTS voice. Change it on a live call
+    with :meth:`timbal.voice.session.VoiceSession.set_language`.
+    """
     sample_rate: int = 16_000
     encoding: str = "pcm_s16le"
     stt_extra: dict[str, Any] = Field(default_factory=_default_stt_extra)
     tts_extra: dict[str, Any] = Field(default_factory=lambda: {"auto_mode": True})
+    ignore_backchannels: bool = False
+    """Drop pure English and Spanish acknowledgements while the assistant is
+    speaking and for one second after playback. "yeah" and "vale" do not
+    interrupt; "no", "stop", "para", and "sí, pero…" still do. Server-side
+    only. Off leaves interruptions unchanged."""
+    hold_unfinished_secs: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    """With provider turn detection, wait this long when a commit ends on a
+    trailing conjunction, preposition, determiner, or filler, then merge the
+    follow-up. None leaves those commits as turns. Ignored for other detectors.
+    Server-side only."""
     turn_detector: Any = None
     """Mode name, ``TurnDetector`` instance, or zero-arg factory.
     ``None`` (unset) resolves to ``"provider"`` on an STT with native
@@ -410,6 +517,47 @@ class VoiceConfig(BaseModel):
     ``select_turn_detector_spec``)."""
     vad_endpointing: bool | None = None
     """None → auto: on when the turn detector exposes an audio EOU model."""
+    min_delay_secs: float = Field(default=0.45, ge=0.0, le=3.0)
+    """Extra silence after a confident end-of-turn score before local
+    endpointing force-commits. Scoring overlaps this wait, so with the
+    default and ``stop_silence_secs`` a confident turn commits about 0.65
+    seconds after speech stops. Lower scores wait longer, up to 3 seconds.
+    LiveKit's turn detector uses about 0.3–0.5 seconds; 0.3 here would commit
+    at about 0.5 seconds and cut callers who pause for roughly 0.6 seconds
+    and then continue, so the default stays 0.45. Set on the agent. A caller
+    hello cannot change it. Ignored when endpointing is off, and a
+    ``VadEndpointer`` passed straight to ``VoiceSession`` keeps its own value."""
+    stop_silence_secs: float = Field(default=0.20, ge=0.0, le=2.0)
+    """How long the line must be quiet before the end-of-turn model is scored.
+    The default 0.2 seconds is the usual speech-stop gap; shorter hears a
+    breath as the end of the turn. Added to ``min_delay_secs`` on a confident
+    commit. Same exposure rules as ``min_delay_secs``."""
+    first_flush_min_words: int | None = Field(default=None, ge=1, le=40)
+    """Unset → the first spoken segment waits for a sentence, like every later
+    segment. A whole number from 1 to 40 lets that first segment start at a
+    comma once it has that many words. 4 is the useful value: long enough to
+    speak, early enough in a long opening sentence. A caller hello cannot set it."""
+    predict_during_speech: bool = False
+    """Score the turn while the caller is still speaking.
+
+    Off by default. Without a native end-of-turn provider, a finished
+    sentence whose audio agrees is confirmed after 0.16 s of silence instead
+    of the usual 0.20 s pause plus the 0.45 s floor. On Deepgram Flux, an
+    EagerEndOfTurn at or above the eager threshold can start the turn;
+    TurnResumed cancels it and EndOfTurn confirms it. Local VAD force-commit
+    stays off for Flux."""
+    entity_patience: bool = False
+    """Wait out numbers, spelled letters, emails, and alphanumeric codes.
+
+    Off by default. While a partial or commit still ends in one of those, the
+    session holds the turn for ``entity_patience_secs`` and, on Deepgram Flux,
+    ignores eager end-of-turn for that stretch. A word after the entity, a
+    complete email, a trailing ``?`` or ``!``, or the patience window closing
+    resumes normal endpointing.
+    """
+    entity_patience_secs: float = Field(default=2.5, gt=0.0, le=10.0)
+    """Silence budget while an entity is still open. Ignored when
+    ``entity_patience`` is off."""
     model: str | None = None
     """Per-session LLM override ("provider/model")."""
     tool_beat_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -417,6 +565,28 @@ class VoiceConfig(BaseModel):
 
     None or zero disables. Tool execution overlaps the speech and the beat;
     tools with no preceding speech never delay the first spoken word.
+    """
+    max_tts_pause_secs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    """Cap internal silence in synthesized PCM. ``None`` (default) leaves the
+    provider audio unchanged. A quiet stretch longer than this, judged by
+    ``tts_quiet_dbfs``, is shortened to this length. The first bytes of a
+    reply are not held back. Requires the ``timbal[voice]`` extra when set."""
+    tts_quiet_dbfs: float = Field(default=-45.0, allow_inf_nan=False)
+    """Level below which PCM counts as silence for ``max_tts_pause_secs``.
+    -45 dBFS keeps breaths. Unused while pause trimming is off."""
+    tts_tempo: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    """Pitch-preserving speaking rate. ``None`` (default) and ``1.0`` leave
+    the audio unchanged; ``1.1`` is a little faster. Requires the
+    ``timbal[voice]`` extra when it is not 1. Applied after pause trimming."""
+    hangup_grace_secs: float | None = Field(default=None, ge=0, le=HANGUP_GRACE_MAX_SECS)
+    """Seconds to keep the line up after a goodbye has been heard, before
+    ``end_call`` tears the session down.
+
+    Unset or ``0`` hangs up as soon as that audio has played. A positive value
+    is a confirmation window: any further caller speech cancels the hangup
+    and the call continues; silence through the window hangs up. Speech is a
+    new transcript or audible caller audio, not a list of phrases. One call
+    can override it with ``end_call(grace_secs=...)``.
     """
 
     turn_timeout_secs: float | None = None
@@ -450,6 +620,10 @@ class VoiceConfig(BaseModel):
     A bare string is shorthand for ``{"text": ...}``; ``""`` means no greeting.
     This is the opener for calls the *other side* started (inbound PSTN, a
     browser joining) and the fallback for outbound — see ``outbound_greeting``."""
+    speculative_generation: SpeculativeGeneration = Field(default_factory=SpeculativeGeneration)
+    """Off unless ``enabled`` is set. ``True`` turns it on with the defaults.
+    Server-side: a browser hello cannot enable it. See
+    :class:`SpeculativeGeneration`."""
     outbound_greeting: GreetingConfig | None = None
     """Opener for calls *we* placed (outbound PSTN), where "thanks for calling"
     is the wrong sentence. Unset → ``greeting`` applies to both directions;
@@ -458,10 +632,40 @@ class VoiceConfig(BaseModel):
     call direction can apply it (:func:`greeting_for_direction`); the session
     itself never sees a direction."""
 
+    @field_validator("min_delay_secs", "stop_silence_secs", "first_flush_min_words", mode="before")
+    @classmethod
+    def _reject_bool_seconds(cls, v: Any) -> Any:
+        # ``True`` is an int. A JSON ``true`` must not become 1.
+        if isinstance(v, bool):
+            raise ValueError("must be a number, not a boolean")
+        return v
+
     @field_validator("greeting", "outbound_greeting", mode="before")
     @classmethod
     def _coerce_greeting(cls, v: Any) -> Any:
         return coerce_greeting(v)
+
+    @field_validator("speculative_generation", mode="before")
+    @classmethod
+    def _coerce_speculative(cls, v: Any) -> Any:
+        if v is True:
+            return {"enabled": True}
+        if v is False:
+            return {"enabled": False}
+        # A dict is the feature turning on. ``{"enabled": false}`` is how a
+        # caller keeps the other knobs and leaves it off. An empty dict is
+        # removed before this runs (see omit_empty_voice_blocks).
+        if isinstance(v, dict) and "enabled" not in v:
+            return {**v, "enabled": True}
+        return v
+
+    @field_validator("hangup_grace_secs", mode="before")
+    @classmethod
+    def _hangup_grace_not_bool(cls, v: Any) -> Any:
+        # ``bool`` is an ``int``; without this, ``True`` becomes ``1.0``.
+        if isinstance(v, bool):
+            raise ValueError("hangup_grace_secs must be a number of seconds")
+        return v
 
 
 def greeting_for_direction(config: VoiceConfig, *, outbound: bool) -> GreetingConfig | None:

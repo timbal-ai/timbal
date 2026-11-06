@@ -129,8 +129,9 @@ class TestCustomToolCallEvents:
         result = collector.process(event)
         assert result is None
 
+    @patch("timbal.collectors.impl.openai.get_billing_id", return_value=None)
     @patch("timbal.collectors.impl.openai.get_run_context")
-    def test_output_item_done_tracks_usage(self, mock_ctx, collector):
+    def test_output_item_done_tracks_usage(self, mock_ctx, _billing, collector):
         # Register the content block first.
         collector.content_blocks.add("ctc_xs_call_1")
 

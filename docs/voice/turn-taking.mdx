@@ -16,13 +16,15 @@ Use the same server and browser playground:
 
 An interruption cancels the current reply and clears queued playback. Conversation memory is adjusted to the portion the caller is estimated or known to have heard, and that message is marked `metadata["interrupted"] = True` (metadata is not sent to model providers). A cancelled tool may already have performed work; stopping speech does not undo external side effects.
 
+A tool can opt out of that barge-in with `interruption_mode`. While barge-in is off, the caller is still transcribed and those words open the next turn. See [Keep a tool from being cut off](/voice/tools#keep-a-tool-from-being-cut-off).
+
 Greetings have their own `interruptible` setting, which defaults to false; see [Greetings](/voice/greetings).
 
 ## How the boundary is chosen
 
 Voice activity detection (VAD) identifies speech and silence. End-of-utterance detection decides whether a pause ends a thought. With Deepgram Flux, the default transcription provider, Flux makes that decision. With other providers, the server uses local audio detection when its dependencies are installed, otherwise lexical detection. The local path combines Smart Turn audio scoring, Namo text scoring, and Silero VAD endpointing.
 
-Inspect `session_started.turn_detector` for the resolved detector. That field is the class name (`ProviderTurnDetector`, `LocalAudioTurnDetector`, …), not the mode string you configured. A requested mode can be changed by the server: STT adapters with native utterance boundaries, currently Flux and Munsit, force `provider` mode unless you explicitly set `heuristic`, `raw`, or `provider`, and they disable local VAD endpointing. OpenAI and ElevenLabs transcription do not have that native boundary, so they keep `local` or `lexical`. `semantic` is accepted as an alias of `lexical`. Opt-in detectors can hold a transcript; the default hold timeout is 1.5 seconds (`hold_timeout_secs` on `VoiceSession`).
+Inspect `session_started.turn_detector` for the resolved detector. That field is the class name (`ProviderTurnDetector`, `LocalAudioTurnDetector`, …), not the mode string you configured. A requested mode can be changed by the server: STT adapters with native utterance boundaries, currently Flux and Munsit, force `provider` mode unless you explicitly set `heuristic`, `raw`, or `provider`, and they disable local VAD endpointing. OpenAI and ElevenLabs transcription do not have that native boundary, so they keep `local` or `lexical`. `semantic` is accepted as an alias of `lexical`. Opt-in detectors can hold a transcript; the default hold timeout is 1.5 seconds (`hold_timeout_secs` on `VoiceSession`). The `provider` detector also holds when `hold_unfinished_secs` is set, and it uses that value instead of 1.5 seconds.
 
 ## Choose another mode
 
@@ -49,6 +51,111 @@ Available modes are:
 - `raw`: accepts committed transcripts with minimal policy; useful for debugging.
 
 `vad_endpointing=None` enables the local fast path when supported. Set it to `False` to disable it. A Python declaration may also supply a `TurnDetector` instance or zero-argument factory; clients may send supported mode names, and sessions own detector clones.
+
+## Acknowledgements and unfinished phrases
+
+Both controls are off until you set them, and a caller cannot set them. They are for a line where short acknowledgements cut the assistant off, or where the transcription provider splits a sentence on a pause.
+
+`ignore_backchannels=True` drops a pure acknowledgement while the assistant is speaking and for one second after playback ends. A late transcript of an acknowledgement such as "yeah", "okay", "mhmm", "mm", "M.", "right", "got it", "vale", "ajá", "claro", or "sí" does not stop playback and does not start a turn. A phrase made only of acknowledgements, such as "yeah okay" or "okay got it", is dropped too. "no", "wait", "hold on", "stop", "actually", "espera", "para", "oh, wait", and "sí, pero…" still interrupt. Outside that window, "okay" is an answer and starts a turn. Matching ignores case, accents, and punctuation, so "si" and "aja" count. It has no effect with the `raw` detector.
+
+`hold_unfinished_secs` applies when the session trusts the transcription provider's end of turn (the default with Deepgram Flux). A commit that ends on a trailing conjunction, preposition, determiner, or filler waits that many seconds and is merged with the next phrase. "…es que", "Necesito, eh,", and "because" are held. A question, and a one-word command such as "para" or "stop", is not. Unlike acknowledgements, this match keeps accents: "creo que sí" starts a turn, and "creo que si" is held. Nothing is held while the assistant is speaking, so an interruption is never delayed. A held phrase whose follow-up arrives during playback starts the turn right away. The `local` and `lexical` detectors already hold unfinished phrases; with any detector other than `provider`, the value is ignored.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={
+        "language": "es",
+        "ignore_backchannels": True,
+        "hold_unfinished_secs": 1.2,
+    },
+)
+```
+
+## Endpointing floors
+
+Local endpointing waits out two silences before it force-commits. `stop_silence_secs` (default 0.2) is how long the line must be quiet before the end-of-turn model is scored. `min_delay_secs` (default 0.45) is the extra wait after a confident score. Scoring runs during that wait, so a confident turn commits about 0.65 seconds after speech stops. A lower score waits longer, up to 3 seconds, and often loses to the transcription provider's own pause.
+
+Lower `min_delay_secs` only when short pauses of about 0.6 s should end the caller's turn. A `VadEndpointer` passed into `VoiceSession` keeps its own values.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={
+        "language": "en",
+        "min_delay_secs": 0.35,
+    },
+)
+```
+
+## Predict a turn while the caller is speaking
+
+Set `predict_during_speech` to decide the turn from what the caller has already said and how it sounds, instead of waiting out a fixed silence. The setting is off unless you turn it on. Clients may send it on a call hello. `SpeechEouPredictor` is the scorer the session uses; a normal call sets the flag and does not construct the class.
+
+```python
+agent.voice_config["predict_during_speech"] = True
+```
+
+On transcription that does not decide the turn itself (ElevenLabs Scribe, Deepgram Nova, OpenAI), the local endpointer scores the live transcript and the recent audio while the caller is speaking. When the words read as a finished sentence and the audio agrees, the session confirms the turn after 0.16 seconds of silence. Otherwise it keeps the usual wait: 0.20 seconds of silence, then up to the 0.45 second floor when the score is confident.
+
+Deepgram Flux still owns the final boundary, and local VAD force-commit stays off, as described above. With this setting, and speculative generation off, the session asks Flux for an early end-of-turn (`EagerEndOfTurn`). That event can start the turn. `TurnResumed` cancels it. `EndOfTurn` confirms it when the words match, including a difference of punctuation only; a longer final transcript cancels the early turn and starts again with the full text. When Smart Turn is available, an incomplete audio score holds the early start and `EndOfTurn` still commits. The eager value is the shared threshold below.
+
+Munsit decides the turn itself and does not emit an early end-of-turn event, so `predict_during_speech` has no effect there.
+
+## Speculative generation
+
+By default the model waits until the transcript is confirmed. Set `speculative_generation` to start it earlier, while the caller might still be pausing:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a helpful voice assistant. Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "speculative_generation": True},
+)
+```
+
+`True` uses the defaults. A dict turns it on too, unless the dict sets `enabled` to false. `{"eou_threshold": 0.6}` enables it; `{"enabled": false}` does not. The keys are `enabled`, `preemptive_tts`, `max_retries` (default 3), `max_speech_duration` (default 10 seconds), and `eou_threshold` (default `0.5`). A Smart Turn pause is skipped when the score is below `eou_threshold`, and also when the text scorer calls the pause incomplete. Speculation is also skipped once the caller has already been speaking longer than `max_speech_duration`. A long utterance is still likely to change, so the reply waits for the confirmed transcript. `preemptive_tts` defaults to false: the model runs early, and speech synthesis starts once the turn is confirmed. Set it to true to synthesize during the wait as well. Those bytes stay buffered either way.
+
+Nothing is played until the turn is confirmed. A caller who keeps talking, or a Flux `TurnResumed`, drops the attempt and its audio. If the confirmed transcript is not the same words (case and punctuation aside), the attempt is dropped and the reply starts over on the final text. A matching transcript is reused, including when only capitalization or punctuation changed.
+
+With `speculative_generation` on Flux, the server sets `eager_eot_threshold` for you. By default it is `min(0.5, eot_threshold - 0.1)`, which is 0.5 with the default `eot_threshold` of 0.8. You can set your own in `stt_extra`. It must be below `eot_threshold`, because Deepgram rejects anything equal or higher, so a value that isn't gets lowered to `eot_threshold - 0.1`. `TurnResumed` discards the held reply. `EndOfTurn` confirms it when the words match, and restarts it when they do not. When `predict_during_speech` is also on, speculative generation owns those Flux events: the early event starts a held reply and does not also commit the turn. During-speech prediction still shortens the local silence confirmation on providers that do not own the turn.
+
+Tool calls wait with the audio. The model may choose a function during the pause, but the handler does not run until the turn is confirmed. A held call still emits its start event. If the attempt is dropped, that call ends cancelled without running the handler, its pre-hook, or any approval question. `defer_until_eot=True` marks a tool that books, charges, sends, or hangs up. Every tool is held, flagged or not. An MCP tool annotated destructive still gets that flag, whether or not `approval` gates it. See [Using tools](/voice/tools).
+
+Each turn's metrics carry `speculative`, plus the call's `speculative_generations_started` and `speculative_generations_discarded` counts. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded`. The setting is server-side. A client hello cannot turn it on.
+
+## Entity and spelling patience
+
+Turn this on when callers read a phone number, a spelled name, an email address, or an order code and pause between groups. It is off unless you set it.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="order_desk",
+    model="openai/gpt-5-mini",
+    system_prompt="You take orders. Read numbers and spelled names back only after the caller finishes them.",
+    voice_config={"language": "en", "entity_patience": True, "entity_patience_secs": 2.5},
+)
+```
+
+While the live transcript still ends in digits, spoken number words (English or Spanish, at least two), a letter name such as "jota" or "aitch", a run of single letters, a single letter after other words, an unfinished email, or a code that mixes letters and digits, the session waits `entity_patience_secs` (default 2.5) before it starts a reply. One number word, or a one-word "a" / "o", does not hold the turn. A word after that entity, a complete email, a trailing `?` or `!`, or the wait expiring starts the turn and normal endpointing resumes. Leaving `entity_patience` unset does not change when turns start.
+
+On Deepgram Flux, eager end-of-turn events are dropped for that stretch, so speculative generation cannot start a reply on a half-read number. Flux is asked, mid-call, to suppress its natural end-of-turn and to wait at least `entity_patience_secs` of silence before it closes the turn. When the entity is finished, `eot_threshold` and `eot_timeout_ms` return to the values in `stt_extra`, or to Timbal's connect defaults of `0.8` and `2000` when those keys are unset, and eager events resume.
+
+Callers who hesitate but are not dictating an entity need a different knob. Set Flux `eot_threshold` (0.5–1.0) and `eot_timeout_ms` (500–60000) in `stt_extra` at connect time, or call `VoiceSession.configure_endpointing` on the live session. Higher values wait longer before Flux ends the turn.
+
+`entity_patience` composes with the holds a `local` or `lexical` detector already returns. Those holds stay; an open entity only lengthens one that would otherwise be shorter. It does not turn a noise or hesitation commit into a turn.
 
 ## Custom clients
 

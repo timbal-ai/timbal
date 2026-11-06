@@ -17,7 +17,7 @@ Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech 
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
 - **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD. It does not report native end-of-turn, so the session uses local turn detection when `timbal[voice]` is installed and lexical detection otherwise. Flux and Munsit are the adapters that force `provider` mode.
 
-Set `language` to a provider-supported language hint or omit it for automatic detection. Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
+Set `language` to the conversation language. It hints transcription and, when set, tells the model to reply in that language. Omit it to follow the user's latest substantive message. See [Reply language](#reply-language). Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
 
 ## Speech providers
 
@@ -29,17 +29,49 @@ Set `tts_provider`, `tts_model`, and `voice` for the output provider:
 - **`munsit`**: defaults to `faseeh-v1-preview`; requires `MUNSIT_API_KEY`. The fallback voice is `MUNSIT_VOICE_ID` or `ar-uae-male-1`.
 - **`openai`**: defaults to `gpt-4o-mini-tts` and `coral`; requires `OPENAI_API_KEY`. Synthesizes complete text segments as they become ready.
 
-Use the chosen provider's voice ID. `language` controls transcription; it does not select a Deepgram Aura voice. Output style options belong in `tts_extra`. See [Speech examples](/examples/agents/tts) for detailed OpenAI and Deepgram settings.
+By default every segment, including the first, waits for a sentence. Set `first_flush_min_words` to any whole number from 1 to 40 (`4` is the useful value) to let the first segment start at a comma once it has that many words, so a long opening sentence is not held until its period. "The return window is thirty days, so you can still send it back." then starts speaking at the comma. "Hello, how are you?" does not: that comma is one word, and the segment waits for the sentence. Later segments still wait for a sentence boundary: a period, exclamation mark, question mark, semicolon, colon, or newline, including the Arabic question mark and semicolon and the fullwidth question mark and exclamation mark. Punctuation inside titles (`Dr.`, `Sr.`, `Sra.`), initials (`U.S.`), times (`3:00`, `a.m.`), numbers (`3.14`, `1,234`), and ellipses (`...`) is not a boundary. `first_flush_min_words` is an agent setting. A caller hello cannot set it.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "first_flush_min_words": 4},
+)
+```
+
+Use the chosen provider's voice ID. `language` sets the reply language and the transcription hint. It does not select a Deepgram Aura voice. Output style options belong in `tts_extra`. See [Speech examples](/examples/agents/tts) for detailed OpenAI and Deepgram settings.
 
 The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate=16000`, `encoding="pcm_s16le"`). Transports convert their wire formats where needed. OpenAI uses 24 kHz on the provider connection and requires the voice extra to resample other session rates.
 
-`stt_extra` defaults to ElevenLabs-oriented VAD keys (`commit_strategy`, `min_speech_duration_ms`, `vad_silence_threshold_secs`, `vad_threshold`). The server strips those keys for adapters that own end-of-turn. `tts_extra` defaults to `{"auto_mode": true}`. `VoiceConfig.model` is a per-session text-model override (`provider/model`), separate from `stt_model` and `tts_model`.
+`stt_extra` defaults to ElevenLabs-oriented VAD keys (`commit_strategy`, `min_speech_duration_ms`, `vad_silence_threshold_secs`, `vad_threshold`). The server strips those keys for adapters that own end-of-turn. For Deepgram Flux, `eot_threshold`, `eot_timeout_ms`, and `eager_eot_threshold` in `stt_extra` are the connect-time end-of-turn knobs. `tts_extra` defaults to `{"auto_mode": true}`. `VoiceConfig.model` is a per-session text-model override (`provider/model`), separate from `stt_model` and `tts_model`.
+
+`entity_patience` (default false) and `entity_patience_secs` (default 2.5, maximum 10) hold a turn that still ends in a number, spoken number words, letter names, spelled letters, an email, or an alphanumeric code. See [Turn-taking and interruptions](/voice/turn-taking#entity-and-spelling-patience).
+
+## Pace synthesized speech
+
+Both controls are off unless you set them, and both need the `timbal[voice]` extra. They apply only to the cascaded pipeline (transcription, then the agent, then speech), not to a `RealtimeSession`. They run on the PCM the caller hears, after the speech provider returns it, and only when the session encoding is PCM16 (`pcm_s16le`, or the `linear16` / `pcm16` aliases). Any other encoding is left unchanged and a warning is logged. An interrupted reply is still cut to the audio that was actually played.
+
+`max_tts_pause_secs` must be `0` or greater. It shortens an internal silence quieter than `tts_quiet_dbfs` (default `-45`, which leaves breaths in) down to that many seconds. Pause trimming does not delay the start of the reply. `tts_tempo` must be greater than `0`. It changes the speaking rate without changing the pitch: `1.0` leaves the audio alone, and a value above `1` is faster. Tempo holds 20–50 ms before the first samples, and a short tail is flushed once no new audio arrives for 0.25 s. `None` on either field disables it. An invalid value in a client hello is dropped and the server's value is kept.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    voice_config={"language": "en", "max_tts_pause_secs": 0.2, "tts_tempo": 1.05},
+)
+```
 
 ## What a client may override
 
-A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `model`, `tool_beat_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
-Recording, ambient audio, `events`, `hello_wait_secs`, and `sip_hello_wait_secs` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`) are treated as unset so they do not wipe an inherited value.
+Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, and `first_flush_min_words` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
 
 ## Mix providers
 
@@ -66,9 +98,57 @@ agent.voice_config = {
 
 This assignment replaces the agent's declared config. Keep any greetings or other behavior fields you want to retain. The earlier lessons use a dict and add individual keys to preserve previous behavior; a `VoiceConfig` instance or callable needs its own update pattern.
 
+## Reply language
+
+`voice_config["language"]` is the conversation language, not only a transcription hint.
+
+- **Set** (`"en"`, `"es"`, `"es-ES"`, any BCP-47 tag the provider accepts): the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`.
+- **Unset**: the model follows the language of the user's latest substantive message (a full request, question, or correction). Accent, fillers, names, and a single word from another language do not switch the reply. If the agent's own system prompt already names one reply language, that instruction stands.
+- **Explicit switch**: the pin yields when the user asks to use another language. Saying a sentence in another language is not, by itself, that request. Call `set_language` when the conversation language should actually change, so the next turn's instruction and the transcription hint move together.
+
+Deepgram Flux applies the new hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. `flux-general-en` does not accept a language hint. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` still changes the reply instruction immediately and stores the tag for the next connection. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
+
+From a tool on the call, `current_voice_session()` is the live session. The tool is not registered for you. Add it only on agents that should be able to switch.
+
+```python
+from timbal import Agent
+from timbal.voice import current_voice_session
+
+
+async def set_conversation_language(language: str) -> str:
+    """Set the language for the rest of the call.
+
+    Use the BCP-47 tag the caller asked for, such as en or es.
+    """
+    session = current_voice_session()
+    if session is None:
+        return "No active call."
+    await session.set_language(language)
+    return f"Conversation language is now {language}."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="Reply in one or two short spoken sentences.",
+    tools=[set_conversation_language],
+    voice_config={"language": "es"},
+)
+```
+
+`set_language` returns true when the open transcriber accepted the hint. The reply instruction changes on the next turn either way. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
+
+## Speculative generation
+
+See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation). `speculative_generation` is off unless you set it. It is server-side. A caller hello cannot turn it on.
+
+## Ending the call
+
+`hangup_grace_secs` is the quiet window after a goodbye, from 0 to 30 seconds. Unset hangs up once that audio has played. When it is set, the hangup tool should await `session.commit_hangup()` so the window is spent before teardown. Bare `session.end_call()` still requests teardown immediately and then opens this window. See [Let the caller end the call](/voice/tools#let-the-caller-end-the-call).
+
 ## Turn detection
 
-See [Turn-taking and interruptions](/voice/turn-taking) for mode names, native provider boundaries, VAD endpointing, and a listening test.
+See [Turn-taking and interruptions](/voice/turn-taking) for mode names, native provider boundaries, VAD endpointing, the `min_delay_secs` and `stop_silence_secs` floors, during-speech prediction, and a listening test. Those two floors are agent settings. A caller hello cannot set them. `predict_during_speech` defaults to false and a caller hello may set it.
 
 ## Greetings and silence
 
@@ -82,4 +162,4 @@ See [Spoken fillers](/voice/fillers) to enable a waiting phrase, tune generation
 
 The server reads `TIMBAL_STT_PROVIDER`, `TIMBAL_STT_MODEL`, `TIMBAL_TTS_MODEL`, `ELEVENLABS_VOICE_ID` (before `TIMBAL_VOICE_ID`), `TIMBAL_VOICE_LANGUAGE`, and `TIMBAL_VOICE_GREETING`. `TIMBAL_VOICE_ID` alone also sets the default ElevenLabs voice. Use `voice_config.tts_provider` to select the output provider; there is no `TIMBAL_TTS_PROVIDER` reader in the server. An unknown STT or TTS provider id falls back to ElevenLabs for that session rather than refusing to boot.
 
-`TIMBAL_VOICE_FILLER=1` enables default fillers. The `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, `TIMBAL_VOICE_FILLER_REPEAT_SECS`, and `TIMBAL_VOICE_FILLER_THINK_DELAY_SECS` variables customize them. See [Recording calls](/voice/recording) and [Background audio](/voice/background-audio) for their operator settings and transport limits.
+`TIMBAL_VOICE_FILLER=1` enables default fillers. The `TIMBAL_VOICE_FILLER_MODEL`, `TIMBAL_VOICE_FILLER_SYSTEM_PROMPT`, `TIMBAL_VOICE_FILLER_DELAY_SECS`, `TIMBAL_VOICE_FILLER_REPEAT_SECS`, and `TIMBAL_VOICE_FILLER_THINK_DELAY_SECS` variables customize them. `TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS` and `TIMBAL_VOICE_FILLER_MESSAGE` add a spoken progress line during a quiet tool wait; see [Spoken fillers](/voice/fillers). See [Recording calls](/voice/recording) and [Background audio](/voice/background-audio) for their operator settings and transport limits.

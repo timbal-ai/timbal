@@ -83,6 +83,13 @@ def default_voice_config_from_env() -> VoiceConfig:
         filler["repeat_secs"] = v
     if v := os.environ.get("TIMBAL_VOICE_FILLER_THINK_DELAY_SECS"):
         filler["think_delay_secs"] = v
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_SOFT_TIMEOUT_SECS"):
+        # "-1" is the disabled sentinel (ElevenLabs). It must not count as a
+        # detail var: a lone disable would otherwise turn the classic filler on.
+        if v.strip() not in ("-1", "-1.0"):
+            filler["soft_timeout_secs"] = v
+    if v := os.environ.get("TIMBAL_VOICE_FILLER_MESSAGE"):
+        filler["message"] = v
     # TIMBAL_VOICE_FILLER=1 enables with defaults; any detail var implies it.
     enabled = os.environ.get("TIMBAL_VOICE_FILLER", "").strip().lower()
     if enabled in ("1", "true", "yes", "on") or (filler and enabled not in ("0", "false", "no", "off")):
@@ -317,8 +324,13 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "stt_extra",
     "tts_extra",
     "vad_endpointing",
+    "predict_during_speech",
     "model",
     "tool_beat_secs",
+    "max_tts_pause_secs",
+    "tts_quiet_dbfs",
+    "tts_tempo",
+    "hangup_grace_secs",
     "turn_timeout_secs",
     "turn_timeout_fallback",
     "filler",
@@ -330,6 +342,9 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     # Silence policy is per-call tuning too (a voicemail-heavy campaign wants a
     # short hang-up; a support line wants patient re-engagement).
     "user_idle",
+    # Dictation / spelling. Off unless the agent or this call turns it on.
+    "entity_patience",
+    "entity_patience_secs",
 })
 
 #: Hello keys the transport reads directly — not ``VoiceConfig`` fields, so
@@ -432,6 +447,49 @@ def _merge_client_extra(field: str, server_extra: Any, client_extra: Any) -> dic
     return {**base, **safe}
 
 
+def _coerce_client_number(updates: dict[str, Any], field: str) -> None:
+    """Validate one numeric hello field in place. A bad value is dropped.
+
+    ``model_copy`` later skips validation, and telephony parameters arrive as
+    strings. One malformed knob keeps the operator's value instead of closing
+    the socket. Booleans are rejected (``bool`` is an ``int`` subclass).
+    """
+    if field not in updates:
+        return
+    raw = updates[field]
+    if isinstance(raw, bool):
+        logger.info("voice_client_config_invalid", field=field)
+        del updates[field]
+        return
+    try:
+        updates[field] = getattr(VoiceConfig(**{field: raw}), field)
+    except (ValidationError, TypeError, ValueError):
+        logger.info("voice_client_config_invalid", field=field)
+        del updates[field]
+
+
+def _sanitize_entity_patience(updates: dict[str, Any]) -> None:
+    """Drop a malformed hello value instead of failing the socket.
+
+    ``model_copy`` does not re-validate. A non-bool or an out-of-range
+    duration keeps the server's setting.
+    """
+    if "entity_patience" in updates and not isinstance(updates["entity_patience"], bool):
+        logger.info("voice_client_entity_patience_invalid")
+        del updates["entity_patience"]
+    if "entity_patience_secs" not in updates:
+        return
+    try:
+        if isinstance(updates["entity_patience_secs"], bool):
+            raise TypeError("a boolean is not a duration")
+        updates["entity_patience_secs"] = VoiceConfig(
+            entity_patience_secs=updates["entity_patience_secs"]
+        ).entity_patience_secs
+    except (TypeError, ValueError):
+        logger.info("voice_client_entity_patience_invalid")
+        del updates["entity_patience_secs"]
+
+
 def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str, Any]) -> VoiceConfig:
     """Apply the optional first WebSocket JSON message over the server config.
 
@@ -459,6 +517,18 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
         except (ValueError, TypeError):
             logger.info("voice_client_tool_beat_invalid")
             del updates["tool_beat_secs"]
+    for field in ("max_tts_pause_secs", "tts_quiet_dbfs", "tts_tempo"):
+        _coerce_client_number(updates, field)
+    if "hangup_grace_secs" in updates:
+        # Same as tool_beat_secs: telephony parameters arrive as strings, and
+        # model_copy below skips validation. A bad value keeps the server's.
+        try:
+            if isinstance(updates["hangup_grace_secs"], bool):
+                raise TypeError("a boolean is not a grace duration")
+            updates["hangup_grace_secs"] = VoiceConfig(hangup_grace_secs=updates["hangup_grace_secs"]).hangup_grace_secs
+        except (ValueError, TypeError):
+            logger.info("voice_client_hangup_grace_invalid")
+            del updates["hangup_grace_secs"]
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
@@ -476,6 +546,7 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
     )
     if ignored:
         logger.info("voice_client_config_ignored", keys=ignored)
+    _sanitize_entity_patience(updates)
     for field in ("stt_extra", "tts_extra"):
         if field in updates:
             updates[field] = _merge_client_extra(field, getattr(server_defaults, field), updates[field])
@@ -1000,7 +1071,7 @@ def build_voice_session(
         stt_provider_id,
     )
     from ..voice.providers import AudioInputConfig, AudioOutputConfig, resolve_tts
-    from ..voice.turn_detection import resolve_turn_detector
+    from ..voice.turn_detection import ProviderTurnDetector, resolve_turn_detector
 
     merged = merge_client_voice_overrides(defaults, client_config)
 
@@ -1073,6 +1144,23 @@ def build_voice_session(
         # (Flux, Munsit).
         for k in ("commit_strategy", "min_speech_duration_ms", "vad_silence_threshold_secs", "vad_threshold"):
             stt_extra.pop(k, None)
+    # One helper, one query value. During-speech prediction and speculative
+    # generation both need EagerEndOfTurn. Whichever is on (or both) sets
+    # eager_eot_threshold once, strictly below eot_threshold.
+    eager_eot_threshold: float | None = None
+    wants_flux_eager = (merged.predict_during_speech is True and stt_native_eou) or (
+        merged.speculative_generation.enabled and stt_provider == "deepgram-flux"
+    )
+    if wants_flux_eager:
+        from ..voice.deepgram import DeepgramFluxSTT
+
+        if isinstance(stt, DeepgramFluxSTT):
+            # Flux emits EagerEndOfTurn only when this query param is set.
+            # Local VAD force-commit stays off: Flux commit() is a no-op.
+            from ..voice.predictive_eou import flux_eager_threshold
+
+            eager_eot_threshold = flux_eager_threshold(stt_extra)
+            stt_extra["eager_eot_threshold"] = str(eager_eot_threshold)
     audio_in = AudioInputConfig(
         model=stt_model,
         language=merged.language,
@@ -1117,8 +1205,8 @@ def build_voice_session(
     if not isinstance(vad_endpointing, bool):
         vad_endpointing = None
     if stt_native_eou:
-        # Flux/Munsit have no force-commit (commit() is a no-op); the Silero
-        # fast path would just burn CPU scoring audio it can never act on.
+        # Flux/Munsit have no force-commit (commit() is a no-op). During-speech
+        # prediction on Flux uses EagerEndOfTurn instead of this fast path.
         vad_endpointing = False
 
     # Playground / client may override the Agent's LLM for this session only.
@@ -1140,9 +1228,15 @@ def build_voice_session(
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
+        min_delay_secs=merged.min_delay_secs,
+        stop_silence_secs=merged.stop_silence_secs,
+        first_flush_min_words=merged.first_flush_min_words,
+        predict_during_speech=merged.predict_during_speech is True,
+        entity_patience=merged.entity_patience,
         direction=direction,
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
+        hangup_grace_secs=merged.hangup_grace_secs,
     )
 
     session_kwargs: dict[str, Any] = {}
@@ -1152,13 +1246,44 @@ def build_voice_session(
         session_kwargs["greeting"] = greeting
     if merged.user_idle is not None:
         session_kwargs["user_idle"] = merged.user_idle
+    if merged.ignore_backchannels:
+        session_kwargs["ignore_backchannels"] = True
+    if merged.hold_unfinished_secs is not None:
+        if isinstance(turn_detector, ProviderTurnDetector):
+            session_kwargs["hold_unfinished_secs"] = merged.hold_unfinished_secs
+        else:
+            logger.info(
+                "voice_hold_unfinished_ignored",
+                reason="turn_detector_not_provider",
+                turn_detector=turn_detector_label,
+            )
+    if merged.predict_during_speech is True:
+        session_kwargs["predict_during_speech"] = True
+        if eager_eot_threshold is not None:
+            session_kwargs["eager_eot_threshold"] = eager_eot_threshold
     if merged.tool_beat_secs is not None:
         session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
+    # Always the agent's floors. A caller hello is not in the allowlist, so it
+    # cannot lower them. A custom VadEndpointer instance (Python only) ignores
+    # these and keeps the knobs it was built with.
+    session_kwargs["min_delay_secs"] = merged.min_delay_secs
+    session_kwargs["stop_silence_secs"] = merged.stop_silence_secs
+    session_kwargs["first_flush_min_words"] = merged.first_flush_min_words
+    # Pause trim and tempo default off. Always forward them so a per-call
+    # hello and the agent config land on the same VoiceSession fields.
+    session_kwargs["max_tts_pause_secs"] = merged.max_tts_pause_secs
+    session_kwargs["tts_quiet_dbfs"] = merged.tts_quiet_dbfs
+    session_kwargs["tts_tempo"] = merged.tts_tempo
+    if merged.hangup_grace_secs is not None:
+        session_kwargs["hangup_grace_secs"] = merged.hangup_grace_secs
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
         except (TypeError, ValueError):
             logger.warning("voice_ws_bad_turn_timeout_secs", value=repr(merged.turn_timeout_secs))
+    if merged.entity_patience:
+        session_kwargs["entity_patience"] = True
+    session_kwargs["entity_patience_secs"] = merged.entity_patience_secs
     if merged.turn_timeout_fallback is not None:
         # "" disables the spoken apology; None means "VoiceSession default".
         session_kwargs["turn_timeout_fallback"] = str(merged.turn_timeout_fallback)
@@ -1174,6 +1299,7 @@ def build_voice_session(
         session_kwargs["announce_background_results"] = defaults.events.announce_background_results
         session_kwargs["client_events"] = defaults.events.client_notify
         session_kwargs["on_busy"] = defaults.events.on_busy
+    session_kwargs["speculative_generation"] = merged.speculative_generation
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).

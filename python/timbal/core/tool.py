@@ -93,6 +93,7 @@ class Tool(Runnable):
         if "name" not in values:
             # If the subclass declares a default for name, let Pydantic apply it.
             from pydantic_core import PydanticUndefined
+
             name_field = cls.model_fields.get("name")
             if name_field is not None and name_field.default is not PydanticUndefined:
                 pass

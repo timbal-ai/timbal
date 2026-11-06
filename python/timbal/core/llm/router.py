@@ -13,6 +13,7 @@ from ..runnable import Runnable
 from .chat_completions import prepare_chat_completions_request
 from .clients import _get_file_client, _resolve_client
 from .messages import prepare_messages_request
+from .prompt_cache import PROMPT_CACHE_KEY_HEADER, SystemPrompt, session_prompt_cache_key
 from .registry import _PROVIDERS, TIMBAL_OPENAI_API
 from .responses import prepare_responses_request
 from .retry import _retry_on_error
@@ -30,7 +31,7 @@ def _set_model_metadata(provider: str, model_name: str) -> None:
 
 async def _llm_router(
     model: Any,  # Model | str | TestModel — typed as Any so Pydantic doesn't reject TestModel instances
-    system_prompt: str | None = None,
+    system_prompt: str | SystemPrompt | None = None,
     messages: list[Message] | None = None,
     tools: list[Runnable] | None = None,
     max_tokens: int | None = None,
@@ -109,6 +110,11 @@ async def _llm_router(
     }
     if call_id:
         request_headers["x-timbal-call-id"] = call_id
+    # Stable per-session key. OpenAI also gets it as prompt_cache_key on the
+    # body; the header is what the platform proxy forwards for every provider.
+    cache_key = session_prompt_cache_key(provider_params)
+    if cache_key:
+        request_headers[PROMPT_CACHE_KEY_HEADER] = cache_key
     if run_context.platform_config and run_context.platform_config.subject:
         if run_context.platform_config.subject.app_id:
             request_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id

@@ -3,7 +3,7 @@ title: "Using Tools"
 description: "Give a spoken assistant a function and hear it answer from the result"
 ---
 
-A voice agent uses regular Timbal tools. The caller asks a question, the text agent decides to call a function, and its answer is spoken back. Speech adapters do not execute the tool themselves.
+A voice agent uses regular Timbal tools. The caller asks a question, the text agent decides to call a function, and its answer is spoken back. Speech adapters do not execute the tool themselves. Keep the system prompt to spoken behavior, and put a rule that matters only for one tool in that tool's description. See [Voice prompts](/voice/prompts).
 
 ## Add one lookup
 
@@ -72,6 +72,42 @@ An enabled pause finishes the pre-tool streaming TTS context and uses a new
 context for the result. With the pause disabled, providers that support flushing and confirming delivery of each audio segment
 keep their context open across the tool call. Other providers finish the context
 at the boundary so interruption tracking never counts unspoken result text as heard.
+
+## Keep a tool from being cut off
+
+By default the caller can barge in at any time, including while a tool runs. That cancels the tool and cuts the reply down to the words already heard. A payment confirmation or a disclaimer should finish. Set `interruption_mode` on the tool:
+
+```python
+from timbal import Agent, Tool
+
+
+async def confirm_payment(order_id: str) -> str:
+    """Confirm a payment and read the result back in full."""
+    return f"Payment for {order_id} is confirmed."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You confirm payments. Reply in one or two short spoken sentences.",
+    tools=[
+        Tool(
+            handler=confirm_payment,
+            interruption_mode="disable_during_tool_and_turn",
+        )
+    ],
+)
+```
+
+- `allow` (the default): the caller can interrupt at any time.
+- `disable_during_tool`: barge-in is ignored only while the tool runs. The spoken reply after it can still be interrupted, and that interruption still keeps only the words the caller heard.
+- `disable_during_tool_and_turn`: barge-in is ignored while the tool runs and until the reply that follows has been played. If the tool pauses for approval or `ask_user`, the caller can speak while the call is waiting, and the reply after they answer is still played through.
+
+This only holds back the caller's barge-in. `session.close()` and an event sent with `announce="interrupt"` still cut the turn.
+
+Speech during the protected window is still transcribed. Those words open the next turn, after the protected audio has finished. When several tools run in the same step, the strictest mode among them covers the whole batch. A plain function passed in `tools` stays `allow`. The same field on an `MCPServer` is copied onto every tool that server exposes.
+
+An agent or workflow in `tools` takes `interruption_mode` too, and it covers that whole call. A mode on a tool inside the nested agent applies only when that agent is the one talking to the caller.
 
 ## Add real actions carefully
 
@@ -177,16 +213,68 @@ When the agent takes a turn of its own, the client gets an `event_turn_started` 
 
 A text turn on the same conversation while the call is live (a chat tab continuing from the call's run) is let in only while the call is not mid-turn. While a call turn runs, the chat turn is refused, or queued with `"events": {"on_busy": "enqueue"}` in the server's `voice_config`. Once let in, the chat turn continues from the call's latest turn, even if the chat sent an older run as its parent, so neither side loses what the other said. A caller who speaks while the chat turn runs is answered after it, and the call continues from what the chat said. An `"interrupt"` event goes ahead of a queued chat turn, but waits for one that is already running.
 
+## Wait for a confirmed turn
+
+With speculative generation on, the model can decide on a tool while the caller might still be pausing, but the tool does not start until the turn is confirmed. That includes lookups. The handler waits, and so do its pre-hook, any approval question, and a default parameter that calls another service. If the caller keeps talking, the wait is cancelled and none of them run. `defer_until_eot=True` marks a tool whose work cannot be undone, such as booking, charging, sending, or hanging up. Speculative generation holds every tool the same way, so the flag is not what turns the hold on. An MCP tool annotated destructive still gets the flag, whether or not `approval` also gates it. With speculative generation off, tools run when the model calls them, which is already after a confirmed transcript.
+
+```python
+from timbal import Agent, Tool
+
+
+async def book_table(name: str) -> str:
+    """Reserve a table under this name."""
+    return f"Booked for {name}."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="You book tables. Reply in one short spoken sentence.",
+    tools=[Tool(handler=book_table, defer_until_eot=True)],
+    voice_config={"language": "en", "speculative_generation": {"enabled": True}},
+)
+```
+
+`end_call` below hangs up. With speculative generation on it waits for a confirmed turn like every other tool, whether or not you set `defer_until_eot`. See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation).
+
 ## Let the caller end the call
 
-`session.end_call()` hangs up once what the agent is saying has been heard. Give it to the model as a tool, and tell it to say goodbye in the same reply:
+Give the model a tool that ends the call, and have it say goodbye in that same reply, before the tool runs. Two calls do different jobs.
+
+`await session.commit_hangup()` is the one to use when `hangup_grace_secs` is set. It waits until any goodbye already playing has finished, then for that many quiet seconds. Speech in that span — a new transcript, or a partial that is not an echo of the goodbye — returns false and does not hang up. True means the window already passed: it then calls `end_call(grace_secs=0)`, so there is no second quiet window after the tool returns. Return a short "Ending the call." Do not ask for a goodbye in that success result. A goodbye spoken only after True has no retract window left.
+
+```python agent.py
+from timbal import Agent, Tool
+from timbal.voice import current_voice_session
+
+
+async def end_call() -> str:
+    """End the call after the goodbye in this same reply has been heard."""
+    session = current_voice_session()
+    if session is None:
+        return "There is no call to end."
+    if not await session.commit_hangup():
+        return "The caller spoke again. Do not hang up. Keep helping."
+    return "Ending the call."
+
+
+agent = Agent(
+    name="voice_assistant",
+    model="openai/gpt-5-mini",
+    system_prompt="When the caller is done, say a short goodbye and then call end_call.",
+    tools=[Tool(handler=end_call)],
+    voice_config={"hangup_grace_secs": 1.5},
+)
+```
+
+`session.end_call()` requests teardown immediately and returns. The session still waits for the goodbye to finish playing, including a goodbye the model speaks on a later step of the same turn. If `hangup_grace_secs` is set, that wait is followed by the quiet window, and speech then cancels the close. The tool has already returned, so the irreversible request is already in flight. Use this when you want the result itself to ask for a goodbye the model has not said yet.
 
 ```python agent.py
 from timbal.voice import current_voice_session
 
 
 async def end_call() -> str:
-    """End the call when the caller asks to. Say a short goodbye in this same reply."""
+    """End the call when the caller asks to."""
     session = current_voice_session()
     if session is None:
         return "There is no call to end."
@@ -194,6 +282,6 @@ async def end_call() -> str:
     return "If you have not said goodbye yet, say it now in one short sentence. The call ends once it has been heard."
 ```
 
-The session waits for the turn to finish and its audio to play, then closes itself, as `session.close()` does. Some models call the tool before writing the goodbye, so the tool's result asks for one; the goodbye then comes from a second model call in the same turn, and the session still waits for it. If the caller says something first, the call stays up. If the goodbye never finishes playing, the call ends after 20 seconds anyway. Calling it again changes nothing.
+If the goodbye never finishes playing, the call ends after 20 seconds, without an extra wait. Calling `end_call` again changes nothing. Speech that cancels the close is any new transcript, or a partial that is not an echo of the goodbye, in whatever language the caller is speaking. Audible speech counts too when local VAD endpointing is on. The assistant can call the tool again on a later turn. `session.end_call(grace_secs=1.5)` sets the window for that one call; `grace_secs=0` hangs up as soon as the goodbye has been heard, even when the session configured a window. Allowed values are from 0 to 30 seconds. A client hello may set `hangup_grace_secs` the same way it sets `tool_beat_secs`. Unset is the default, and then `commit_hangup()` is the same as `end_call()`.
 
 Continue to [Thinking sounds](/voice/thinking-sounds).

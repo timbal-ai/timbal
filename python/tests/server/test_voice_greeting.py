@@ -120,6 +120,27 @@ class _PacedTTS(TextToSpeech):
             yield self.marker(text) * self.chunk_bytes
 
 
+def _spy_on_resolved_voice_prompts(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """Record the prompt a voice turn actually sends, after the cache split.
+
+    The greeting note lives in the dynamic suffix (:meth:`VoiceSession.prompt_for_turn`),
+    not in the ``system_prompt`` kwarg. The kwarg stays unset so the static prefix
+    can cache.
+    """
+    from timbal.core.llm.prompt_cache import system_prompt_text
+
+    seen: list[str | None] = []
+    original = Agent._voice_system_prompt
+
+    def spy(self: Agent, system_prompt: Any) -> Any:
+        result = original(self, system_prompt)
+        seen.append(system_prompt_text(result))
+        return result
+
+    monkeypatch.setattr(Agent, "_voice_system_prompt", spy)
+    return seen
+
+
 def _spy_on_system_prompts(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
     """Record the ``system_prompt`` kwarg every agent run is invoked with.
 
@@ -368,9 +389,7 @@ class TestClientGreetingOverrides:
         """End to end over the two hops a TeXML ``<Parameter>`` actually takes."""
         custom = {"greeting": GREETING, "recording": "/tmp/evil", "bogus": "x"}
         client_config = {
-            k: v
-            for k, v in custom.items()
-            if k in telephony_routes._CONFIG_PARAM_KEYS and isinstance(v, str) and v
+            k: v for k, v in custom.items() if k in telephony_routes._CONFIG_PARAM_KEYS and isinstance(v, str) and v
         }
         assert client_config == {"greeting": GREETING}
 
@@ -650,9 +669,7 @@ class TestGreetingSpoken:
         def _boom(messages):
             raise RuntimeError("generator down")
 
-        session = _make_session(
-            greeting={"instructions": "say hi", "model": TestModel(handler=_boom)}, stt=stt
-        )
+        session = _make_session(greeting={"instructions": "say hi", "model": TestModel(handler=_boom)}, stt=stt)
         events = await _run(session, stt, settle=0.15)
 
         assert session.transcript == []
@@ -691,12 +708,13 @@ class TestGreetingMemory:
     async def test_first_turn_prompt_says_do_not_greet_again(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        prompts = _spy_on_system_prompts(monkeypatch)
+        prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         stt = _OpenSTT()
         session = _make_session(greeting={"text": GREETING}, stt=stt)
         await _run(session, stt, drive=self._turns(stt, "Yes, hello."))
 
         [prompt] = prompts
+        assert prompt is not None
         assert SYSTEM_PROMPT in prompt  # the agent's own prompt survives intact
         assert GREETING in prompt
         assert "Do not greet" in prompt
@@ -726,11 +744,13 @@ class TestGreetingMemory:
         # Not a filler: fillers are dimmed / excluded from reply text downstream.
         assert all(e.filler is False for e in session.transcript)
 
-    async def test_no_greeting_means_no_prompt_override(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Existing behaviour unchanged: the agent resolves its own prompt."""
-        prompts = _spy_on_system_prompts(monkeypatch)
+    async def test_no_greeting_still_sets_reply_language(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No opener note. The reply-language policy is still on the turn.
+
+        ``language`` is unset here, so the policy matches the latest substantive
+        message and does not pin a language. The agent's own prompt is kept.
+        """
+        prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         stt = _OpenSTT()
         session = _make_session(stt=stt)
 
@@ -742,12 +762,17 @@ class TestGreetingMemory:
         await _run(session, stt, drive=drive)
 
         assert session.greeting is None
-        assert prompts == [None]  # no override at all — Agent.handler resolves it
+        [prompt] = prompts
+        assert SYSTEM_PROMPT in prompt
+        assert "latest substantive message" in prompt
+        assert "Do not greet" not in prompt
+        assert "Reply in English" not in prompt
 
-    async def test_second_turn_has_no_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_second_turn_drops_the_greeting_note(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Turn two chains through turn one's memory, which carries the note's
-        effect — re-stating it every turn would be dead weight in the prompt."""
-        prompts = _spy_on_system_prompts(monkeypatch)
+        effect — re-stating it every turn would be dead weight. The reply-language
+        policy stays, because it is not in that memory."""
+        prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         stt = _OpenSTT()
         session = _make_session(
             greeting={"text": GREETING},
@@ -757,13 +782,18 @@ class TestGreetingMemory:
         await _run(session, stt, drive=self._turns(stt, "Yes, hello.", "What time was it again?"))
 
         first, second = prompts
-        assert GREETING in first
-        assert second is None
+        assert first is not None and GREETING in first
+        assert "Do not greet" in first
+        assert "latest substantive message" in first
+        # Turn two keeps the static prefix (so it can cache) and drops the note.
+        assert second is not None and "Do not greet" not in second
+        assert GREETING not in second
+        assert "latest substantive message" in second
 
     async def test_prompt_note_survives_a_callable_system_prompt(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        prompts = _spy_on_system_prompts(monkeypatch)
+        prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         stt = _OpenSTT()
 
         def dynamic_prompt() -> str:
@@ -775,14 +805,14 @@ class TestGreetingMemory:
             tools=[],
             system_prompt=dynamic_prompt,
         )
-        session = VoiceSession(
-            agent, stt, _make_tts_class()(), turn_detector="heuristic", greeting=GREETING
-        )
+        session = VoiceSession(agent, stt, _make_tts_class()(), turn_detector="heuristic", greeting=GREETING)
         await _run(session, stt, drive=self._turns(stt, "Yes, hello."))
 
         [prompt] = prompts
+        assert prompt is not None
         assert prompt.startswith("RESOLVED PROMPT")
         assert GREETING in prompt
+        assert "latest substantive message" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -981,9 +1011,7 @@ class TestGreetingOverWs:
         f"agent = Agent(name='voice_test', model=TestModel(responses=[{REPLY!r}]), tools=[])\n"
     )
 
-    def test_agent_voice_config_greeting_is_spoken_first(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_agent_voice_config_greeting_is_spoken_first(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         body = self._AGENT + f"agent.voice_config = {{'greeting': {GREETING!r}}}\n"
         messages = self._run_ws(monkeypatch, tmp_path, module_body=body, hello={})
 
@@ -991,25 +1019,17 @@ class TestGreetingOverWs:
         transcript = next(m for m in messages if m["type"] == "session_transcript")["entries"]
         assert [e["text"] for e in transcript] == [GREETING, "Yes, hello.", REPLY]
 
-    def test_client_hello_string_override_is_spoken(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_client_hello_string_override_is_spoken(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Same shape a telephony ``<Parameter name="greeting">`` arrives in."""
-        messages = self._run_ws(
-            monkeypatch, tmp_path, module_body=self._AGENT, hello={"greeting": GREETING}
-        )
+        messages = self._run_ws(monkeypatch, tmp_path, module_body=self._AGENT, hello={"greeting": GREETING})
         assert [m["text"] for m in messages if m["type"] == "agent_text_done"] == [GREETING, REPLY]
 
-    def test_client_can_switch_off_a_server_greeting(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_client_can_switch_off_a_server_greeting(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         body = self._AGENT + f"agent.voice_config = {{'greeting': {GREETING!r}}}\n"
         messages = self._run_ws(monkeypatch, tmp_path, module_body=body, hello={"greeting": ""})
         assert [m["text"] for m in messages if m["type"] == "agent_text_done"] == [REPLY]
 
-    def test_no_greeting_configured_stays_reactive(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_no_greeting_configured_stays_reactive(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         messages = self._run_ws(monkeypatch, tmp_path, module_body=self._AGENT, hello={})
         assert [m["text"] for m in messages if m["type"] == "agent_text_done"] == [REPLY]
 
@@ -1229,11 +1249,9 @@ class TestGreetingPromptNoteAfterBargeIn:
     async def test_note_quotes_only_the_heard_prefix(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        prompts = _spy_on_system_prompts(monkeypatch)
+        prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         tts = _PacedTTS(num_chunks=4, every_secs=0.05)
-        session = _make_session(
-            greeting={"text": GREETING, "interruptible": True}, tts=tts
-        )
+        session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
         speak = session._claim_greeting(GREETING)
         await asyncio.sleep(0.12)
         await session.interrupt()
@@ -1242,28 +1260,42 @@ class TestGreetingPromptNoteAfterBargeIn:
         heard = session.transcript[-1].text
         assert heard and heard != GREETING
 
-        await session._run_turn("Sorry, who is this?")
+        # interrupt() leaves the cancel flag set. A real next turn clears it
+        # in _begin_user_turn before the agent runs; this test calls _run_turn
+        # directly. The greeting note is applied only while this session is
+        # current, which session.run() would have set.
+        from timbal.voice.session import _current_voice_session
+
+        session._cancel_turn.clear()
+        token = _current_voice_session.set(session)
+        try:
+            await session._run_turn("Sorry, who is this?")
+        finally:
+            _current_voice_session.reset(token)
 
         [prompt] = prompts
+        assert prompt is not None
         assert heard in prompt
         assert GREETING not in prompt  # never claim words that were cut off
 
-    async def test_no_note_when_the_opener_was_never_heard(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_no_note_when_the_opener_was_never_heard(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Cut before a single word landed → the agent should greet normally."""
-        prompts = _spy_on_system_prompts(monkeypatch)
+        prompts = _spy_on_resolved_voice_prompts(monkeypatch)
         tts = _PacedTTS(num_chunks=2, every_secs=0.0)
-        session = _make_session(
-            greeting={"text": GREETING, "interruptible": True}, tts=tts
-        )
+        session = _make_session(greeting={"text": GREETING, "interruptible": True}, tts=tts)
         await session._claim_greeting(GREETING)
         await session.interrupt()
         assert session.transcript == []
 
+        # interrupt() leaves the cancel flag set. A real next turn clears it
+        # before the agent runs; this test calls _run_turn directly.
+        session._cancel_turn.clear()
         await session._run_turn("Hello?")
 
-        assert prompts == [None]
+        [prompt] = prompts
+        assert GREETING not in prompt
+        assert "Do not greet" not in prompt
+        assert "latest substantive message" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1407,9 +1439,7 @@ class TestClientCallContext:
         monkeypatch.setenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", "1")
         assert voice_routes.client_call_context({"call_context": raw}) == {}
 
-    def test_meta_reports_the_switch_so_the_page_can_hide_the_field(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_meta_reports_the_switch_so_the_page_can_hide_the_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
         agent = Agent(name="voice_test", model=TestModel(responses=[REPLY]), tools=[])
         monkeypatch.delenv("TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT", raising=False)
         assert voice_routes.runnable_meta_for_voice_page(agent, "")["allow_client_call_context"] is False
@@ -1446,9 +1476,7 @@ class TestClientCallContext:
         )
         assert seen["call_context"] == {"rep_id": "R001", "task": "reminder"}
 
-    def test_ws_hello_is_dropped_when_the_door_is_shut(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_ws_hello_is_dropped_when_the_door_is_shut(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         seen: dict[str, Any] = {}
         real = voice_routes.build_voice_session
 

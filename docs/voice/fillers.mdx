@@ -3,7 +3,7 @@ title: "Spoken Fillers"
 description: "Have the assistant acknowledge a slow tool call with a short spoken phrase"
 ---
 
-A filler is a generated phrase such as "One moment, let me check." It can cover a tool's waiting period before the substantive answer arrives. It uses the session's speech output, so it can be heard on phone and browser transports.
+A filler is a short phrase such as "One moment, let me check." It can cover a tool's waiting period before the substantive answer arrives. It uses the session's speech output, so it can be heard on phone and browser transports.
 
 ## Enable one filler
 
@@ -35,14 +35,14 @@ agent.voice_config["filler"] = {
     "delay_secs": 1.0,
     "timeout_secs": 5.0,
     "system_prompt": (
-        "Write one brief, natural waiting phrase in the caller's language. "
+        "Write one brief, natural waiting phrase. "
         "Do not answer the question or claim the lookup succeeded. "
         "Return only the phrase, without quotes."
     ),
 }
 ```
 
-Generation starts when the tool call is detected and overlaps the delay. The phrase is spoken only while the turn still needs a filler and no substantive reply has started. Omit `model` to use the session's LLM, or set a full `provider/model` ID to choose a separate generator.
+The session appends the [reply-language policy](/voice/configuration#reply-language) after this prompt. Generation starts when the tool call is detected and overlaps the delay. The phrase is spoken only while the turn still needs a filler and no substantive reply has started. Omit `model` to use the session's LLM, or set a full `provider/model` ID to choose a separate generator.
 
 ## Longer waits
 
@@ -56,6 +56,22 @@ agent.voice_config["filler"] = {
     "max_per_turn": 2,
 }
 ```
+
+## Progress line during a long tool
+
+A client can show a status such as "Calling lookup…" while a tool runs. That event is not speech, so a caller on the phone still hears silence. `soft_timeout_secs` speaks a short line once the caller has heard no agent audio for that many seconds during a tool wait, then keeps waiting for the result.
+
+With `soft_timeout_secs` unset, a tool wait is unchanged. When `soft_timeout_secs` is set, the classic `delay_secs` tool-wait path is not used; `think_delay_secs` still covers silence before the first tool. A tool that finishes inside the window stays silent. Audio already playing resets the wait, so the line does not talk over a preamble or the answer. The caller can interrupt the line the same way they interrupt a reply.
+
+```python
+agent.voice_config["filler"] = {
+    "enabled": True,
+    "soft_timeout_secs": 1.5,
+    "message": "One moment, I'm checking that.",
+}
+```
+
+`message` is spoken directly, with no extra model call. Omit it to use `phrases` when one matches the call's language, or the filler generator otherwise. `repeat_secs` speaks another line after that much further silence, up to `max_per_turn`. ElevenLabs uses `-1` to disable this timeout; omit `soft_timeout_secs`, or set it to `-1`, for the same result.
 
 ## Before the first tool call
 
@@ -80,6 +96,8 @@ agent.voice_config["filler"] = {
 The line said on the previous turn is avoided when there is another to choose. A language with no entry falls back to a generated first line. Regions are dropped on both sides, so an `"es-ES"` key serves a call configured as `"es"` and the other way round.
 
 The language is the session's configured `language`, not one the speech-to-text provider detects. With `language` unset (auto-detect), only the `"*"` lines are used, so set it per call when callers speak different languages.
+
+A generated filler uses the same reply-language policy as the conversation. A configured `language` pins the phrase. With `language` unset, the phrase follows the user's latest substantive message. See [Reply language](/voice/configuration#reply-language).
 
 Only the session agent's own reply is spoken. An agent it calls as a tool streams its text through the same run, and that text — working notes, a document being drafted — is never read aloud.
 

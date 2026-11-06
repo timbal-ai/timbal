@@ -63,7 +63,7 @@ jobs:
         run: uv sync --dev --extra all
 
       - name: Smoke import (catches platform-specific import errors)
-        run: uv run python -c "import timbal; from timbal.state.tracing.providers import JsonlTracingProvider, InMemoryTracingProvider, PlatformTracingProvider, SqliteTracingProvider; print('ok')"
+        run: uv run python -c "import timbal; import av, numpy; from timbal.state.tracing.providers import JsonlTracingProvider, InMemoryTracingProvider, PlatformTracingProvider, SqliteTracingProvider; print('ok', av.__version__, numpy.__version__)"
 
       - name: Audit models.yaml (offline)
         run: uv run python scripts/audit_models.py --offline

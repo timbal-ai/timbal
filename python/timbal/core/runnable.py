@@ -214,6 +214,10 @@ warning suggesting offload_blocking=True / an async handler. Set to 0 to warn
 on any sync handler; raise it (or set very high) to silence."""
 
 
+# ElevenLabs Agents tool interruption modes. Set on a Tool, or on an Agent or
+# Workflow passed in ``tools``. ``allow`` leaves caller barge-in unchanged.
+InterruptionMode = Literal["allow", "disable_during_tool", "disable_during_tool_and_turn"]
+
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
 ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
@@ -345,6 +349,19 @@ class Runnable(ABC, BaseModel):
     approval_grantable: bool = True
     """Whether a human may remember an approval of this runnable for the rest of
     the session. ``False`` for decisions that must be taken every time."""
+    defer_until_eot: bool = False
+    """Mark a tool that must not run before a voice turn is confirmed.
+
+    Deepgram's ``defer_until_eot`` name, for work that cannot be undone (book,
+    charge, send, hang up). While speculative generation is on, every tool
+    call waits for that confirmation, flagged or not: the handler, its
+    ``pre_hook``, the approval gate, argument guardrails, and default-parameter
+    callables do not start, and a discarded attempt cancels the wait. The flag
+    records the intent (MCP sets it on tools annotated destructive). It does
+    not by itself hold or release a call. With speculative generation off
+    there is no gate, and a turn only starts after EndOfTurn, so tool timing
+    is unchanged.
+    """
 
     schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
@@ -403,6 +420,18 @@ class Runnable(ABC, BaseModel):
     """Optional seconds without log events before a background child is
     cancelled as ``stalled``. Resets on every emitted event. Distinct from
     ``background_timeout`` (wall-clock). ``None`` / non-positive = disabled."""
+
+    interruption_mode: InterruptionMode = "allow"
+    """Whether a voice caller can barge in around this runnable when it is used as a tool.
+
+    ``allow`` (default) interrupts at any time. ``disable_during_tool`` ignores
+    barge-in only while it runs; the spoken reply after it can be interrupted.
+    ``disable_during_tool_and_turn`` also plays that reply through, including the
+    reply after an approval or ``ask_user`` pause. Speech during the protected
+    window is still transcribed and opens the next turn. When several tools run
+    together, the strictest mode applies to that batch. A mode on a tool inside
+    a nested agent applies when that agent is the one on the call.
+    """
 
     background_announce: Literal["when_idle", "silent", "interrupt"] | None = None
     """How this child's completion asks for the session's attention, overriding
@@ -759,7 +788,9 @@ class Runnable(ABC, BaseModel):
         plus a ``value`` key holding the current value. Override in subclasses
         to expose additional construction-time settings.
         """
-        return self._annotate_config({"name": self.name, "description": self.description})
+        return self._annotate_config(
+            {"name": self.name, "description": self.description, "interruption_mode": self.interruption_mode}
+        )
 
     @abstractmethod
     def nest(self, parent_path: str) -> None:
@@ -1995,6 +2026,16 @@ class Runnable(ABC, BaseModel):
             background_handoff=background_handoff,
         )
 
+    def _holds_for_unconfirmed_turn(self, parent_call_id: str | None) -> bool:
+        """Whether this call waits until a speculative voice turn is confirmed.
+
+        False for the root agent, the internal LLM tool, and any call with no
+        speculative gate. See :func:`timbal.core.speculative_gate.holds_for_unconfirmed_turn`.
+        """
+        from .speculative_gate import holds_for_unconfirmed_turn
+
+        return holds_for_unconfirmed_turn(self, parent_call_id)
+
     async def _stream(self, _background_handoff_control: Any = None, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Raw event stream for one runnable execution (internal entry point).
 
@@ -2177,6 +2218,20 @@ class Runnable(ABC, BaseModel):
                 _get_logger().info(start_event.type, **start_event.model_dump())
             yield start_event
             _restore_context()
+
+            # Speculative generation is already inside this call. Pipecat holds
+            # the speculative reply until the turn commits and drops it on
+            # resume; Deepgram's Flux guide says to cancel on TurnResumed
+            # before any tool runs. The root agent and its LLM still run.
+            # Every other call waits here, before input defaults, guardrails,
+            # approval, pre_hook, and the handler. Discard cancels the wait,
+            # so none of those start. No gate (speculation off) skips this.
+            # Audio already held until confirm is untouched.
+            if self._holds_for_unconfirmed_turn(_new_parent_call_id):
+                from .speculative_gate import wait_for_turn_confirmation
+
+                await wait_for_turn_confirmation()
+                _restore_context()
 
             # Before param resolution and pre_hook: a turn refused here must not run either.
             if _new_parent_call_id is None:
