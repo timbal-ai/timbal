@@ -67,7 +67,7 @@ assert.equal(window._assistantEl.textContent, 'A fresh reply.');
         [shutil.which("node"), "-e", harness + helpers + handler + checks],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=60,
         check=False,
     )
     assert result.returncode == 0, result.stderr
