@@ -1140,6 +1140,9 @@ def build_voice_session(
         model=llm_model,
         turn_detector=turn_detector_label,
         vad_endpointing="auto" if vad_endpointing is None else vad_endpointing,
+        min_delay_secs=merged.min_delay_secs,
+        stop_silence_secs=merged.stop_silence_secs,
+        first_flush_min_words=merged.first_flush_min_words,
         direction=direction,
         greeting=(None if greeting is None else ((greeting.text or "")[:80] or "<generated>")),
         user_idle=merged.user_idle is not None,
@@ -1154,6 +1157,12 @@ def build_voice_session(
         session_kwargs["user_idle"] = merged.user_idle
     if merged.tool_beat_secs is not None:
         session_kwargs["tool_beat_secs"] = merged.tool_beat_secs
+    # Always the agent's floors. A caller hello is not in the allowlist, so it
+    # cannot lower them. A custom VadEndpointer instance (Python only) ignores
+    # these and keeps the knobs it was built with.
+    session_kwargs["min_delay_secs"] = merged.min_delay_secs
+    session_kwargs["stop_silence_secs"] = merged.stop_silence_secs
+    session_kwargs["first_flush_min_words"] = merged.first_flush_min_words
     if merged.turn_timeout_secs is not None:
         try:
             session_kwargs["turn_timeout_secs"] = float(merged.turn_timeout_secs)
