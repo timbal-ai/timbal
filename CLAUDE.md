@@ -378,6 +378,12 @@ agent = Agent(model="...", tracing_provider=provider)
   - **No timer:** an ended run, `_closing`, or a run that never saved mid-run (`durability="end"`). `flush()` cancels this loop's timers. A failed keep-alive logs `platform_trace_keepalive_failed`; the timer was already re-armed.
   - **Hosts before monolith#574** derive `timeout` from `created_at` instead: there a run over 30 minutes reads `timeout` while alive, whatever it saves.
 
+### Platform and SQLite storage
+
+- `SqliteTracingProvider`: one connection per file, WAL, `synchronous="NORMAL"` (survives a crash or kill, not a power cut; `"FULL"` opt-in); a `spans` table upserted per span — a save writes the spans new or still running, every span once the root ended — and `runs.spans` still holds the whole trace for ended runs (older rows read too).
+- `PlatformTracingProvider` negotiates per host from response headers: `Accept-Encoding: gzip` → gzip PATCH bodies (`compress=` / `TIMBAL_TRACE_GZIP` force it); `Accept-Patch: application/vnd.timbal.trace-delta+json` → span deltas (`deltas=` forces): mid-run saves carry the finished spans the platform has not acknowledged plus a root header (no memory), the root's end the full root and any span whose content changed since acknowledged; acknowledgement only on success, so a failed save's spans go with the next. A 400/415/422 to either format turns it off for the host and retries as a whole uncompressed trace. Server side: `rfcs/platform-trace-storage.md` (measured: a 40-step run uploads 72.6 MB today, 1.5 MB gzipped, 0.07 MB as gzipped deltas; 82–92 % of a trace is LLM spans repeating their input — content-addressed inputs, RFC step B).
+- `ChatSession` turns on a platform provider default to `durability="buffered"` unless the provider, `TIMBAL_TRACE_DURABILITY` or `ChatSession(durability=)` chose.
+
 ### Exporters
 
 Write-only sinks attached to any provider. Fire after `_store()` completes.
