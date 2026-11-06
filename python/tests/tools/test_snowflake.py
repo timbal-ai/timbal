@@ -20,6 +20,7 @@ from pydantic import SecretStr
 from timbal.errors import CredentialNotAvailable
 from timbal.platform.integrations import Integration
 from timbal.tools.snowflake import (
+    SnowflakeAuth,
     SnowflakeError,
     SnowflakeInsertRows,
     SnowflakeQuery,
@@ -51,10 +52,12 @@ _ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
-def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    sf._JWT_CACHE.clear()
+    if request.node.get_closest_marker("integration"):
+        return
     for var in _ENV_VARS:
         monkeypatch.delenv(var, raising=False)
-    sf._JWT_CACHE.clear()
 
 
 @pytest.fixture(scope="module")
@@ -542,3 +545,146 @@ def test_lazy_export() -> None:
     from timbal.tools import SnowflakeQuery as exported
 
     assert exported is SnowflakeQuery
+
+
+# ---------------------------------------------------------------------------
+# SnowflakeAuth (managed MCP servers)
+# ---------------------------------------------------------------------------
+
+
+def _auth_client(auth: SnowflakeAuth, handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), auth=auth)
+
+
+@pytest.mark.asyncio
+async def test_auth_reuses_one_integration_resolve(rsa_key: rsa.RSAPrivateKey) -> None:
+    integration = MagicMock(spec=Integration)
+    integration.resolve = AsyncMock(return_value={"account": "myorg-acct", "user": "svc", "private_key": _pem(rsa_key)})
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={})
+
+    async with _auth_client(SnowflakeAuth(integration), handler) as client:
+        await client.post("https://myorg-acct.snowflakecomputing.com/api/v2/x/mcp-servers/s", json={})
+        await client.post("https://myorg-acct.snowflakecomputing.com/api/v2/x/mcp-servers/s", json={})
+
+    assert integration.resolve.await_count == 1
+    assert all(r.headers["X-Snowflake-Authorization-Token-Type"] == "KEYPAIR_JWT" for r in seen)
+    claims = jwt.decode(seen[0].headers["Authorization"].split()[1], rsa_key.public_key(), algorithms=["RS256"])
+    assert claims["sub"] == "MYORG-ACCT.SVC"
+
+
+@pytest.mark.asyncio
+async def test_auth_remints_before_jwt_expiry(rsa_key: rsa.RSAPrivateKey, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1_000_000.0]
+    monkeypatch.setattr(sf.time, "time", lambda: now[0])
+    tokens: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tokens.append(request.headers["Authorization"])
+        return httpx.Response(200)
+
+    auth = SnowflakeAuth(account="myorg-acct", user="svc", private_key=_pem(rsa_key))
+    async with _auth_client(auth, handler) as client:
+        await client.get("https://h/api/v2/a")
+        now[0] += 30 * 60
+        await client.get("https://h/api/v2/a")
+        now[0] += 25 * 60
+        await client.get("https://h/api/v2/a")
+
+    assert tokens[0] == tokens[1] != tokens[2]
+
+
+@pytest.mark.asyncio
+async def test_auth_retries_once_on_401(rsa_key: rsa.RSAPrivateKey, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1_000_000.0]
+    monkeypatch.setattr(sf.time, "time", lambda: now[0])
+    tokens: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tokens.append(request.headers["Authorization"])
+        now[0] += 1
+        return httpx.Response(401)
+
+    auth = SnowflakeAuth(account="myorg-acct", user="svc", private_key=_pem(rsa_key))
+    async with _auth_client(auth, handler) as client:
+        response = await client.get("https://h/api/v2/a")
+
+    assert response.status_code == 401
+    assert len(tokens) == 2 and tokens[0] != tokens[1]
+
+
+@pytest.mark.asyncio
+async def test_auth_static_token_has_no_expiry() -> None:
+    seen: list[httpx.Request] = []
+    auth = SnowflakeAuth(account="myorg-acct", programmatic_access_token=SecretStr("pat"))
+    async with _auth_client(auth, lambda r: seen.append(r) or httpx.Response(200)) as client:
+        await client.get("https://h/api/v2/a")
+    assert seen[0].headers["Authorization"] == "Bearer pat"
+    assert seen[0].headers["X-Snowflake-Authorization-Token-Type"] == "PROGRAMMATIC_ACCESS_TOKEN"
+
+
+def test_mcp_server_accepts_auth_but_not_with_service_api() -> None:
+    from timbal.core import MCPServer
+
+    auth = SnowflakeAuth(account="myorg-acct", token="t")
+    server = MCPServer(transport="http", url="https://h/mcp", auth=auth)
+    assert server.auth is auth
+    assert "auth" not in server.model_dump()
+    with pytest.raises(ValueError, match="auth"):
+        MCPServer(transport="http", service="api", auth=auth)
+
+
+# ---------------------------------------------------------------------------
+# Live Snowflake (requires credentials + network; excluded from default pytest)
+# ---------------------------------------------------------------------------
+
+
+def _skip_if_snowflake_live_env_not_set() -> None:
+    import os
+
+    has_auth = any(
+        os.getenv(v)
+        for v in ("SNOWFLAKE_PRIVATE_KEY", "SNOWFLAKE_PRIVATE_KEY_PATH", "SNOWFLAKE_PAT", "SNOWFLAKE_TOKEN")
+    )
+    if not (os.getenv("SNOWFLAKE_ACCOUNT") and has_auth):
+        pytest.skip(
+            "Snowflake live integration: set SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER and SNOWFLAKE_PRIVATE_KEY_PATH "
+            "(or SNOWFLAKE_PAT). Optional: SNOWFLAKE_ROLE, SNOWFLAKE_WAREHOUSE, SNOWFLAKE_MCP_URL."
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_query_context_and_null_binding() -> None:
+    _skip_if_snowflake_live_env_not_set()
+    out = await SnowflakeQuery()(
+        query="SELECT CURRENT_USER() AS u, CURRENT_ROLE() AS r, ? IS NULL AS null_bound, ?::DATE AS d",
+        bindings=[None, "2024-01-01"],
+    ).collect()
+    assert out.status.code == "success", out.error
+    row = out.output["rows"][0]
+    assert row["NULL_BOUND"] is True
+    assert row["D"] == "2024-01-01"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_live_managed_mcp_lists_tools() -> None:
+    import os
+
+    _skip_if_snowflake_live_env_not_set()
+    url = os.getenv("SNOWFLAKE_MCP_URL")
+    if not url:
+        pytest.skip("Set SNOWFLAKE_MCP_URL to a Snowflake-managed MCP server endpoint.")
+
+    from timbal.core import MCPServer
+
+    server = MCPServer(name="snowflake", transport="http", url=url, auth=SnowflakeAuth())
+    try:
+        tools = await server.resolve()
+    finally:
+        await server.close()
+    assert tools, "managed MCP server returned no tools"

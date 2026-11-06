@@ -23,6 +23,9 @@ Integration credentials (type: credentials):
 - host: hostname override (PrivateLink)
 - role, warehouse, database, schema: session defaults
 
+``SnowflakeAuth`` reuses the same credentials for Snowflake-managed MCP servers via
+``MCPServer(..., auth=SnowflakeAuth(...))``.
+
 The Snowflake role is the real permission boundary. ``SnowflakeQuery``'s
 read-only check is a guardrail against an agent picking the wrong tool, not a
 security control; give the service user a role with only the grants it needs.
@@ -41,8 +44,10 @@ import uuid
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any
 
+import httpx
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
@@ -134,7 +139,7 @@ def _parse_account(account: str) -> tuple[str, str]:
     return jwt_account.upper(), f"{host.replace('_', '-')}.snowflakecomputing.com"
 
 
-async def _resolve_connection(tool: Any) -> dict[str, Any]:
+async def _resolve_connection(tool: Any, *, fresh: bool = False) -> dict[str, Any]:
     creds: dict[str, Any] = {}
     if isinstance(getattr(tool, "integration", None), Integration):
         creds = await tool.integration.resolve() or {}
@@ -188,7 +193,7 @@ async def _resolve_connection(tool: Any) -> dict[str, Any]:
     elif private_key:
         if not user:
             raise CredentialNotAvailable("Snowflake", missing=["user"], env_vars=["SNOWFLAKE_USER"])
-        auth = ("KEYPAIR_JWT", _keypair_jwt(jwt_account, user, private_key, passphrase))
+        auth = ("KEYPAIR_JWT", _keypair_jwt(jwt_account, user, private_key, passphrase, fresh=fresh))
     else:
         raise CredentialNotAvailable(
             "Snowflake",
@@ -260,7 +265,7 @@ def _public_key_fingerprint(key: Any) -> str:
     return "SHA256:" + base64.b64encode(hashlib.sha256(der).digest()).decode()
 
 
-def _keypair_jwt(account: str, user: str, private_key: str, passphrase: str | None) -> str:
+def _keypair_jwt(account: str, user: str, private_key: str, passphrase: str | None, *, fresh: bool = False) -> str:
     import jwt
 
     key = _load_private_key(private_key, passphrase)
@@ -270,7 +275,7 @@ def _keypair_jwt(account: str, user: str, private_key: str, passphrase: str | No
 
     now = time.time()
     cached = _JWT_CACHE.get(cache_key)
-    if cached and cached[1] - now > _JWT_REFRESH_MARGIN_SECS:
+    if cached and not fresh and cached[1] - now > _JWT_REFRESH_MARGIN_SECS:
         return cached[0]
 
     issued_at = int(now)
@@ -499,8 +504,6 @@ async def _execute(
     schema: str | None = None,
     warehouse: str | None = None,
 ) -> dict[str, Any]:
-    import httpx
-
     statement = statement.strip()
     if not statement:
         raise ValueError("SQL statement cannot be empty.")
@@ -578,6 +581,90 @@ async def _execute(
     if result.get("stats"):
         out["stats"] = result["stats"]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Snowflake-managed MCP servers
+# ---------------------------------------------------------------------------
+
+
+class SnowflakeAuth(httpx.Auth):
+    """``httpx.Auth`` for Snowflake REST endpoints, e.g. a Snowflake-managed MCP server.
+
+    Resolves credentials exactly like the Snowflake tools (explicit → integration → env)::
+
+        MCPServer(
+            name="snowflake",
+            transport="http",
+            url="https://<account>.snowflakecomputing.com/api/v2/databases/<db>/schemas/<schema>/mcp-servers/<name>",
+            auth=SnowflakeAuth(integration="<org_integration_id>"),
+        )
+
+    The resolved connection is reused across requests; key-pair JWTs are re-minted before
+    they expire and any 401 triggers one fresh resolve + retry, so a long MCP session
+    survives token expiry and credential rotation.
+    """
+
+    def __init__(
+        self,
+        integration: str | Integration | None = None,
+        *,
+        account: str | None = None,
+        user: str | None = None,
+        private_key: str | SecretStr | None = None,
+        private_key_passphrase: str | SecretStr | None = None,
+        token: str | SecretStr | None = None,
+        programmatic_access_token: str | SecretStr | None = None,
+        host: str | None = None,
+    ) -> None:
+        if isinstance(integration, str):
+            integration = Integration("snowflake", integration)
+        self._source = SimpleNamespace(
+            integration=integration,
+            account=account,
+            user=user,
+            private_key=private_key,
+            private_key_passphrase=private_key_passphrase,
+            token=token,
+            programmatic_access_token=programmatic_access_token,
+            host=host,
+            role=None,
+            warehouse=None,
+            database=None,
+            schema_name=None,
+        )
+        self._conn: dict[str, Any] | None = None
+        self._valid_until = 0.0
+        self._lock: asyncio.Lock | None = None
+
+    async def _connection(self, *, fresh: bool = False) -> dict[str, Any]:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if fresh or self._conn is None or time.time() >= self._valid_until:
+                self._conn = await _resolve_connection(self._source, fresh=fresh)
+                self._valid_until = (
+                    time.time() + _JWT_LIFETIME_SECS - _JWT_REFRESH_MARGIN_SECS
+                    if self._conn["token_type"] == "KEYPAIR_JWT"
+                    else float("inf")
+                )
+            return self._conn
+
+    @staticmethod
+    def _apply(request: httpx.Request, conn: dict[str, Any]) -> None:
+        request.headers["Authorization"] = f"Bearer {conn['token']}"
+        request.headers["X-Snowflake-Authorization-Token-Type"] = conn["token_type"]
+        request.headers.setdefault("User-Agent", _USER_AGENT)
+
+    def sync_auth_flow(self, _request: httpx.Request):
+        raise RuntimeError("SnowflakeAuth only supports httpx.AsyncClient.")
+
+    async def async_auth_flow(self, request: httpx.Request):
+        self._apply(request, await self._connection())
+        response = yield request
+        if response.status_code == 401:
+            self._apply(request, await self._connection(fresh=True))
+            yield request
 
 
 # ---------------------------------------------------------------------------
