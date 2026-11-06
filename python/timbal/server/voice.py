@@ -975,7 +975,7 @@ def build_voice_session(
     client_config: dict[str, Any],
     *,
     playback_tracker: Any = None,
-    call_context: dict[str, str] | None = None,
+    call_context: dict[str, Any] | None = None,
     parent_run_id: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Resolve voice config into a ``VoiceSession`` plus ``session_started`` metadata.

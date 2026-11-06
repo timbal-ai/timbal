@@ -7,9 +7,10 @@ testable without the FFI extra.
 
 from __future__ import annotations
 
+import json
 import os
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 import structlog
 
@@ -53,6 +54,9 @@ SIP_ATTR_CALL_ID = "sip.callID"
 SIP_ATTR_PHONE = "sip.phoneNumber"
 SIP_ATTR_TRUNK_PHONE = "sip.trunkPhoneNumber"
 SIP_ATTR_CALL_STATUS = "sip.callStatus"
+# JSON strings the platform sets on outbound lines whose runtime joins LiveKit itself.
+SIP_ATTR_TIMBAL_CALL_CONTEXT = "timbal.call_context"
+SIP_ATTR_TIMBAL_OUTCOME_SCHEMA = "timbal.outcome_schema"
 
 # DTMF RFC 2833 event codes (0-9, *, #, A-D).
 _DTMF_CODES: dict[str, int] = {
@@ -161,22 +165,68 @@ def find_eligible_caller(
     return None
 
 
-def sip_call_context(attributes: dict[str, str] | None) -> dict[str, str]:
-    """Map ``sip.*`` attributes → ``session.call_context`` keys."""
+def _attribute_json(attributes: dict[str, str], name: str) -> dict[str, Any] | None:
+    raw = attributes.get(name)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        logger.warning("livekit_sip_attribute_not_json", attribute=name)
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def platform_call_context(attributes: dict[str, str] | None) -> dict[str, Any]:
+    """The platform's ``timbal.call_context`` attribute (outbound lines), or ``{}``."""
+    return _attribute_json(attributes or {}, SIP_ATTR_TIMBAL_CALL_CONTEXT) or {}
+
+
+def platform_outcome_schema(attributes: dict[str, str] | None) -> dict[str, Any] | None:
+    """The platform's ``timbal.outcome_schema`` attribute, when the call asked for an outcome."""
+    return _attribute_json(attributes or {}, SIP_ATTR_TIMBAL_OUTCOME_SCHEMA)
+
+
+def sip_call_context(attributes: dict[str, str] | None, direction: str | None = None) -> dict[str, Any]:
+    """Map ``sip.*`` attributes → ``session.call_context`` keys.
+
+    LiveKit names its attributes by role: ``sip.phoneNumber`` is the person on
+    the line and ``sip.trunkPhoneNumber`` is our trunk, in both directions.
+    ``user_number`` / ``agent_number`` keep those roles; ``from`` / ``to`` follow
+    the call, so on an outbound call ``from`` is our line.
+
+    The platform's ``timbal.call_context`` attribute (set on outbound lines) is
+    the base and its keys win, so every media path hands the agent the same map.
+    ``direction`` comes from that attribute when present, else the argument,
+    else inbound.
+    """
     if not attributes:
         return {}
-    ctx: dict[str, str] = {}
-    mapping = {
-        SIP_ATTR_CALL_ID: "call_id",
-        SIP_ATTR_PHONE: "from",
-        SIP_ATTR_TRUNK_PHONE: "to",
-        SIP_ATTR_CALL_STATUS: "sip_call_status",
-    }
-    for attr, key in mapping.items():
-        val = attributes.get(attr)
-        if isinstance(val, str) and val:
-            ctx[key] = val
-    return ctx
+    platform = platform_call_context(attributes)
+    resolved = platform.get("direction") or direction or "inbound"
+    ctx: dict[str, Any] = {}
+    call_id = attributes.get(SIP_ATTR_CALL_ID)
+    if isinstance(call_id, str) and call_id:
+        ctx["call_id"] = call_id
+    status = attributes.get(SIP_ATTR_CALL_STATUS)
+    if isinstance(status, str) and status:
+        ctx["sip_call_status"] = status
+    user = attributes.get(SIP_ATTR_PHONE)
+    agent = attributes.get(SIP_ATTR_TRUNK_PHONE)
+    user = user if isinstance(user, str) and user else None
+    agent = agent if isinstance(agent, str) and agent else None
+    if user:
+        ctx["user_number"] = user
+    if agent:
+        ctx["agent_number"] = agent
+    caller, callee = (agent, user) if resolved == "outbound" else (user, agent)
+    if caller:
+        ctx["from"] = caller
+    if callee:
+        ctx["to"] = callee
+    if platform or direction:
+        ctx["direction"] = resolved
+    return {**ctx, **platform}
 
 
 def sip_recording_meta(attributes: dict[str, str] | None) -> dict[str, str]:

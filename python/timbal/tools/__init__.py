@@ -260,6 +260,7 @@ if TYPE_CHECKING:
         FathomListTeamMembers,
         FathomListTeams,
     )
+    from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
     from .freematica import (
         FreematicaCreateCliente,
         FreematicaCreateContactoCliente,
@@ -342,7 +343,6 @@ if TYPE_CHECKING:
         FreematicaListFacturasElectronicas,
         FreematicaListFacturaVencimientos,
     )
-    from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
     from .gemini_images import (
         GeminiImagesAnalyzeImage,
         GeminiImagesEditImage,
@@ -925,6 +925,7 @@ if TYPE_CHECKING:
         WriteOffInvoice,
     )
     from .tavily import TavilyCrawl, TavilyExtract, TavilyMap, TavilySearch
+    from .voice_calls import StartVoiceCall, WaitForVoiceCall
     from .web_search import WebSearch
     from .write import Write
     from .xai import XSearch
@@ -1637,6 +1638,8 @@ __all__ = [
     "ParallelSearch",
     "ParallelExtract",
     "ParallelTaskRun",
+    "StartVoiceCall",
+    "WaitForVoiceCall",
     "WebSearch",
     "Write",
     "XSearch",
@@ -2927,6 +2930,8 @@ _LAZY_IMPORTS = {
     "ParallelSearch": ".parallel",
     "ParallelExtract": ".parallel",
     "ParallelTaskRun": ".parallel",
+    "StartVoiceCall": ".voice_calls",
+    "WaitForVoiceCall": ".voice_calls",
     "WebSearch": ".web_search",
     "Write": ".write",
     "XSearch": ".xai",

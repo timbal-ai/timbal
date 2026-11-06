@@ -1315,6 +1315,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if self._read_offloaded is not None:
             _register(self._read_offloaded)
 
+        if "." not in self._path:
+            from ..voice.call import current_call_control
+
+            call_control = current_call_control(self)
+            report_tool = call_control.report_tool() if call_control is not None else None
+            if report_tool is not None and report_tool.name not in tools_names:
+                report_tool.nest(self._path)
+                _register(report_tool)
+
         store = current_background_store()
         if store is not None and len(store) > 0:
             bg_tools: list[tuple[str, str, Any]] = [

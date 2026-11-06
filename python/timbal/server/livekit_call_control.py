@@ -36,6 +36,7 @@ import structlog
 
 from ..core.tool import Tool
 from ..platform.utils import _request
+from ..voice.call import CallControl
 from .livekit_sip import call_id_from_env, dtmf_code
 
 logger = structlog.get_logger("timbal.server.livekit_call_control")
@@ -62,6 +63,16 @@ class LivekitCallControl:
         self.is_sip = is_sip
         self._call_control_url = call_control_url or _call_control_url()
         self._call_control_token = call_control_token or _call_control_token()
+
+    def outcome_control(self, outcome_schema: dict[str, Any] | None) -> CallControl | None:
+        """Handle for ``report_call_outcome`` when the platform asked this call for an outcome."""
+        if not outcome_schema or not self._call_control_token:
+            return None
+        base = self._call_control_url
+        if not base or not str(self.call_id).strip():
+            return None
+        url = base.format(call_id=self.call_id) if "{call_id}" in base else base
+        return CallControl(url=url, token=self._call_control_token, outcome_schema=outcome_schema)
 
     async def send_dtmf(self, digit: str) -> None:
         """Send one DTMF tone into the room (SIP leg receives it)."""

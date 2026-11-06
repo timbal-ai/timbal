@@ -31,17 +31,30 @@ class InMemoryTracingProvider(TracingProvider):
 
     # Class-level storage: run_id -> Trace
     _storage: dict[str, Trace] = {}
-    
+    _claims: dict[str, str] = {}
+
     @classmethod
     @override
     async def get(cls, run_context: "RunContext") -> Trace | None:
         """See base class."""
         return cls._storage.get(run_context.parent_id)
-    
+
+    @classmethod
+    @override
+    async def claim_approval(cls, parent_id: str | None, approval_id: str, run_id: str) -> bool:
+        """Atomically claim ``(parent_id, approval_id)`` in process memory."""
+        if parent_id is None:
+            return True
+        key = f"{parent_id}:{approval_id}"
+        existing = cls._claims.get(key)
+        if existing is not None:
+            return existing == run_id
+        cls._claims[key] = run_id
+        return True
+
     @classmethod
     @override
     async def _store(cls, run_context: "RunContext") -> None:
         """See base class."""
         run_context._trace.parent_id = run_context.parent_id
         cls._storage[run_context.id] = run_context._trace
-    

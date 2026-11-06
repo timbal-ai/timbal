@@ -23,8 +23,9 @@ from dotenv import load_dotenv
 
 from .. import __version__
 from ..logs import setup_logging
-from ..state import RunContext, set_run_context
+from ..state import set_run_context
 from ..utils import ImportSpec, is_port_in_use
+from ..voice.call import run_context_from_wire
 from .jobs import DEFAULT_READ_LIMIT, JobStore, RunIdInUse
 from .voice import merge_voice_config
 
@@ -205,7 +206,7 @@ def create_app() -> FastAPI:
 
         run_id = None
         if run_context is not None:
-            run_context = RunContext.model_validate(run_context)
+            run_context = run_context_from_wire(run_context)
             set_run_context(run_context)
             run_id = run_context.id
 
@@ -245,7 +246,7 @@ def create_app() -> FastAPI:
 
         run_id = None
         if run_context is not None:
-            run_context = RunContext.model_validate(run_context)
+            run_context = run_context_from_wire(run_context)
             set_run_context(run_context)
             run_id = run_context.id
 
