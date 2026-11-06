@@ -1,123 +1,140 @@
-# Platform trace storage and chat sessions
+# Platform trace storage: smaller saves, smaller traces
 
-Status: proposal. Owners: framework (timbal), platform API (monolith).
+Status: proposal (v2). Owners: framework (timbal) — SDK side; platform API (monolith) — server side.
+Reviewed against monolith `origin/master` `1d3d6b3e` (2026-11-06).
 
 ## Problem
 
-`PlatformTracingProvider` stores a run by sending its whole trace in a `PATCH
-/orgs/{org}/apps/{app}/runs/{run_id}` every time a span finishes. Per request the API
-(`handlers/orgs/apps/runs/edit.rs`, monolith at `03a03bcf`):
+Framework agents store runs through `PlatformTracingProvider`: a `PATCH /orgs/{org}/apps/{app}/runs/{run_id}`
+with the **whole trace** every time a span finishes (`durability="sync"`, the default). Per request
+`handlers/orgs/apps/runs/edit.rs` runs the auth gate, `parse_trace` over the whole trace (status, timing,
+cost; a read-replica query), replaces the JSONB `trace` column of `OrgsAppsVersionsRuns`, and on the
+terminal write runs chat-session ingest and `record_costs`. Composer writes the same shape to
+`PATCH /orgs/{org}/traces/{run_id}` (`Traces`). Every turn's resume `GET`s the parent's whole trace.
 
-1. runs the auth gate query, which also looks the run up by id or idempotency key;
-2. runs `parse_trace` over the whole trace (status, timing, cost; a read-replica query);
-3. replaces the JSONB `trace` column of `OrgsAppsVersionsRuns`;
-4. spawns `record_costs`.
+Measured (one run, sync saves, offline model, 8 tools, `/tmp/e2e/bench_payloads.py`):
 
-A 40-step agent turn makes ~80 saves of a trace that grows to ~0.5 MB (every LLM span carries its
-whole input history), so ~20 MB uploaded, parsed and rewritten in Postgres for one turn. With the
-default `durability="sync"` the turn waits on every one. Request bodies are not compressed (the router
-has no decompression layer).
+| Run | Saves | Final trace | LLM spans' input history | LLM spans' tool schemas | Uploaded per run | Gzipped |
+|---|---|---|---|---|---|---|
+| 40 steps, 2 000-char tool outputs | 82 | 2.3 MB | **82 %** | 7 % | 72.6 MB | 1.52 MB |
+| 40 steps, 200-char tool outputs | 82 | 0.7 MB | **63 %** | 21 % | 25.3 MB | 0.64 MB |
+| 100 steps, 2 000-char tool outputs | 202 | 12.8 MB | **92 %** | 3 % | 927 MB | 16.4 MB |
 
-Durable chat sessions (restart recovery for `ChatSession`) also need a small, mutable, per-session
-record. The API has nowhere to put it: no sessions resource, and app runs cannot be listed or queried
-by metadata.
+Two multiplicative costs:
 
-## Framework changes (done, no API change)
+1. **Every save resends the trace** (quadratic in steps): fixed by span deltas.
+2. **Every LLM span repeats its whole input** (messages + tool schemas — quadratic again, and across turns:
+   the next turn's first call resends the conversation): fixed by content-addressing messages and tool
+   lists. This one also inflates storage and every resume `GET`, which deltas alone do not touch.
 
-- `ChatSession` turns on a platform provider default to `durability="buffered"`: saves during a turn
-  are coalesced to one PATCH per flush interval (0.5 s), the turn's end still waits for its save. An
-  explicit `ChatSession(durability=...)`, a provider that set `durability`, or
-  `TIMBAL_TRACE_DURABILITY` wins.
-- `PlatformTracingProvider.compress` / `TIMBAL_TRACE_GZIP=1`: gzip PATCH bodies
-  (`Content-Encoding: gzip`). Off until the API decompresses requests (phase 1).
+| Design (40 steps, 2 000-char outputs) | Uploaded | Gzipped | Largest body | Stored per run |
+|---|---|---|---|---|
+| Full snapshots (today) | 72.6 MB | 1.52 MB | 2.3 MB | 2.3 MB |
+| Span deltas | 2.4 MB | 0.07 MB | 99 KB | 2.3 MB |
+| Full snapshots + content-addressed inputs | 11.1 MB | 0.31 MB | 261 KB | ~0.3 MB |
+| Span deltas + content-addressed inputs | 0.28 MB | 0.03 MB | 94 KB | ~0.3 MB |
 
-## Phase 1 — small API changes
+## A — Request compression (hours)
 
-### 1a. Request decompression
+- Server: `tower_http::decompression::RequestDecompressionLayer` (gzip, zstd) on the router; advertise it
+  with `Accept-Encoding: gzip, zstd` on responses (RFC 7694 — how a server tells clients which request
+  encodings it takes).
+- SDK (done): `PlatformTracingProvider` compresses `PATCH` bodies once a response from that host
+  advertised it (or `compress=True` / `TIMBAL_TRACE_GZIP=1`); a `415` turns it off for the host and the
+  save is retried uncompressed.
 
-`tower_http::decompression::RequestDecompressionLayer` on the router (gzip, zstd). The SDK then turns
-`compress` on by default once the deployed API advertises it (e.g. `Accept-Encoding` on
-`OPTIONS /runs`, or a version check).
+Upload 48× smaller on today's snapshots. Server work unchanged.
 
-### 1b. Sessions resource
+## B — Content-addressed LLM inputs
+
+An LLM span's `input.messages` and `input.tools` become lists of hashes; the bodies are stored once per
+thread.
+
+```json
+"input": {"model": "...", "system_prompt": {"$ref": "sha256:..."},
+          "messages": [{"$ref": "sha256:a1..."}, {"$ref": "sha256:b2..."}],
+          "tools": {"$ref": "sha256:t9..."}, "max_tokens": 1024}
+```
+
+- Hash = sha256 of the canonical JSON (sorted keys, no whitespace) of the message dict as sent to the
+  router. Not a pointer into agent memory: compaction rewrites memory in place, attachment limits swap in
+  stand-ins per request, steering and tool search change messages and tools per step — the hash names
+  exactly what that call saw.
+- Blobs travel with the save that first uses them (`"blobs": {"sha256:a1...": {...}}`), deduplicated
+  client-side per thread (the SDK remembers which hashes the server acknowledged) and server-side by
+  primary key.
+- Server: `TraceBlobs(org_id, session_id, hash, body jsonb, PRIMARY KEY (org_id, session_id, hash))`,
+  keyed by thread (`session_id` = root run id, already on `Traces`; `group_id`'s root key on app runs), so
+  turn N+1 re-references turn N's history instead of storing it again. Retention follows the thread's.
+- Readers: the UI's LLM-call view and evals/exports resolve `$ref`s (`GET .../runs/{id}?resolve=refs` can
+  inline them for old clients). The framework's own resume reads agent memory, not LLM inputs: unaffected.
+- `format_version` bumps (`Traces.format_version` exists for exactly this); `parse_trace` reads only the
+  root span and usage, unaffected.
+
+## C — Span deltas
 
 ```text
-GET   /orgs/{org}/apps/{app}/sessions/{session_id}        200 {snapshot, version, lease, updated_at} | 404
-PUT   /orgs/{org}/apps/{app}/sessions/{session_id}        body {snapshot}; If-Match: <version> (absent = create)
-                                                           200 {version} | 412 version mismatch | 409 leased by another owner
-POST  /orgs/{org}/apps/{app}/sessions/{session_id}/lease  body {owner, ttl_s}  200 {lease} | 409 held
-DELETE /orgs/{org}/apps/{app}/sessions/{session_id}       204
-GET   /orgs/{org}/apps/{app}/sessions?pending=true        sessions with work pending (eager restore after a deploy)
+PATCH /orgs/{org}/apps/{app}/runs/{run_id}        and   PATCH /orgs/{org}/traces/{run_id}
+Content-Type: application/vnd.timbal.trace-delta+json
+{"parent_id": ..., "rev": ..., "snapshot": 17, "ended": false,
+ "root": {"call_id": ..., "path": ..., "t0": ..., "parent_call_id": null},
+ "spans": [ <finished spans the server has not acknowledged> ],
+ "blobs": { <B, once both ship> }}
 ```
 
 ```sql
-CREATE TABLE public."OrgsAppsSessions" (
-    id            BIGSERIAL PRIMARY KEY,
-    org_app_id    BIGINT NOT NULL REFERENCES public."OrgsApps"(id),
-    session_id    TEXT   NOT NULL,          -- caller-supplied, like a run idempotency key
-    user_id       BIGINT NOT NULL REFERENCES public."Users"(id),
-    snapshot      JSONB  NOT NULL,          -- a few KB: queue, wakes, head run, parked, in-flight run, log tail
-    version       BIGINT NOT NULL DEFAULT 1,
-    head_run_id   BIGINT REFERENCES public."OrgsAppsVersionsRuns"(id),
-    pending       BOOLEAN NOT NULL DEFAULT false,  -- queued messages, wakes, or a turn in flight
-    lease_owner   TEXT,
-    lease_until   TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (org_app_id, session_id)
+CREATE TABLE public."TraceSpans" (
+    org_id   bigint NOT NULL,
+    run_id   text   NOT NULL,   -- Timbal context.id = Traces.run_id = OrgsAppsVersionsRuns.idempotency_key
+    call_id  text   NOT NULL,
+    seq      int    NOT NULL,   -- first-seen order (the trace's order)
+    snapshot bigint NOT NULL,   -- SDK save counter: an older delta never overwrites a newer span
+    span     jsonb  NOT NULL,
+    PRIMARY KEY (org_id, run_id, call_id)
 );
+-- ON CONFLICT (org_id, run_id, call_id) DO UPDATE SET span = EXCLUDED.span, snapshot = EXCLUDED.snapshot
+--   WHERE "TraceSpans".snapshot < EXCLUDED.snapshot
 ```
 
-Authorization mirrors run writes: `projects.runs.write` on the app's project, author-bound (only the
-session's `user_id` reads or writes it; superadmin overrides), scoped credentials capped to the project.
-`PUT` is a compare-and-swap on `version`; a held, unexpired lease by another owner rejects writes.
-Writes are small and few (a send, a turn's start and end), so no batching is needed.
+- Shared by both run tables (keyed by the producer run id), so it works on today's app-run path and
+  survives app runs moving to `Traces`.
+- `ended: false`: upsert spans; create the run row as `running` on the first delta, else bump
+  `updated_at` (the liveness signal `services/traces.rs` already describes). No `parse_trace`, costs,
+  metrics or ingest.
+- `ended: true` (root finished — includes runs parked on approval): upsert, assemble `trace` / `data`
+  from the rows in `seq` order, run today's finalize path unchanged (parse, metrics, chat ingest, costs,
+  titles), delete the rows.
+- `GET` of a run that never ended (its process died) assembles from the rows: what crash recovery reads.
+- Mid-run saves carry finished spans only (immutable once finished) plus a root header without memory.
+  The full root goes with `ended: true`. A span changed after it finished (a background child's real
+  output after the root ended) is resent with a newer `snapshot`.
+- Negotiation: responses carry `Accept-Patch: application/vnd.timbal.trace-delta+json` (RFC 5789); the SDK
+  switches per host once seen, sends full traces otherwise. Old SDKs keep working unchanged.
 
-The SDK side is two classmethods on the provider, shared with SQLite:
-`load_session(session_id) -> SessionSnapshot | None` and
-`save_session(snapshot, expect_version=) -> version`.
+Effect: a save becomes one or two spans; parsing and finalization happen once per run; `sync` becomes
+affordable, so crash recovery sees every finished tool call.
 
-## Phase 2 — span deltas
+## Chat session state (after C)
 
-```text
-PATCH /orgs/{org}/apps/{app}/runs/{run_id}
-Content-Type: application/vnd.timbal.spans+json
-{"parent_id": ..., "rev": ..., "spans": [<changed spans>], "ended": false}
-```
+Durable `ChatSession` needs a small mutable record (queue, wakes, head run, lease). Not a new table: make
+`ChatSession.id` the thread's root run id (= `Traces.session_id` = `Sessions.session_id`) and keep the
+runtime state on the `Sessions` envelope (`runtime jsonb`, `runtime_version`, lease columns), or wherever
+the platform prefers — it must not become a fourth "session" (see SESSIONS_PLAN "Naming collisions").
 
-- Store spans in `OrgsAppsVersionsRunSpans(run_pk, call_id, seq, span JSONB, PRIMARY KEY (run_pk, call_id))`,
-  upserted per request: each save writes the spans that changed (finished since the last save, or still
-  running), not the run.
-- `parse_trace`, the `trace` column, status/cost and `record_costs` run when `ended: true` (and on the
-  timeout sweep for runs that never end). While a run is live, status comes from its root span row.
-- `GET .../runs/{run_id}` assembles the trace from span rows for live runs, the `trace` column for ended
-  ones. The UI's live view reads the same.
-- The SDK sends deltas when the API advertises the content type, whole traces otherwise. It already
-  tracks which spans changed (`SqliteTracingProvider` does the same locally).
+## Order
 
-Effect: a save is one or two spans (KB) instead of the run (hundreds of KB), so `durability="sync"`
-becomes affordable on the platform, and crash recovery sees every finished tool call.
-
-## Phase 3 — LLM span history
-
-Each `<agent>.llm` span stores the full message list it was called with, so a trace grows quadratically
-with its steps. Store a reference instead (`{"memory_ref": <agent call_id>, "upto": n}`) and render the
-input from the agent span's memory. Needs the UI (and evals/exports that read LLM span inputs) to
-resolve the reference. Biggest payload cut; independent of phases 1–2.
-
-## Order and sizing (estimates)
-
-| Phase | Where | Size |
+| Step | Who | Size (estimate) |
 |---|---|---|
-| Framework: buffered chat turns, gzip flag | timbal | done |
-| 1a decompression | monolith | hours |
-| 1b sessions resource | monolith (+ SDK provider methods) | 1–2 days |
-| 2 span deltas | monolith + SDK + UI live view | 3–5 days |
-| 3 LLM span references | SDK + UI + evals | 2–3 days |
+| A server: decompression + `Accept-Encoding` | platform | hours |
+| A SDK: negotiated gzip | framework | done |
+| C SDK: delta sender, fallback to full | framework | in progress |
+| C server: `TraceSpans`, both PATCH paths, GET assembly | platform | 3–5 days |
+| B SDK + server + UI/evals `$ref` resolution | both | 1–2 weeks |
+| Chat session runtime state | platform decision | after C |
 
 ## Open questions
 
-- Is the monolith checkout used here (`03a03bcf`, Sept 23) what production runs?
-- Where do platform-hosted agents run, and is local disk kept across deploys? (Decides whether a
-  platform deployment could ever use the SQLite session store instead of 1b.)
-- Should `ChatSession` be the only buffered default, or every platform run?
+- Where do platform-hosted agents run, and is local disk kept across deploys?
+- Should `durability="buffered"` be the default for every platform run, not only `ChatSession` turns?
+- B: hash the provider-ready message (what was sent) or the Timbal `Message` dump? Proposal: the Timbal
+  dump the LLM span already stores today, so the UI renders what it renders now.

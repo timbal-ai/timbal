@@ -66,6 +66,40 @@ class _Saves:
         self.newest = -1
 
 
+DELTA_MEDIA_TYPE = "application/vnd.timbal.trace-delta+json"
+_DELTA_RUNS_MAX = 2048
+
+
+class _HostCaps:
+    """What a platform host advertised it accepts (learned from its responses)."""
+
+    __slots__ = ("delta", "gzip")
+
+    def __init__(self) -> None:
+        self.gzip = False
+        self.delta = False
+
+    def learn(self, headers) -> None:
+        items = getattr(headers, "items", None)
+        if items is None:
+            return
+        found = {str(name).lower(): value for name, value in items() if isinstance(value, str)}
+        if "gzip" in found.get("accept-encoding", "").lower():
+            self.gzip = True
+        if DELTA_MEDIA_TYPE in found.get("accept-patch", "").lower():
+            self.delta = True
+
+
+class _DeltaRun:
+    """Spans of one run the platform acknowledged, by fingerprint, and the order spans were first seen."""
+
+    __slots__ = ("acked", "seq")
+
+    def __init__(self) -> None:
+        self.acked: dict[str, str] = {}
+        self.seq: dict[str, int] = {}
+
+
 class PlatformTracingProvider(TracingProvider):
     """Platform tracing provider using platform-wide storage.
 
@@ -105,8 +139,17 @@ class PlatformTracingProvider(TracingProvider):
     platform_config: PlatformConfig | None = None
 
     compress: bool | None = None
-    """Gzip each PATCH body (``Content-Encoding: gzip``). Off by default: the API must decompress
-    request bodies first. ``None`` reads ``TIMBAL_TRACE_GZIP``."""
+    """Gzip each PATCH body (``Content-Encoding: gzip``). ``None``: when ``TIMBAL_TRACE_GZIP`` is set, or
+    once the host advertised it (``Accept-Encoding: gzip`` on a response, RFC 7694)."""
+
+    deltas: bool | None = None
+    """Send span deltas instead of whole traces (``Content-Type: application/vnd.timbal.trace-delta+json``):
+    a save carries the finished spans the platform has not acknowledged and a root header; the run's end
+    carries the full root. ``None``: once the host advertised it (``Accept-Patch``, RFC 5789). A host that
+    rejects either format (400/415/422) falls back to whole uncompressed traces for good."""
+
+    _caps: ClassVar[dict[str, _HostCaps]] = {}
+    _delta_runs: ClassVar[OrderedDict[str, _DeltaRun]] = OrderedDict()
 
     # run key -> (monotonic time of the last successful save, the exact PATCH body sent)
     _recent: ClassVar[OrderedDict[str, tuple[float, bytes]]] = OrderedDict()
@@ -189,11 +232,36 @@ class PlatformTracingProvider(TracingProvider):
         stored = json.loads(entry[1])
         return Trace(stored["trace"], parent_id=stored.get("parent_id"))
 
+    @staticmethod
+    def _host_caps(host: str) -> _HostCaps:
+        caps = PlatformTracingProvider._caps.get(host)
+        if caps is None:
+            caps = PlatformTracingProvider._caps[host] = _HostCaps()
+        return caps
+
     @classmethod
-    def _compressing(cls) -> bool:
+    def _compressing(cls, caps: _HostCaps) -> bool:
         if cls.compress is not None:
             return cls.compress
-        return os.environ.get("TIMBAL_TRACE_GZIP", "").strip().lower() in ("1", "true", "yes")
+        if os.environ.get("TIMBAL_TRACE_GZIP", "").strip().lower() in ("1", "true", "yes"):
+            return True
+        return caps.gzip
+
+    @classmethod
+    def _sending_deltas(cls, caps: _HostCaps) -> bool:
+        return cls.deltas if cls.deltas is not None else caps.delta
+
+    @staticmethod
+    def _delta_run(key: str) -> _DeltaRun:
+        runs = PlatformTracingProvider._delta_runs
+        run = runs.get(key)
+        if run is None:
+            run = runs[key] = _DeltaRun()
+            while len(runs) > _DELTA_RUNS_MAX:  # a run whose process died never ends
+                runs.popitem(last=False)
+        else:
+            runs.move_to_end(key)
+        return run
 
     @classmethod
     def _resolve_config(cls, run_context: RunContext):
@@ -249,6 +317,7 @@ class PlatformTracingProvider(TracingProvider):
             path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
         )
         res.raise_for_status()
+        cls._host_caps(platform_config.host).learn(getattr(res, "headers", None))
         res_json = res.json()
         trace = res_json.get("trace")
         if not trace:
@@ -259,31 +328,42 @@ class PlatformTracingProvider(TracingProvider):
     @override
     async def _store(cls, run_context: RunContext) -> None:
         """See base class."""
+        from ....errors import PlatformError
         from ....platform.utils import _request
 
         platform_config = cls._resolve_config(run_context)
         subject = platform_config.subject
         if subject is None:
             raise RuntimeError("PlatformTracingProvider._store requires a subject (org_id + app_id) in platform_config.")
-
-        payload = {"parent_id": run_context.parent_id, "trace": run_context._trace.model_dump()}
         if subject.app_id:
             subject_path = f"apps/{subject.app_id}"
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
-        if subject.rev is not None:
-            payload["rev"] = subject.rev
+
+        caps = cls._host_caps(platform_config.host)
+        key = cls._recent_key(platform_config, subject_path, run_context.id)
+        delta = cls._sending_deltas(caps)
+        # Taken with no await before model_dump(), so numbers follow snapshot order.
+        snapshot = next(PlatformTracingProvider._snapshots)
         # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
         # while the PATCH is in flight. Same encoding httpx applies to json=.
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
-        # Taken with no await since model_dump(), so numbers follow snapshot order.
-        snapshot = next(PlatformTracingProvider._snapshots)
-        key = cls._recent_key(platform_config, subject_path, run_context.id)
+        if delta:
+            body, cache_body, sent = cls._delta_body(run_context, subject.rev, key, snapshot)
+        else:
+            payload = {"parent_id": run_context.parent_id, "trace": run_context._trace.model_dump()}
+            if subject.rev is not None:
+                payload["rev"] = subject.rev
+            body = cache_body = _encode(payload)
+            sent = {}
         saves = PlatformTracingProvider._saving.setdefault(key, _Saves())
         saves.pending[snapshot] = asyncio.get_running_loop().create_future()
-        headers = {"Prefer": "return=minimal", "Content-Type": "application/json"}  # RFC 7240
+        headers = {
+            "Prefer": "return=minimal",  # RFC 7240
+            "Content-Type": DELTA_MEDIA_TYPE if delta else "application/json",
+        }
+        compressed = cls._compressing(caps)
         wire = body
-        if cls._compressing():
+        if compressed:
             wire = gzip.compress(body, compresslevel=5)
             headers["Content-Encoding"] = "gzip"
         try:
@@ -294,8 +374,88 @@ class PlatformTracingProvider(TracingProvider):
                 content=wire,
             )
             res.raise_for_status()
+        except PlatformError as e:
+            cls._remember(key, snapshot, None)
+            rejected_format = getattr(e, "status_code", None) in (400, 415, 422) and (
+                (delta and cls.deltas is None) or (compressed and cls.compress is None)
+            )
+            if not rejected_format:
+                raise
+            # The host took the advertisement back (or a proxy in between does not pass these through):
+            # whole uncompressed traces from now on, starting with this save.
+            caps.delta = caps.delta and not delta
+            caps.gzip = caps.gzip and not compressed
+            logger.warning(
+                "platform_trace_format_rejected",
+                host=platform_config.host,
+                status=e.status_code,
+                deltas=delta,
+                gzip=compressed,
+            )
+            await cls._store(run_context)
+            return
         except BaseException:
             # The write may have landed anyway (timeout after commit): never keep serving the older snapshot.
             cls._remember(key, snapshot, None)
             raise
-        cls._remember(key, snapshot, body)
+        caps.learn(getattr(res, "headers", None))
+        if sent:
+            cls._delta_run(key).acked.update(sent)
+        cls._remember(key, snapshot, cache_body)
+
+    @classmethod
+    def _delta_body(
+        cls, run_context: RunContext, rev: str | None, key: str, snapshot: int
+    ) -> tuple[bytes, bytes | None, dict]:
+        """A delta save: the spans the platform has not acknowledged, and the whole trace once the root ended.
+
+        While the run goes, finished spans only (they no longer change) and a root header; the root's
+        end sends the full root and every span whose content changed since it was acknowledged (a
+        background child's late output). Returns the body, the full-trace body to cache (only once
+        the root ended: that is what the next turn reads back), and the fingerprints sent.
+        """
+        run = cls._delta_run(key)
+        spans = run_context._trace.as_records()
+        root = next((span for span in spans if span.parent_call_id is None), None)
+        ended = root is not None and root.t1 is not None
+        out: list[dict] = []
+        sent: dict[str, str] = {}
+        full: list[dict] = []
+        for span in spans:
+            run.seq.setdefault(span.call_id, len(run.seq))
+            if span is root:
+                continue
+            if not ended and (span.t1 is None or span.call_id in run.acked):
+                continue
+            dumped = span.model_dump()
+            fingerprint = hashlib.blake2b(_encode(dumped), digest_size=16).hexdigest()
+            if ended:
+                full.append(dumped)
+                if run.acked.get(span.call_id) == fingerprint:
+                    continue
+            out.append({**dumped, "seq": run.seq[span.call_id]})
+            if span.t1 is not None:
+                sent[span.call_id] = fingerprint
+        if root is None:
+            root_part = None
+        elif ended:
+            root_part = root.model_dump()
+        else:
+            root_part = {"call_id": root.call_id, "path": root.path, "parent_call_id": None, "t0": root.t0}
+        payload = {
+            "parent_id": run_context.parent_id,
+            "snapshot": snapshot,
+            "ended": ended,
+            "root": root_part,
+            "spans": out,
+        }
+        if rev is not None:
+            payload["rev"] = rev
+        cache_body = None
+        if ended:
+            cache_body = _encode({"parent_id": run_context.parent_id, "trace": [root_part, *full]})
+        return _encode(payload), cache_body, sent
+
+
+def _encode(payload) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False, default=str).encode()
