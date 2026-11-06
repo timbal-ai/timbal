@@ -482,6 +482,39 @@ class TestSingleFlight:
                 await read_back(provider, "some-run")
         assert calls == [None, {"select": "resume"}]
 
+    async def test_every_agent_span_is_in_the_resume_projection(self):
+        """The platform keeps the root and every span with a ``memory`` key: a nested agent cut before it
+        assembled its memory must still be there, or the next turn loses the conversation."""
+        from timbal import Workflow
+
+        gate = asyncio.Event()
+
+        async def slow_prompt() -> str:
+            await gate.wait()
+            return "sys"
+
+        inner = Agent(name="inner", model=TestModel(responses=["hi"]), system_prompt=slow_prompt)
+        flow = Workflow(name="flow").step(inner, prompt="go")
+        server = FakePlatform(advertise=False)
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = CONFIG
+            set_run_context(ctx)
+            running = asyncio.create_task(flow(prompt="go").collect())
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if any(s.path == "flow.inner" for s in ctx._trace.as_records()):
+                    break
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)  # the run settles as cancelled
+            await provider._store(ctx)
+        stored = server.runs[ctx.id]["trace"]
+        projection = [s for s in stored if s["parent_call_id"] is None or "memory" in s]
+        assert [s["path"] for s in projection] == ["flow", "flow.inner"]
+        assert projection[1]["memory"] is None
+        assert all("memory" not in s for s in stored if s["path"] not in ("flow", "flow.inner"))
+
     def test_patch_reads_are_bounded_unless_configured(self, monkeypatch):
         monkeypatch.delenv("TIMBAL_HTTP_READ_TIMEOUT", raising=False)
         assert PlatformTracingProvider._patch_timeout().read == PlatformTracingProvider._patch_read_timeout_s

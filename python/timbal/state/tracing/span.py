@@ -43,7 +43,19 @@ class Span(SlotModel):
         "_extra",
     )
 
-    _FIELDS = ("path", "call_id", "parent_call_id", "t0", "t1", "input", "status", "output", "error", "usage", "metadata")
+    _FIELDS = (
+        "path",
+        "call_id",
+        "parent_call_id",
+        "t0",
+        "t1",
+        "input",
+        "status",
+        "output",
+        "error",
+        "usage",
+        "metadata",
+    )
 
     # pydantic-compat: evals introspect Span.model_fields.keys() to know which
     # names address span properties (includes non-serialized fields).
@@ -155,6 +167,10 @@ class Span(SlotModel):
             data["output"] = self._output_dump
         if hasattr(self, "_memory_dump"):
             data["memory"] = self._memory_dump
+        elif getattr(self.runnable, "_dumps_memory", False):
+            # An agent that has not assembled its memory (yet): the key still marks it as a span resuming
+            # reads, for stores that keep only those (the platform's resume projection).
+            data["memory"] = None
         if hasattr(self, "_session_dump"):
             data["session"] = self._session_dump
         return data
