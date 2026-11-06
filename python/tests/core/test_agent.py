@@ -766,6 +766,21 @@ class TestSynthesizeMissingToolResults:
         assert inline.value["tool_use_id"] == "svu_001"
         assert inline.value["type"] == "web_search_tool_result"
 
+    def test_interrupted_tool_search_gets_tool_search_error(self):
+        agent = _make_agent("anthropic/claude-sonnet-4-6")
+        memory = [
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="srvtoolu_1", name="tool_search_tool_bm25", input={}, is_server_tool_use=True)],
+            )
+        ]
+        agent._synthesize_missing_tool_results(memory)
+        assert memory[0].content[1].value == {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_1",
+            "content": {"type": "tool_search_tool_result_error", "error_code": "unavailable"},
+        }
+
     def test_server_tool_use_non_anthropic_skipped(self):
         """Interrupted server_tool_use on a non-Anthropic provider is skipped (no mutation)."""
         agent = _make_agent("openai/gpt-4o")
