@@ -134,7 +134,7 @@ Run the setup file again **with a new enrollment token** when:
 - The first attempt used a token that had expired, was already used, or belongs to another environment
 - The connector was revoked in Timbal and should come back
 
-The server then registers as a **new** connector. The installer writes the new token into the existing configuration, moves the previous identity aside (`state.json` becomes `state.json.pre-reenroll-<number>`, kept as a backup), and restarts the service. Your connections and other settings are kept. If the server had been connected before, its old connector stays offline in Timbal; revoke it.
+The setup window preselects the environment the server is already connected to, so a new token alone keeps it on the same Timbal environment. The server then registers as a **new** connector. The installer writes the new token into the existing configuration, moves the previous identity aside (`state.json` becomes `state.json.pre-reenroll-<number>`, kept as a backup), and restarts the service. Your connections and other settings are kept. If the server had been connected before, its old connector stays offline in Timbal; revoke it.
 
 ## Uninstall
 

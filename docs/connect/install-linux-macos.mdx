@@ -22,7 +22,7 @@ The script detects the OS and architecture, downloads the connector, verifies it
 | Option | Effect |
 | ------ | ------ |
 | `--token <token>` | Enrollment token. Required on first install. Omit it to upgrade; pass a new one to re-enroll |
-| `--url <wss://...>` | Control plane, if Timbal gave you a non-default one |
+| `--url <wss://...>` | Control plane, if Timbal gave you a non-default one. On an existing install it defaults to the one the server is configured for |
 | `--version <vX.Y.Z>` | Pin a connector version (default `latest`) |
 
 Then add your databases and file shares: [Configure connections](/connect/connections).
@@ -76,7 +76,7 @@ The connector normally updates itself when Timbal pushes a new version. To upgra
 
 ## Re-enroll
 
-If the first attempt used an expired or already-used token, or the connector was revoked in Timbal, re-run the install command with a **new** `--token`. The server registers as a new connector: the token is written into the existing configuration, the previous identity is moved aside (`state.json.pre-reenroll-<number>`, kept as a backup) and the service restarts. Connections and other settings are kept. Revoke the old connector if it had been connected before.
+If the first attempt used an expired or already-used token, or the connector was revoked in Timbal, re-run the install command with a **new** `--token`. Without `--url`, the server stays on the Timbal environment it is configured for. The server registers as a new connector: the token is written into the existing configuration, the previous identity is moved aside (`state.json.pre-reenroll-<number>`, kept as a backup) and the service restarts. Connections and other settings are kept. Revoke the old connector if it had been connected before.
 
 ## Uninstall
 
