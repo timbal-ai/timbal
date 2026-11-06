@@ -2,6 +2,7 @@
 
 import pytest
 from timbal.core.memory_compaction import (
+    _EARLIER_CONVERSATION_NOTE,
     _SUMMARY_MARKER,
     _format_message_for_summary,
     _remove_orphaned_tool_parts,
@@ -396,12 +397,14 @@ class TestKeepLastNMessages:
         ]
         compactor = keep_last_n_messages(2)
         result = compactor(memory)
-        assert len(result) == 1
-        assert result[0].role == "assistant"
-        assert result[0].content[0].text == "end"
+        # The orphaned tool result is gone. What remains opens on assistant, so a user note
+        # is prepended (providers that require a leading user turn).
+        assert [m.role for m in result] == ["user", "assistant"]
+        assert result[0].collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert result[1].content[0].text == "end"
 
     def test_removes_orphaned_tool_result_when_truncating(self) -> None:
-        """When we cut before tool_use, the tool_result becomes orphaned and is removed."""
+        """A tool pair kept inside the window stays intact and is preceded by a user note."""
         memory = [
             _msg_user("1"),
             _msg_user("2"),
@@ -410,7 +413,11 @@ class TestKeepLastNMessages:
         ]
         compactor = keep_last_n_messages(2)
         result = compactor(memory)
-        assert len(result) == 2
+        # The tool pair is inside the window and stays intact. It opens the transcript, so a
+        # user note is prepended ahead of it.
+        assert [m.role for m in result] == ["user", "assistant", "tool"]
+        assert result[0].collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert result[2].content[0].content[0].text == "r"
 
     def test_removes_orphaned_tool_use_when_truncating(self) -> None:
         """When we cut before tool_result, the tool_use becomes orphaned and is removed."""
@@ -425,6 +432,40 @@ class TestKeepLastNMessages:
         assert len(result) == 2
         assert result[0].content[0].text == "3"
         assert result[1].content[0].text == "4"
+
+    def test_short_assistant_first_memory_gets_a_user_opening(self) -> None:
+        """A transcript that already fits is not trimmed, but it must still open on a user."""
+        memory = [_msg_assistant_text("only assistant")]
+        result = keep_last_n_messages(5)(memory)
+        assert [m.role for m in result] == ["user", "assistant"]
+        assert result[0].collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert result[1].content[0].text == "only assistant"
+
+    def test_leading_system_messages_stay_ahead_of_the_opening_note(self) -> None:
+        """System messages stay first, as in summarize. The note follows them when the
+        conversation itself would open on assistant."""
+        memory = [
+            _msg_system("rules"),
+            _msg_user("old"),
+            _msg_assistant_text("old reply"),
+            _msg_system("still"),
+            _msg_assistant_text("kept reply"),
+        ]
+        result = keep_last_n_messages(2)(memory)
+        assert [m.role for m in result] == ["system", "user", "assistant"]
+        assert result[0].collect_text() == "still"
+        assert result[1].collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert result[2].collect_text() == "kept reply"
+
+        already_user = [
+            _msg_user("old"),
+            _msg_assistant_text("old"),
+            _msg_system("rules"),
+            _msg_user("new"),
+        ]
+        kept = keep_last_n_messages(2)(already_user)
+        assert [m.role for m in kept] == ["system", "user"]
+        assert kept[1].collect_text() == "new"
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +520,10 @@ class TestKeepLastNTurns:
         memory = [_msg_assistant_text("only assistant")]
         compactor = keep_last_n_turns(2)
         result = compactor(memory)
-        assert len(result) == 1
+        # Nothing is dropped, but an assistant-first transcript still gets a user opening.
+        assert [m.role for m in result] == ["user", "assistant"]
+        assert result[0].collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert result[1].content[0].text == "only assistant"
 
     def test_runtime_notice_does_not_count_as_turn_but_stays_with_user(self) -> None:
         memory = [
@@ -499,6 +543,28 @@ class TestKeepLastNTurns:
             "reply3",
         ]
         assert result[0].is_runtime()
+
+    def test_pinned_pairs_stay_ahead_of_the_runtime_notice(self) -> None:
+        """A pinned pair from an older turn stays before the runtime notice + user, and
+        the transcript still opens with the user note rather than the tool call."""
+        memory = [
+            _msg_user("q1"),
+            _msg_assistant_tool("P", name="read_skill"),
+            _msg_tool_pinned("P", result_text="SKILL DOC BODY"),
+            _msg_assistant_text("a1"),
+            _msg_runtime("notice"),
+            _msg_user("q2"),
+            _msg_assistant_text("a2"),
+        ]
+        result = keep_last_n_turns(1)(memory)
+        assert [m.role for m in result] == ["user", "assistant", "tool", "user", "user", "assistant"]
+        assert result[0].collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert result[1].content[0].id == "P"
+        assert result[2].content[0].content[0].text == "SKILL DOC BODY"
+        assert result[3].is_runtime()
+        assert result[3].collect_text() == "notice"
+        assert result[4].collect_text() == "q2"
+        assert result[5].collect_text() == "a2"
 
 
 # ---------------------------------------------------------------------------
@@ -1000,7 +1066,10 @@ class TestComposition:
         ]
         compacted = compact_tool_results(replacement="[{tool_name}]")(memory)
         compacted = keep_last_n_messages(3)(compacted)
-        assert len(compacted) == 3
+        # The kept window opens on the previous turn's assistant reply.
+        assert [m.role for m in compacted] == ["user", "assistant", "user", "assistant"]
+        assert compacted[0].collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert [m.collect_text() for m in compacted[1:]] == ["Done.", "2", "ok"]
 
 
 # ---------------------------------------------------------------------------
@@ -1233,6 +1302,7 @@ class TestPinnedResults:
         # Keep only the last 2 messages; the pinned pair is far earlier but must be hoisted in.
         result = keep_last_n_messages(2)(self._memory())
         self._assert_pinned_pair_intact(result)
+        assert result[0].role == "user"
         # Order preserved: pinned tool_use precedes its result.
         idx_use = next(
             i
@@ -1253,8 +1323,131 @@ class TestPinnedResults:
         # Keep only the last turn (after the 2nd user message); pinned pair is in the 1st turn.
         result = keep_last_n_turns(1)(self._memory())
         self._assert_pinned_pair_intact(result)
+        assert result[0].role == "user"
         assert _has_id(result, "B", "tool", ToolResultContent)  # last turn kept
         assert not _has_id(result, "A", "tool", ToolResultContent)  # earlier turn dropped
+
+    def test_older_pinned_pairs_open_with_user_and_stay_in_order(self) -> None:
+        """Pinned pairs from turns outside the window must not lead the transcript.
+
+        Both keep-last compactors insert ``(earlier conversation)`` ahead of those
+        pairs and leave them before the first kept user message (issue #257). Moving
+        the pairs to after that message would change their order relative to the
+        question. A second pass does not stack another note.
+        """
+        memory = [
+            _msg_user("q1"),
+            _msg_assistant_tool("P1", name="read_skill"),
+            _msg_tool_pinned("P1", result_text="SKILL ONE"),
+            _msg_assistant_tool("P2", name="read_skill"),
+            _msg_tool_pinned("P2", result_text="SKILL TWO"),
+            _msg_assistant_text("answered q1"),
+            _msg_user("q2"),
+            _msg_assistant_text("answered q2"),
+            _msg_user("q3"),
+            _msg_assistant_text("answered q3"),
+        ]
+        expected_roles = ["user", "assistant", "tool", "assistant", "tool", "user", "assistant"]
+        for compactor in (keep_last_n_turns(1), keep_last_n_messages(2)):
+            result = compactor(memory)
+            assert result[0].role == "user"
+            assert [m.role for m in result] == expected_roles
+            assert result[0].collect_text() == _EARLIER_CONVERSATION_NOTE
+            assert result[5].collect_text() == "q3"
+            assert result[6].collect_text() == "answered q3"
+            assert [m.content[0].id for m in result[1:5]] == ["P1", "P1", "P2", "P2"]
+            assert [m.content[0].content[0].text for m in result if m.role == "tool"] == ["SKILL ONE", "SKILL TWO"]
+            # q1 and q2 are gone; the note did not take their place in the kept tail.
+            assert [m.collect_text() for m in result if m.role == "user"] == [_EARLIER_CONVERSATION_NOTE, "q3"]
+            again = compactor(result)
+            assert [m.collect_text() for m in again if m.role == "user"] == [_EARLIER_CONVERSATION_NOTE, "q3"]
+            assert sum(m.collect_text() == _EARLIER_CONVERSATION_NOTE for m in again) == 1
+
+        # Pinned pair already inside the kept turn: the turn opens on its user message.
+        inside = [
+            _msg_user("q1"),
+            _msg_assistant_text("a1"),
+            _msg_user("q2"),
+            _msg_assistant_tool("P", name="read_skill"),
+            _msg_tool_pinned("P", result_text="SKILL DOC BODY"),
+            _msg_assistant_text("a2"),
+        ]
+        kept_turn = keep_last_n_turns(1)(inside)
+        assert [m.role for m in kept_turn] == ["user", "assistant", "tool", "assistant"]
+        assert kept_turn[0].collect_text() == "q2"
+        assert kept_turn[1].content[0].id == "P"
+        assert kept_turn[2].content[0].content[0].text == "SKILL DOC BODY"
+        assert kept_turn[3].collect_text() == "a2"
+        assert _EARLIER_CONVERSATION_NOTE not in [m.collect_text() for m in kept_turn]
+
+    def test_compaction_note_is_runtime_and_does_not_consume_a_turn(self) -> None:
+        """The opening note is a runtime message, so it is not one of the n real turns."""
+        opened = keep_last_n_turns(1)(
+            [
+                _msg_user("q1"),
+                _msg_assistant_tool("P", name="read_skill"),
+                _msg_tool_pinned("P", result_text="SKILL"),
+                _msg_assistant_text("a1"),
+                _msg_user("q2"),
+                _msg_assistant_text("a2"),
+            ]
+        )
+        note = opened[0]
+        assert note.role == "user"
+        assert note.is_runtime()
+        assert note.collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert note.metadata["source"] == "runtime"
+        assert note.metadata["kind"] == "compaction_note"
+
+        # note + pinned pair + q2, then q3 and q4. keep 2 must retain q3 and q4.
+        # A plain user note would be reinserted and show up as another user utterance.
+        continued = opened + [
+            _msg_user("q3"),
+            _msg_assistant_text("a3"),
+            _msg_user("q4"),
+            _msg_assistant_text("a4"),
+        ]
+        result = keep_last_n_turns(2)(continued)
+        real_users = [m.collect_text() for m in result if m.role == "user" and not m.is_runtime()]
+        assert real_users == ["q3", "q4"]
+        notes = [m for m in result if m.collect_text() == _EARLIER_CONVERSATION_NOTE]
+        assert len(notes) == 1
+        assert notes[0].is_runtime()
+        # The pinned pair from the dropped turn stays ahead of q3, behind the note.
+        assert result[0].is_runtime()
+        assert result[1].content[0].id == "P"
+        assert result[3].collect_text() == "q3"
+
+    @pytest.mark.asyncio
+    async def test_summarize_omits_compaction_note_from_verbatim_users(self) -> None:
+        """Once the note falls into the summarized region it is not 'the user's words'."""
+        from timbal.core.memory_compaction import _VERBATIM_MARKER
+
+        note = keep_last_n_turns(1)(
+            [
+                _msg_user("q1"),
+                _msg_assistant_tool("P", name="read_skill"),
+                _msg_tool_pinned("P", result_text="SKILL"),
+                _msg_user("q2"),
+            ]
+        )[0]
+        assert note.is_runtime()
+        memory = [
+            note,
+            _msg_user("remember this"),
+            _msg_assistant_text("ok"),
+            _msg_user("and this"),
+            _msg_assistant_text("ok2"),
+            _msg_user("latest"),
+            _msg_assistant_text("done"),
+        ]
+        compactor = summarize(threshold=3, keep_last_n=2, model=TestModel(responses=["Summary text."]))
+        result = await compactor(memory)
+        text = result[0].collect_text()
+        verbatim = text.split(_VERBATIM_MARKER, 1)[1]
+        assert "remember this" in verbatim
+        assert "and this" in verbatim
+        assert _EARLIER_CONVERSATION_NOTE not in verbatim
 
     @pytest.mark.asyncio
     async def test_summarize_keeps_pinned_verbatim(self) -> None:
@@ -1322,6 +1515,7 @@ class TestPinnedResults:
         # Keep only the last message; the pinned half of the old parallel batch is hoisted back,
         # the unpinned sibling is dropped as an orphan, and alternation holds.
         result = keep_last_n_messages(1)(self._parallel_batch_memory())
+        assert result[0].role == "user"
         assert _has_id(result, "P", "assistant", ToolUseContent)
         assert _has_id(result, "P", "tool", ToolResultContent)
         assert not _has_id(result, "Q", "assistant", ToolUseContent)

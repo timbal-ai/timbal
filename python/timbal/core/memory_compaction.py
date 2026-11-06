@@ -14,7 +14,7 @@ import structlog
 from uuid_extensions import uuid7
 
 from ..types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
-from ..types.message import Message
+from ..types.message import RUNTIME_SOURCE, Message
 from .tool_result_offload import read_offloaded_call
 
 logger = structlog.get_logger("timbal.core.memory_compaction")
@@ -36,6 +36,11 @@ _VERBATIM_MARKER = "[Verbatim User Messages]"
 _TRANSCRIPT_MARKER = "[Compacted Transcripts]"
 _NOTE_MARKER = "[Note]"
 _REHYDRATED_MARKER = "[Rehydrated Context]"
+# Opening note for a windowed transcript that would otherwise start on assistant/tool.
+# ``summarize`` gets the same guarantee by injecting its summary as a user message.
+# Tagged runtime so it is not a turn boundary and not "the user's own words".
+_EARLIER_CONVERSATION_NOTE = "(earlier conversation)"
+_COMPACTION_NOTE_KIND = "compaction_note"
 _SECTION_MARKERS = (_SUMMARY_MARKER, _VERBATIM_MARKER, _TRANSCRIPT_MARKER, _NOTE_MARKER, _REHYDRATED_MARKER)
 _VERBATIM_SEPARATOR = "\n----8<----\n"
 _VERBATIM_HEADER = "The user's own messages from the compacted region, verbatim, oldest first:"
@@ -95,6 +100,41 @@ def _pinned_protected_indices(memory: list[Message]) -> set[int]:
             if any(isinstance(c, ToolUseContent) and c.id in pinned_ids for c in msg.content):
                 keep.add(i)
     return keep
+
+
+def _ensure_opens_with_user(memory: list[Message]) -> list[Message]:
+    """Return ``memory`` with a leading user message when the conversation does not open on one.
+
+    ``summarize`` always opens the non-system region with a user message (the summary).
+    Positional compactors can drop that opening user turn and still retain pinned tool
+    pairs from before it, so the transcript starts on an assistant ``tool_use``. Providers
+    that expect a leading user turn then treat the request differently (one production
+    path dropped ``cache_control`` and billed the prefix uncached). Insert a short user
+    note ahead of those pairs. Do not move them to after the first kept user message:
+    that would change their order relative to the question.
+
+    Leading system messages stay in front, matching ``summarize``. A transcript that
+    already opens on a user message (including after that system prefix) is unchanged.
+
+    The note is role ``user`` — that is what providers see — and ``source="runtime"``
+    so turn windows, verbatim user sections, and transcripts do not treat it as a
+    human utterance. Metadata is not sent on the wire.
+    """
+    if not memory or memory[0].role == "user":
+        return memory
+    insert_at = 0
+    while insert_at < len(memory) and memory[insert_at].role == "system":
+        insert_at += 1
+    if insert_at == len(memory) or memory[insert_at].role == "user":
+        return memory
+    note = Message.validate(
+        {
+            "role": "user",
+            "content": _EARLIER_CONVERSATION_NOTE,
+            "metadata": {"source": RUNTIME_SOURCE, "kind": _COMPACTION_NOTE_KIND},
+        }
+    )
+    return [*memory[:insert_at], note, *memory[insert_at:]]
 
 
 def _remove_orphaned_tool_parts(memory: list[Message]) -> list[Message]:
@@ -557,6 +597,15 @@ def keep_last_n_messages(n: int) -> Callable[[list[Message]], list[Message]]:
     would cut a tool call sequence, removes the orphaned part (tool_result without
     tool_use, or tool_use without tool_result).
 
+    Pinned tool results (and their paired tool_use) outside the window are kept in
+    original order. If the conversation would then open on a non-user message, a
+    short user note ``"(earlier conversation)"`` is inserted there — the same opening
+    guarantee ``summarize`` gets from its user-role summary. The note is a runtime
+    message, so it is not counted as a turn and is not treated as the user's words.
+    Leading system messages stay in front of the note. The pinned pairs are not moved
+    to after the first kept user message. Messages that already fit in ``n`` are not
+    dropped; only a missing user opening is repaired.
+
     Args:
         n: Maximum number of messages to retain.
 
@@ -566,11 +615,13 @@ def keep_last_n_messages(n: int) -> Callable[[list[Message]], list[Message]]:
 
     def _compact(memory: list[Message]) -> list[Message]:
         if len(memory) <= n:
-            return _remove_orphaned_tool_parts(memory)
-        # Keep the last n messages, plus any pinned messages (and their paired tool_use) that
-        # fell outside the window — "last n PLUS pinned". Order is preserved.
-        keep = set(range(len(memory) - n, len(memory))) | _pinned_protected_indices(memory)
-        return _remove_orphaned_tool_parts([memory[i] for i in sorted(keep)])
+            compacted = _remove_orphaned_tool_parts(memory)
+        else:
+            # Keep the last n messages, plus any pinned messages (and their paired tool_use) that
+            # fell outside the window — "last n PLUS pinned". Order is preserved.
+            keep = set(range(len(memory) - n, len(memory))) | _pinned_protected_indices(memory)
+            compacted = _remove_orphaned_tool_parts([memory[i] for i in sorted(keep)])
+        return _ensure_opens_with_user(compacted)
 
     return _compact
 
@@ -580,6 +631,15 @@ def keep_last_n_turns(n: int) -> Callable[[list[Message]], list[Message]]:
 
     A turn starts with a user message and includes all messages until the next
     user message (assistant, tool calls, etc.). Structure-aware.
+
+    Pinned tool results (and their paired tool_use) from earlier turns are kept in
+    original order. If the conversation would then open on a non-user message, a
+    short user note ``"(earlier conversation)"`` is inserted there — the same opening
+    guarantee ``summarize`` gets from its user-role summary. The note is a runtime
+    message, so it is not counted as a turn and is not treated as the user's words.
+    Leading system messages stay in front of the note. The pinned pairs are not moved
+    to after the first kept user message. Turns that already fit in ``n`` are not
+    dropped; only a missing user opening is repaired.
 
     Args:
         n: Maximum number of turns to retain.
@@ -595,16 +655,18 @@ def keep_last_n_turns(n: int) -> Callable[[list[Message]], list[Message]]:
         # for the LLM wire but must not count as turn boundaries.
         user_indices = [i for i, m in enumerate(memory) if m.role == "user" and not m.is_runtime()]
         if len(user_indices) <= n:
-            return _remove_orphaned_tool_parts(memory)
-        start = user_indices[-n]
-        # Pull contiguous runtime notices that sit immediately before the first kept
-        # human user message so [...notice, user...] stays intact.
-        while start > 0 and memory[start - 1].is_runtime():
-            start -= 1
-        # Keep the last n turns, plus any pinned messages (and their paired tool_use) from
-        # earlier turns. Order is preserved.
-        keep = set(range(start, len(memory))) | _pinned_protected_indices(memory)
-        return _remove_orphaned_tool_parts([memory[i] for i in sorted(keep)])
+            compacted = _remove_orphaned_tool_parts(memory)
+        else:
+            start = user_indices[-n]
+            # Pull contiguous runtime notices that sit immediately before the first kept
+            # human user message so [...notice, user...] stays intact.
+            while start > 0 and memory[start - 1].is_runtime():
+                start -= 1
+            # Keep the last n turns, plus any pinned messages (and their paired tool_use) from
+            # earlier turns. Order is preserved.
+            keep = set(range(start, len(memory))) | _pinned_protected_indices(memory)
+            compacted = _remove_orphaned_tool_parts([memory[i] for i in sorted(keep)])
+        return _ensure_opens_with_user(compacted)
 
     return _compact
 
