@@ -514,3 +514,61 @@ voice_config = {
 ```
 
 The hang-up tool has to await `session.commit_hangup()` and treat a false result as "do not hang up". `session.end_call()` alone still only delays teardown after the tool has already run. No new dependencies.
+
+Set `language` to the conversation language. See wave 5. `"en"` for an English line, `"es"` for a Spanish-first line. Leave it unset only when the caller may switch and the reply should follow the latest substantive message. A soft "reply in the caller's language" in the agent prompt does not do this.
+
+## Wave 5 — reply language
+
+PR #252 is on this branch. The pin cannot be turned off while `language` is set, and leaving `language` unset still installs the match-latest instruction, so a same-branch "no pin" cell does not exist. The before column is wave 2, Flux × `gpt-5.4-mini`, the recommended ship config, which already sent the STT hint and did not pin the reply. Main-default wave 2 is in parentheses; the ship config did not move these cells. The after column is wave-4 ship (`hangup_grace_secs=1.2`, `entity_patience`, soft timeout 0.8 s) plus the pin. n=10, 60 rows, 0 transport errors, `benchmarks/voice/242-results/runs-wave5-language.jsonl`. Hang-up, entity patience, and the soft timeout were not re-run live. The wave-4 counts still stand. `test_end_call` and `test_entity_patience` passed on the merged tree.
+
+`language` on the after cell: `en` for the English lines, `es` for the code-switch, unset for English after a Spanish greeting (that cell is the match-latest case).
+
+### English lines answered in Spanish
+
+A miss is an English commit whose scored reply is Spanish. `unk` is not a miss. One warranty apology scored `unk` ("Sorry, I couldn't check that warranty just now, it timed out.") and is English.
+
+| Scenario | Wave 2 main | Wave 2 ship | Wave 5 pin |
+| --- | ---: | ---: | ---: |
+| Clean phone English | 6/10 | 7/10 | 0/10 |
+| Fast English | 9/10 | 10/10 | 0/10 |
+| Warranty tool | 9/10 | 10/10 | 0/10 |
+| Short English control | 1/10 | 0/10 | 0/10 |
+| **Those four** | **25/40** | **27/40** | **0/40** |
+
+The Spanish-reply rate on these lines is fixed with `language="en"`.
+
+### English after a Spanish greeting
+
+Wave 2 set `language="es"` because the opener is Spanish. Flux committed only the tail `in English, please.` on 10/10 (main) and 9/9 (ship; one row missing) and the model answered that fragment in English. Wave 5 leaves `language` unset, so Flux gets no `language_hint`.
+
+| | Tail only | Full sentence committed | English reply |
+| --- | ---: | ---: | ---: |
+| Wave 2 ship | 9/9 | 0/9 | 9/9 |
+| Wave 5 unset | 0/10 | 10/10 | 10/10 |
+
+Every after commit is `I need the return window in English, please.` The sticky `es` hint was the truncation. Do not pin `es` on a call that has to accept an English caller after a Spanish opener. Unset follows the English utterance. Pin `en` when the conversation is English from the start.
+
+### Code-switch
+
+Spanish sentence with English words (`refund`, `order`, `please`), `language="es"`.
+
+| | Spanish reply | Read-back miss |
+| --- | ---: | ---: |
+| Wave 2 ship | 10/10 | 5/10 |
+| Wave 5 pin `es` | 10/10 | 2/10 |
+
+The reply stays Spanish. Two after replies never said 4821. That is the model skipping the order id, not a language switch.
+
+### What to set
+
+```python
+voice_config = {
+    "language": "en",  # or "es" for a Spanish-first line; omit to follow the latest substantive message
+    "ignore_backchannels": True,
+    "speculative_generation": {"enabled": True, "preemptive_tts": True},
+    "max_tts_pause_secs": 0.2,
+    "filler": {"enabled": True, "soft_timeout_secs": 0.8, "message": "One moment."},
+    "hangup_grace_secs": 1.2,
+    "entity_patience": True,
+}
+```
