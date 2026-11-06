@@ -238,7 +238,7 @@ Import strategies from `timbal.core.memory_compaction`.
 
 Keeps only the last `n` user/assistant turn pairs. Structure-aware: never leaves orphaned tool calls or results.
 
-If the compacted conversation would open on a non-user message — typically pinned tool pairs kept from outside the window — a short user note `(earlier conversation)` is inserted after any leading system messages. That is the same opening shape as `summarize`, which leads with a user-role summary.
+If the compacted conversation would open on a non-user message — typically pinned tool pairs kept from outside the window — a short user note `(earlier conversation)` is inserted after any leading system messages. That is the same opening shape as `summarize`, which leads with a user-role summary. The note is a runtime message: it is not counted as a turn, and it is not treated as something the user wrote.
 
 ```python
 from timbal.core.memory_compaction import keep_last_n_turns
@@ -254,7 +254,7 @@ agent = Agent(
 
 Keeps only the last `n` messages regardless of role. Also structure-aware.
 
-If the compacted conversation would open on a non-user message — typically pinned tool pairs kept from outside the window — a short user note `(earlier conversation)` is inserted after any leading system messages. That is the same opening shape as `summarize`, which leads with a user-role summary.
+If the compacted conversation would open on a non-user message — typically pinned tool pairs kept from outside the window — a short user note `(earlier conversation)` is inserted after any leading system messages. That is the same opening shape as `summarize`, which leads with a user-role summary. The note is a runtime message: it is not counted as a turn, and it is not treated as something the user wrote.
 
 ```python
 from timbal.core.memory_compaction import keep_last_n_messages

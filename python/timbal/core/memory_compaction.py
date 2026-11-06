@@ -14,7 +14,7 @@ import structlog
 from uuid_extensions import uuid7
 
 from ..types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
-from ..types.message import Message
+from ..types.message import RUNTIME_SOURCE, Message
 from .tool_result_offload import read_offloaded_call
 
 logger = structlog.get_logger("timbal.core.memory_compaction")
@@ -38,7 +38,9 @@ _NOTE_MARKER = "[Note]"
 _REHYDRATED_MARKER = "[Rehydrated Context]"
 # Opening note for a windowed transcript that would otherwise start on assistant/tool.
 # ``summarize`` gets the same guarantee by injecting its summary as a user message.
+# Tagged runtime so it is not a turn boundary and not "the user's own words".
 _EARLIER_CONVERSATION_NOTE = "(earlier conversation)"
+_COMPACTION_NOTE_KIND = "compaction_note"
 _SECTION_MARKERS = (_SUMMARY_MARKER, _VERBATIM_MARKER, _TRANSCRIPT_MARKER, _NOTE_MARKER, _REHYDRATED_MARKER)
 _VERBATIM_SEPARATOR = "\n----8<----\n"
 _VERBATIM_HEADER = "The user's own messages from the compacted region, verbatim, oldest first:"
@@ -113,6 +115,10 @@ def _ensure_opens_with_user(memory: list[Message]) -> list[Message]:
 
     Leading system messages stay in front, matching ``summarize``. A transcript that
     already opens on a user message (including after that system prefix) is unchanged.
+
+    The note is role ``user`` — that is what providers see — and ``source="runtime"``
+    so turn windows, verbatim user sections, and transcripts do not treat it as a
+    human utterance. Metadata is not sent on the wire.
     """
     if not memory or memory[0].role == "user":
         return memory
@@ -121,7 +127,13 @@ def _ensure_opens_with_user(memory: list[Message]) -> list[Message]:
         insert_at += 1
     if insert_at == len(memory) or memory[insert_at].role == "user":
         return memory
-    note = Message.validate({"role": "user", "content": _EARLIER_CONVERSATION_NOTE})
+    note = Message.validate(
+        {
+            "role": "user",
+            "content": _EARLIER_CONVERSATION_NOTE,
+            "metadata": {"source": RUNTIME_SOURCE, "kind": _COMPACTION_NOTE_KIND},
+        }
+    )
     return [*memory[:insert_at], note, *memory[insert_at:]]
 
 
@@ -588,10 +600,11 @@ def keep_last_n_messages(n: int) -> Callable[[list[Message]], list[Message]]:
     Pinned tool results (and their paired tool_use) outside the window are kept in
     original order. If the conversation would then open on a non-user message, a
     short user note ``"(earlier conversation)"`` is inserted there — the same opening
-    guarantee ``summarize`` gets from its user-role summary. Leading system messages
-    stay in front of the note. The pinned pairs are not moved to after the first kept
-    user message. Messages that already fit in ``n`` are not dropped; only a missing
-    user opening is repaired.
+    guarantee ``summarize`` gets from its user-role summary. The note is a runtime
+    message, so it is not counted as a turn and is not treated as the user's words.
+    Leading system messages stay in front of the note. The pinned pairs are not moved
+    to after the first kept user message. Messages that already fit in ``n`` are not
+    dropped; only a missing user opening is repaired.
 
     Args:
         n: Maximum number of messages to retain.
@@ -622,10 +635,11 @@ def keep_last_n_turns(n: int) -> Callable[[list[Message]], list[Message]]:
     Pinned tool results (and their paired tool_use) from earlier turns are kept in
     original order. If the conversation would then open on a non-user message, a
     short user note ``"(earlier conversation)"`` is inserted there — the same opening
-    guarantee ``summarize`` gets from its user-role summary. Leading system messages
-    stay in front of the note. The pinned pairs are not moved to after the first kept
-    user message. Turns that already fit in ``n`` are not dropped; only a missing
-    user opening is repaired.
+    guarantee ``summarize`` gets from its user-role summary. The note is a runtime
+    message, so it is not counted as a turn and is not treated as the user's words.
+    Leading system messages stay in front of the note. The pinned pairs are not moved
+    to after the first kept user message. Turns that already fit in ``n`` are not
+    dropped; only a missing user opening is repaired.
 
     Args:
         n: Maximum number of turns to retain.

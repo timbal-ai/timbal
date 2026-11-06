@@ -1380,6 +1380,75 @@ class TestPinnedResults:
         assert kept_turn[3].collect_text() == "a2"
         assert _EARLIER_CONVERSATION_NOTE not in [m.collect_text() for m in kept_turn]
 
+    def test_compaction_note_is_runtime_and_does_not_consume_a_turn(self) -> None:
+        """The opening note is a runtime message, so it is not one of the n real turns."""
+        opened = keep_last_n_turns(1)(
+            [
+                _msg_user("q1"),
+                _msg_assistant_tool("P", name="read_skill"),
+                _msg_tool_pinned("P", result_text="SKILL"),
+                _msg_assistant_text("a1"),
+                _msg_user("q2"),
+                _msg_assistant_text("a2"),
+            ]
+        )
+        note = opened[0]
+        assert note.role == "user"
+        assert note.is_runtime()
+        assert note.collect_text() == _EARLIER_CONVERSATION_NOTE
+        assert note.metadata["source"] == "runtime"
+        assert note.metadata["kind"] == "compaction_note"
+
+        # note + pinned pair + q2, then q3 and q4. keep 2 must retain q3 and q4.
+        # A plain user note would be reinserted and show up as another user utterance.
+        continued = opened + [
+            _msg_user("q3"),
+            _msg_assistant_text("a3"),
+            _msg_user("q4"),
+            _msg_assistant_text("a4"),
+        ]
+        result = keep_last_n_turns(2)(continued)
+        real_users = [m.collect_text() for m in result if m.role == "user" and not m.is_runtime()]
+        assert real_users == ["q3", "q4"]
+        notes = [m for m in result if m.collect_text() == _EARLIER_CONVERSATION_NOTE]
+        assert len(notes) == 1
+        assert notes[0].is_runtime()
+        # The pinned pair from the dropped turn stays ahead of q3, behind the note.
+        assert result[0].is_runtime()
+        assert result[1].content[0].id == "P"
+        assert result[3].collect_text() == "q3"
+
+    @pytest.mark.asyncio
+    async def test_summarize_omits_compaction_note_from_verbatim_users(self) -> None:
+        """Once the note falls into the summarized region it is not 'the user's words'."""
+        from timbal.core.memory_compaction import _VERBATIM_MARKER
+
+        note = keep_last_n_turns(1)(
+            [
+                _msg_user("q1"),
+                _msg_assistant_tool("P", name="read_skill"),
+                _msg_tool_pinned("P", result_text="SKILL"),
+                _msg_user("q2"),
+            ]
+        )[0]
+        assert note.is_runtime()
+        memory = [
+            note,
+            _msg_user("remember this"),
+            _msg_assistant_text("ok"),
+            _msg_user("and this"),
+            _msg_assistant_text("ok2"),
+            _msg_user("latest"),
+            _msg_assistant_text("done"),
+        ]
+        compactor = summarize(threshold=3, keep_last_n=2, model=TestModel(responses=["Summary text."]))
+        result = await compactor(memory)
+        text = result[0].collect_text()
+        verbatim = text.split(_VERBATIM_MARKER, 1)[1]
+        assert "remember this" in verbatim
+        assert "and this" in verbatim
+        assert _EARLIER_CONVERSATION_NOTE not in verbatim
+
     @pytest.mark.asyncio
     async def test_summarize_keeps_pinned_verbatim(self) -> None:
         captured = []
