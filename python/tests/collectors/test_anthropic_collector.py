@@ -325,6 +325,52 @@ class TestAnthropicCollectorWebSearch:
         assert isinstance(msg.content[0], CustomContent)
 
 
+class TestAnthropicCollectorToolSearch:
+    def test_tool_search_result_kept_verbatim(self):
+        from anthropic.types import ServerToolUseBlock, ToolSearchToolResultBlock
+
+        _make_context()
+        collector = _make_collector()
+        collector.process(_make_message_start())
+        collector.process(RawContentBlockStartEvent(**{
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": ServerToolUseBlock(
+                type="server_tool_use", id="srvtoolu_1", name="tool_search_tool_bm25", input={}
+            ),
+        }))
+        collector.process(RawContentBlockStopEvent(**{"type": "content_block_stop", "index": 0}))
+        item = collector.process(RawContentBlockStartEvent(**{
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": ToolSearchToolResultBlock(
+                type="tool_search_tool_result",
+                tool_use_id="srvtoolu_1",
+                content={
+                    "type": "tool_search_tool_search_result",
+                    "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
+                },
+            ),
+        }))
+        assert item is None
+
+        msg = collector.result()
+        assert msg.content[0].is_server_tool_use
+        block = msg.content[1]
+        assert isinstance(block, CustomContent)
+        assert block.to_anthropic_input() == {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_1",
+            "content": {
+                "type": "tool_search_tool_search_result",
+                "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
+            },
+        }
+        # Provider-internal: never sent to OpenAI after a fallback switch.
+        assert block.to_openai_responses_input(role="assistant") is None
+        assert block.to_openai_chat_completions_input() is None
+
+
 class TestAnthropicCollectorMessageDelta:
     def test_stop_reason_end_turn(self):
         _make_context()

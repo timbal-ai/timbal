@@ -60,6 +60,15 @@ class Tool(Runnable):
         ),
     )
 
+    defer_loading: bool = Field(
+        default=False,
+        description=(
+            "Keep this tool's schema out of the model's context until it searches for it "
+            "(Agent.tool_search). Anthropic models search natively; others get a search_tools tool. "
+            "For large catalogs (many MCP tools); keep the few tools used on most turns loaded."
+        ),
+    )
+
     result_limit: ToolResultLimit | int | None | Literal["inherit"] = Field(
         default="inherit",
         description=(

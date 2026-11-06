@@ -1,6 +1,6 @@
 """Anthropic Messages API request adapter (anthropic)."""
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Collection
 from typing import TYPE_CHECKING, Any
 
 from ...types.message import Message
@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
 
     from ..runnable import Runnable
+
+
+ANTHROPIC_TOOL_SEARCH_TYPE = "tool_search_tool_bm25_20251119"
+ANTHROPIC_TOOL_SEARCH_NAME = "tool_search_tool_bm25"
 
 
 def prepare_messages_request(
@@ -24,8 +28,13 @@ def prepare_messages_request(
     temperature: float | None,
     output_model: "type[BaseModel] | None",
     provider_params: dict[str, Any],
+    deferred_tools: "Collection[str] | None" = None,
 ) -> tuple[Callable[[], AsyncIterator[Any]], str]:
-    """Build the Messages API kwargs and return (create_stream, context_label)."""
+    """Build the Messages API kwargs and return (create_stream, context_label).
+
+    ``deferred_tools``: names sent with ``defer_loading`` behind Anthropic's own
+    tool search (``Agent.tool_search``), which is added to the tools when any are.
+    """
     anthropic_kwargs = {
         "model": model_name,
         "messages": [message.to_anthropic_input() for message in messages],
@@ -37,7 +46,13 @@ def prepare_messages_request(
         anthropic_kwargs["system"] = system_prompt
 
     if tools:
-        anthropic_tools = [tool.anthropic_schema for tool in tools]
+        deferred = set(deferred_tools or ())
+        anthropic_tools = [
+            {**tool.anthropic_schema, "defer_loading": True} if tool.name in deferred else tool.anthropic_schema
+            for tool in tools
+        ]
+        if deferred.intersection(tool.name for tool in tools):
+            anthropic_tools.append({"type": ANTHROPIC_TOOL_SEARCH_TYPE, "name": ANTHROPIC_TOOL_SEARCH_NAME})
         if anthropic_tools:
             anthropic_kwargs["tools"] = anthropic_tools
 
