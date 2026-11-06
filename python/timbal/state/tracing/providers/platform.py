@@ -4,12 +4,12 @@ import asyncio
 import functools
 import gzip
 import hashlib
-import itertools
 import json
 import math
 import os
 import time
 from collections import OrderedDict
+from time import time_ns
 from typing import TYPE_CHECKING, ClassVar
 
 import structlog
@@ -71,13 +71,17 @@ _DELTA_RUNS_MAX = 2048
 
 
 class _HostCaps:
-    """What a platform host advertised it accepts (learned from its responses)."""
+    """What a platform host advertised it accepts (learned from its responses), and what it turned down."""
 
-    __slots__ = ("delta", "gzip")
+    __slots__ = ("delta", "delta_rejected", "gzip", "gzip_rejected")
 
     def __init__(self) -> None:
         self.gzip = False
         self.delta = False
+        # A rejection outlives later advertisements (a proxy may pass the header but not the body) and
+        # overrides a forced format, so one bad host never drops saves.
+        self.gzip_rejected = False
+        self.delta_rejected = False
 
     def learn(self, headers) -> None:
         items = getattr(headers, "items", None)
@@ -90,8 +94,23 @@ class _HostCaps:
             self.delta = True
 
 
+_last_snapshot = 0
+
+
+def _next_snapshot() -> int:
+    """Strictly increasing within the process and, by the clock, across processes (µs since the epoch).
+
+    The platform ignores a delta whose snapshot is not newer than the last it applied to the run, and a
+    run can be continued by another process (an approval resumed elsewhere): a per-process counter
+    would restart below what the first process sent.
+    """
+    global _last_snapshot
+    _last_snapshot = max(_last_snapshot + 1, time_ns() // 1000)
+    return _last_snapshot
+
+
 class _DeltaRun:
-    """Spans of one run the platform acknowledged, by fingerprint, and the order spans were first seen."""
+    """Spans of one run the platform acknowledged, by fingerprint, and each span's start index (root = 0)."""
 
     __slots__ = ("acked", "seq")
 
@@ -146,16 +165,16 @@ class PlatformTracingProvider(TracingProvider):
     """Send span deltas instead of whole traces (``Content-Type: application/vnd.timbal.trace-delta+json``):
     a save carries the finished spans the platform has not acknowledged and a root header; the run's end
     carries the full root. ``None``: once the host advertised it (``Accept-Patch``, RFC 5789). A host that
-    rejects either format (400/415/422) falls back to whole uncompressed traces for good."""
+    rejects either format (400/415/422) while it takes the same save without it falls back to whole
+    uncompressed traces for good, forced or not."""
 
     _caps: ClassVar[dict[str, _HostCaps]] = {}
     _delta_runs: ClassVar[OrderedDict[str, _DeltaRun]] = OrderedDict()
 
     # run key -> (monotonic time of the last successful save, the exact PATCH body sent)
     _recent: ClassVar[OrderedDict[str, tuple[float, bytes]]] = OrderedDict()
-    # Numbers snapshots as they are taken: saves of one run overlap (parallel tools, background
-    # children) and their PATCHes can finish in any order.
-    _snapshots: ClassVar[itertools.count] = itertools.count()
+    # Snapshots are numbered as they are taken (_next_snapshot): saves of one run overlap (parallel
+    # tools, background children) and their PATCHes can finish in any order.
     # run key -> the run's saves in flight. Kept apart from _recent so eviction cannot lose it, and dropped
     # with the run's last save in flight: any later save takes a higher number.
     _saving: ClassVar[dict[str, _Saves]] = {}
@@ -241,6 +260,8 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     def _compressing(cls, caps: _HostCaps) -> bool:
+        if caps.gzip_rejected:
+            return False
         if cls.compress is not None:
             return cls.compress
         if os.environ.get("TIMBAL_TRACE_GZIP", "").strip().lower() in ("1", "true", "yes"):
@@ -249,7 +270,19 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     def _sending_deltas(cls, caps: _HostCaps) -> bool:
+        if caps.delta_rejected:
+            return False
         return cls.deltas if cls.deltas is not None else caps.delta
+
+    @classmethod
+    def takes_deltas(cls, platform_config: PlatformConfig | None = None) -> bool:
+        """Whether saves to this provider's host go out as span deltas right now (each save is then small)."""
+        cfg = platform_config or cls.platform_config
+        if cfg is None:
+            from ....state.config_loader import resolve_platform_config
+
+            cfg = resolve_platform_config(None)
+        return cfg is not None and cls._sending_deltas(cls._host_caps(cfg.host))
 
     @staticmethod
     def _delta_run(key: str) -> _DeltaRun:
@@ -277,6 +310,7 @@ class PlatformTracingProvider(TracingProvider):
         cfg = run_context.platform_config or cls.platform_config
         if cfg is None:
             from ....state.config_loader import resolve_platform_config
+
             cfg = resolve_platform_config(None)
             if cfg is None:
                 raise RuntimeError(
@@ -328,13 +362,20 @@ class PlatformTracingProvider(TracingProvider):
     @override
     async def _store(cls, run_context: RunContext) -> None:
         """See base class."""
+        await cls._save(run_context)
+
+    @classmethod
+    async def _save(cls, run_context: RunContext, *, plain: bool = False) -> None:
+        """One PATCH. ``plain``: whole and uncompressed whatever the host advertised."""
         from ....errors import PlatformError
         from ....platform.utils import _request
 
         platform_config = cls._resolve_config(run_context)
         subject = platform_config.subject
         if subject is None:
-            raise RuntimeError("PlatformTracingProvider._store requires a subject (org_id + app_id) in platform_config.")
+            raise RuntimeError(
+                "PlatformTracingProvider._store requires a subject (org_id + app_id) in platform_config."
+            )
         if subject.app_id:
             subject_path = f"apps/{subject.app_id}"
         else:
@@ -342,9 +383,9 @@ class PlatformTracingProvider(TracingProvider):
 
         caps = cls._host_caps(platform_config.host)
         key = cls._recent_key(platform_config, subject_path, run_context.id)
-        delta = cls._sending_deltas(caps)
+        delta = not plain and cls._sending_deltas(caps)
         # Taken with no await before model_dump(), so numbers follow snapshot order.
-        snapshot = next(PlatformTracingProvider._snapshots)
+        snapshot = _next_snapshot()
         # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
         # while the PATCH is in flight. Same encoding httpx applies to json=.
         if delta:
@@ -361,7 +402,7 @@ class PlatformTracingProvider(TracingProvider):
             "Prefer": "return=minimal",  # RFC 7240
             "Content-Type": DELTA_MEDIA_TYPE if delta else "application/json",
         }
-        compressed = cls._compressing(caps)
+        compressed = not plain and cls._compressing(caps)
         wire = body
         if compressed:
             wire = gzip.compress(body, compresslevel=5)
@@ -376,15 +417,14 @@ class PlatformTracingProvider(TracingProvider):
             res.raise_for_status()
         except PlatformError as e:
             cls._remember(key, snapshot, None)
-            rejected_format = getattr(e, "status_code", None) in (400, 415, 422) and (
-                (delta and cls.deltas is None) or (compressed and cls.compress is None)
-            )
-            if not rejected_format:
+            if not (delta or compressed) or getattr(e, "status_code", None) not in (400, 415, 422):
                 raise
-            # The host took the advertisement back (or a proxy in between does not pass these through):
-            # whole uncompressed traces from now on, starting with this save.
-            caps.delta = caps.delta and not delta
-            caps.gzip = caps.gzip and not compressed
+            # Today's server answers a gzip body with 400 (its JSON extractor cannot parse it), a server
+            # with the layer with 415. The same save whole and uncompressed tells a rejected format from
+            # a bad save: only when that one lands is the format off for this host, starting now.
+            await cls._save(run_context, plain=True)
+            caps.delta_rejected = caps.delta_rejected or delta
+            caps.gzip_rejected = caps.gzip_rejected or compressed
             logger.warning(
                 "platform_trace_format_rejected",
                 host=platform_config.host,
@@ -392,7 +432,6 @@ class PlatformTracingProvider(TracingProvider):
                 deltas=delta,
                 gzip=compressed,
             )
-            await cls._store(run_context)
             return
         except BaseException:
             # The write may have landed anyway (timeout after commit): never keep serving the older snapshot.
@@ -401,6 +440,9 @@ class PlatformTracingProvider(TracingProvider):
         caps.learn(getattr(res, "headers", None))
         if sent:
             cls._delta_run(key).acked.update(sent)
+        elif not delta and key in PlatformTracingProvider._delta_runs:
+            # A whole trace replaces the platform's span rows: what they acknowledged is gone.
+            PlatformTracingProvider._delta_runs[key].acked.clear()
         cls._remember(key, snapshot, cache_body)
 
     @classmethod
@@ -433,7 +475,7 @@ class PlatformTracingProvider(TracingProvider):
                 full.append(dumped)
                 if run.acked.get(span.call_id) == fingerprint:
                     continue
-            out.append({**dumped, "seq": run.seq[span.call_id]})
+            out.append({"seq": run.seq[span.call_id], "span": dumped})
             if span.t1 is not None:
                 sent[span.call_id] = fingerprint
         if root is None:

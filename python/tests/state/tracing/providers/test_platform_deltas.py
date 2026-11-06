@@ -88,16 +88,17 @@ class FakePlatform:
         self.patches.append(
             {"kind": kind, "bytes": len(content), "body": body, "gzip": headers.get("Content-Encoding") == "gzip"}
         )
-        run = self.runs.setdefault(run_id, {"spans": {}, "trace": None, "root": None, "parent_id": None})
+        run = self.runs.setdefault(run_id, {"spans": {}, "trace": None, "root": None, "parent_id": None, "snapshot": 0})
         run["parent_id"] = body.get("parent_id")
-        if kind == "full":
-            run["trace"] = body["trace"]
+        if kind == "full":  # authoritative: replaces the span rows
+            run.update(trace=body["trace"], spans={}, snapshot=0)
             return self._ok()
-        for span in body["spans"]:
-            seq = span.pop("seq")
-            old = run["spans"].get(span["call_id"])
-            if old is None or old[1] < body["snapshot"]:
-                run["spans"][span["call_id"]] = (seq, body["snapshot"], span)
+        if body["snapshot"] <= run["snapshot"]:
+            return self._ok()  # stale or retried delta: ack, no-op
+        run["snapshot"] = body["snapshot"]
+        for entry in body["spans"]:
+            assert set(entry) == {"seq", "span"}, entry
+            run["spans"][entry["span"]["call_id"]] = (entry["seq"], body["snapshot"], entry["span"])
         run["root"] = body["root"]
         if body["ended"]:
             rows = [span for _, (_seq, _snap, span) in sorted(run["spans"].items(), key=lambda kv: kv[1][0])]
@@ -196,7 +197,7 @@ class TestNegotiation:
             out = await agent(prompt="go").collect()
             stored = await read_back(provider, ctx.id)
         assert out.status.code == "success"
-        assert not PlatformTracingProvider._host_caps(CONFIG.host).delta
+        assert PlatformTracingProvider._host_caps(CONFIG.host).delta_rejected
         assert server.patches and {p["kind"] for p in server.patches} == {"full"}
         same_trace(stored, ctx, server)
 
@@ -207,9 +208,52 @@ class TestNegotiation:
         with patch("timbal.platform.utils._request", server.request):
             ctx, _ = await run(agent, provider)
             stored = await read_back(provider, ctx.id)
-        assert not PlatformTracingProvider._host_caps(CONFIG.host).gzip
+        assert PlatformTracingProvider._host_caps(CONFIG.host).gzip_rejected
         assert server.patches and not any(p["gzip"] for p in server.patches)
         same_trace(stored, ctx, server)
+
+    async def test_forced_gzip_on_todays_server_falls_back(self):
+        # Today's API has no decompression layer: its JSON extractor answers a gzip body with 400.
+        server = FakePlatform(advertise=False, gzip_ok=False)
+        agent, _ = tool_loop(2)
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, compress=True)
+        agent.tracing_provider = provider
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, out = await run(agent, provider)
+            stored = await read_back(provider, ctx.id)
+        assert "tracing:save_failed" not in out.usage
+        assert PlatformTracingProvider._host_caps(CONFIG.host).gzip_rejected
+        same_trace(stored, ctx, server)
+
+    async def test_a_rejection_outlives_later_advertisements(self):
+        server = FakePlatform(deltas=False)  # advertises gzip, takes it, rejects deltas
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        agent, provider = tool_loop(3)
+        with patch("timbal.platform.utils._request", server.request):
+            await run(agent, provider)
+            server.advertise, server.deltas = True, False
+            server._headers = lambda: {"Accept-Patch": DELTA_MEDIA_TYPE}
+            server.patches.clear()
+            await run(agent, provider)
+        assert server.patches and {p["kind"] for p in server.patches} == {"full"}
+
+    async def test_a_bad_save_is_not_taken_for_a_rejected_format(self):
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        PlatformTracingProvider._host_caps(CONFIG.host).gzip = True
+        calls = []
+
+        async def always_400(*_args, **kwargs):
+            calls.append(kwargs.get("headers", {}))
+            raise PlatformError("bad request", status_code=400)
+
+        agent, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", always_400), pytest.raises(PlatformError):
+            await provider._store(ctx)
+        caps = PlatformTracingProvider._host_caps(CONFIG.host)
+        assert not caps.delta_rejected and not caps.gzip_rejected
+        assert [h.get("Content-Encoding") for h in calls] == ["gzip", None]  # retried plain once, then raised
 
 
 class TestDeltas:
@@ -220,8 +264,11 @@ class TestDeltas:
         with patch("timbal.platform.utils._request", server.request):
             ctx, _ = await run(agent, provider)
         deltas = [p["body"] for p in server.patches]
-        sent = [s["call_id"] for body in deltas for s in body["spans"]]
+        sent = [s["span"]["call_id"] for body in deltas for s in body["spans"]]
         assert len(sent) == len(set(sent)) == len(ctx._trace) - 1
+        start_order = {call_id: i for i, call_id in enumerate(ctx._trace.keys())}
+        assert next(iter(ctx._trace.values())).parent_call_id is None  # the root is index 0
+        assert all(s["seq"] == start_order[s["span"]["call_id"]] for body in deltas for s in body["spans"])
         assert [b["ended"] for b in deltas].count(True) == 1 and deltas[-1]["ended"]
         assert "memory" not in deltas[0]["root"]
         assert deltas[-1]["root"]["memory"]
@@ -269,8 +316,27 @@ class TestDeltas:
             await provider._store(ctx)
             stored = await read_back(provider, ctx.id)
         last = server.patches[-1]["body"]
-        assert [s["call_id"] for s in last["spans"]] == [step.call_id]
+        assert [s["span"]["call_id"] for s in last["spans"]] == [step.call_id]
         assert next(s for s in stored.as_records() if s.call_id == step.call_id).output == "late real output"
+
+    async def test_snapshots_keep_rising_in_a_new_process(self):
+        from timbal.state.tracing.providers import platform as platform_module
+
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        agent, provider = tool_loop(2)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(agent, provider)
+            first = max(p["body"]["snapshot"] for p in server.patches)
+            # Another process continues the run (an approval resumed elsewhere): no counter carried over.
+            platform_module._last_snapshot = 0
+            PlatformTracingProvider._delta_runs.clear()
+            step = next(s for s in ctx._trace.as_records() if s.path == "agent.step")
+            step._output_dump = "resumed elsewhere"
+            await provider._store(ctx)
+            stored = await read_back(provider, ctx.id)
+        assert server.patches[-1]["body"]["snapshot"] > first
+        assert next(s for s in stored.as_records() if s.call_id == step.call_id).output == "resumed elsewhere"
 
     async def test_bytes(self):
         full_server, delta_server = FakePlatform(advertise=False), FakePlatform()
@@ -288,7 +354,7 @@ class TestDeltas:
 
 
 class TestChatSessionOverDeltas:
-    async def test_two_buffered_turns_chain_through_the_platform(self):
+    async def test_two_turns_chain_through_the_platform(self):
         from timbal.core.chat_session import ChatSession
 
         server = FakePlatform()

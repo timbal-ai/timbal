@@ -9,7 +9,7 @@ import pytest
 from structlog.testing import capture_logs
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
-from timbal.state.tracing.providers.platform import PlatformTracingProvider, _parse_cache_limits
+from timbal.state.tracing.providers.platform import PlatformTracingProvider, _next_snapshot, _parse_cache_limits
 from timbal.state.tracing.trace import Trace
 
 CONFIG = PlatformConfig(
@@ -63,7 +63,7 @@ def clock(monkeypatch):
 
 
 def _remember(key: str, body: bytes) -> None:
-    Provider._remember(key, next(PlatformTracingProvider._snapshots), body)
+    Provider._remember(key, _next_snapshot(), body)
 
 
 async def _store(run_id: str, request: AsyncMock) -> None:
