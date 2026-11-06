@@ -75,7 +75,8 @@ class FillerConfig(BaseModel):
     ``soft_timeout_secs`` is a separate, opt-in progress line for a tool that
     is still running after the caller has heard no agent audio for that long
     (ElevenLabs ``soft_timeout_config``, LiveKit ``ctx.with_filler(delay=)``).
-    Unset, tool waits keep the rules above.
+    Unset, tool waits keep the rules above. A hangup tool (``end_call``,
+    ``hangup``, or any call already inside ``commit_hangup``) does not get one.
     """
 
     model_config = ConfigDict(extra="forbid")

@@ -82,7 +82,8 @@ _PROMPT = (
     "When they dictate a phone number or spell a name, wait until they finish and read the entire number "
     "or the entire name back once, digit by digit or letter by letter. "
     "When they say goodbye or ask you to hang up, say one short goodbye and call end_call. "
-    "If end_call says they spoke again, stay on the line and help them."
+    "If end_call says they spoke again, stay on the line and help them. "
+    "If they say goodbye again, say one short goodbye and call end_call again."
 )
 
 voice_config = ship_voice_config(ship_language())

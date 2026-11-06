@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 
 import pytest
-from timbal.types.content import ToolUseContent
+from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import (
     CommitAction,
@@ -21,6 +21,7 @@ from timbal.voice import (
     VoiceSessionEvent,
     current_voice_session,
 )
+from timbal.voice.session import _hangup_farewell_phrase, _hangup_utterance_kind
 
 from .test_session import FakePlaybackTracker, _FakeEndpointer
 from .test_voice_events import _Model, _session, _texts, _until
@@ -615,3 +616,233 @@ class TestCommitHangup:
         asyncio.create_task(retract())
         assert await session.commit_hangup() is False
         assert session._end_call_task is None
+
+
+def _tool_only(name: str = "end_call", call_id: str = "c1") -> Message:
+    return Message(
+        role="assistant",
+        content=[ToolUseContent(id=call_id, name=name, input={})],
+        stop_reason="tool_use",
+    )
+
+
+_HANGUP_FILLER = {
+    "enabled": True,
+    "soft_timeout_secs": 0.05,
+    "message": "One moment.",
+    "delay_secs": 0.0,
+}
+
+
+class TestHangupUtterance:
+    @pytest.mark.parametrize(
+        ("text", "kind"),
+        [
+            ("Alright.", "ack"),
+            ("Okay.", "ack"),
+            ("Yeah.", "ack"),
+            ("Vale.", "ack"),
+            ("Bye.", "goodbye"),
+            ("Goodbye.", "goodbye"),
+            ("Adiós.", "goodbye"),
+            ("Never mind. Bye.", "goodbye"),
+            ("Please hang up.", "goodbye"),
+            ("Cuelga la llamada.", "goodbye"),
+            ("Wait. One more thing.", "retract"),
+            ("Espera, una cosa más.", "retract"),
+            ("No, espera, todavía necesito ayuda.", "retract"),
+            ("What's my order?", "retract"),
+        ],
+    )
+    def test_kind(self, text: str, kind: str) -> None:
+        assert _hangup_utterance_kind(text) == kind
+
+    def test_farewell_follows_the_configured_language(self) -> None:
+        assert _hangup_farewell_phrase("en") == "Goodbye."
+        assert _hangup_farewell_phrase("es-ES") == "Adiós."
+        assert _hangup_farewell_phrase(None) == "Goodbye."
+
+
+class TestHangupFillerAndRearm:
+    async def test_ack_partial_does_not_cancel_commit(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.35)
+
+        async def ack() -> None:
+            await asyncio.sleep(0.05)
+            session._latest_partial_text = "Alright."
+            session._last_partial_at = time.monotonic()
+
+        session._last_commit_at = time.monotonic()
+        asyncio.create_task(ack())
+        assert await session.commit_hangup() is True
+        assert session._end_call_task is not None
+
+    async def test_wait_partial_cancels_commit(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+
+        async def retract() -> None:
+            await asyncio.sleep(0.05)
+            session._latest_partial_text = "Wait. One more thing."
+            session._last_partial_at = time.monotonic()
+
+        session._last_commit_at = time.monotonic()
+        asyncio.create_task(retract())
+        assert await session.commit_hangup() is False
+        assert session._end_call_task is None
+        assert session._hangup_retracted
+
+    async def test_no_filler_and_framework_farewell_when_the_model_skips_text(self) -> None:
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            if not await session.commit_hangup():
+                return "The caller spoke again. Do not hang up. Keep helping."
+            return "Ending the call."
+
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(_tool_only()),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0.2,
+            filler=_HANGUP_FILLER,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert "Goodbye." in tts.synthesized_texts
+        assert "One moment." not in tts.synthesized_texts
+        assert not any(entry.filler for entry in session.transcript)
+
+    async def test_custom_hangup_tool_name_also_skips_filler(self) -> None:
+        async def finish_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            if not await session.commit_hangup():
+                return "cancelled"
+            return "ended"
+
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(_tool_only("finish_call")),
+            tools=[finish_call],
+            tracker=tracker,
+            hangup_grace_secs=0.25,
+            filler={**_HANGUP_FILLER, "soft_timeout_secs": 0.08},
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert "One moment." not in tts.synthesized_texts
+        assert "Goodbye." in tts.synthesized_texts
+
+    async def test_model_goodbye_before_the_tool_is_left_alone(self) -> None:
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            assert await session.commit_hangup()
+            return "Ending the call."
+
+        spoken = Message(
+            role="assistant",
+            content=[
+                TextContent(text="Talk soon."),
+                ToolUseContent(id="c1", name="end_call", input={}),
+            ],
+            stop_reason="tool_use",
+        )
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(spoken),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0.15,
+            filler=_HANGUP_FILLER,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert "Talk soon." in tts.synthesized_texts
+        assert "Goodbye." not in tts.synthesized_texts
+        assert "One moment." not in tts.synthesized_texts
+
+    async def test_spanish_farewell(self) -> None:
+        session, _stt, tts = _session(_Model(), hangup_grace_secs=0.05)
+        session.audio_input.language = "es"
+        session._last_commit_at = time.monotonic()
+        assert await session.commit_hangup() is True
+        assert "Adiós." in tts.synthesized_texts
+
+    async def test_ack_during_hangup_still_drops_without_another_model_turn(self) -> None:
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            if not await session.commit_hangup():
+                return "The caller spoke again. Do not hang up. Keep helping."
+            return "Ending the call."
+
+        model = _Model(_tool_only(), "Goodbye.")
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            model,
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0.45,
+            filler=_HANGUP_FILLER,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await _until(lambda: session._hangup_open)
+        await stt.inject(TranscriptEvent(type="committed", text="Alright."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert "One moment." not in tts.synthesized_texts
+        assert "Goodbye." in tts.synthesized_texts
+        last_users = [m.collect_text() for call_messages in model.calls for m in call_messages if m.role == "user"]
+        assert all("Alright" not in text for text in last_users)
+
+    async def test_cancel_then_retract_stays_up_and_a_later_goodbye_rearms(self) -> None:
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            if not await session.commit_hangup():
+                return "The caller spoke again. Do not hang up. Keep helping."
+            return "Ending the call."
+
+        model = _Model(_tool_only(), "Sure, what else?", "It is packed.", "Goodbye.")
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            model,
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0.8,
+            filler=_HANGUP_FILLER,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await _until(lambda: session._hangup_open)
+        await stt.inject(TranscriptEvent(type="committed", text="Wait. One more thing."))
+        await _until(lambda: "Sure, what else?" in _texts(events))
+        await asyncio.sleep(0.3)
+        assert not session.closed
+        assert session._end_call_task is None or session._end_call_task.done()
+        assert "One moment." not in tts.synthesized_texts
+
+        await stt.inject(TranscriptEvent(type="committed", text="What's my order?"))
+        await _until(lambda: "It is packed." in _texts(events))
+        await asyncio.sleep(0.2)
+        assert not session.closed
+
+        await stt.inject(TranscriptEvent(type="committed", text="Bye."))
+        await _until(lambda: "Goodbye." in _texts(events))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
