@@ -1089,6 +1089,7 @@ class MCPServer(ToolSet):
             title=title,
             tool_annotations=annotations,
             requires_approval=approval_policy,
+            defer_until_eot=_is_destructive(mcp_tool),
             approval_prompt=f"Run {title or exposed_name}?" if requires_approval else None,
             approval_description=(mcp_tool.description or None) if requires_approval else None,
             approval_kind="mcp_tool" if requires_approval else None,

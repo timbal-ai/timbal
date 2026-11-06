@@ -230,7 +230,9 @@ class UserIdleConfig(BaseModel):
     @model_validator(mode="after")
     def _has_something_to_do(self) -> UserIdleConfig:
         has_line = bool(self.instructions and self.instructions.strip()) or bool(
-            self.text if isinstance(self.text, str) and self.text.strip() else [t for t in (self.text or []) if str(t).strip()]
+            self.text
+            if isinstance(self.text, str) and self.text.strip()
+            else [t for t in (self.text or []) if str(t).strip()]
         )
         if self.max_count > 0 and not has_line:
             raise ValueError("user_idle needs 'text' or 'instructions' (or max_count=0 with hangup_after_secs)")
@@ -315,6 +317,36 @@ class RecordingConfig(BaseModel):
     """Async callable invoked with the ``RecordingResult``. Python-only."""
 
 
+class SpeculativeGeneration(BaseModel):
+    """Start the reply before the turn is confirmed. Off unless ``enabled``.
+
+    LiveKit Agents' ``PreemptiveGenerationOptions``, with Timbal's triggers:
+    Smart Turn scoring a pause as probably complete, or Deepgram Flux
+    ``EagerEndOfTurn``. Audio stays buffered until the committed transcript
+    matches. See :mod:`timbal.voice.speculative`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    """``False`` (the default) waits for a confirmed transcript, as before."""
+    preemptive_tts: bool = False
+    """Also synthesize speech before confirmation. Off by default: the model
+    runs early and synthesis starts once the turn is confirmed, so a resumed
+    utterance does not spend a TTS request. Audio is held either way."""
+    max_speech_duration: float = Field(default=10.0, gt=0)
+    """Skip speculation once the caller has been speaking longer than this.
+    Long utterances change more often. LiveKit's default is 10 seconds."""
+    max_retries: int = Field(default=3, ge=0)
+    """Speculative attempts per caller turn. The counter resets when a turn
+    is confirmed. LiveKit's default is 3."""
+    eou_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Smart Turn ``P(complete)`` at or above which a pause starts a
+    speculative reply. 0.5 is the model's complete/incomplete boundary.
+    A pause the text scorer calls incomplete does not start one, even above
+    this."""
+
+
 class VoiceEventsConfig(BaseModel):
     """Event turns (see ``VoiceSession.notify``). Server-side only — never client-settable."""
 
@@ -340,6 +372,7 @@ _OPTIONAL_VOICE_BLOCKS = {
     "filler": FillerConfig,
     "recording": RecordingConfig,
     "events": VoiceEventsConfig,
+    "speculative_generation": SpeculativeGeneration,
 }
 
 
@@ -450,6 +483,10 @@ class VoiceConfig(BaseModel):
     A bare string is shorthand for ``{"text": ...}``; ``""`` means no greeting.
     This is the opener for calls the *other side* started (inbound PSTN, a
     browser joining) and the fallback for outbound — see ``outbound_greeting``."""
+    speculative_generation: SpeculativeGeneration = Field(default_factory=SpeculativeGeneration)
+    """Off unless ``enabled`` is set. ``True`` turns it on with the defaults.
+    Server-side: a browser hello cannot enable it. See
+    :class:`SpeculativeGeneration`."""
     outbound_greeting: GreetingConfig | None = None
     """Opener for calls *we* placed (outbound PSTN), where "thanks for calling"
     is the wrong sentence. Unset → ``greeting`` applies to both directions;
@@ -462,6 +499,20 @@ class VoiceConfig(BaseModel):
     @classmethod
     def _coerce_greeting(cls, v: Any) -> Any:
         return coerce_greeting(v)
+
+    @field_validator("speculative_generation", mode="before")
+    @classmethod
+    def _coerce_speculative(cls, v: Any) -> Any:
+        if v is True:
+            return {"enabled": True}
+        if v is False:
+            return {"enabled": False}
+        # A dict is the feature turning on. ``{"enabled": false}`` is how a
+        # caller keeps the other knobs and leaves it off. An empty dict is
+        # removed before this runs (see omit_empty_voice_blocks).
+        if isinstance(v, dict) and "enabled" not in v:
+            return {**v, "enabled": True}
+        return v
 
 
 def greeting_for_direction(config: VoiceConfig, *, outbound: bool) -> GreetingConfig | None:
