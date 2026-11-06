@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 
 import pytest
 from timbal.state.context import RunContext
@@ -543,3 +544,136 @@ class TestSqliteMemoryIntegration:
 
         expected = await dump([Message.validate(m) for m in stored_memory])
         assert stored_memory == expected, "_memory_dump stored in SQLite does not match full re-dump"
+
+
+# -- Per-span storage ----------------------------------------------------------------
+
+
+def _tool_loop_agent(provider, calls, probe=None):
+    from timbal import Agent, Tool
+    from timbal.core.test_model import TestModel
+    from timbal.types.content import ToolUseContent
+    from timbal.types.message import Message
+
+    def handler(messages):
+        done = sum(1 for m in messages if m.role == "tool")
+        if done >= calls:
+            return "done"
+        return Message(
+            role="assistant", content=[ToolUseContent(id=f"c{done}", name="step", input={})], stop_reason="tool_use"
+        )
+
+    async def step() -> str:
+        if probe is not None:
+            await probe()
+        return "ok"
+
+    return Agent(
+        name="agent", model=TestModel(handler=handler), tools=[Tool(name="step", handler=step)],
+        tracing_provider=provider, max_iter=calls + 5,
+    )
+
+
+class TestPerSpanStorage:
+    async def test_running_turn_is_readable_mid_run(self, tmp_path):
+        from timbal.state import get_run_context, set_run_context
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "t.db")
+        seen = []
+
+        async def probe():
+            run_id = get_run_context().id
+            reader = RunContext(parent_id=run_id, tracing_provider=provider)
+            trace = await provider.get(reader)
+            seen.append(sorted(s.path for s in trace.as_records()) if trace else None)
+
+        set_run_context(None)
+        out = await _tool_loop_agent(provider, 3, probe)(prompt="go").collect()
+        assert out.status.code == "success"
+        # The first call already sees the finished LLM span that asked for it.
+        assert seen[0] is not None and "agent.llm" in seen[0]
+        assert seen[-1].count("agent.step") == 2  # the earlier calls, finished
+        conn = sqlite3.connect(str(tmp_path / "t.db"))
+        (blob,) = conn.execute("SELECT spans FROM runs WHERE run_id = ?", (out.run_id,)).fetchone()
+        assert len(json.loads(blob)) == len(conn.execute("SELECT 1 FROM spans WHERE run_id = ?", (out.run_id,)).fetchall())
+
+    async def test_saves_stay_small_as_the_run_grows(self, tmp_path, monkeypatch):
+        import timbal.state.tracing.providers.sqlite as sqlite_module
+        from timbal.state import set_run_context
+
+        sizes = []
+        real = sqlite_module._Database.__init__
+
+        def spy_init(self, *a, **k):
+            real(self, *a, **k)
+            conn = self.conn
+
+            class Spy:
+                def __getattr__(self, name):
+                    return getattr(conn, name)
+
+                def executemany(self, sql, rows):
+                    rows = list(rows)
+                    sizes.append(len(rows))
+                    return conn.executemany(sql, rows)
+
+            self.conn = Spy()
+
+        monkeypatch.setattr(sqlite_module._Database, "__init__", spy_init)
+        set_run_context(None)
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "grow.db")
+        out = await _tool_loop_agent(provider, 30)(prompt="go").collect()
+        assert out.status.code == "success"
+        during, final = sizes[:-1], sizes[-1]
+        assert max(during) <= 4  # the finished span, its parent, a new sibling — not the whole run
+        assert final >= 60  # the end writes every span once
+
+    def test_legacy_blob_rows_still_read(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY, parent_id TEXT, spans TEXT NOT NULL, stored_at INTEGER NOT NULL)")
+        span = Span(path="agent", call_id="c1", parent_call_id=None, t0=1).model_dump()
+        conn.execute("INSERT INTO runs VALUES (?, ?, ?, ?)", ("old-run", None, json.dumps([span]), 1))
+        conn.commit()
+        conn.close()
+        provider = SqliteTracingProvider.configured(_path=path)
+        trace = asyncio.run(provider.get(RunContext(parent_id="old-run", tracing_provider=provider)))
+        assert [s.call_id for s in trace.as_records()] == ["c1"]
+
+    async def test_synchronous_setting(self, tmp_path):
+        from timbal.state import set_run_context
+
+        set_run_context(None)
+        full = SqliteTracingProvider.configured(_path=tmp_path / "full.db", synchronous="FULL")
+        out = await _tool_loop_agent(full, 2)(prompt="go").collect()
+        assert out.status.code == "success"
+        bad = SqliteTracingProvider.configured(_path=tmp_path / "bad.db", synchronous="OFF")
+        with pytest.raises(ValueError, match="synchronous"):
+            bad._db()
+
+    async def test_a_deleted_file_is_recreated(self, tmp_path):
+        from timbal.state import set_run_context
+
+        path = tmp_path / "gone.db"
+        provider = SqliteTracingProvider.configured(_path=path)
+        set_run_context(None)
+        await _tool_loop_agent(provider, 1)(prompt="go").collect()
+        for suffix in ("", "-wal", "-shm"):
+            (tmp_path / f"gone.db{suffix}").unlink(missing_ok=True)
+        set_run_context(None)
+        out = await _tool_loop_agent(provider, 1)(prompt="go").collect()
+        trace = await provider.get(RunContext(parent_id=out.run_id, tracing_provider=provider))
+        assert trace is not None and path.exists()
+
+    async def test_a_span_changed_after_the_root_ended_is_rewritten(self, tmp_path):
+        from timbal.state import set_run_context
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "late.db")
+        ctx = RunContext(tracing_provider=provider)
+        set_run_context(ctx)
+        await _tool_loop_agent(provider, 1)(prompt="go").collect()
+        step = next(s for s in ctx._trace.as_records() if s.path == "agent.step")
+        step._output_dump = "real output, arrived late"
+        await provider._store(ctx)
+        trace = await provider.get(RunContext(parent_id=ctx.id, tracing_provider=provider))
+        assert next(s for s in trace.as_records() if s.path == "agent.step").output == "real output, arrived late"
