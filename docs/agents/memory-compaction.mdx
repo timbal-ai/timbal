@@ -238,6 +238,8 @@ Import strategies from `timbal.core.memory_compaction`.
 
 Keeps only the last `n` user/assistant turn pairs. Structure-aware: never leaves orphaned tool calls or results.
 
+If the compacted conversation would open on a non-user message — typically pinned tool pairs kept from outside the window — a short user note `(earlier conversation)` is inserted after any leading system messages. That is the same opening shape as `summarize`, which leads with a user-role summary.
+
 ```python
 from timbal.core.memory_compaction import keep_last_n_turns
 
@@ -251,6 +253,8 @@ agent = Agent(
 ### `keep_last_n_messages(n)`
 
 Keeps only the last `n` messages regardless of role. Also structure-aware.
+
+If the compacted conversation would open on a non-user message — typically pinned tool pairs kept from outside the window — a short user note `(earlier conversation)` is inserted after any leading system messages. That is the same opening shape as `summarize`, which leads with a user-role summary.
 
 ```python
 from timbal.core.memory_compaction import keep_last_n_messages
@@ -350,8 +354,12 @@ Some tool results are durable context the model must keep referencing — for ex
 [skill](/agents/skills) documentation. Those results are **pinned**: every compaction strategy
 preserves them verbatim (and never orphans their paired tool call), regardless of `keep_last_n`,
 turn windows, or drop/replacement mode. For `keep_last_n_messages` / `keep_last_n_turns` the
-effective behavior is "last N **plus** pinned"; for `summarize`, pinned results are kept verbatim
-and never fed to the summarizer (like system messages). Offloading skips pinned results too.
+effective behavior is "last N **plus** pinned". Older pinned pairs stay in their original order,
+ahead of the kept window. When that would open the conversation on a non-user message, the
+`(earlier conversation)` note is inserted after any leading system messages, in front of those
+pairs. The pairs are not moved to after the first kept user message. For `summarize`, pinned
+results are kept verbatim and never fed to the summarizer (like system messages). Offloading
+skips pinned results too.
 
 You opt a tool in declaratively with `pin_result=True`:
 
