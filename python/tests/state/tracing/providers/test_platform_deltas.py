@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from structlog.testing import capture_logs
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.errors import PlatformError
@@ -514,6 +515,197 @@ class TestSingleFlight:
         assert [s["path"] for s in projection] == ["flow", "flow.inner"]
         assert projection[1]["memory"] is None
         assert all("memory" not in s for s in stored if s["path"] not in ("flow", "flow.inner"))
+
+    @staticmethod
+    def stalled_run():
+        """A context whose first PATCH hangs until ``release``; every PATCH is recorded."""
+        sent, first_sent, release = [], asyncio.Event(), asyncio.Event()
+
+        async def request(*_args, content=None, **_):
+            sent.append(json.loads(content))
+            if len(sent) == 1:
+                first_sent.set()
+                await release.wait()
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        return ctx, provider, request, sent, first_sent, release
+
+    async def test_mid_run_saves_wait_out_a_stalled_patch_and_the_end_does_not(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.05)
+        ctx, provider, request, sent, first_sent, release = self.stalled_run()
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            mid = asyncio.create_task(provider._store(ctx))
+            await asyncio.sleep(0.15)
+            assert len(sent) == 1  # mid-run: superseded anyway, waits however long it takes
+            ctx._trace["r"].t1 = 1
+            end = asyncio.create_task(provider._store(ctx))
+            await asyncio.wait_for(end, 1)  # the end goes past the stalled one
+            assert mid.done()  # and carried the mid-run state with it
+            assert len(sent) == 2 and sent[1]["trace"][0]["t1"] == 1
+            release.set()
+            await first
+
+    async def test_never_more_than_two_patches_on_the_wire(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 0.0)
+        on_wire, most, release = [0], [0], asyncio.Event()
+
+        async def request(*_args, **_):
+            on_wire[0] += 1
+            most[0] = max(most[0], on_wire[0])
+            await release.wait()
+            on_wire[0] -= 1
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", request):
+            saves = []
+            for _ in range(6):  # each arrives once the one before is on the wire
+                saves.append(asyncio.create_task(provider._store(ctx)))
+                await asyncio.sleep(0.01)
+            assert most[0] == 2
+            release.set()
+            await asyncio.gather(*saves)
+
+    @pytest.mark.parametrize("writer", ["another_process", "this_process"])
+    async def test_a_save_dropped_as_stale_is_resent_only_if_the_newer_one_was_not_ours(self, writer):
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        _, _, key = PlatformTracingProvider._target(ctx)
+        sent = []
+
+        async def request(*_args, headers=None, **_):
+            mine = int(headers["X-Timbal-Snapshot"])
+            sent.append(mine)
+            if len(sent) > 1:
+                return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+            stored = mine + 10**12  # the platform already holds something newer
+            if writer == "this_process":
+                PlatformTracingProvider._own(key).append(stored)  # a round of ours that overtook this one
+            headers_out = {"X-Timbal-Snapshot": str(stored), "X-Timbal-Snapshot-Applied": "false"}
+            return SimpleNamespace(raise_for_status=lambda: None, headers=headers_out, json=lambda: {})
+
+        with patch("timbal.platform.utils._request", request):
+            await provider._store(ctx)
+        if writer == "another_process":
+            assert len(sent) == 2 and sent[1] > sent[0] + 10**12  # numbered above what it lost to
+        else:
+            assert len(sent) == 1
+
+    async def test_413_is_not_a_format_rejection(self):
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        PlatformTracingProvider._host_caps(CONFIG.host).gzip = True
+        calls = []
+
+        async def too_large(*_args, **kwargs):
+            calls.append(kwargs["headers"])
+            raise PlatformError("payload too large", status_code=413)
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", too_large), pytest.raises(PlatformError):
+            await provider._store(ctx)
+        caps = PlatformTracingProvider._host_caps(CONFIG.host)
+        assert len(calls) == 1 and not caps.delta_rejected and not caps.gzip_rejected
+
+
+class TestShutdownFlush:
+    async def test_saves_owed_land_before_shutdown_ends(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_stall_s", 60.0)
+        ctx, provider, request, sent, first_sent, release = TestSingleFlight.stalled_run()
+        with patch("timbal.platform.utils._request", request):
+            caller = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            caller.cancel()  # the turn went away; its save did not
+            ctx._trace["r"].t1 = 1
+            end = asyncio.create_task(provider._store(ctx))
+            await asyncio.sleep(0)  # joined the next round
+            end.cancel()
+            from timbal.state.tracing.uploads import flush_all
+
+            flushing = asyncio.create_task(flush_all(timeout=2))
+            await asyncio.sleep(0.05)
+            assert sent[-1]["trace"][0]["t1"] == 1  # the end did not wait out the 60 s stall
+            release.set()
+            await flushing
+        assert not PlatformTracingProvider._unsaved
+
+    async def test_saves_that_cannot_land_are_reported_within_the_bound(self):
+        ctx, provider, request, sent, first_sent, release = TestSingleFlight.stalled_run()
+        with patch("timbal.platform.utils._request", request), capture_logs() as logs:
+            caller = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            caller.cancel()
+            left = await asyncio.wait_for(PlatformTracingProvider.flush(timeout=0.1), 1)
+            release.set()
+        assert left == [ctx.id]
+        assert any(log["event"] == "platform_trace_flush_incomplete" and log["run_ids"] == [ctx.id] for log in logs)
+
+    async def test_saves_that_died_with_an_earlier_loop_are_sent_again(self):
+        server = FakePlatform(advertise=False)
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}
+        _, _, key = PlatformTracingProvider._target(ctx)
+        PlatformTracingProvider._unsaved[key] = ctx  # asked for; its loop was torn down before it landed
+        with patch("timbal.platform.utils._request", server.request):
+            assert await PlatformTracingProvider.flush(timeout=1) == []
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+
+    def test_a_script_whose_loop_ended_mid_save_still_lands_at_exit(self, tmp_path):
+        import subprocess
+        import sys
+
+        log = tmp_path / "patches.jsonl"
+        script = tmp_path / "script.py"
+        script.write_text(
+            f"""
+import asyncio, json
+from types import SimpleNamespace
+from unittest.mock import patch
+from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+from timbal.state.context import RunContext
+from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+CONFIG = PlatformConfig(host="api.exit.test", auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t"),
+                        subject=PlatformSubject(org_id="1", app_id="2"))
+calls = []
+
+async def request(method, path, content=None, **_):
+    calls.append(1)
+    if len(calls) == 1:
+        await asyncio.Event().wait()  # the first PATCH hangs; asyncio.run cancels it on the way out
+    with open({str(log)!r}, "a") as f:
+        f.write(content.decode() + "\\n")
+    return SimpleNamespace(raise_for_status=lambda: None, headers={{}}, json=lambda: {{}})
+
+patch("timbal.platform.utils._request", request).start()
+provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+
+async def main():
+    ctx = RunContext(tracing_provider=provider)
+    ctx.platform_config = CONFIG
+    ctx._trace["r"] = {{"call_id": "r", "path": "a", "t0": 0, "t1": 1, "parent_call_id": None}}
+    asyncio.create_task(provider._store(ctx))
+    await asyncio.sleep(0.05)
+
+asyncio.run(main())
+"""
+        )
+        subprocess.run([sys.executable, str(script)], check=True, timeout=30)
+        lines = log.read_text().splitlines()
+        assert len(lines) == 1 and json.loads(lines[0])["trace"][0]["t1"] == 1
 
     def test_patch_reads_are_bounded_unless_configured(self, monkeypatch):
         monkeypatch.delenv("TIMBAL_HTTP_READ_TIMEOUT", raising=False)

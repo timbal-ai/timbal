@@ -355,6 +355,7 @@ async def _overlapping_saves(
         older = asyncio.create_task(Provider._store(stored))
         await older_sent.wait()
         stored._trace["c1"].metadata["snapshot"] = "newer"
+        stored._trace["c1"].t1 = 1  # the run's end: the only save that goes past a stalled one
         try:
             await Provider._store(stored)
         except RuntimeError:

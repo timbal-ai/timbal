@@ -86,13 +86,19 @@ def clear_in_memory_tracing_storage():
     from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
     from timbal.state.tracing.providers.platform import PlatformTracingProvider
 
-    InMemoryTracingProvider._storage.clear()
-    PlatformTracingProvider._recent.clear()
-    PlatformTracingProvider._saving.clear()
+    def clear():
+        InMemoryTracingProvider._storage.clear()
+        PlatformTracingProvider._recent.clear()
+        PlatformTracingProvider._saving.clear()
+        # Saves a test left unlanded would otherwise be resent by the exit flush, to a host that was mocked.
+        PlatformTracingProvider._flights.clear()
+        PlatformTracingProvider._unsaved.clear()
+        PlatformTracingProvider._own_snapshots.clear()
+        PlatformTracingProvider._closing = False
+
+    clear()
     yield
-    InMemoryTracingProvider._storage.clear()
-    PlatformTracingProvider._recent.clear()
-    PlatformTracingProvider._saving.clear()
+    clear()
 
 
 def assert_has_output_event(output: OutputEvent):

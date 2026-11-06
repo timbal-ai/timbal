@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import contextlib
 import functools
 import gzip
 import hashlib
@@ -8,7 +10,7 @@ import json
 import math
 import os
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from time import time_ns
 from typing import TYPE_CHECKING, ClassVar
 
@@ -66,17 +68,27 @@ class _Saves:
         self.newest = -1
 
 
+_MAX_ON_WIRE = 2
+_UNSAVED_MAX = 256
+
+
 class _Flight:
-    """One run's saves, single-flight: the round to send next, the rounds on the wire, and the task sending them."""
+    """One run's saves, single-flight: the round to send next, the PATCHes on the wire, the task sending them,
+    and how many saves were asked for against how many a successful PATCH carried."""
 
-    __slots__ = ("context", "driver", "loop", "next", "sent")
+    __slots__ = ("arrival", "context", "driver", "joins", "key", "landed", "loop", "next", "on_wire", "sent")
 
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, key: str, loop: asyncio.AbstractEventLoop) -> None:
+        self.key = key
         self.loop = loop
         self.context: RunContext | None = None
         self.next: asyncio.Future[None] | None = None
         self.sent: list[asyncio.Future[None]] = []
+        self.on_wire: dict[asyncio.Task, float] = {}  # save -> loop time it went out
         self.driver: asyncio.Task | None = None
+        self.arrival: asyncio.Future[None] | None = None  # wakes the driver when a save joins
+        self.joins = 0
+        self.landed = 0
 
     def waits(self) -> list[asyncio.Future[None]]:
         """The rounds not settled yet: a read of this run must not overtake them."""
@@ -85,6 +97,15 @@ class _Flight:
             rounds.append(self.next)
         return rounds
 
+    def terminal(self) -> bool:
+        return _ended(self.context)
+
+
+def _ended(run_context: RunContext | None) -> bool:
+    """The run's root finished: its next save is the end of the run."""
+    root = run_context.root_span() if run_context is not None else None
+    return root is not None and root.t1 is not None
+
 
 def _retrieve(future: asyncio.Future) -> None:
     """Mark a round's error seen: every caller of it may have been cancelled."""
@@ -92,9 +113,10 @@ def _retrieve(future: asyncio.Future) -> None:
         future.exception()
 
 
-def _settle(flight: _Flight, joined: asyncio.Future[None], save: asyncio.Task) -> None:
+def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: asyncio.Task) -> None:
     """A round's save finished. Success also settles earlier rounds still on the wire (a stalled
     PATCH): this one carried their state and newer."""
+    flight.on_wire.pop(save, None)
     if save.cancelled() or save.exception() is not None:
         flight.sent.remove(joined)
         if not joined.done():
@@ -103,11 +125,40 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], save: asyncio.Task) -
             else:
                 joined.set_exception(save.exception())
         return
+    flight.landed = max(flight.landed, covers)
+    if flight.landed >= flight.joins:
+        PlatformTracingProvider._unsaved.pop(flight.key, None)
     index = flight.sent.index(joined)
     settled, flight.sent[: index + 1] = flight.sent[: index + 1], []
     for future in settled:
         if not future.done():
             future.set_result(None)
+
+
+def _flush_timeout() -> float:
+    raw = os.environ.get("TIMBAL_TRACE_FLUSH_TIMEOUT_SECS")
+    try:
+        value = float(raw) if raw is not None else 5.0
+        if not math.isfinite(value) or value < 0:
+            raise ValueError
+    except ValueError:
+        logger.warning("invalid_trace_flush_timeout", value=raw, default=5.0)
+        value = 5.0
+    return value
+
+
+def _flush_at_exit() -> None:
+    """Scripts: ``asyncio.run`` cancels saves still pending when its coroutine returns. Resend those runs'
+    latest state on a fresh loop. A server flushes in its lifespan shutdown, before this runs."""
+    if not PlatformTracingProvider._unsaved:
+        return
+    try:
+        asyncio.get_running_loop()
+        return  # still inside a loop in this thread: nothing here can block on it
+    except RuntimeError:
+        pass
+    with contextlib.suppress(Exception):
+        asyncio.run(PlatformTracingProvider.flush())
 
 
 DELTA_MEDIA_TYPE = "application/vnd.timbal.trace-delta+json"
@@ -149,6 +200,7 @@ def _header_items(headers) -> dict[str, str]:
 
 
 SNAPSHOT_HEADER = "x-timbal-snapshot"
+APPLIED_HEADER = "x-timbal-snapshot-applied"
 SELECT_HEADER = "x-timbal-select"
 _last_snapshot = 0
 
@@ -242,8 +294,14 @@ class PlatformTracingProvider(TracingProvider):
     _saving: ClassVar[dict[str, _Saves]] = {}
     # run key -> its single-flight state, while it has a round queued or a driver sending.
     _flights: ClassVar[dict[str, _Flight]] = {}
-    # How long the next round waits behind a PATCH still on the wire before going anyway.
+    # How long a run's end waits behind a PATCH still on the wire before going anyway.
     _stall_s: ClassVar[float] = 10.0
+    # run key -> its latest context, while a save asked for has not landed (failed, or still on its way).
+    _unsaved: ClassVar[OrderedDict[str, RunContext]] = OrderedDict()
+    # run key -> the snapshots this process sent for it (0.1: a newer stored one that is not ours is a takeover).
+    _own_snapshots: ClassVar[OrderedDict[str, deque[int]]] = OrderedDict()
+    _closing: ClassVar[bool] = False
+    _exit_hook: ClassVar[bool] = False
     # The PATCH read timeout when the client has none (its default): the platform parses the trace first.
     _patch_read_timeout_s: ClassVar[float] = 120.0
     # How long a read waits for saves of that run already in flight before asking the platform.
@@ -445,34 +503,117 @@ class PlatformTracingProvider(TracingProvider):
         flights = PlatformTracingProvider._flights
         flight = flights.get(key)
         if flight is None or flight.loop is not loop:
-            flight = flights[key] = _Flight(loop)
+            flight = flights[key] = _Flight(key, loop)
         flight.context = run_context
+        flight.joins += 1
+        unsaved = PlatformTracingProvider._unsaved
+        unsaved[key] = run_context
+        unsaved.move_to_end(key)
+        while len(unsaved) > _UNSAVED_MAX:
+            unsaved.popitem(last=False)
+        if not PlatformTracingProvider._exit_hook:
+            PlatformTracingProvider._exit_hook = True
+            atexit.register(_flush_at_exit)
         if flight.next is None:
             flight.next = loop.create_future()
             flight.next.add_done_callback(_retrieve)
         joined = flight.next
+        if flight.arrival is not None and not flight.arrival.done():
+            flight.arrival.set_result(None)
         if flight.driver is None:
-            flight.driver = loop.create_task(cls._drive(key, flight))
+            flight.driver = loop.create_task(cls._drive(flight))
         await asyncio.shield(joined)
 
     @classmethod
-    async def _drive(cls, key: str, flight: _Flight) -> None:
+    def _send_in(cls, flight: _Flight, now: float) -> float:
+        """Seconds until the next round may go out (0: now; inf: only once something changes)."""
+        if flight.next is None:
+            return math.inf
+        if not flight.on_wire:
+            return 0.0
+        # A second PATCH only for the run's end, and only past a stalled one: mid-run rounds are superseded
+        # anyway, and more overlap when the platform is slow would feed the slowness.
+        if len(flight.on_wire) >= _MAX_ON_WIRE or not flight.terminal():
+            return math.inf
+        if PlatformTracingProvider._closing:
+            return 0.0
+        return max(0.0, min(flight.on_wire.values()) + cls._stall_s - now)
+
+    @classmethod
+    async def _drive(cls, flight: _Flight) -> None:
+        loop = asyncio.get_running_loop()
         try:
-            while flight.next is not None:
-                joined, flight.next = flight.next, None
-                flight.sent.append(joined)
-                save = asyncio.get_running_loop().create_task(cls._save(flight.context))
-                save.add_done_callback(functools.partial(_settle, flight, joined))
-                # A PATCH can hang (read timeouts are unbounded by default): past this the next round
-                # goes anyway, so a run's end is never held behind it. The platform keeps the newest
-                # snapshot whichever lands last.
-                await asyncio.wait({save}, timeout=cls._stall_s)
+            while flight.next is not None or flight.on_wire:
+                wait = cls._send_in(flight, loop.time())
+                if wait == 0:
+                    joined, flight.next = flight.next, None
+                    flight.sent.append(joined)
+                    save = loop.create_task(cls._save(flight.context))
+                    flight.on_wire[save] = loop.time()
+                    save.add_done_callback(functools.partial(_settle, flight, joined, flight.joins))
+                    continue
+                flight.arrival = loop.create_future()
+                await asyncio.wait(
+                    {*flight.on_wire, flight.arrival},
+                    timeout=None if math.isinf(wait) else wait,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                flight.arrival = None
         finally:
             flight.driver = None
             if flight.next is not None and not flight.next.done():
                 flight.next.cancel()  # the driver itself was cancelled (loop shutting down)
-            if PlatformTracingProvider._flights.get(key) is flight:
-                del PlatformTracingProvider._flights[key]
+            if PlatformTracingProvider._flights.get(flight.key) is flight:
+                del PlatformTracingProvider._flights[flight.key]
+
+    @classmethod
+    async def flush(cls, timeout: float | None = None) -> list[str]:
+        """Send every save this process still owes the platform, and wait for them (process shutdown).
+
+        Runs' ends go first and no longer wait out a stalled PATCH; runs whose last save failed, or died
+        with an earlier event loop, are sent again from their latest state. Bounded by ``timeout``
+        (default ``TIMBAL_TRACE_FLUSH_TIMEOUT_SECS``, 5 s: inside a pod's grace period). Returns, and
+        logs, the run ids whose saves did not land.
+        """
+        if timeout is None:
+            timeout = _flush_timeout()
+        loop = asyncio.get_running_loop()
+        PlatformTracingProvider._closing = True
+        try:
+            flights = PlatformTracingProvider._flights
+            for flight in flights.values():
+                if flight.loop is loop and flight.arrival is not None and not flight.arrival.done():
+                    flight.arrival.set_result(None)  # re-evaluate with _closing set
+            orphans = [
+                context
+                for key, context in PlatformTracingProvider._unsaved.items()
+                if (flight := flights.get(key)) is None or flight.loop is not loop or flight.driver is None
+            ]
+            orphans.sort(key=lambda context: not _ended(context))
+            resends = [loop.create_task(cls._store(context)) for context in orphans]
+            for task in resends:
+                task.add_done_callback(_retrieve)
+            waits = [*resends, *(r for f in flights.values() if f.loop is loop for r in f.waits())]
+            if waits:
+                await asyncio.wait(waits, timeout=timeout)
+            left = [context.id for context in PlatformTracingProvider._unsaved.values()]
+            if left:
+                logger.error("platform_trace_flush_incomplete", run_ids=left, timeout_s=timeout)
+            return left
+        finally:
+            PlatformTracingProvider._closing = False
+
+    @staticmethod
+    def _own(key: str) -> deque[int]:
+        owned = PlatformTracingProvider._own_snapshots
+        snapshots = owned.get(key)
+        if snapshots is None:
+            snapshots = owned[key] = deque(maxlen=64)
+            while len(owned) > _DELTA_RUNS_MAX:
+                owned.popitem(last=False)
+        else:
+            owned.move_to_end(key)
+        return snapshots
 
     @classmethod
     def _patch_timeout(cls):
@@ -504,8 +645,9 @@ class PlatformTracingProvider(TracingProvider):
         return platform_config, subject_path, cls._recent_key(platform_config, subject_path, run_context.id)
 
     @classmethod
-    async def _save(cls, run_context: RunContext, *, plain: bool = False) -> None:
-        """One PATCH. ``plain``: whole and uncompressed whatever the host advertised."""
+    async def _save(cls, run_context: RunContext, *, plain: bool = False, resend: bool = True) -> None:
+        """One PATCH. ``plain``: whole and uncompressed whatever the host advertised. ``resend``: send it
+        again, numbered above, if the platform kept a newer snapshot this process did not write."""
         from ....errors import PlatformError
         from ....platform.utils import _request
 
@@ -527,6 +669,7 @@ class PlatformTracingProvider(TracingProvider):
             sent = {}
         saves = PlatformTracingProvider._saving.setdefault(key, _Saves())
         saves.pending[snapshot] = asyncio.get_running_loop().create_future()
+        cls._own(key).append(snapshot)
         headers = {
             "Prefer": "return=minimal",  # RFC 7240
             "Content-Type": DELTA_MEDIA_TYPE if delta else "application/json",
@@ -555,7 +698,7 @@ class PlatformTracingProvider(TracingProvider):
             # Today's server answers a gzip body with 400 (its JSON extractor cannot parse it), a server
             # with the layer with 415. The same save whole and uncompressed tells a rejected format from
             # a bad save: only when that one lands is the format off for this host, starting now.
-            await cls._save(run_context, plain=True)
+            await cls._save(run_context, plain=True, resend=resend)
             caps.delta_rejected = caps.delta_rejected or delta
             caps.gzip_rejected = caps.gzip_rejected or compressed
             logger.warning(
@@ -570,7 +713,25 @@ class PlatformTracingProvider(TracingProvider):
             # The write may have landed anyway (timeout after commit): never keep serving the older snapshot.
             cls._remember(key, snapshot, None)
             raise
-        caps.learn(getattr(res, "headers", None))
+        caps.learn(getattr(res, "headers", None))  # also lifts the counter above the stored snapshot
+        found = _header_items(getattr(res, "headers", None))
+        stored = found.get(SNAPSHOT_HEADER, "").strip()
+        if (
+            found.get(APPLIED_HEADER, "").strip().lower() == "false"
+            and stored.isdigit()
+            and int(stored) > snapshot
+            and int(stored) not in cls._own(key)
+        ):
+            # Another process wrote this run with a clock ahead of ours (a takeover that read nothing
+            # first): this save was dropped as stale. Within this process the newer write was ours.
+            cls._remember(key, snapshot, None)
+            if not resend:
+                # Still behind after numbering above it: another process is writing this run right now.
+                logger.warning("platform_trace_save_superseded", run_id=run_context.id, stored=int(stored))
+                return
+            logger.info("platform_trace_save_stale", run_id=run_context.id, sent=snapshot, stored=int(stored))
+            await cls._save(run_context, plain=plain, resend=False)
+            return
         if sent:
             cls._delta_run(key).acked.update(sent)
         elif not delta and key in PlatformTracingProvider._delta_runs:
