@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...types.message import Message
 from ...utils import transform_schema
+from .prompt_cache import apply_openai_prompt_cache_key, openai_responses_instructions
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -87,10 +88,11 @@ def prepare_responses_request(
         "include": include,
     }
 
-    if system_prompt:
-        responses_kwargs["instructions"] = system_prompt
+    instructions, leading_items = openai_responses_instructions(system_prompt, model_name)
+    if instructions:
+        responses_kwargs["instructions"] = instructions
 
-    input_items = []
+    input_items = list(leading_items)
     openai_reasoning = supports_encrypted_reasoning(model_name)
     for message in messages:
         # Grok 4.7 always returns encrypted reasoning without an include flag.
@@ -137,6 +139,7 @@ def prepare_responses_request(
     # letting dict.update clobber the generated list.
     provider_params = normalize_responses_params(provider_params)
     extra_tools = provider_params.pop("tools", None)
+    apply_openai_prompt_cache_key(provider, responses_kwargs, provider_params)
     # A caller-supplied `include` extends ours rather than replacing it: dropping
     # `reasoning.encrypted_content` silently would reintroduce the lost-chain-of-thought bug.
     extra_include = provider_params.pop("include", None)
