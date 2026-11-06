@@ -123,11 +123,15 @@ class TestFluxEventMapping:
         events = _drain(stt)
         assert [(e.type, e.text) for e in events] == [("committed", "tell me a story.")]
 
-    async def test_eager_events_emit_nothing(self) -> None:
+    async def test_eager_events_are_predictions_not_commits(self) -> None:
         stt = DeepgramFluxSTT()
-        await stt._handle_message(_flux_turn_info("EagerEndOfTurn"))
-        await stt._handle_message(_flux_turn_info("TurnResumed"))
-        assert _drain(stt) == []
+        await stt._handle_message(_flux_turn_info("EagerEndOfTurn", "tell me a story"))
+        await stt._handle_message(_flux_turn_info("TurnResumed", "tell me a story about"))
+        events = _drain(stt)
+        assert [(e.type, e.text, e.confidence) for e in events] == [
+            ("eager", "tell me a story", 0.9),
+            ("resumed", "tell me a story about", 0.9),
+        ]
 
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()

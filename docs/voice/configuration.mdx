@@ -37,7 +37,7 @@ The default session audio is mono PCM16 little-endian at 16,000 Hz (`sample_rate
 
 ## What a client may override
 
-A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `model`, `tool_beat_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, and `user_idle`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
 Recording, ambient audio, `events`, `hello_wait_secs`, and `sip_hello_wait_secs` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`) are treated as unset so they do not wipe an inherited value.
 
@@ -68,7 +68,7 @@ This assignment replaces the agent's declared config. Keep any greetings or othe
 
 ## Turn detection
 
-See [Turn-taking and interruptions](/voice/turn-taking) for mode names, native provider boundaries, VAD endpointing, and a listening test.
+See [Turn-taking and interruptions](/voice/turn-taking) for mode names, native provider boundaries, VAD endpointing, during-speech prediction, and a listening test. `predict_during_speech` defaults to false.
 
 ## Greetings and silence
 

@@ -50,6 +50,22 @@ Available modes are:
 
 `vad_endpointing=None` enables the local fast path when supported. Set it to `False` to disable it. A Python declaration may also supply a `TurnDetector` instance or zero-argument factory; clients may send supported mode names, and sessions own detector clones.
 
+## Predict a turn while the caller is speaking
+
+Set `predict_during_speech` to decide the turn from what the caller has already said and how it sounds, instead of waiting out a fixed silence. The setting is off unless you turn it on. Clients may send it on a call hello. `SpeechEouPredictor` is the scorer the session uses; a normal call sets the flag and does not construct the class.
+
+```python
+agent.voice_config["predict_during_speech"] = True
+```
+
+On transcription that does not decide the turn itself (ElevenLabs Scribe, Deepgram Nova, OpenAI), the local endpointer scores the live transcript and the recent audio while the caller is speaking. When the words read as a finished sentence and the audio agrees, the session confirms the turn after 0.16 seconds of silence. Otherwise it keeps the usual wait: 0.20 seconds of silence, then up to the 0.45 second floor when the score is confident.
+
+Deepgram Flux still owns the final boundary, and local VAD force-commit stays off, as described above. With this setting the session asks Flux for an early end-of-turn (`EagerEndOfTurn`). That event can start the turn. `TurnResumed` cancels it. `EndOfTurn` confirms it when the words match, including a difference of punctuation only; a longer final transcript cancels the early turn and starts again with the full text. When Smart Turn is available, an incomplete audio score holds the early start and `EndOfTurn` still commits.
+
+The eager threshold defaults to 0.5. If `eot_threshold` is set close to that, the eager value is lowered so it stays below the end-of-turn threshold. An `eager_eot_threshold` at or above `eot_threshold` is lowered below it. Set `eager_eot_threshold` in `stt_extra` to choose it yourself.
+
+Munsit decides the turn itself and does not emit an early end-of-turn event, so `predict_during_speech` has no effect there.
+
 ## Custom clients
 
 WebSocket clients must report cumulative milliseconds of audio actually played and discard queued audio on `interrupted`. Reporting received bytes as played can preserve words the caller never heard. WebRTC and LiveKit use the server's paced media clock. See [Transports](/voice/transports) for the wire contract and [Events and usage](/voice/observability) for interruption metrics.
