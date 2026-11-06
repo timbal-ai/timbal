@@ -40,8 +40,8 @@ __all__ = ["SEND_MODES", "SILENT_REPLY", "ChatSession", "SendMode", "ToolPolicy"
 
 logger = structlog.get_logger("timbal.core.chat_session")
 
-SendMode = Literal["steer", "followup", "collect", "interrupt"]
-SEND_MODES: tuple[str, ...] = ("steer", "followup", "collect", "interrupt")
+SendMode = Literal["steer", "now", "followup", "collect", "interrupt"]
+SEND_MODES: tuple[str, ...] = ("steer", "now", "followup", "collect", "interrupt")
 
 ToolPolicy = Literal["read_only"] | Collection[str] | Callable[[Any], bool]
 """Which tools a turn offers its model: ``"read_only"`` (tools declared ``read_only``,
@@ -116,6 +116,11 @@ class ChatSession:
       user message, and does not end before answering it (``Agent.steering``,
       on for these runs unless the agent turns it off). Messages a turn ends
       without taking start the next turn together.
+    - ``"now"``: like steer, but without waiting: the answer being streamed is
+      cut (its text kept, marked interrupted) and running tools that allow it
+      (``Tool.interruptible``, default: read-only ones) are cancelled with an
+      interrupted result; the others finish first. Messages within a quarter
+      second make one cut. Same turn — unlike ``"interrupt"``.
     - ``"followup"``: a turn of its own once the running one ends.
     - ``"collect"``: one turn for every collected message, once none has
       arrived for ``collect_window`` seconds.
@@ -236,13 +241,16 @@ class ChatSession:
         if mode == "interrupt":
             event = self._store.post_event(text, source="user", mode="followup", announce="interrupt")
         else:
-            event = self._store.post_event(text, source="user", mode=mode)
+            # 'now' joins the running turn like steer, after cutting what is in flight.
+            event = self._store.post_event(text, source="user", mode="steer" if mode == "now" else mode)
         self.last_activity = time.monotonic()
         self._record("message", event_id=event.id, text=event.text, mode=mode, busy=busy)
         self._watch(event)
         self._ensure_worker()
         if mode == "interrupt":
             self.interrupt()
+        elif mode == "now" and busy and self._turn_context is not None and self._turn_context._cut is not None:
+            self._turn_context._cut.set()
         return event
 
     def wake(
@@ -661,6 +669,7 @@ class ChatSession:
             context._steering = options.steer
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
+            context._cut = asyncio.Event()
             adopt_background_store(context, self._store)
             scheduler.mark_own(context)
             self._last_prompt, self._last_options = kwargs["prompt"], options
