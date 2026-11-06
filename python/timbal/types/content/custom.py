@@ -17,7 +17,7 @@ class CustomContent(BaseContent):
     # Anthropic server-side tool result blocks stored verbatim in memory (see
     # AnthropicCollector.result()). Meaningless to other APIs — skip on
     # cross-provider replay instead of sending an unknown block type.
-    _ANTHROPIC_SERVER_BLOCKS = ("web_search_tool_result",)
+    _ANTHROPIC_SERVER_BLOCKS = ("web_search_tool_result", "tool_search_tool_result")
 
     @override
     def to_openai_responses_input(self, role: str, **kwargs: Any) -> dict[str, Any] | None:
