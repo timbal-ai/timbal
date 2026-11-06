@@ -1,4 +1,4 @@
-"""Platform saves from chat sessions: buffered by default, optional gzip bodies."""
+"""Platform saves from chat sessions: buffered by default (sync once the host takes deltas), optional gzip bodies."""
 
 import gzip
 import json
@@ -88,6 +88,18 @@ class TestChatTurnDurability:
         finished = await one_turn(agent)
         assert finished["status"]["code"] == "success"
         assert seen == ["buffered"]
+
+    async def test_platform_turns_are_sync_once_the_host_takes_deltas(self):
+        caps = PlatformTracingProvider._host_caps(CONFIG.host)
+        caps.delta = True
+        try:
+            agent, seen = probe_agent(FakePlatform.configured(platform_config=CONFIG))
+            await one_turn(agent)
+            caps.delta_rejected = True
+            await one_turn(agent)
+        finally:
+            PlatformTracingProvider._caps.pop(CONFIG.host, None)
+        assert seen == ["sync", "buffered"]
 
     async def test_explicit_durability_wins(self):
         agent, seen = probe_agent(FakePlatform)

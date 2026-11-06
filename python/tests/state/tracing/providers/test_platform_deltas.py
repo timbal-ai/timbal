@@ -1226,3 +1226,63 @@ class TestKeepAlive:
             await run(long_tool(provider, 0.35, marks)(server), provider)
         assert flaky.failed and marks[1] - marks[0] >= 2
         assert [log for log in logs if log["event"] == "platform_trace_keepalive_failed"]
+
+
+class TestChatSessionOverDeltas:
+    async def test_two_turns_chain_through_the_platform(self):
+        from timbal.core.chat_session import ChatSession
+
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        agent, _ = tool_loop(2)
+        with (
+            patch("timbal.platform.utils._request", server.request),
+            patch.object(PlatformTracingProvider, "platform_config", CONFIG),
+        ):
+            async with ChatSession(agent) as session:
+                session.send("go")
+                finished = []
+                async for item in session.events():
+                    if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                        finished.append(item)
+                        if len(finished) == 1:
+                            PlatformTracingProvider._recent.clear()  # the next turn reads the platform's copy
+                            session.send("again")
+                        else:
+                            break
+        assert [f["status"]["code"] for f in finished] == ["success", "success"]
+        second = server.runs[finished[1]["run_id"]]["trace"]
+        root = next(s for s in second if s["parent_call_id"] is None)
+        users = [m for m in root["memory"] if m["role"] == "user"]
+        assert len(users) == 2  # the first turn's prompt came back from the platform
+        assert all(p["kind"] == "delta" for p in server.patches)
+
+
+def long_tool(provider, seconds, marks):
+    """One tool call that takes ``seconds``; ``marks`` records how many PATCHes had landed as it started and ended."""
+
+    async def wait(server):
+        marks.append(len(server.patches))
+        await asyncio.sleep(seconds)
+        marks.append(len(server.patches))
+
+    def handler(messages):
+        if any(m.role == "tool" for m in messages):
+            return "done"
+        return Message(
+            role="assistant", content=[ToolUseContent(id="c0", name="wait", input={})], stop_reason="tool_use"
+        )
+
+    def agent(server):
+        async def wait_tool() -> str:
+            await wait(server)
+            return "waited"
+
+        return Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="wait", handler=wait_tool)],
+            tracing_provider=provider,
+        )
+
+    return agent
