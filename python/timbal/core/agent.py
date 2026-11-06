@@ -260,6 +260,24 @@ def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | None = None) -> None:
+    """``span.metadata.tool_search``: what each search (or direct call) loaded this run."""
+    record = span.metadata.setdefault("tool_search", {"mode": mode, "loaded": [], "searches": []})
+    record["loaded"].extend(name for name in loaded if name not in record["loaded"])
+    record["searches"].append({"query": query, "loaded": list(loaded)})
+
+
+def _native_search_finds(message: Message) -> list[str]:
+    """Tool names Anthropic's tool search returned in one assistant message."""
+    names = []
+    for content in message.content:
+        value = content.value if isinstance(content, CustomContent) else None
+        if isinstance(value, dict) and value.get("type") == "tool_search_tool_result":
+            references = (value.get("content") or {}).get("tool_references") or []
+            names.extend(ref.get("tool_name") for ref in references if ref.get("tool_name"))
+    return names
+
+
 def rank_tools(tools: list[Any], query: str) -> list[Any]:
     """Tools matching ``query``, best first: keyword hits weighted name > parameters > description."""
     return [tool for _, tool in _score_tools(tools, query)]
@@ -1488,11 +1506,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             dispatch.append(search)
         return offered, dispatch, None, {tool.name for tool in hidden}
 
-    async def _load_tools(self, names: list[str]) -> None:
+    async def _load_tools(self, names: list[str], span: Any, query: str | None = None) -> None:
         """Keep tools search_tools found offered for the rest of the session."""
         session = await get_run_context().get_session()
         loaded = session.setdefault(_LOADED_TOOLS_KEY, {}).setdefault(self._path, [])
         loaded.extend(name for name in names if name not in loaded)
+        _record_tool_search(span, "client", names, query)
 
     def _search_tools(self, hidden: list[Tool]) -> Tool:
         """The ``search_tools`` tool over the deferred tools not loaded yet."""
@@ -1506,7 +1525,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             matches = [tool for score, tool in scored if score * 2 >= scored[0][0]][: max(1, min(limit, 20))]
             if not matches:
                 return f"No tool matched {query!r}. Try other words. Tools not loaded yet: {listing}."
-            await self._load_tools([tool.name for tool in matches])
+            await self._load_tools([tool.name for tool in matches], get_run_context().parent_span(), query)
             found = [{"name": tool.name, "description": tool.description or ""} for tool in matches]
             return json.dumps({"loaded": found, "note": "Call these from your next step."})
 
@@ -2631,6 +2650,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     for content in current_span.memory[-1].content
                     if isinstance(content, ToolUseContent) and not content.is_server_tool_use
                 ]
+                if deferred_tools:
+                    found = _native_search_finds(current_span.memory[-1])
+                    if found:
+                        _record_tool_search(current_span, "native", found)
 
                 if not tool_calls:
                     if steering:
@@ -2651,7 +2674,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
                 called_unloaded = [call.name for call in tool_calls if call.name in unloaded_tools]
                 if called_unloaded:
-                    await self._load_tools(called_unloaded)
+                    await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None
                 active_events = self._multiplex_tools(tools, tool_calls)
                 async for tool_call, event in active_events:

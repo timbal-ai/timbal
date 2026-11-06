@@ -1,5 +1,6 @@
 """Deferred tool schemas: client-side search_tools, native Anthropic tool search, persistence."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -315,3 +316,451 @@ class TestMCPDeferLoading:
         assert tool.defer_loading is True
         plain = MCPServer(name="gh", transport="http", url="http://localhost:1/mcp")
         assert plain._make_tool(MCPToolDef(name="x", inputSchema={"type": "object"})).defer_loading is False
+
+
+# -- Native search through the agent loop (scripted Anthropic stream) ------------
+
+
+class FakeAnthropic:
+    """Streams scripted assistant messages as real SDK events; records every request."""
+
+    def __init__(self, scripts):
+        self.scripts = list(scripts)
+        self.requests = []
+        self.messages = self
+
+    async def create(self, **request):
+        self.requests.append(request)
+        blocks, stop_reason = self.scripts.pop(0)
+        return self._stream(blocks, stop_reason)
+
+    async def _stream(self, blocks, stop_reason):
+        from anthropic.types import (
+            InputJSONDelta,
+            RawContentBlockDeltaEvent,
+            RawContentBlockStartEvent,
+            RawContentBlockStopEvent,
+            RawMessageDeltaEvent,
+            RawMessageStartEvent,
+            RawMessageStopEvent,
+            ServerToolUseBlock,
+            TextBlock,
+            TextDelta,
+            ToolSearchToolResultBlock,
+            ToolUseBlock,
+        )
+
+        yield RawMessageStartEvent(
+            type="message_start",
+            message={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-haiku-5-5",
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 10, "output_tokens": 0},
+            },
+        )
+        for index, block in enumerate(blocks):
+            kind = block["type"]
+            if kind == "text":
+                start = TextBlock(type="text", text="")
+                delta = TextDelta(type="text_delta", text=block["text"])
+            elif kind in ("tool_use", "server_tool_use"):
+                cls = ToolUseBlock if kind == "tool_use" else ServerToolUseBlock
+                start = cls(type=kind, id=block["id"], name=block["name"], input={})
+                delta = InputJSONDelta(type="input_json_delta", partial_json=json.dumps(block["input"]))
+            else:
+                start, delta = ToolSearchToolResultBlock(**block), None
+            yield RawContentBlockStartEvent(type="content_block_start", index=index, content_block=start)
+            if delta is not None:
+                yield RawContentBlockDeltaEvent(type="content_block_delta", index=index, delta=delta)
+            yield RawContentBlockStopEvent(type="content_block_stop", index=index)
+        yield RawMessageDeltaEvent(
+            type="message_delta",
+            delta={"stop_reason": stop_reason, "stop_sequence": None},
+            usage={"output_tokens": 5},
+        )
+        yield RawMessageStopEvent(type="message_stop")
+
+
+SEARCH_RESULT = {
+    "type": "tool_search_tool_result",
+    "tool_use_id": "srvtoolu_1",
+    "content": {
+        "type": "tool_search_tool_search_result",
+        "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
+    },
+}
+
+
+class TestNativeLoop:
+    async def test_search_round_trips_through_the_loop(self, monkeypatch):
+        from unittest.mock import patch
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        calls = []
+        fake = FakeAnthropic(
+            [
+                (
+                    [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_1",
+                            "name": ANTHROPIC_TOOL_SEARCH_NAME,
+                            "input": {"query": "weather"},
+                        },
+                        SEARCH_RESULT,
+                        {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Oslo"}},
+                    ],
+                    "tool_use",
+                ),
+                ([{"type": "text", "text": "Sunny in Oslo."}], "end_turn"),
+            ]
+        )
+        with patch("timbal.core.llm.clients._get_client", return_value=fake):
+            out = await agent("anthropic/claude-haiku-5-5", catalog(calls))(prompt="weather in Oslo?").collect()
+        assert out.status.code == "success", out.error
+        assert out.output.collect_text() == "Sunny in Oslo."
+        assert calls == [("get_weather", "Oslo")]
+
+        first, second = fake.requests
+        by_name = {t["name"]: t for t in first["tools"]}
+        assert by_name["get_weather"].get("defer_loading") is True
+        assert "defer_loading" not in by_name["lookup"]
+        assert by_name[ANTHROPIC_TOOL_SEARCH_NAME]["type"] == ANTHROPIC_TOOL_SEARCH_TYPE
+        assert SEARCH_TOOLS_NAME not in by_name  # native: no client-side search tool
+        # The search blocks go back unchanged, and only the client tool gets a tool_result.
+        assistant = next(m for m in second["messages"] if m["role"] == "assistant")
+        types = [block["type"] for block in assistant["content"]]
+        assert types == ["server_tool_use", "tool_search_tool_result", "tool_use"]
+        assert assistant["content"][1] == SEARCH_RESULT
+        results = [b for m in second["messages"] if m["role"] == "user" for b in m["content"] if isinstance(b, dict)]
+        assert [b["tool_use_id"] for b in results if b.get("type") == "tool_result"] == ["toolu_1"]
+        assert out.metadata["tool_search"] == {
+            "mode": "native",
+            "loaded": ["get_weather"],
+            "searches": [{"query": None, "loaded": ["get_weather"]}],
+        }
+
+    async def test_searched_turn_replays_on_the_next_turn(self, monkeypatch):
+        from unittest.mock import patch
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        fake = FakeAnthropic(
+            [
+                (
+                    [
+                        {
+                            "type": "server_tool_use",
+                            "id": "srvtoolu_1",
+                            "name": ANTHROPIC_TOOL_SEARCH_NAME,
+                            "input": {"query": "weather"},
+                        },
+                        SEARCH_RESULT,
+                        {"type": "text", "text": "Found it."},
+                    ],
+                    "end_turn",
+                ),
+                ([{"type": "text", "text": "Again."}], "end_turn"),
+            ]
+        )
+        a = agent("anthropic/claude-haiku-5-5")
+        with patch("timbal.core.llm.clients._get_client", return_value=fake):
+            first = await a(prompt="find weather").collect()
+            context(parent_id=first.run_id)
+            second = await a(prompt="again").collect()
+        assert second.status.code == "success", second.error
+        replayed = fake.requests[1]["messages"]
+        assert any(
+            isinstance(b, dict) and b.get("type") == "tool_search_tool_result"
+            for m in replayed
+            if m["role"] == "assistant"
+            for b in m["content"]
+        )
+
+
+# -- Observability ----------------------------------------------------------------
+
+
+class TestRecord:
+    async def test_client_search_and_direct_call_recorded(self):
+        model = TestModel(
+            responses=[
+                call(SEARCH_TOOLS_NAME, query="weather"),
+                call("list_repos", "c2", org="timbal"),
+                "done",
+            ]
+        )
+        out = await agent(model)(prompt="x").collect()
+        record = out.metadata["tool_search"]
+        assert record["mode"] == "client"
+        assert record["loaded"] == ["get_weather", "list_repos"]
+        assert record["searches"] == [
+            {"query": "weather", "loaded": ["get_weather"]},
+            {"query": None, "loaded": ["list_repos"]},
+        ]
+
+    async def test_no_record_without_loads(self):
+        out = await agent(TestModel(responses=["hi"]))(prompt="x").collect()
+        assert "tool_search" not in out.metadata
+
+
+# -- Parallel calls, sub-agents, approval, persistence -----------------------------
+
+
+class TestEdges:
+    async def test_search_and_direct_call_in_one_batch(self):
+        calls = []
+        model = TestModel(
+            responses=[
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseContent(id="c1", name=SEARCH_TOOLS_NAME, input={"query": "invoice"}),
+                        ToolUseContent(id="c2", name="get_weather", input={"city": "Rome"}),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                "done",
+            ]
+        )
+        out = await agent(model, catalog(calls))(prompt="x").collect()
+        assert calls == [("get_weather", "Rome")]
+        offered = (await offered_per_call(out))[1]
+        assert offered[0] == "lookup" and set(offered[1:3]) == {"create_invoice", "get_weather"}
+        assert offered[-1] == SEARCH_TOOLS_NAME
+
+    async def test_sub_agent_loads_stay_its_own(self):
+        child = Agent(
+            name="child",
+            model=TestModel(responses=[call(SEARCH_TOOLS_NAME, query="weather"), "child done"]),
+            tools=catalog()[1:],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        parent_model = TestModel(responses=[call("child", prompt="go"), "parent done"])
+        parent = Agent(
+            name="parent",
+            model=parent_model,
+            tools=[child, *catalog()[1:]],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        out = await parent(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        trace = await trace_of(out)
+        session = next(s for s in trace.values() if s.parent_call_id is None).session
+        assert session["__loaded_tools"] == {"parent.child": ["get_weather"]}
+        parent_calls = [
+            [t.name for t in s.input["tools"]]
+            for s in sorted(trace.values(), key=lambda s: s.t0)
+            if s.path == "parent.llm"
+        ]
+        assert parent_calls[-1] == ["child", SEARCH_TOOLS_NAME]
+
+    async def test_approval_on_a_deferred_tool(self):
+        from timbal.types.events import ApprovalEvent
+
+        charged = []
+        tools = [
+            Tool(
+                name="charge_card",
+                description="Charge a card.",
+                handler=lambda: charged.append(1) or "charged",
+                requires_approval=True,
+                defer_loading=True,
+            )
+        ]
+        model = TestModel(responses=[call(SEARCH_TOOLS_NAME, query="charge card"), call("charge_card", "c2"), "Paid."])
+        a = agent(model, tools)
+        events = [event async for event in a(prompt="pay")]
+        approval = next(e for e in events if isinstance(e, ApprovalEvent))
+        parked = events[-1]
+        assert parked.status.reason == "approval_required" and charged == []
+        context(parent_id=parked.run_id)
+        resumed = await a(prompt="pay", resume={approval.approval_id: True}).collect()
+        assert resumed.status.code == "success", resumed.error
+        assert charged == [1]
+
+    async def test_loaded_tools_survive_a_restart(self, tmp_path):
+        from timbal.state.tracing.providers import JsonlTracingProvider
+
+        path = tmp_path / "traces.jsonl"
+
+        def fresh(model):
+            return Agent(
+                name="agent",
+                model=model,
+                tools=catalog(),
+                tracing_provider=JsonlTracingProvider.configured(_path=path),
+            )
+
+        first = await fresh(TestModel(responses=[call(SEARCH_TOOLS_NAME, query="repos"), "ok"]))(prompt="x").collect()
+        set_run_context(
+            RunContext(parent_id=first.run_id, tracing_provider=JsonlTracingProvider.configured(_path=path))
+        )
+        second = await fresh(TestModel(responses=["second"]))(prompt="y").collect()
+        assert second.status.code == "success", second.error
+        provider = JsonlTracingProvider.configured(_path=path)
+        trace = await RunContext(id=second.run_id, tracing_provider=provider)._get_parent_trace(second.run_id)
+        llm = next(s for s in trace.values() if s.path == "agent.llm")
+        names = [t["name"] if isinstance(t, dict) else t.name for t in llm.input["tools"]]
+        assert names == ["lookup", "list_repos", SEARCH_TOOLS_NAME]
+
+
+# -- ChatSession: turns, steering mid-search, read-only wakes ------------------------
+
+
+async def session_records(session, kind, count, timeout=3.0):
+    found = []
+
+    async def collect():
+        async for item in session.events():
+            if isinstance(item, dict) and item.get("kind") == kind:
+                found.append(item)
+                if len(found) >= count:
+                    return
+
+    await asyncio.wait_for(collect(), timeout)
+    return found
+
+
+def session_llm_tools(session):
+    """Tool names offered on each LLM call the session's turns made, in order."""
+    from timbal.types.events import StartEvent
+
+    events, _ = session.log.peek()
+    return [
+        [t["name"] if isinstance(t, dict) else t.name for t in (e.input or {}).get("tools") or []]
+        for e in events
+        if isinstance(e, StartEvent) and e.path.endswith(".llm")
+    ] or None
+
+
+class TestChatSession:
+    async def test_loads_persist_across_session_turns(self):
+        from timbal.core.chat_session import ChatSession
+
+        offered = []
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                return "done"
+            if last.collect_text() == "find weather":
+                return call(SEARCH_TOOLS_NAME, f"c{len(messages)}", query="weather")
+            return "plain"
+
+        a = agent(TestModel(handler=handler))
+        original = a._plan_tool_search
+
+        async def spy(tools, model):
+            planned = await original(tools, model)
+            offered.append([t.name for t in planned[0]])
+            return planned
+
+        a._plan_tool_search = spy
+        async with ChatSession(a) as session:
+            session.send("find weather")
+            (first,) = await session_records(session, "turn_finished", 1)
+            session.send("hello")
+            await session_records(session, "turn_finished", 2)
+        assert first["tool_search"]["loaded"] == ["get_weather"]
+        assert offered[0] == ["lookup", SEARCH_TOOLS_NAME]
+        assert offered[-1] == ["lookup", "get_weather", SEARCH_TOOLS_NAME]
+
+    async def test_steer_during_a_search_batch_sees_the_loaded_tool(self):
+        from timbal.core.chat_session import ChatSession
+
+        entered, release = asyncio.Event(), asyncio.Event()
+        seen = []
+
+        async def work() -> str:
+            entered.set()
+            await release.wait()
+            return "worked"
+
+        def handler(messages):
+            seen.append(messages)
+            if messages[-1].role == "user" and messages[-1].collect_text() == "start":
+                return Message(
+                    role="assistant",
+                    content=[
+                        ToolUseContent(id="s1", name=SEARCH_TOOLS_NAME, input={"query": "weather"}),
+                        ToolUseContent(id="w1", name="work", input={}),
+                    ],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        a = agent(TestModel(handler=handler), [*catalog(), Tool(name="work", handler=work)], steering=True)
+        offered = []
+        original = a._plan_tool_search
+
+        async def spy(tools, model):
+            planned = await original(tools, model)
+            offered.append([t.name for t in planned[0]])
+            return planned
+
+        a._plan_tool_search = spy
+        async with ChatSession(a) as session:
+            session.send("start")
+            await asyncio.wait_for(entered.wait(), 2)
+            session.send("use it for Paris", mode="steer")
+            release.set()
+            await session_records(session, "turn_finished", 1)
+        assert "get_weather" in offered[1]
+        assert any(m.collect_text() == "use it for Paris" for m in seen[1] if m.role == "user")
+
+    async def test_read_only_wake_only_finds_read_only_tools(self):
+        from timbal.core.chat_session import ChatSession
+
+        sent = []
+
+        def read_inbox() -> str:
+            return "1 unread"
+
+        def send_email(to: str) -> str:
+            sent.append(to)
+            return "sent"
+
+        tools = [
+            Tool(
+                name="read_inbox",
+                description="Read the email inbox.",
+                handler=read_inbox,
+                read_only=True,
+                defer_loading=True,
+            ),
+            Tool(name="send_email", description="Send an email.", handler=send_email, defer_loading=True),
+        ]
+        searches = []
+
+        def handler(messages):
+            last = messages[-1]
+            if last.role == "tool":
+                searches.append(last.content[0].content[0].text if last.content else "")
+                return "NO_REPLY"
+            return call(SEARCH_TOOLS_NAME, f"c{len(messages)}", query="email inbox send")
+
+        a = agent(TestModel(handler=handler), tools)
+        offered = []
+        original = a._plan_tool_search
+
+        async def spy(tools, model):
+            planned = await original(tools, model)
+            offered.append(planned)
+            return planned
+
+        a._plan_tool_search = spy
+        async with ChatSession(a) as session:
+            session.wake("Check email.")
+            (finished,) = await session_records(session, "turn_finished", 1)
+        assert finished["silent"] is True
+        first_offered, first_dispatch, _, unloaded = offered[0]
+        assert unloaded == {"read_inbox"}
+        assert "send_email" not in first_offered[-1].description
+        assert "send_email" not in {t.name for t in first_dispatch}
+        assert finished["tool_search"]["loaded"] == ["read_inbox"]
+        assert sent == []
