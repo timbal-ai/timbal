@@ -205,6 +205,30 @@
         ]
       },
       {
+        "tab": "Model Reference",
+        "groups": [
+          {
+            "group": "Model Reference",
+            "pages": [
+              "models/overview",
+              "models/anthropic",
+              "models/byteplus",
+              "models/cerebras",
+              "models/fireworks",
+              "models/google",
+              "models/groq",
+              "models/moonshot",
+              "models/openai",
+              "models/sambanova",
+              "models/timbal",
+              "models/togetherai",
+              "models/xai",
+              "models/xiaomi"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "API Reference",
         "groups": [
           {
@@ -648,30 +672,6 @@
         ]
       },
       {
-        "tab": "Model Reference",
-        "groups": [
-          {
-            "group": "Model Reference",
-            "pages": [
-              "models/overview",
-              "models/anthropic",
-              "models/byteplus",
-              "models/cerebras",
-              "models/fireworks",
-              "models/google",
-              "models/groq",
-              "models/moonshot",
-              "models/openai",
-              "models/sambanova",
-              "models/timbal",
-              "models/togetherai",
-              "models/xai",
-              "models/xiaomi"
-            ]
-          }
-        ]
-      },
-      {
         "tab": "MCP Integration",
         "pages": [
           {
@@ -687,6 +687,23 @@
               "mcp-integration/windsurf",
               "mcp-integration/zed"
             ]
+          }
+        ]
+      },
+      {
+        "tab": "Data Gateway",
+        "groups": [
+          {
+            "group": "Timbal Connect",
+            "pages": ["connect/index", "connect/network-requirements"]
+          },
+          {
+            "group": "Install",
+            "pages": ["connect/install-windows", "connect/install-linux-macos"]
+          },
+          {
+            "group": "Configure and operate",
+            "pages": ["connect/connections", "connect/troubleshooting"]
           }
         ]
       }
