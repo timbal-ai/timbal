@@ -248,16 +248,42 @@ class TestSteering:
             assert started[1]["trigger"]["kind"] == "user_message"
             assert started[1]["parent_id"] == finished[0]["run_id"]
 
-    async def test_steered_text_is_screened_like_a_prompt(self):
+    async def test_a_blocked_steer_is_dropped_and_the_turn_goes_on(self):
         gate = Gate()
         rail = guardrail(lambda text: Verdict.block("nope") if "forbidden" in text else True, stages=["input"])
         async with ChatSession(make_agent(gate, guardrails=[rail])) as session:
             session.send("start")
             await asyncio.wait_for(gate.entered.wait(), 2)
-            session.send("something forbidden")
+            blocked = session.send("something forbidden")
+            allowed = session.send("and something fine")
             gate.release.set()
             (finished,) = await records(session, "turn_finished", 1)
-            assert finished["status"]["code"] == "blocked"
+            assert finished["status"]["code"] == "success"
+            assert blocked.state == allowed.state == "delivered"
+            (output,) = root_outputs(session)
+            assert output.output.collect_text() == "echo: and something fine"
+            memory = await stored_memory(output)
+            assert all("forbidden" not in m.collect_text() for m in memory)
+            notices = [m for m in memory if m.metadata.get("kind") == "steer_blocked"]
+            assert len(notices) == 1 and "guardrail" in notices[0].collect_text()
+            assert output.metadata["guardrails"]
+            # The tool's result is kept: the work done before the steer is not thrown away.
+            assert [m.role for m in memory][:3] == ["user", "assistant", "tool"]
+
+    async def test_a_steer_a_guardrail_rewrites_is_kept_rewritten(self):
+        gate = Gate()
+        rail = guardrail(
+            lambda text: text.replace("secret", "[redacted]") if "secret" in text else True,
+            stages=["input"],
+            action="redact",
+        )
+        async with ChatSession(make_agent(gate, guardrails=[rail])) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            session.send("my secret is 42")
+            gate.release.set()
+            await records(session, "turn_finished", 1)
+            assert root_outputs(session)[0].output.collect_text() == "echo: my [redacted] is 42"
 
     async def test_a_plain_agent_run_leaves_user_messages_pending(self):
         agent = make_agent(Gate())
@@ -744,6 +770,61 @@ class TestSessionLifecycle:
             await records(session, "turn_finished", 3)
             texts = [o.output.collect_text() for o in root_outputs(session)[1:]]
             assert texts == ["paid", "echo: hello?"]
+
+    async def test_interrupt_abandons_a_parked_turn_and_runs_the_new_message(self):
+        charged = []
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "paid"
+            return tool_call("charge") if last_user_text(messages) == "pay" else f"echo: {last_user_text(messages)}"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: charged.append(1) or "charged", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("pay")
+            await records(session, "turn_finished", 1)
+            assert session.parked
+            session.send("actually, forget it", mode="interrupt")
+            finished = await records(session, "turn_finished", 3)
+            assert finished[1]["status"]["code"] == "cancelled"
+            assert finished[2]["status"]["code"] == "success" and not session.parked
+            assert charged == []
+            assert root_outputs(session)[-1].output.collect_text() == "echo: actually, forget it"
+            (cut,) = await records(session, "interrupt", 1)
+            assert cut["abandoned"]
+            # The next turn's history answers the cancelled call, so the provider accepts it.
+            memory = await stored_memory(root_outputs(session)[-1])
+            uses = [c.id for m in memory if m.role == "assistant" for c in m.content if c.type == "tool_use"]
+            results = [c.id for m in memory if m.role == "tool" for c in m.content if c.type == "tool_result"]
+            assert set(uses) <= set(results)
+
+    async def test_stop_while_parked_cancels_the_question(self):
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "thanks"
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id="ask-1", name="ask_user", input={"question": "Which city?"})],
+                stop_reason="tool_use",
+            )
+
+        from timbal.tools.interaction import ask_user
+
+        agent = Agent(name="agent", model=TestModel(handler=handler), tools=[ask_user],
+                      tracing_provider=InMemoryTracingProvider)
+        async with ChatSession(agent) as session:
+            session.send("ask me")
+            await records(session, "turn_finished", 1)
+            assert session.parked and session.state()["pending_interactions"]
+            assert session.interrupt() is True
+            finished = await records(session, "turn_finished", 2)
+            assert finished[1]["status"]["code"] == "cancelled" and not session.parked
+            assert session.interrupt() is False
 
     async def test_constructor_checks(self):
         with pytest.raises(ValueError, match="tracing provider"):

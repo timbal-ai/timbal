@@ -23,6 +23,7 @@ from ..state.background import (
     forget_idle_background_store,
     store_for_run,
 )
+from ..types.approval import Cancel
 from ..types.content import TextContent
 from ..types.events import OutputEvent
 from ..types.message import RUNTIME_SOURCE, Message
@@ -126,7 +127,8 @@ class ChatSession:
     one that answers exactly :data:`SILENT_REPLY` ends ``silent``
     (``allow_silence``). A turn that ends waiting on an approval or
     ``ask_user`` parks the session: new messages wait until :meth:`resume`
-    answers it.
+    answers it, or :meth:`interrupt` (a message sent with ``"interrupt"``)
+    cancels what it waits for.
 
     :attr:`log` holds every event of every turn, in order, plus session records
     (``{"type": "SESSION", "kind": ...}``): ``message`` (a message was sent),
@@ -272,13 +274,27 @@ class ChatSession:
         return wake.id
 
     def interrupt(self) -> bool:
-        """Cancel the running turn; queued messages then start the next one. False when none runs."""
+        """Cut what the session is doing; queued messages then start the next turn.
+
+        Cancels the running turn, or, when the session is parked, every pending
+        approval and question (``Cancel``: the gated tools never run, the run
+        ends ``cancelled``). False when there is neither.
+        """
         turn = self._turn
-        if turn is None or turn.done():
-            return False
-        self._record("interrupt", run_id=self.run_id)
-        turn.cancel()
-        return True
+        if turn is not None and not turn.done():
+            self._record("interrupt", run_id=self.run_id)
+            turn.cancel()
+            return True
+        if self.parked and self._resume is None and self._last_context is not None:
+            reason = "The user moved on before answering."
+            pending = [a["approval_id"] for a in self._last_context.pending_approvals()]
+            pending += [i["interaction_id"] for i in self._last_context.pending_interactions()]
+            if not pending:
+                return False
+            self._record("interrupt", run_id=self._last_context.id, abandoned=pending)
+            self.resume({pending_id: Cancel(reason=reason) for pending_id in pending})
+            return True
+        return False
 
     def resume(self, values: dict[str, Any]) -> None:
         """Answer the parked turn: ``{approval_id: ...}`` / ``{interaction_id: value}``, as for ``resume=``."""

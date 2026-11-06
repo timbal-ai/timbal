@@ -106,6 +106,12 @@ DEFAULT_DENIAL_NOTICE = (
 )
 """User message injected once ``max_consecutive_denials`` is reached, before a tool-less LLM call."""
 
+DEFAULT_STEER_BLOCKED_NOTICE = (
+    "[System notice] A message the user sent during this turn was blocked by the '{rail}' guardrail and is "
+    "not shown. Do not guess what it said. Carry on, and mention briefly that one message could not be accepted."
+)
+"""Runtime message that stands in for a steered user message an input guardrail blocked."""
+
 READ_ONLY_POLICY = "read_only"
 # Agent-provided tools that only read (their constructors do not take ``read_only``).
 _READ_ONLY_BUILTINS = frozenset(
@@ -1144,7 +1150,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _take_steering(self, run_context: Any, current_span: Any) -> list[Any]:
         """The messages posted for the running turn (``lane="next"``), settled as delivered to it.
 
-        A runtime notice for events, then one user message for what the user sent.
+        A runtime notice for events, then one user message per message the user
+        sent (screened one by one, so blocking one keeps the others).
         """
         store = current_background_store()
         if store is None:
@@ -1158,9 +1165,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         others = [event for event in events if event.source != "user"]
         if others:
             messages.append(format_session_notice([], others))
-        users = [event for event in events if event.source == "user"]
-        if users:
-            messages.append(format_user_message(users, steered=True))
+        messages.extend(format_user_message([event], steered=True) for event in events if event.source == "user")
         return messages
 
     def _apply_background_limits(self, run_context: Any) -> None:
@@ -1978,20 +1983,39 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         steered = steered_user = False
 
         async def _steer() -> AsyncGenerator[BaseEvent, None]:
-            """Bring in what was posted for the running turn, screening user text like a prompt."""
+            """Bring in what was posted for the running turn, screening user text like a prompt.
+
+            A blocked message is dropped for a notice; the turn and its work go on.
+            """
             nonlocal steered, steered_user
             messages = self._take_steering(run_context, current_span)
             steered = bool(messages)
-            steered_user = any(not message.is_runtime() for message in messages)
+            steered_user = False
+            runner = self._guardrail_runner
+            screen = runner is not None and runner.has_stage(GuardrailStage.INPUT)
             for message in messages:
+                if not message.is_runtime() and screen:
+                    text = message_text(message)
+                    ctx = GuardrailContext(stage=GuardrailStage.INPUT, agent_path=self._path, payload=message)
+                    outcome = await runner.run_stage(GuardrailStage.INPUT, text, ctx)
+                    record_guardrails_metadata(current_span, outcome.triggered, run_context=run_context)
+                    for guardrail_event in build_guardrail_events(
+                        outcome.triggered, run_context=run_context, span=current_span
+                    ):
+                        yield guardrail_event
+                    if outcome.verdict is not None:
+                        await _append_memory(
+                            Message(
+                                role="user",
+                                content=[TextContent(text=DEFAULT_STEER_BLOCKED_NOTICE.format(rail=outcome.rail.name))],
+                                metadata={"source": "runtime", "kind": "steer_blocked"},
+                            )
+                        )
+                        continue
+                    if outcome.replaced and outcome.text != text:
+                        replace_message_text(message, outcome.text)
                 await _append_memory(message)
-            if (
-                steered_user
-                and self._guardrail_runner is not None
-                and self._guardrail_runner.has_stage(GuardrailStage.INPUT)
-            ):
-                async for guardrail_event in self._run_input_guardrails(run_context, current_span, _append_memory):
-                    yield guardrail_event
+                steered_user = steered_user or not message.is_runtime()
 
         # Set once max_consecutive_denials is reached: the next model call gets no tools.
         withhold_tools = False

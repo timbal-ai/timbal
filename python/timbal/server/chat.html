@@ -337,10 +337,13 @@
     if (S.parked) { pill.className = "status-pill park"; pill.textContent = "Waiting for your answer"; }
     else if (S.busy) { pill.className = "status-pill busy"; pill.textContent = `Running turn ${S.turnNo}`; }
     else { pill.className = "status-pill idle"; pill.textContent = "Idle"; }
-    $("btn-stop").disabled = !S.busy;
+    $("btn-stop").disabled = !S.busy && !S.parked;
+    $("btn-stop").title = S.parked ? "Cancel the pending question" : "Interrupt the running turn (Esc)";
     $("mode-hint").textContent = S.busy
       ? `→ ${MODE_HINTS[S.mode]}`
-      : (S.parked ? "messages wait until the pending question is answered" : "idle: any message starts a turn");
+      : (S.parked
+        ? "messages wait for the pending question; Interrupt (or Stop) cancels it"
+        : "idle: any message starts a turn");
   }
 
   // ---------- timeline pieces ----------
@@ -516,7 +519,15 @@
         break;
       }
       case "interrupt":
-        note("✂ interrupted");
+        if (d.abandoned) {
+          note("✂ cancelled the pending question");
+          d.abandoned.forEach((id) => {
+            const card = S.asks[id];
+            if (card) { card.classList.add("done"); card.querySelectorAll("button").forEach((b) => (b.disabled = true)); }
+          });
+        } else {
+          note("✂ interrupted");
+        }
         break;
       case "wake":
         note(`⏰ wake queued${d.tool_policy ? " · " + pretty(d.tool_policy) : ""}: ${d.text}`, "wake");
@@ -733,7 +744,7 @@
   }
 
   async function stop() {
-    if (!S.sessionId || !S.busy) return;
+    if (!S.sessionId || !(S.busy || S.parked)) return;
     await post(`/${S.sessionId}/interrupt`).catch((e) => note(`stop failed: ${e.message}`, "warn"));
   }
 
