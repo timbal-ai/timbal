@@ -50,6 +50,29 @@ Available modes are:
 
 `vad_endpointing=None` enables the local fast path when supported. Set it to `False` to disable it. A Python declaration may also supply a `TurnDetector` instance or zero-argument factory; clients may send supported mode names, and sessions own detector clones.
 
+## Entity and spelling patience
+
+Turn this on when callers read a phone number, a spelled name, an email address, or an order code and pause between groups. It is off unless you set it.
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="order_desk",
+    model="openai/gpt-5-mini",
+    system_prompt="You take orders. Read numbers and spelled names back only after the caller finishes them.",
+    voice_config={"language": "en", "entity_patience": True, "entity_patience_secs": 2.5},
+)
+```
+
+While the live transcript still ends in digits, a run of single letters, an unfinished email, or a code that mixes letters and digits, the session waits `entity_patience_secs` (default 2.5) before it starts a reply. A word after that entity, a complete email, a trailing `?` or `!`, or the wait expiring starts the turn and normal endpointing resumes. Leaving `entity_patience` unset does not change when turns start.
+
+On Deepgram Flux, eager end-of-turn events are dropped for that stretch. Timbal only logs those events and does not start a reply from them. Flux is asked, mid-call, to suppress its natural end-of-turn and to wait at least `entity_patience_secs` of silence before it closes the turn. When the entity is finished, `eot_threshold` and `eot_timeout_ms` return to the values in `stt_extra`, or to Timbal's connect defaults of `0.8` and `2000` when those keys are unset.
+
+Callers who hesitate but are not dictating an entity need a different knob. Set Flux `eot_threshold` (0.5–1.0) and `eot_timeout_ms` (500–60000) in `stt_extra` at connect time, or call `VoiceSession.configure_endpointing` on the live session. Higher values wait longer before Flux ends the turn. `eager_eot_threshold` makes Flux emit eager end-of-turn events. Timbal logs them and does not start a reply from them; leave the key unset while collecting numbers or spelled text. Deepgram documents eager end-of-turn as a poor fit for dictation, and recommends raising the threshold and the silence limit when pauses are frequent.
+
+`entity_patience` composes with the holds a `local` or `lexical` detector already returns. Those holds stay; an open entity only lengthens one that would otherwise be shorter. It does not turn a noise or hesitation commit into a turn.
+
 ## Custom clients
 
 WebSocket clients must report cumulative milliseconds of audio actually played and discard queued audio on `interrupted`. Reporting received bytes as played can preserve words the caller never heard. WebRTC and LiveKit use the server's paced media clock. See [Transports](/voice/transports) for the wire contract and [Events and usage](/voice/observability) for interruption metrics.

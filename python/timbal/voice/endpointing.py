@@ -156,6 +156,10 @@ class VadEndpointer:
         self._commit: Callable[[], Awaitable[None]] | None = None
         self._should_commit: Callable[[], bool] | None = None
         self._text_score: Callable[[], Awaitable[float | None]] | None = None
+        # Session sets this while an entity/spelling capture is open
+        # (AssemblyAI min_turn_silence bump, Pipecat long incomplete timeout).
+        # None → the delay map above is unchanged.
+        self.patience_floor_secs: float | None = None
 
         self._started = False
         self._closed = False
@@ -345,6 +349,12 @@ class VadEndpointer:
                 bumped = max(delay, self.text_incomplete_delay_secs)
                 text_bumped = bumped > delay
                 delay = bumped
+            floor = self.patience_floor_secs
+            if floor is not None and floor > delay:
+                # Open number / spelling / code: don't force-commit on a
+                # confident audio score. The floor is the long timeout; a
+                # later partial cancels the pending endpoint as usual.
+                delay = floor
             # INFO on purpose: fires once per speech-stop and is the whole
             # observable behaviour of the endpointing fast path.
             logger.info(
@@ -355,6 +365,7 @@ class VadEndpointer:
                 score_ms=round((time.monotonic() - t0) * 1000, 1),
                 p_text=round(p_text, 3) if p_text is not None else None,
                 text_incomplete_bump=text_bumped,
+                patience_floor_secs=None if floor is None else round(floor, 3),
             )
             remaining = delay - (time.monotonic() - t0)
             if remaining > 0:
