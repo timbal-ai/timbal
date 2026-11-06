@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import gzip
 import hashlib
 import itertools
 import json
@@ -103,6 +104,10 @@ class PlatformTracingProvider(TracingProvider):
 
     platform_config: PlatformConfig | None = None
 
+    compress: bool | None = None
+    """Gzip each PATCH body (``Content-Encoding: gzip``). Off by default: the API must decompress
+    request bodies first. ``None`` reads ``TIMBAL_TRACE_GZIP``."""
+
     # run key -> (monotonic time of the last successful save, the exact PATCH body sent)
     _recent: ClassVar[OrderedDict[str, tuple[float, bytes]]] = OrderedDict()
     # Numbers snapshots as they are taken: saves of one run overlap (parallel tools, background
@@ -183,6 +188,12 @@ class PlatformTracingProvider(TracingProvider):
         # Parsed afresh each time, so a reader can never change what the next one sees.
         stored = json.loads(entry[1])
         return Trace(stored["trace"], parent_id=stored.get("parent_id"))
+
+    @classmethod
+    def _compressing(cls) -> bool:
+        if cls.compress is not None:
+            return cls.compress
+        return os.environ.get("TIMBAL_TRACE_GZIP", "").strip().lower() in ("1", "true", "yes")
 
     @classmethod
     def _resolve_config(cls, run_context: RunContext):
@@ -270,12 +281,17 @@ class PlatformTracingProvider(TracingProvider):
         key = cls._recent_key(platform_config, subject_path, run_context.id)
         saves = PlatformTracingProvider._saving.setdefault(key, _Saves())
         saves.pending[snapshot] = asyncio.get_running_loop().create_future()
+        headers = {"Prefer": "return=minimal", "Content-Type": "application/json"}  # RFC 7240
+        wire = body
+        if cls._compressing():
+            wire = gzip.compress(body, compresslevel=5)
+            headers["Content-Encoding"] = "gzip"
         try:
             res = await _request(
                 method="PATCH",
                 path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
-                headers={"Prefer": "return=minimal", "Content-Type": "application/json"},  # RFC 7240
-                content=body,
+                headers=headers,
+                content=wire,
             )
             res.raise_for_status()
         except BaseException:
