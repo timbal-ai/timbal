@@ -458,4 +458,4 @@ class PlatformTracingProvider(TracingProvider):
 
 
 def _encode(payload) -> bytes:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False, default=str).encode()
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
