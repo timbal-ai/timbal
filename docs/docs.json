@@ -205,6 +205,30 @@
         ]
       },
       {
+        "tab": "Model Reference",
+        "groups": [
+          {
+            "group": "Model Reference",
+            "pages": [
+              "models/overview",
+              "models/anthropic",
+              "models/byteplus",
+              "models/cerebras",
+              "models/fireworks",
+              "models/google",
+              "models/groq",
+              "models/moonshot",
+              "models/openai",
+              "models/sambanova",
+              "models/timbal",
+              "models/togetherai",
+              "models/xai",
+              "models/xiaomi"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "API Reference",
         "groups": [
           {
@@ -643,30 +667,6 @@
                   }
                 ]
               }
-            ]
-          }
-        ]
-      },
-      {
-        "tab": "Model Reference",
-        "groups": [
-          {
-            "group": "Model Reference",
-            "pages": [
-              "models/overview",
-              "models/anthropic",
-              "models/byteplus",
-              "models/cerebras",
-              "models/fireworks",
-              "models/google",
-              "models/groq",
-              "models/moonshot",
-              "models/openai",
-              "models/sambanova",
-              "models/timbal",
-              "models/togetherai",
-              "models/xai",
-              "models/xiaomi"
             ]
           }
         ]
