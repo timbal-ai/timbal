@@ -83,7 +83,7 @@ A run is one turn. A chat session is a conversation that stays open while its tu
 | `GET /chat/` | The chat playground (below). |
 | `POST /chat/sessions` | Open a session. Body: `{"parent_id"?, "busy_mode"?, "collect_window"?}` → `201` state. |
 | `POST /chat/sessions/{id}/messages` | `{"text", "mode"?}` → `202` with the message receipt. |
-| `POST /chat/sessions/{id}/interrupt` | Cut the running turn. `{"interrupted": false}` when none runs. |
+| `POST /chat/sessions/{id}/interrupt` | Cut the running turn, or, while the session is parked, cancel what it waits for (the gated tool never runs). `{"interrupted": false}` when there is neither. |
 | `POST /chat/sessions/{id}/wake` | A turn for the application (routine, heartbeat): `{"text", "key"?, "tool_policy"?, "silent_ok"?}` → `202` with `wake_id`. `tool_policy` defaults to `"read_only"`; `null` gives every tool, a list only those. It runs when the user has nothing pending, never inside a user's turn, and may answer `NO_REPLY` to stay silent. |
 | `POST /chat/sessions/{id}/resume` | Answer a parked turn: `{"resume": {approval_id: true \| {...}, interaction_id: value}}`. `409` when nothing waits. |
 | `GET /chat/sessions/{id}/events?after=` | The session log as SSE (a `GET`, so `EventSource` works; `Last-Event-ID` is honored). |
@@ -97,7 +97,7 @@ A run is one turn. A chat session is a conversation that stays open while its tu
 - `collect` — one turn for every collected message, once none has arrived for `collect_window` seconds.
 - `interrupt` — cancels the running turn (it ends `cancelled` / `interrupted`, keeping what it produced) and runs this message first.
 
-With nothing running, any mode starts a turn. A turn that ends waiting on an approval or `ask_user` parks the session: new messages wait until `/resume` answers it.
+With nothing running, any mode starts a turn. A turn that ends waiting on an approval or `ask_user` parks the session: new messages wait until `/resume` answers it, and an `interrupt` (message or route) cancels the pending question instead. A steered message an input guardrail blocks is dropped on its own; the turn carries on.
 
 **The log** holds every event of every turn in order (the same `START` / `DELTA` / `OUTPUT` / `APPROVAL` / … events `/stream` sends) plus session records `{"type": "SESSION", "kind": ...}`: `message` (sent, with `mode` and whether a turn was running), `message_settled` (`delivered` with the `run_id` that took it — recorded before anything that run does next — or `superseded`), `wake` / `wake_superseded`, `turn_started` (`run_id`, `parent_id`, `trigger`: `user_message` with its `event_ids`, `resume`, `wake`, `session_event`, `background_completion`), `turn_finished` (`status`, `parked`, `silent`), `interrupt`, `closed`. Turns the runtime starts (events, finished tasks, wakes) may answer `NO_REPLY`: `silent: true` means there is nothing to show the user. A message whose id is not in its turn's `trigger.event_ids` was steered into it. SSE frames carry the cursor as `id:`; `event: gapped` means the ring dropped entries past your cursor. The JSON route returns `{events: [{seq, data}], next_cursor, gapped, closed}`.
 
