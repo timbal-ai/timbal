@@ -368,6 +368,7 @@ class TestWakeAndSilence:
             prompt = memory[0]
             assert prompt.is_runtime() and prompt.metadata["kind"] == "wake"
             assert "NO_REPLY" in prompt.collect_text() and "Check the inbox" in prompt.collect_text()
+            assert "This turn can only read" in prompt.collect_text()
 
     async def test_wake_with_all_tools_and_no_silence(self):
         sent = []

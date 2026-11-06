@@ -50,6 +50,10 @@ WAKE_KIND = "wake"
 
 _SILENCE_NOTE = f"If nothing here needs the user's attention, reply with exactly {SILENT_REPLY} and nothing else."
 _WAKE_HEADER = "Scheduled wake-up (the user did not write this):"
+_READ_ONLY_NOTE = (
+    "This turn can only read: tools that send, write, delete or buy are not available. If the task needs "
+    "one, do not retry or look for a way around it; say what you would do and that it needs the user."
+)
 _SESSION_KWARGS = frozenset({"prompt", "messages", "parent_id", "resume"})
 
 
@@ -430,6 +434,8 @@ class ChatSession:
         if wake is not None:
             options = _TurnOptions(tool_policy=wake.tool_policy, silence=self.allow_silence and wake.silent_ok)
             text = f"{_WAKE_HEADER}\n\n{wake.text}"
+            if wake.tool_policy == "read_only":
+                text += f"\n\n{_READ_ONLY_NOTE}"
             prompt = Message(
                 role="user",
                 content=[TextContent(text=text)],
