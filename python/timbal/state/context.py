@@ -220,6 +220,10 @@ class RunContext(BaseModel):
     #       then: a release it defers completes there)
     #   _steering: bool — the channel that started this run asks its root agent to
     #       take ``lane="next"`` session events between steps (``Agent.steering=None``)
+    #   _tool_policy: "read_only" | Collection[str] | Callable | None — narrows the
+    #       tools every agent in this run offers its model (``Agent._tool_allowed``)
+    #   _silence_token: str | None — a root agent whose final answer is exactly this
+    #       marks its span ``metadata.silent`` (a turn the runtime started may stay quiet)
     #   _resume_values: dict — active resume values keyed by id, supplied via
     #       ``resume=`` to fulfill a paused run. The id is an approval_id for an
     #       approval gate (value normalized to ``ApprovalResolution``) or a
@@ -334,6 +338,8 @@ class RunContext(BaseModel):
         self._continuation_owner = None
         self._foreign_turn_of = None
         self._steering = False
+        self._tool_policy = None
+        self._silence_token = None
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
         # Allocates nothing unless this session actually has children.

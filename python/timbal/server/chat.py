@@ -193,6 +193,33 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
     )
 
 
+@router.post("/sessions/{session_id}/wake")
+async def wake_session(request: Request, session_id: str) -> JSONResponse:
+    """Start a turn for the application: ``{"text", "key"?, "tool_policy"?, "silent_ok"?}``.
+
+    ``tool_policy`` defaults to ``"read_only"``; ``null`` gives the turn every
+    tool, a list of names only those. The wake runs once the user has nothing
+    pending, as a turn of its own, and may stay silent.
+    """
+    session = _session(request, session_id)
+    body = await _body(request)
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="'text' must be a string.")
+    policy = body.get("tool_policy", "read_only")
+    if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
+        raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
+    try:
+        wake_id = session.wake(
+            text, key=body.get("key"), tool_policy=policy, silent_ok=bool(body.get("silent_ok", True))
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return _json({"wake_id": wake_id, "busy": session.busy}, status_code=202)
+
+
 @router.post("/sessions/{session_id}/interrupt")
 async def interrupt_session(request: Request, session_id: str) -> JSONResponse:
     return _json({"interrupted": _session(request, session_id).interrupt()})

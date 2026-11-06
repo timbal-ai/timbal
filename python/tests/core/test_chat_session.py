@@ -8,7 +8,7 @@ from timbal.core.chat_session import ChatSession
 from timbal.core.session_scheduler import take_followup, user_batch
 from timbal.core.test_model import TestModel
 from timbal.guardrails import Verdict, guardrail
-from timbal.state import post_session_event, set_call_id, set_parent_call_id, set_run_context
+from timbal.state import get_run_context, post_session_event, set_call_id, set_parent_call_id, set_run_context
 from timbal.state.background import BackgroundTaskStore
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers import InMemoryTracingProvider
@@ -315,6 +315,392 @@ class TestModes:
             session.send("hello", mode="interrupt")
             await records(session, "turn_finished", 1)
             assert root_outputs(session)[0].output.collect_text() == "echo: hello"
+
+
+def wake_agent(sent, *, reply="NO_REPLY", extra_tools=(), model=None):
+    """``wake`` prompts try to email (hidden when read-only) then answer ``reply``; users get echoes."""
+
+    def send_email(to: str) -> str:
+        sent.append(to)
+        return "sent"
+
+    def lookup(q: str) -> str:
+        return f"found {q}"
+
+    def handler(messages):
+        last = messages[-1]
+        prompt = next(m for m in reversed(messages) if m.role == "user")
+        if last.role == "tool":
+            return reply
+        if prompt.is_runtime() and prompt.metadata.get("kind") == "wake":
+            return Message(
+                role="assistant",
+                content=[ToolUseContent(id=f"call-{len(messages)}", name="send_email", input={"to": "boss@acme.test"})],
+                stop_reason="tool_use",
+            )
+        if prompt.is_runtime():
+            return reply
+        return f"echo: {last_user_text(messages)}"
+
+    return Agent(
+        name="agent",
+        model=model or TestModel(handler=handler),
+        tools=[
+            Tool(name="lookup", handler=lookup, read_only=True),
+            Tool(name="send_email", handler=send_email),
+            *extra_tools,
+        ],
+        tracing_provider=InMemoryTracingProvider,
+    )
+
+
+class TestWakeAndSilence:
+    async def test_wake_runs_read_only_and_may_stay_silent(self):
+        sent = []
+        async with ChatSession(wake_agent(sent)) as session:
+            session.wake("Check the inbox for anything urgent.")
+            (finished,) = await records(session, "turn_finished", 1)
+            (started,) = await records(session, "turn_started", 1)
+            assert started["trigger"]["kind"] == "wake" and started["trigger"]["tool_policy"] == "read_only"
+            assert finished["silent"] is True and finished["status"]["code"] == "success"
+            assert sent == []  # send_email was hidden from the wake turn
+            memory = await stored_memory(root_outputs(session)[0])
+            prompt = memory[0]
+            assert prompt.is_runtime() and prompt.metadata["kind"] == "wake"
+            assert "NO_REPLY" in prompt.collect_text() and "Check the inbox" in prompt.collect_text()
+
+    async def test_wake_with_all_tools_and_no_silence(self):
+        sent = []
+        async with ChatSession(wake_agent(sent, reply="Emailed them.")) as session:
+            session.wake("Send the daily digest.", tool_policy=None, silent_ok=False)
+            (finished,) = await records(session, "turn_finished", 1)
+            assert sent == ["boss@acme.test"]
+            assert finished["silent"] is False
+            prompt = (await stored_memory(root_outputs(session)[0]))[0]
+            assert "NO_REPLY" not in prompt.collect_text()
+
+    async def test_user_messages_go_before_wakes_and_wakes_never_join_user_turns(self):
+        gate = Gate()
+        sent = []
+
+        async def work() -> str:
+            return await gate.work()
+
+        agent = wake_agent(sent, extra_tools=[Tool(name="work", handler=work)])
+        base_handler = agent.model.handler
+        agent.model.handler = lambda m: (
+            tool_call("work") if last_user_text(m) == "start" and m[-1].role == "user" else base_handler(m)
+        )
+        async with ChatSession(agent) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            session.wake("periodic check")
+            session.send("hi", mode="followup")
+            gate.release.set()
+            await records(session, "turn_finished", 3)
+            kinds = [r["trigger"]["kind"] for r in await records(session, "turn_started", 3)]
+            assert kinds == ["user_message", "user_message", "wake"]
+            user_turn = await stored_memory(root_outputs(session)[1])
+            assert all("periodic check" not in m.collect_text() for m in user_turn)
+
+    async def test_a_newer_wake_with_the_same_key_replaces_a_pending_one(self):
+        gate = Gate()
+        sent = []
+        agent = wake_agent(sent, extra_tools=[Tool(name="work", handler=gate.work)])
+        base = agent.model.handler
+        agent.model.handler = lambda m: (
+            tool_call("work") if last_user_text(m) == "start" and m[-1].role == "user" else base(m)
+        )
+        async with ChatSession(agent) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            first = session.wake("heartbeat 1", key="heartbeat")
+            second = session.wake("heartbeat 2", key="heartbeat")
+            assert [w["wake_id"] for w in session.state()["wakes"]] == [second]
+            gate.release.set()
+            await records(session, "turn_finished", 2)
+            (superseded,) = await records(session, "wake_superseded", 1)
+            assert superseded["wake_id"] == first
+            started = await records(session, "turn_started", 2)
+            assert started[1]["trigger"]["wake_id"] == second
+
+    async def test_a_wake_is_not_held_back_by_a_running_background_task(self):
+        release = asyncio.Event()
+
+        async def build() -> str:
+            await release.wait()
+            return "built"
+
+        def handler(messages):
+            prompt = next(m for m in reversed(messages) if m.role == "user")
+            if messages[-1].role == "tool":
+                return "Started the build."
+            if prompt.is_runtime() and prompt.metadata.get("kind") == "wake":
+                return "Still building."
+            return tool_call("build")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="build", handler=build, background_mode="always")],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("build it")
+            await records(session, "turn_finished", 1)
+            assert session.store.running_count() == 1
+            session.wake("How is the build going?")
+            finished = await records(session, "turn_finished", 2, timeout=1.5)
+            assert root_outputs(session)[1].output.collect_text() == "Still building."
+            assert finished[1]["silent"] is False
+            release.set()
+            # The finished build then gets a turn of its own, which may stay silent.
+            done = await records(session, "turn_finished", 3)
+            started = await records(session, "turn_started", 3)
+            assert started[2]["trigger"]["kind"] == "background_completion"
+            assert "silent" in done[2]
+
+    async def test_event_turns_may_stay_silent_but_user_turns_may_not(self):
+        sent = []
+        async with ChatSession(wake_agent(sent)) as session:
+            session.store.post_event("Deploy 42 finished.")
+            (event_turn,) = await records(session, "turn_finished", 1)
+            assert event_turn["silent"] is True
+            prompt = (await stored_memory(root_outputs(session)[0]))[0]
+            assert "NO_REPLY" in prompt.collect_text()
+
+        def says_no_reply(_messages):
+            return "NO_REPLY"
+
+        agent = Agent(name="agent", model=TestModel(handler=says_no_reply), tracing_provider=InMemoryTracingProvider)
+        async with ChatSession(agent) as session:
+            session.send("hello?")
+            (user_turn,) = await records(session, "turn_finished", 1)
+            assert user_turn["silent"] is False
+
+    async def test_allow_silence_off(self):
+        sent = []
+        async with ChatSession(wake_agent(sent), allow_silence=False) as session:
+            session.store.post_event("Deploy 42 finished.")
+            (finished,) = await records(session, "turn_finished", 1)
+            assert finished["silent"] is False
+            prompt = (await stored_memory(root_outputs(session)[0]))[0]
+            assert "NO_REPLY" not in prompt.collect_text()
+
+    async def test_a_resumed_wake_keeps_its_tool_policy(self):
+        policies = []
+
+        def charge() -> str:
+            policies.append(get_run_context()._tool_policy)
+            return "charged"
+
+        def handler(messages):
+            if messages[-1].role == "tool":
+                return "Charged."
+            return tool_call("charge")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=charge, requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.wake("Pay the invoice.", tool_policy=["charge"])
+            (parked,) = await records(session, "turn_finished", 1)
+            assert parked["parked"]
+            approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+            session.resume({approval.approval_id: True})
+            await records(session, "turn_finished", 2)
+            assert policies == [frozenset({"charge"})]
+
+    async def test_wake_validation(self):
+        session = ChatSession(make_agent(Gate()))
+        with pytest.raises(ValueError, match="non-empty"):
+            session.wake("   ")
+        with pytest.raises(ValueError, match="tool_policy"):
+            session.wake("x", tool_policy="read")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="strings"):
+            session.wake("x", tool_policy=[1])  # type: ignore[list-item]
+        await session.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            session.wake("x")
+
+
+class ConcurrencyProbe(TestModel):
+    """Echoes like ``echo`` and records how many model calls overlap (a session runs one turn at a time)."""
+
+    def __init__(self, delay=0.01):
+        super().__init__(handler=echo)
+        self.active = 0
+        self.max_active = 0
+        self.delay = delay
+
+    async def stream(self, messages, **kwargs):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(self.delay)
+            async for event in super().stream(messages, **kwargs):
+                yield event
+        finally:
+            self.active -= 1
+
+
+class TestRobustness:
+    async def test_two_subscribers_see_the_same_log(self):
+        """Two tabs on one session: both follow every record, in the same order."""
+        async with ChatSession(make_agent(Gate())) as session:
+            seen = [[], []]
+
+            async def follow(i):
+                async for item in session.events():
+                    seen[i].append(item)
+                    if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                        return
+
+            tabs = [asyncio.create_task(follow(0)), asyncio.create_task(follow(1))]
+            await asyncio.sleep(0)
+            session.send("hello")
+            await asyncio.wait_for(asyncio.gather(*tabs), 3)
+            assert seen[0] == seen[1] and len(seen[0]) > 5
+
+    async def test_reconnecting_mid_turn_replays_from_the_cursor(self):
+        gate = Gate()
+        async with ChatSession(make_agent(gate)) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            cursor = session.log.cursor_end
+            before, _ = session.log.peek()
+            gate.release.set()
+            await records(session, "turn_finished", 1)
+            tail = []
+            async for item in session.events(after=cursor):
+                tail.append(item)
+                if isinstance(item, dict) and item.get("kind") == "turn_finished":
+                    break
+            everything, _ = session.log.peek()
+            assert before + tail == everything[: len(before) + len(tail)]
+
+    async def test_a_foreign_turn_waits_for_the_running_one_and_the_session_continues_after_it(self):
+        gate = Gate()
+        agent = make_agent(gate)
+        async with ChatSession(agent) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            running = session.run_id
+            # Another client continues the same conversation directly (e.g. POST /stream with this parent).
+            foreign = asyncio.create_task(agent(prompt="from elsewhere", parent_id=running).collect())
+            await asyncio.sleep(0.05)
+            assert not foreign.done()  # queued behind the session's running turn
+            gate.release.set()
+            other = await asyncio.wait_for(foreign, 3)
+            assert other.output.collect_text() == "echo: from elsewhere"
+            assert session.head == other.run_id
+            session.send("and now?")
+            finished = await records(session, "turn_finished", 2)
+            started = await records(session, "turn_started", 2)
+            assert started[1]["parent_id"] == other.run_id
+            memory = await stored_memory(root_outputs(session)[1])
+            assert [m.collect_text() for m in memory if m.role == "user"] == ["start", "from elsewhere", "and now?"]
+            assert finished[1]["status"]["code"] == "success"
+
+    async def test_interrupting_a_tool_runs_its_cleanup_and_the_next_turn_has_a_result_for_it(self):
+        cleaned = asyncio.Event()
+
+        async def forever() -> str:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+            return "never"
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=echo),
+            tools=[Tool(name="forever", handler=forever)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        async with ChatSession(agent) as session:
+            session.send("slow")
+            await asyncio.sleep(0.1)
+            session.send("stop", mode="interrupt")
+            await records(session, "turn_finished", 2)
+            assert cleaned.is_set()
+            memory = await stored_memory(root_outputs(session)[1])
+            # Every tool_use is answered (a synthetic result for the cut call), so the provider accepts it.
+            uses = [c.id for m in memory if m.role == "assistant" for c in m.content if c.type == "tool_use"]
+            results = [c.id for m in memory if m.role == "tool" for c in m.content if c.type == "tool_result"]
+            assert uses and set(uses) <= set(results)
+
+    async def test_a_burst_of_mixed_messages_is_each_delivered_exactly_once(self):
+        model = ConcurrencyProbe()
+        gate = Gate()
+        async with ChatSession(make_agent(gate, model=model), collect_window=0.01) as session:
+            session.send("start")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            modes = ["steer", "followup", "collect", "steer", "followup"] * 10
+            events = [session.send(f"m{i}", mode=mode) for i, mode in enumerate(modes)]
+            gate.release.set()
+            await asyncio.wait_for(asyncio.gather(*(event.settled() for event in events)), 5)
+            await asyncio.sleep(0.1)
+            while session.busy or session.pending_messages():
+                await asyncio.sleep(0.02)
+            assert model.max_active == 1
+            assert all(event.state == "delivered" for event in events)
+            # Each turn's memory holds the conversation so far; take the messages each turn added.
+            delivered: list[str] = []
+            for output in root_outputs(session):
+                ids = [
+                    event_id
+                    for message in await stored_memory(output)
+                    if message.metadata.get("kind") == "user_message"
+                    for event_id in message.metadata["event_ids"]
+                ]
+                assert ids[: len(delivered)] == delivered  # history is append-only
+                delivered = ids
+            sent = {event.id for event in events}
+            burst = [event_id for event_id in delivered if event_id in sent]
+            assert sorted(burst) == sorted(sent) and len(burst) == len(sent)  # exactly once
+            # Steers jump ahead of queued follow-ups by design; within a mode the order holds.
+            for mode in ("steer", "followup", "collect"):
+                expected = [event.id for event, m in zip(events, modes, strict=True) if m == mode]
+                assert [event_id for event_id in burst if event_id in set(expected)] == expected
+
+    async def test_an_interrupt_storm_ends_with_every_message_answered(self):
+        gate = Gate()
+        async with ChatSession(make_agent(gate)) as session:
+            session.send("slow")
+            await asyncio.wait_for(gate.entered.wait(), 2)
+            events = [session.send(f"cut {i}", mode="interrupt") for i in range(5)]
+            await asyncio.wait_for(asyncio.gather(*(event.settled() for event in events)), 5)
+            while session.busy:
+                await asyncio.sleep(0.02)
+            assert {event.state for event in events} == {"delivered"}
+            last = root_outputs(session)[-1]
+            assert last.status.code == "success"
+            assert "cut 4" in last.output.collect_text()
+
+    async def test_close_with_pending_work_and_a_parked_turn(self):
+        def handler(messages):
+            return "ok" if messages[-1].role == "tool" else tool_call("charge")
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="charge", handler=lambda: "x", requires_approval=True)],
+            tracing_provider=InMemoryTracingProvider,
+        )
+        session = ChatSession(agent)
+        session.send("pay")
+        await records(session, "turn_finished", 1)
+        assert session.parked
+        waiting = session.send("hello?", mode="followup")
+        session.wake("check")
+        await session.close()
+        assert waiting.state == "pending" and session.closed
+        with pytest.raises(RuntimeError):
+            session.resume({"x": True})
 
 
 class TestSessionLifecycle:

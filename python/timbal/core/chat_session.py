@@ -4,8 +4,9 @@ import asyncio
 import contextlib
 import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import aclosing
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
@@ -22,20 +23,78 @@ from ..state.background import (
     forget_idle_background_store,
     store_for_run,
 )
+from ..types.content import TextContent
 from ..types.events import OutputEvent
+from ..types.message import RUNTIME_SOURCE, Message
 from .session_scheduler import Followup, SessionScheduler, is_parked, user_batch
 
 if TYPE_CHECKING:
     from .agent import Agent
 
-__all__ = ["SEND_MODES", "ChatSession", "SendMode"]
+__all__ = ["SEND_MODES", "SILENT_REPLY", "ChatSession", "SendMode", "ToolPolicy"]
 
 logger = structlog.get_logger("timbal.core.chat_session")
 
 SendMode = Literal["steer", "followup", "collect", "interrupt"]
 SEND_MODES: tuple[str, ...] = ("steer", "followup", "collect", "interrupt")
 
+ToolPolicy = Literal["read_only"] | Collection[str] | Callable[[Any], bool]
+"""Which tools a turn offers its model: ``"read_only"`` (tools declared ``read_only``,
+MCP tools the server marks ``readOnlyHint``, the agent's own readers), a collection of
+tool names, or a callable deciding per tool."""
+
+SILENT_REPLY = "NO_REPLY"
+"""What a turn the runtime started answers to stay silent (``turn_finished.silent``)."""
+
+WAKE_KIND = "wake"
+
+_SILENCE_NOTE = f"If nothing here needs the user's attention, reply with exactly {SILENT_REPLY} and nothing else."
+_WAKE_HEADER = "Scheduled wake-up (the user did not write this):"
 _SESSION_KWARGS = frozenset({"prompt", "messages", "parent_id", "resume"})
+
+
+@dataclass(eq=False)
+class _Wake:
+    text: str
+    key: str | None
+    tool_policy: Any
+    silent_ok: bool
+    id: str = field(default_factory=lambda: uuid7(as_type="hex"))  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class _TurnOptions:
+    """What a turn runs under; a resume of it runs under the same."""
+
+    tool_policy: Any = None
+    silence: bool = False
+
+
+def _check_tool_policy(policy: Any) -> Any:
+    if policy is None or policy == "read_only" or callable(policy):
+        return policy
+    if isinstance(policy, str) or not isinstance(policy, Collection):
+        raise ValueError("tool_policy must be 'read_only', a collection of tool names, a callable, or None.")
+    names = frozenset(policy)
+    if not all(isinstance(name, str) for name in names):
+        raise ValueError("tool_policy names must be strings.")
+    return names
+
+
+def _describe_policy(policy: Any) -> Any:
+    if policy is None or policy == "read_only":
+        return policy
+    if callable(policy):
+        return "custom"
+    return sorted(policy)
+
+
+def _with_note(prompt: Message, note: str) -> Message:
+    return Message(
+        role=prompt.role,
+        content=[*prompt.content, TextContent(text=note)],
+        metadata=dict(prompt.metadata) if prompt.metadata else None,
+    )
 
 
 class ChatSession:
@@ -57,14 +116,19 @@ class ChatSession:
 
     ``busy_mode`` is the mode a message gets when none is given. Finished
     background tasks and posted session events start turns too (when their
-    announce policy asks for one), as with :class:`AgentContinuation`. A turn
-    that ends waiting on an approval or ``ask_user`` parks the session: new
-    messages wait until :meth:`resume` answers it.
+    announce policy asks for one), as with :class:`AgentContinuation`, and
+    :meth:`wake` starts one for the application (a routine, a heartbeat) with
+    a narrowed tool set. Those turns may stay silent: told so in their prompt,
+    one that answers exactly :data:`SILENT_REPLY` ends ``silent``
+    (``allow_silence``). A turn that ends waiting on an approval or
+    ``ask_user`` parks the session: new messages wait until :meth:`resume`
+    answers it.
 
     :attr:`log` holds every event of every turn, in order, plus session records
     (``{"type": "SESSION", "kind": ...}``): ``message`` (a message was sent),
-    ``message_settled`` (a turn took it, or it was superseded), ``turn_started``,
-    ``turn_finished``, ``interrupt``, ``closed``. Read it with :meth:`events`.
+    ``message_settled`` (a turn took it, or it was superseded), ``wake`` /
+    ``wake_superseded``, ``turn_started``, ``turn_finished`` (``status``,
+    ``parked``, ``silent``), ``interrupt``, ``closed``. Read it with :meth:`events`.
 
     Process-local, like the session store it owns. Call its methods on the loop
     it runs on.
@@ -77,6 +141,7 @@ class ChatSession:
         parent_id: str | None = None,
         busy_mode: SendMode = "steer",
         collect_window: float = 1.0,
+        allow_silence: bool = True,
         max_log_events: int | None = DEFAULT_BG_LOG_MAX_EVENTS,
         max_log_bytes: int | None = DEFAULT_BG_LOG_MAX_BYTES,
         **kwargs: Any,
@@ -98,6 +163,7 @@ class ChatSession:
         self.id: str = uuid7(as_type="hex")  # type: ignore[assignment]
         self.busy_mode: SendMode = busy_mode
         self.collect_window = collect_window
+        self.allow_silence = allow_silence
         self.log = BackgroundEventLog(max_events=max_log_events, max_bytes=max_log_bytes)
         self.closed = False
         self.parked = False
@@ -116,7 +182,9 @@ class ChatSession:
         self._scheduler.head = parent_id
         self._work = asyncio.Event()
         self._resume: dict[str, Any] | None = None
+        self._wakes: list[_Wake] = []
         self._last_prompt: Any = None
+        self._last_options = _TurnOptions()
         self._worker: asyncio.Task | None = None
         self._turn: asyncio.Task | None = None
         self._turn_context: RunContext | None = None
@@ -162,6 +230,43 @@ class ChatSession:
             self.interrupt()
         return event
 
+    def wake(
+        self,
+        text: str,
+        *,
+        key: str | None = None,
+        tool_policy: ToolPolicy | None = "read_only",
+        silent_ok: bool = True,
+    ) -> str:
+        """Start a turn for the application (a routine, a heartbeat): returns the wake's id.
+
+        It runs once nothing the user sent or the session owes is waiting, as
+        a turn of its own (never folded into a user's), with only the tools
+        ``tool_policy`` allows (default ``"read_only"``: proactive work that
+        cannot send, write or buy; ``None`` for all tools). With ``silent_ok``
+        (and ``allow_silence``) it may answer :data:`SILENT_REPLY` to say
+        nothing. A pending wake with the same ``key`` is replaced. The text is
+        trusted application text: input guardrails do not screen it.
+        """
+        if self.closed:
+            raise RuntimeError("The chat session is closed.")
+        text = text.strip() if isinstance(text, str) else ""
+        if not text:
+            raise ValueError("A wake needs non-empty text.")
+        policy = _check_tool_policy(tool_policy)
+        key = (key or "").strip() or None
+        if key is not None:
+            for old in [wake for wake in self._wakes if wake.key == key]:
+                self._wakes.remove(old)
+                self._record("wake_superseded", wake_id=old.id, key=key)
+        wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=silent_ok)
+        self._wakes.append(wake)
+        self.last_activity = time.monotonic()
+        self._record("wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy))
+        self._work.set()
+        self._ensure_worker()
+        return wake.id
+
     def interrupt(self) -> bool:
         """Cancel the running turn; queued messages then start the next one. False when none runs."""
         turn = self._turn
@@ -202,6 +307,7 @@ class ChatSession:
             "turns": self.turns,
             "busy_mode": self.busy_mode,
             "pending": self.pending_messages(),
+            "wakes": [{"wake_id": wake.id, "text": wake.text, "key": wake.key} for wake in self._wakes],
             "last_status": self.last_status,
             "log_cursor": self.log.cursor_end,
         }
@@ -241,6 +347,10 @@ class ChatSession:
 
     def _work_arrived(self) -> None:
         self._work.set()
+        # An event or a finished task can be the session's first work: nothing else started the worker.
+        if not self.closed:
+            with contextlib.suppress(RuntimeError):
+                self._ensure_worker()
 
     async def _serve(self) -> None:
         try:
@@ -262,8 +372,12 @@ class ChatSession:
             if self.parked:
                 await self._work.wait()
                 continue
-            if await scheduler.wait_ready(self._admit) is None:
-                await self._work.wait()
+            if self._wakes and scheduler.pending_turn() is None and not scheduler.other_turn_first():
+                wake = self._wakes.pop(0)
+                scheduler.turn_started()
+                await self._run_turn(wake=wake)
+                continue
+            if not await self._turn_due():
                 continue
             # Take and busy in one step: a foreign root turn either goes before it or meets a busy owner.
             followup = scheduler.take()
@@ -271,6 +385,24 @@ class ChatSession:
                 continue
             scheduler.turn_started()
             await self._run_turn(followup=followup)
+
+    async def _turn_due(self) -> bool:
+        """True once the scheduler says a turn is due; False when other work arrived first (a wake, a resume)."""
+        loop = asyncio.get_running_loop()
+        ready = loop.create_task(self._scheduler.wait_ready(self._admit))
+        work = loop.create_task(self._work.wait())
+        try:
+            await asyncio.wait({ready, work}, return_when=asyncio.FIRST_COMPLETED)
+            if ready.done() and ready.result() is not None:
+                return True
+            # Nothing pending or running could ask for a turn: wait for new work.
+            if not work.done():
+                await work
+            return False
+        finally:
+            for task in (ready, work):
+                if not task.done():
+                    task.cancel()
 
     async def _admit(self) -> None:
         """Hold a turn for collected messages until none has arrived for ``collect_window`` seconds."""
@@ -285,23 +417,59 @@ class ChatSession:
                 return
             await asyncio.sleep(delay)
 
-    async def _run_turn(self, *, followup: Followup | None = None, resume: dict[str, Any] | None = None) -> None:
+    def _turn_inputs(
+        self, followup: Followup | None, resume: dict[str, Any] | None, wake: _Wake | None
+    ) -> tuple[dict[str, Any], dict[str, Any], _TurnOptions]:
+        """The agent kwargs, the log's trigger, and the options of the turn about to run."""
+        kwargs = dict(self._kwargs)
+        if resume is not None:
+            # The run a resume chains onto drops its prompt; the agent still requires one.
+            kwargs["prompt"] = self._last_prompt
+            kwargs["resume"] = resume
+            return kwargs, {"kind": "resume"}, self._last_options
+        if wake is not None:
+            options = _TurnOptions(tool_policy=wake.tool_policy, silence=self.allow_silence and wake.silent_ok)
+            text = f"{_WAKE_HEADER}\n\n{wake.text}"
+            prompt = Message(
+                role="user",
+                content=[TextContent(text=text)],
+                metadata={"source": RUNTIME_SOURCE, "kind": WAKE_KIND, "wake_id": wake.id},
+            )
+            trigger = {
+                "kind": WAKE_KIND,
+                "wake_id": wake.id,
+                "key": wake.key,
+                "tool_policy": _describe_policy(wake.tool_policy),
+            }
+        else:
+            assert followup is not None
+            trigger = followup.trigger
+            options = _TurnOptions(silence=self.allow_silence and trigger["kind"] != "user_message")
+            prompt = followup.prompt
+        if options.silence:
+            prompt = _with_note(prompt, _SILENCE_NOTE)
+        kwargs["prompt"] = prompt
+        return kwargs, trigger, options
+
+    async def _run_turn(
+        self,
+        *,
+        followup: Followup | None = None,
+        resume: dict[str, Any] | None = None,
+        wake: _Wake | None = None,
+    ) -> None:
         """Run one turn the scheduler is already busy with (``turn_started``), and settle it."""
         scheduler = self._scheduler
         turn: asyncio.Task | None = None
         try:
+            kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
             context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
             context._steering = True
+            context._tool_policy = options.tool_policy
+            context._silence_token = SILENT_REPLY if options.silence else None
             adopt_background_store(context, self._store)
             scheduler.mark_own(context)
-            kwargs = dict(self._kwargs)
-            if followup is not None:
-                kwargs["prompt"] = self._last_prompt = followup.prompt
-            if resume is not None:
-                # The run a resume chains onto drops its prompt; the agent still requires one.
-                kwargs["prompt"] = self._last_prompt
-                kwargs["resume"] = resume
-            trigger = followup.trigger if followup is not None else {"kind": "resume"}
+            self._last_prompt, self._last_options = kwargs["prompt"], options
             turn = asyncio.get_running_loop().create_task(self._pump(context, kwargs, followup, trigger))
             self._turn, self._turn_context = turn, context
             try:
@@ -325,6 +493,8 @@ class ChatSession:
                 output = turn.result()
         if output is None:
             # Never started (cut before its first event): the head stays on the last run that did.
+            if wake is not None and not self.closed:
+                self._wakes.insert(0, wake)
             return
         if self._last_context is not None and self._last_context is not context:
             scheduler.unmark(self._last_context)
@@ -333,7 +503,13 @@ class ChatSession:
         self.parked = is_parked(status)
         self.last_status = {"code": status.code, "reason": status.reason, "message": status.message}
         self.last_activity = time.monotonic()
-        self._record("turn_finished", run_id=context.id, status=self.last_status, parked=self.parked)
+        self._record(
+            "turn_finished",
+            run_id=context.id,
+            status=self.last_status,
+            parked=self.parked,
+            silent=bool(output.metadata.get("silent")),
+        )
 
     async def _pump(
         self,

@@ -62,6 +62,20 @@ class RunTimeout(TimbalError, TimeoutError):
         self.timeout = timeout
 
 
+class ModelStreamStalled(TimbalError, TimeoutError):
+    """A model stream sent nothing for ``idle_timeout`` seconds (``Agent.stream_idle_timeout``).
+
+    Retried like a timeout while the stream has produced nothing; once it has,
+    the call fails instead, since a fresh attempt would repeat what was sent.
+    """
+
+    def __init__(self, idle_timeout: float, *, after_output: bool = False) -> None:
+        when = "after it started answering" if after_output else "before its first chunk"
+        super().__init__(f"The model stream sent nothing for {idle_timeout:g}s {when}.")
+        self.idle_timeout = idle_timeout
+        self.after_output = after_output
+
+
 class EarlyExit(TimbalError):
     """Error raised when an early exit is requested.
 

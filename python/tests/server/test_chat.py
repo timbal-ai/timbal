@@ -115,6 +115,27 @@ def test_interrupt_endpoint_cuts_the_turn(client):
     assert client.post(f"/chat/sessions/{session_id}/interrupt").json() == {"interrupted": False}
 
 
+def test_wake_starts_a_read_only_turn(client):
+    session_id = open_session(client)
+    woke = client.post(f"/chat/sessions/{session_id}/wake", json={"text": "anything new?", "key": "heartbeat"})
+    assert woke.status_code == 202 and woke.json()["wake_id"]
+    items = read_log(client, session_id, until_kind="turn_finished", count=1)
+    (started,) = [item for _, item in items if item.get("kind") == "turn_started"]
+    assert started["trigger"]["kind"] == "wake" and started["trigger"]["tool_policy"] == "read_only"
+    (wake,) = [item for _, item in items if item.get("kind") == "wake"]
+    assert wake["key"] == "heartbeat"
+
+
+def test_wake_validation(client):
+    session_id = open_session(client)
+    url = f"/chat/sessions/{session_id}/wake"
+    assert client.post(url, json={}).status_code == 400
+    assert client.post(url, json={"text": "  "}).status_code == 400
+    assert client.post(url, json={"text": "x", "tool_policy": "everything"}).status_code == 400
+    assert client.post(url, json={"text": "x", "tool_policy": ["work"]}).status_code == 202
+    assert client.post(url, json={"text": "x", "tool_policy": None}).status_code == 202
+
+
 def test_errors(client):
     assert client.get("/chat/sessions/nope").status_code == 404
     assert client.post("/chat/sessions/nope/messages", json={"text": "x"}).status_code == 404
