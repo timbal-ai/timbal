@@ -210,7 +210,7 @@ agent = Agent(
 )
 ```
 
-Each value resolves tool field → `Integration("snowflake")` → env: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PRIVATE_KEY` or `SNOWFLAKE_PRIVATE_KEY_PATH`, `SNOWFLAKE_TOKEN`, and `SNOWFLAKE_PAT`, plus optional `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. The schema tool field is `schema_name`. Auth precedence is OAuth token → PAT → key pair. Use `?` bindings.
+Each value resolves tool field → `Integration("snowflake")` → env: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PRIVATE_KEY` or `SNOWFLAKE_PRIVATE_KEY_PATH`, `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`, `SNOWFLAKE_TOKEN`, and `SNOWFLAKE_PAT`, plus optional `SNOWFLAKE_HOST` (PrivateLink), `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. The schema tool field is `schema_name`. Auth precedence is OAuth token → PAT → key pair. Use `?` bindings.
 
 <Warning>
 The Snowflake role is the real permission boundary. `SnowflakeQuery`'s read-only check is only a guardrail. Put write tools (`SnowflakeExecute`, `SnowflakeInsertRows`) behind `requires_approval`. See [Approval gates](/human-in-the-loop/approval-gates).
