@@ -76,6 +76,22 @@ class ModelStreamStalled(TimbalError, TimeoutError):
         self.after_output = after_output
 
 
+class ModelOutputTruncated(TimbalError):
+    """The model's final answer hit its output limit before any visible text.
+
+    Reasoning models can spend the whole ``max_tokens`` budget thinking. The
+    agent retries once with a larger budget before raising this.
+    """
+
+    def __init__(self, max_tokens: int | None) -> None:
+        budget = f"max_tokens={max_tokens}" if max_tokens else "the provider's default limit"
+        super().__init__(
+            f"The model used its whole output budget ({budget}) before writing a reply, "
+            "most likely on reasoning. Raise max_tokens or lower the reasoning effort."
+        )
+        self.max_tokens = max_tokens
+
+
 class EarlyExit(TimbalError):
     """Error raised when an early exit is requested.
 

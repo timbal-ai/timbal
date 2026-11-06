@@ -552,6 +552,7 @@
             t.state.textContent = st.reason === "interrupted" ? "interrupted" : "not finished";
           }
         });
+        if (d.error) note(`⚠ ${d.error.type || "error"}: ${d.error.message || ""}`.slice(0, 300), "warn");
         divider(`end of turn ${turn ? turn.n : "?"}`, text, cls);
         refreshState();
         if (d.parked) sendQueuedAnswers();
@@ -642,8 +643,27 @@
         S.tools[c.id] = t;
         t.args.textContent = pretty(c.input);
       });
+      // Anthropic results name their call (tool_use_id); OpenAI's tool_search_output follows its call.
+      let openaiSearch = null;
       content.forEach((c) => {
-        if (c.type === "custom" && c.value && c.value.tool_use_id) serverResult(c.value);
+        const v = c.type === "custom" ? c.value : null;
+        if (!v) return;
+        if (v.tool_use_id) serverResult(v);
+        else if (v.type === "tool_search_call") {
+          openaiSearch = v.id;
+          if (!S.tools[v.id]) {
+            const t = streamedServer.shift() || toolCard(d.run_id, v.id, "tool_search", v.arguments, true);
+            S.tools[v.id] = t;
+          }
+          S.tools[v.id].args.textContent = pretty(v.arguments);
+        } else if (v.type === "tool_search_output" && openaiSearch) {
+          const loaded = (v.tools || []).flatMap((t) => (t.type === "namespace" ? t.tools || [] : [t]));
+          serverResult({
+            type: "tool_search_tool_result",
+            tool_use_id: openaiSearch,
+            content: { tool_references: loaded.map((t) => ({ tool_name: t.name })) },
+          });
+        }
       });
       if (d.status && d.status.code === "error") note(`model error: ${d.error ? d.error.message || "" : ""}`.slice(0, 200), "warn");
       return;

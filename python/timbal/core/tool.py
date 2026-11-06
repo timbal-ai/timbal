@@ -69,6 +69,14 @@ class Tool(Runnable):
         ),
     )
 
+    search_group: str | None = Field(
+        default=None,
+        description=(
+            "Deferred tools sharing a group are offered to OpenAI's tool search as one namespace, so the "
+            "model first sees one short entry instead of every tool's description. MCPServer sets its name."
+        ),
+    )
+
     result_limit: ToolResultLimit | int | None | Literal["inherit"] = Field(
         default="inherit",
         description=(
