@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import math
+import os
 import time
 from collections.abc import AsyncIterator, Callable, Collection
 from contextlib import aclosing
@@ -188,8 +189,11 @@ class ChatSession:
         allow_silence: bool = True,
         max_log_events: int | None = DEFAULT_BG_LOG_MAX_EVENTS,
         max_log_bytes: int | None = DEFAULT_BG_LOG_MAX_BYTES,
+        durability: Literal["sync", "buffered", "end"] | None = None,
         **kwargs: Any,
     ) -> None:
+        if durability not in (None, "sync", "buffered", "end"):
+            raise ValueError(f"durability must be 'sync', 'buffered' or 'end', got {durability!r}")
         if "." in agent._path or agent.background_mode != "never":
             raise RuntimeError("A chat session needs a foreground, top-level Agent.")
         if agent.tracing_provider is None:
@@ -218,6 +222,8 @@ class ChatSession:
         self.last_activity = time.monotonic()
         self._agent = agent
         self._kwargs = kwargs
+        self._durability = durability
+        self._providers: dict[type, type] = {}
         store = store_for_run(parent_id) if parent_id is not None else None
         self._store = store if store is not None else BackgroundTaskStore()
         self._scheduler = SessionScheduler(
@@ -698,6 +704,7 @@ class ChatSession:
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
             context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
+            context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
@@ -785,6 +792,32 @@ class ChatSession:
         return output
 
     # -- Log ----------------------------------------------------------------------
+
+    def _turn_provider(self, provider: Any) -> Any:
+        """The provider a turn saves with: ``durability`` when given; else platform saves are buffered.
+
+        The platform stores a whole trace per save over the network, so a turn that saved on every
+        finished span would upload its history dozens of times. Buffered, it saves at most once per
+        flush interval and waits only at the turn's end. A provider or ``TIMBAL_TRACE_DURABILITY``
+        that already chose a mode keeps it.
+        """
+        from ..state.tracing import uploads
+        from ..state.tracing.providers import PlatformTracingProvider
+
+        if not isinstance(provider, type):
+            return provider
+        want = self._durability
+        if want is None:
+            chosen = provider.durability is not None or os.environ.get(uploads.DURABILITY_ENV)
+            if not issubclass(provider, PlatformTracingProvider) or chosen:
+                return provider
+            want = "buffered"
+        if uploads.durability(provider) == want:
+            return provider
+        configured = self._providers.get(provider)
+        if configured is None:
+            configured = self._providers[provider] = provider.configured(durability=want)
+        return configured
 
     def _record(self, kind: str, **fields: Any) -> None:
         self.log.put_nowait({"type": "SESSION", "kind": kind, "t": int(time.time() * 1000), **fields})
