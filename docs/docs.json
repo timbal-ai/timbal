@@ -120,17 +120,6 @@
               "deployment/platform",
               "deployment/self-hosted"
             ]
-          },
-          {
-            "group": "Timbal Connect",
-            "pages": [
-              "connect/index",
-              "connect/network-requirements",
-              "connect/install-windows",
-              "connect/install-linux-macos",
-              "connect/connections",
-              "connect/troubleshooting"
-            ]
           }
         ]
       },
@@ -698,6 +687,23 @@
               "mcp-integration/windsurf",
               "mcp-integration/zed"
             ]
+          }
+        ]
+      },
+      {
+        "tab": "Connect",
+        "groups": [
+          {
+            "group": "Timbal Connect",
+            "pages": ["connect/index", "connect/network-requirements"]
+          },
+          {
+            "group": "Install",
+            "pages": ["connect/install-windows", "connect/install-linux-macos"]
+          },
+          {
+            "group": "Configure and operate",
+            "pages": ["connect/connections", "connect/troubleshooting"]
           }
         ]
       }
