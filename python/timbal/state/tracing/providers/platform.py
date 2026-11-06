@@ -66,6 +66,50 @@ class _Saves:
         self.newest = -1
 
 
+class _Flight:
+    """One run's saves, single-flight: the round to send next, the rounds on the wire, and the task sending them."""
+
+    __slots__ = ("context", "driver", "loop", "next", "sent")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.context: RunContext | None = None
+        self.next: asyncio.Future[None] | None = None
+        self.sent: list[asyncio.Future[None]] = []
+        self.driver: asyncio.Task | None = None
+
+    def waits(self) -> list[asyncio.Future[None]]:
+        """The rounds not settled yet: a read of this run must not overtake them."""
+        rounds = [r for r in self.sent if not r.done()]
+        if self.next is not None and not self.next.done():
+            rounds.append(self.next)
+        return rounds
+
+
+def _retrieve(future: asyncio.Future) -> None:
+    """Mark a round's error seen: every caller of it may have been cancelled."""
+    if not future.cancelled():
+        future.exception()
+
+
+def _settle(flight: _Flight, joined: asyncio.Future[None], save: asyncio.Task) -> None:
+    """A round's save finished. Success also settles earlier rounds still on the wire (a stalled
+    PATCH): this one carried their state and newer."""
+    if save.cancelled() or save.exception() is not None:
+        flight.sent.remove(joined)
+        if not joined.done():
+            if save.cancelled():
+                joined.cancel()
+            else:
+                joined.set_exception(save.exception())
+        return
+    index = flight.sent.index(joined)
+    settled, flight.sent[: index + 1] = flight.sent[: index + 1], []
+    for future in settled:
+        if not future.done():
+            future.set_result(None)
+
+
 DELTA_MEDIA_TYPE = "application/vnd.timbal.trace-delta+json"
 _DELTA_RUNS_MAX = 2048
 
@@ -73,7 +117,7 @@ _DELTA_RUNS_MAX = 2048
 class _HostCaps:
     """What a platform host advertised it accepts (learned from its responses), and what it turned down."""
 
-    __slots__ = ("delta", "delta_rejected", "gzip", "gzip_rejected")
+    __slots__ = ("delta", "delta_rejected", "gzip", "gzip_rejected", "select_resume")
 
     def __init__(self) -> None:
         self.gzip = False
@@ -82,31 +126,49 @@ class _HostCaps:
         # overrides a forced format, so one bad host never drops saves.
         self.gzip_rejected = False
         self.delta_rejected = False
+        self.select_resume = False
 
     def learn(self, headers) -> None:
-        items = getattr(headers, "items", None)
-        if items is None:
-            return
-        found = {str(name).lower(): value for name, value in items() if isinstance(value, str)}
+        found = _header_items(headers)
         if "gzip" in found.get("accept-encoding", "").lower():
             self.gzip = True
         if DELTA_MEDIA_TYPE in found.get("accept-patch", "").lower():
             self.delta = True
+        if "resume" in found.get(SELECT_HEADER, "").lower():
+            self.select_resume = True
+        stored = found.get(SNAPSHOT_HEADER, "").strip()
+        if stored.isdigit():
+            _observe_snapshot(int(stored))
 
 
+def _header_items(headers) -> dict[str, str]:
+    items = getattr(headers, "items", None)
+    if items is None:
+        return {}
+    return {str(name).lower(): value for name, value in items() if isinstance(value, str)}
+
+
+SNAPSHOT_HEADER = "x-timbal-snapshot"
+SELECT_HEADER = "x-timbal-select"
 _last_snapshot = 0
 
 
 def _next_snapshot() -> int:
-    """Strictly increasing within the process and, by the clock, across processes (µs since the epoch).
+    """Strictly increasing within the process and, by the clock, across processes (ns since the epoch).
 
-    The platform ignores a delta whose snapshot is not newer than the last it applied to the run, and a
+    The platform ignores a save whose snapshot is not newer than the last it applied to the run, and a
     run can be continued by another process (an approval resumed elsewhere): a per-process counter
     would restart below what the first process sent.
     """
     global _last_snapshot
-    _last_snapshot = max(_last_snapshot + 1, time_ns() // 1000)
+    _last_snapshot = max(_last_snapshot + 1, time_ns())
     return _last_snapshot
+
+
+def _observe_snapshot(stored: int) -> None:
+    """The platform said it holds ``stored``: number later saves above it, whatever this clock says."""
+    global _last_snapshot
+    _last_snapshot = max(_last_snapshot, stored)
 
 
 class _DeltaRun:
@@ -178,6 +240,12 @@ class PlatformTracingProvider(TracingProvider):
     # run key -> the run's saves in flight. Kept apart from _recent so eviction cannot lose it, and dropped
     # with the run's last save in flight: any later save takes a higher number.
     _saving: ClassVar[dict[str, _Saves]] = {}
+    # run key -> its single-flight state, while it has a round queued or a driver sending.
+    _flights: ClassVar[dict[str, _Flight]] = {}
+    # How long the next round waits behind a PATCH still on the wire before going anyway.
+    _stall_s: ClassVar[float] = 10.0
+    # The PATCH read timeout when the client has none (its default): the platform parses the trace first.
+    _patch_read_timeout_s: ClassVar[float] = 120.0
     # How long a read waits for saves of that run already in flight before asking the platform.
     _save_wait_s: ClassVar[float] = 2.0
     # One entry per live conversation: concurrent calls sharing a process must not evict each other between turns.
@@ -338,20 +406,27 @@ class PlatformTracingProvider(TracingProvider):
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
         key = cls._recent_key(platform_config, subject_path, run_context.parent_id)
         saves = PlatformTracingProvider._saving.get(key)
-        if saves is not None and saves.pending:
+        flight = PlatformTracingProvider._flights.get(key)
+        waits = list(saves.pending.values()) if saves is not None else []
+        if flight is not None and flight.loop is asyncio.get_running_loop():
+            waits += flight.waits()  # a round queued behind one on the wire is a save already asked for
+        if waits:
             # The parent's save is still in flight (a voice turn's shielded save racing the next turn): the
-            # platform could answer 404, or an older snapshot. Only saves already started are awaited, so a
+            # platform could answer 404, or an older snapshot. Only saves already asked for are awaited, so a
             # parent that keeps saving (background children) does not hold every read for the full bound.
-            await asyncio.wait(list(saves.pending.values()), timeout=cls._save_wait_s)
+            await asyncio.wait(waits, timeout=cls._save_wait_s)
         recalled = cls._recall(key)
         if recalled is not None:
             return recalled
+        caps = cls._host_caps(platform_config.host)
         res = await _request(
             method="GET",
             path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
+            # The root and the agent spans: what resuming reads, without the LLM and tool spans' bytes.
+            params={"select": "resume"} if caps.select_resume else None,
         )
         res.raise_for_status()
-        cls._host_caps(platform_config.host).learn(getattr(res, "headers", None))
+        caps.learn(getattr(res, "headers", None))
         res_json = res.json()
         trace = res_json.get("trace")
         if not trace:
@@ -361,15 +436,61 @@ class PlatformTracingProvider(TracingProvider):
     @classmethod
     @override
     async def _store(cls, run_context: RunContext) -> None:
-        """See base class."""
-        await cls._save(run_context)
+        """See base class. Single-flight per run: a save that arrives while one is on the wire joins the
+        next round, which goes out once, from the latest state, when that one is back (or has stalled
+        for ``_stall_s``). The caller waits for the round carrying its state; cancelling it does not
+        cancel the save."""
+        _, _, key = cls._target(run_context)
+        loop = asyncio.get_running_loop()
+        flights = PlatformTracingProvider._flights
+        flight = flights.get(key)
+        if flight is None or flight.loop is not loop:
+            flight = flights[key] = _Flight(loop)
+        flight.context = run_context
+        if flight.next is None:
+            flight.next = loop.create_future()
+            flight.next.add_done_callback(_retrieve)
+        joined = flight.next
+        if flight.driver is None:
+            flight.driver = loop.create_task(cls._drive(key, flight))
+        await asyncio.shield(joined)
 
     @classmethod
-    async def _save(cls, run_context: RunContext, *, plain: bool = False) -> None:
-        """One PATCH. ``plain``: whole and uncompressed whatever the host advertised."""
-        from ....errors import PlatformError
-        from ....platform.utils import _request
+    async def _drive(cls, key: str, flight: _Flight) -> None:
+        try:
+            while flight.next is not None:
+                joined, flight.next = flight.next, None
+                flight.sent.append(joined)
+                save = asyncio.get_running_loop().create_task(cls._save(flight.context))
+                save.add_done_callback(functools.partial(_settle, flight, joined))
+                # A PATCH can hang (read timeouts are unbounded by default): past this the next round
+                # goes anyway, so a run's end is never held behind it. The platform keeps the newest
+                # snapshot whichever lands last.
+                await asyncio.wait({save}, timeout=cls._stall_s)
+        finally:
+            flight.driver = None
+            if flight.next is not None and not flight.next.done():
+                flight.next.cancel()  # the driver itself was cancelled (loop shutting down)
+            if PlatformTracingProvider._flights.get(key) is flight:
+                del PlatformTracingProvider._flights[key]
 
+    @classmethod
+    def _patch_timeout(cls):
+        """The client's timeouts, with the read bounded when it is not: no save may stay on the wire
+        forever now that callers do not cancel it. ``TIMBAL_HTTP_READ_TIMEOUT`` still wins."""
+        import httpx
+
+        from ....platform.utils import _default_timeout
+
+        timeout = _default_timeout()
+        if timeout.read is not None or os.environ.get("TIMBAL_HTTP_READ_TIMEOUT"):
+            return timeout
+        return httpx.Timeout(
+            connect=timeout.connect, read=cls._patch_read_timeout_s, write=timeout.write, pool=timeout.pool
+        )
+
+    @classmethod
+    def _target(cls, run_context: RunContext):
         platform_config = cls._resolve_config(run_context)
         subject = platform_config.subject
         if subject is None:
@@ -380,9 +501,17 @@ class PlatformTracingProvider(TracingProvider):
             subject_path = f"apps/{subject.app_id}"
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
+        return platform_config, subject_path, cls._recent_key(platform_config, subject_path, run_context.id)
 
+    @classmethod
+    async def _save(cls, run_context: RunContext, *, plain: bool = False) -> None:
+        """One PATCH. ``plain``: whole and uncompressed whatever the host advertised."""
+        from ....errors import PlatformError
+        from ....platform.utils import _request
+
+        platform_config, subject_path, key = cls._target(run_context)
+        subject = platform_config.subject
         caps = cls._host_caps(platform_config.host)
-        key = cls._recent_key(platform_config, subject_path, run_context.id)
         delta = not plain and cls._sending_deltas(caps)
         # Taken with no await before model_dump(), so numbers follow snapshot order.
         snapshot = _next_snapshot()
@@ -401,6 +530,9 @@ class PlatformTracingProvider(TracingProvider):
         headers = {
             "Prefer": "return=minimal",  # RFC 7240
             "Content-Type": DELTA_MEDIA_TYPE if delta else "application/json",
+            # Lets the platform drop a save that lands after a newer one (it acks it): saves overlap
+            # across processes, retries and stalls.
+            "X-Timbal-Snapshot": str(snapshot),
         }
         compressed = not plain and cls._compressing(caps)
         wire = body
@@ -413,6 +545,7 @@ class PlatformTracingProvider(TracingProvider):
                 path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
                 headers=headers,
                 content=wire,
+                timeout=cls._patch_timeout(),
             )
             res.raise_for_status()
         except PlatformError as e:

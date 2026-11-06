@@ -5,6 +5,7 @@ decompression, `Accept-Encoding` / `Accept-Patch` advertisement, span upserts or
 `snapshot`, assembly at `ended`, and GET of a never-ended run from its span rows.
 """
 
+import asyncio
 import gzip
 import json
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ def clean():
     PlatformTracingProvider._caps.clear()
     PlatformTracingProvider._delta_runs.clear()
     PlatformTracingProvider._recent.clear()
+    PlatformTracingProvider._flights.clear()
     set_run_context(None)
     set_call_id(None)
     set_parent_call_id(None)
@@ -351,6 +353,140 @@ class TestDeltas:
         full = sum(p["bytes"] for p in full_server.patches)
         delta = sum(p["bytes"] for p in delta_server.patches)
         assert delta * 20 < full, (full, delta)
+
+
+class TestSingleFlight:
+    """rfcs/platform-trace-storage.md 0.1–0.4 on the SDK side."""
+
+    @staticmethod
+    def held(server):
+        """The first PATCH waits for ``release``; the rest go through."""
+        first_sent, release = asyncio.Event(), asyncio.Event()
+        original = server.request
+
+        async def request(method, path, **kwargs):
+            if method == "PATCH" and not first_sent.is_set():
+                first_sent.set()
+                await release.wait()
+            return await original(method, path, **kwargs)
+
+        return request, first_sent, release
+
+    async def test_saves_arriving_meanwhile_go_out_once_from_the_latest_state(self):
+        server = FakePlatform(advertise=False)
+        request, first_sent, release = self.held(server)
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            later = []
+            for i in range(5):
+                ctx._trace[f"c{i}"] = {"call_id": f"c{i}", "path": "a.x", "t0": i, "parent_call_id": "r"}
+                later.append(asyncio.create_task(provider._store(ctx)))
+            await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(first, *later)
+        assert len(server.patches) == 2
+        assert len(server.patches[1]["body"]["trace"]) == 6  # every save's state, in one round
+        assert not PlatformTracingProvider._flights
+
+    async def test_every_patch_carries_its_snapshot_and_they_rise(self):
+        seen = []
+
+        async def request(*_args, headers=None, **_):
+            seen.append(int(headers["X-Timbal-Snapshot"]))
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        agent, provider = tool_loop(3)
+        with patch("timbal.platform.utils._request", request):
+            await run(agent, provider)
+        assert len(seen) > 2 and seen == sorted(set(seen))
+
+    async def test_continues_above_the_snapshot_the_platform_holds(self):
+        from timbal.state.tracing.providers import platform as platform_module
+
+        ahead = platform_module._last_snapshot + 10**15  # another process' clock runs ahead
+        sent = []
+
+        async def request(*_args, headers=None, **_):
+            sent.append(int(headers["X-Timbal-Snapshot"]))
+            return SimpleNamespace(
+                raise_for_status=lambda: None, headers={"X-Timbal-Snapshot": str(ahead)}, json=lambda: {}
+            )
+
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", request):
+            await provider._store(ctx)
+            await provider._store(ctx)
+        assert sent[0] < ahead < sent[1]
+
+    async def test_the_end_of_a_run_waits_for_the_save_on_the_wire_and_still_goes(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        request, first_sent, release = self.held(server)
+        agent, provider = tool_loop(3)
+        with patch("timbal.platform.utils._request", request):
+            ctx = RunContext(tracing_provider=provider)
+            ctx.platform_config = CONFIG
+            set_run_context(ctx)
+            running = asyncio.create_task(agent(prompt="go").collect())
+            await first_sent.wait()
+            await asyncio.sleep(0.05)
+            release.set()
+            out = await running
+            stored = await read_back(provider, ctx.id)
+        assert out.status.code == "success"
+        assert server.patches[-1]["body"]["ended"]
+        same_trace(stored, ctx, server)
+
+    async def test_a_read_waits_for_a_round_queued_behind_the_wire(self):
+        server = FakePlatform(advertise=False)
+        request, first_sent, release = self.held(server)
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["c0"] = {"call_id": "c0", "path": "x", "t0": 0, "parent_call_id": None}
+        reader = RunContext(parent_id=ctx.id, tracing_provider=provider)
+        reader.platform_config = CONFIG
+        with patch("timbal.platform.utils._request", request):
+            first = asyncio.create_task(provider._store(ctx))
+            await first_sent.wait()
+            ctx._trace["c0"].metadata["final"] = True
+            final = asyncio.create_task(provider._store(ctx))  # queued behind the first
+            read = asyncio.create_task(provider.get(reader))
+            await asyncio.sleep(0.01)
+            release.set()
+            trace = await read
+            await asyncio.gather(first, final)
+        assert trace["c0"].metadata == {"final": True}
+
+    async def test_resume_reads_ask_for_the_projection_once_advertised(self):
+        calls = []
+
+        async def request(*_args, params=None, **_):
+            calls.append(params)
+            return SimpleNamespace(
+                raise_for_status=lambda: None,
+                headers={"X-Timbal-Select": "resume"},
+                json=lambda: {"trace": [{"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}]},
+            )
+
+        _, provider = tool_loop(1)
+        with patch("timbal.platform.utils._request", request):
+            for _ in range(2):
+                await read_back(provider, "some-run")
+        assert calls == [None, {"select": "resume"}]
+
+    def test_patch_reads_are_bounded_unless_configured(self, monkeypatch):
+        monkeypatch.delenv("TIMBAL_HTTP_READ_TIMEOUT", raising=False)
+        assert PlatformTracingProvider._patch_timeout().read == PlatformTracingProvider._patch_read_timeout_s
+        monkeypatch.setenv("TIMBAL_HTTP_READ_TIMEOUT", "none")
+        assert PlatformTracingProvider._patch_timeout().read is None
 
 
 class TestChatSessionOverDeltas:
