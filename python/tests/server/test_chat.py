@@ -54,7 +54,7 @@ def test_page_and_meta(client):
     assert page.status_code == 200 and "Chat playground" in page.text
     meta = client.get("/chat/meta").json()
     assert meta["agent"] == "chat_agent" and meta["is_agent"] is True
-    assert meta["modes"] == ["steer", "followup", "collect", "interrupt"]
+    assert meta["modes"] == ["steer", "now", "followup", "collect", "interrupt"]
 
 
 def test_steer_joins_the_running_turn(client):

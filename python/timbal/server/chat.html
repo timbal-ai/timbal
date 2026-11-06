@@ -235,6 +235,7 @@
           <span class="label">While busy</span>
           <div class="seg" id="modes" role="radiogroup" aria-label="Busy mode">
             <button type="button" data-mode="steer" class="on" title="Join the running turn after its current tool batch">Steer</button>
+            <button type="button" data-mode="now" title="Join the running turn right away: cut its answer or its read-only tools">Now</button>
             <button type="button" data-mode="followup" title="Wait for a turn of its own">Follow-up</button>
             <button type="button" data-mode="collect" title="Merge with other collected messages into one later turn">Collect</button>
             <button type="button" data-mode="interrupt" title="Cancel the running turn and run this first">Interrupt</button>
@@ -271,6 +272,7 @@
   const api = (path) => new URL(`sessions${path}`, new URL("./", location.href)).toString();
   const MODE_HINTS = {
     steer: "joins the running turn after its current tool call",
+    now: "joins the running turn right away, cutting its answer or read-only tools",
     followup: "gets a turn of its own after the running one",
     collect: "waits for a quiet moment, then one turn for all collected",
     interrupt: "cuts the running turn and runs first",

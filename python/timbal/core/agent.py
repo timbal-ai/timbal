@@ -121,6 +121,11 @@ DEFAULT_STEER_BLOCKED_NOTICE = (
 )
 """Runtime message that stands in for a steered user message an input guardrail blocked."""
 
+DEFAULT_STEERED_TOOL_RESULT = "[Interrupted] Stopped before it finished: the user sent a new message."
+"""Tool result for a call a 'now' message cut (``ChatSession.send(mode="now")``)."""
+# How long a 'now' cut waits before taking the messages, so a burst of them becomes one cut.
+NOW_COALESCE_SECS = 0.25
+
 SEARCH_TOOLS_NAME = "search_tools"
 # Used when an agent tool already has the name (e.g. an unprefixed MCP server's own search_tools).
 _SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
@@ -285,6 +290,16 @@ def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | No
     record = span.metadata.setdefault("tool_search", {"mode": mode, "loaded": [], "searches": []})
     record["loaded"].extend(name for name in loaded if name not in record["loaded"])
     record["searches"].append({"query": query, "loaded": list(loaded)})
+
+
+def _cut_answer(message: Any) -> Message | None:
+    """The visible text of an answer a 'now' message cut off, as an assistant message marked interrupted."""
+    if not isinstance(message, Message):
+        return None
+    texts = [TextContent(text=c.text) for c in message.content if isinstance(c, TextContent) and c.text.strip()]
+    if not texts:
+        return None
+    return Message(role="assistant", content=texts, stop_reason="interrupted", metadata={"interrupted": "steer_now"})
 
 
 def _empty_at_limit(message: Any) -> bool:
@@ -1267,6 +1282,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         A runtime notice for events, then one user message per message the user
         sent (screened one by one, so blocking one keeps the others).
         """
+        if run_context._cut is not None:
+            run_context._cut.clear()  # what is drained now answers the cut; a later 'now' cuts again
         store = current_background_store()
         if store is None:
             return []
@@ -1803,12 +1820,35 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             event.parent_call_id = tool_span_parent_call_id
         return event, tool_span_call_id, tool_span_parent_call_id
 
-    async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
-        """Execute multiple tool calls concurrently and multiplex their events."""
+    @staticmethod
+    def _interruptible(tool: Any) -> bool:
+        """Whether a 'now' message may cancel ``tool`` mid-run (``Tool.interruptible``, else ``read_only``)."""
+        interruptible = getattr(tool, "interruptible", None)
+        return bool(getattr(tool, "read_only", False) if interruptible is None else interruptible)
+
+    def _steered_event(self, tool_call: ToolUseContent, span_ids: tuple[str, str | None] | None) -> OutputEvent:
+        """The result of a tool a 'now' message cut, on the tool's own span so clients close its card."""
+        event = self._synthetic_event(
+            tool_call.name,
+            RunStatus(code="cancelled", reason="steered", message=DEFAULT_STEERED_TOOL_RESULT),
+            input=tool_call.input,
+        )
+        if span_ids is not None:
+            event.call_id, event.parent_call_id = span_ids
+        return event
+
+    async def _multiplex_tools(
+        self, tools: list[Tool], tool_calls: list[ToolUseContent], cut: asyncio.Event | None = None
+    ) -> AsyncGenerator[Any, None]:
+        """Execute multiple tool calls concurrently and multiplex their events.
+
+        ``cut``: set by a 'now' message. The interruptible calls still running are
+        cancelled (each gets a ``steered`` result); the others run to the end.
+        """
         # Fast path: a single tool call needs no queue/task fan-in — iterate the
         # tool directly, exactly like Workflow consumes its steps. This is the
-        # common case for most agent iterations.
-        if len(tool_calls) == 1:
+        # common case for most agent iterations. A cuttable batch needs the tasks.
+        if len(tool_calls) == 1 and cut is None:
             tool_call = tool_calls[0]
             tool = self._resolve_tool_for_call(tools, tool_call)
             if tool is None:
@@ -1892,12 +1932,43 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tasks.append(task)
 
             remaining = len(tool_calls)
+            spans: dict[str, tuple[str, str | None]] = {}  # tool_call id -> its span (call_id, parent)
+            finished: set[str] = set()
+            dropped: set[str] = set()
             while remaining > 0:
-                tool_call, event = await queue.get()
-                if event is None:
-                    remaining -= 1
+                if cut is not None and not cut.is_set():
+                    getter = asyncio.ensure_future(queue.get())
+                    waiter = asyncio.ensure_future(cut.wait())
+                    await asyncio.wait({getter, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                    waiter.cancel()
+                    if not getter.done():
+                        getter.cancel()
+                        try:
+                            await getter
+                        except asyncio.CancelledError:
+                            pass
+                    item = None if getter.cancelled() else getter.result()
                 else:
-                    yield tool_call, event
+                    item = await queue.get()
+                if item is not None:
+                    tool_call, event = item
+                    if event is None:
+                        remaining -= 1
+                    elif tool_call.id not in dropped:  # else queued before the cancel landed
+                        if event.type == "START" and tool_call.id not in spans:
+                            spans[tool_call.id] = (event.call_id, event.parent_call_id)
+                        elif isinstance(event, OutputEvent) and spans.get(tool_call.id, (None,))[0] == event.call_id:
+                            finished.add(tool_call.id)
+                        yield tool_call, event
+                if cut is not None and cut.is_set():
+                    for task, tc in zip(tasks, tool_calls, strict=True):
+                        if task.done() or tc.id in finished:
+                            continue
+                        if self._interruptible(self._resolve_tool_for_call(tools, tc)):
+                            task.cancel()
+                            dropped.add(tc.id)
+                            yield tc, self._steered_event(tc, spans.get(tc.id))
+                    cut = None  # one cut per batch; the rest runs to the end
         except (asyncio.CancelledError, GeneratorExit, InterruptError):
             raise
         finally:
@@ -2087,6 +2158,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if event.status.code == "cancelled" and event.status.reason == "approval_denied":
                 msg = event.status.message or "The tool call was denied."
                 content = f"[Approval denied] {msg}"
+            elif event.status.code == "cancelled" and event.status.reason == "steered":
+                content = event.status.message or DEFAULT_STEERED_TOOL_RESULT
+                current_span.metadata.setdefault("steer_now", []).append(
+                    {"cut": "tool", "tool": event.path.rsplit(".", 1)[-1]}
+                )
             elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
                 msg = event.status.message or "The tool exited early."
                 content = f"[Cancelled] {msg}"
@@ -2181,6 +2257,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span._memory_dump.append(tool_result_dump)
 
         steering = self._steers(run_context, current_span)
+        # Set by ChatSession when a 'now' message arrives: cut the model's answer or the
+        # interruptible tools in flight, then steer the message in (see _multiplex_tools).
+        cut: asyncio.Event | None = run_context._cut if steering else None
         # Set by _steer: whether it added messages, and whether the user wrote one of them.
         steered = steered_user = False
 
@@ -2378,7 +2457,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     _llm_memory_saved = True  # nothing to salvage; we never called the LLM
                     tool_calls = pending_tool_uses
                     first_pending: OutputEvent | None = None
-                    active_events = self._multiplex_tools(tools, tool_calls)
+                    active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
                     async for tool_call, event in active_events:
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
                         for pending_event in pending_guardrail_events:
@@ -2404,6 +2483,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     i += 1
                     await _check_denials()
                     if steering:
+                        if cut is not None and cut.is_set():
+                            await asyncio.sleep(NOW_COALESCE_SECS)
                         async for steer_event in _steer():
                             yield steer_event
                         if steered_user:
@@ -2470,7 +2551,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     **({"deferred_tools": deferred_tools} if deferred_tools else {}),
                     **({**kwargs, "max_tokens": max_tokens_retry} if max_tokens_retry else kwargs),
                 )
+                llm_call_id: str | None = None
+                answer_cut = False
                 async for event in active_events:
+                    if llm_call_id is None and event.type == "START":
+                        llm_call_id = event.call_id
+                    if cut is not None and cut.is_set() and not isinstance(event, OutputEvent):
+                        answer_cut = True  # a 'now' message: stop this answer where it is
+                        break
                     if isinstance(event, OutputEvent):
                         # If the LLM call fails, we want to propagate the error upwards
                         if event.error is not None:
@@ -2715,6 +2803,30 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # Output validation/guardrails can break the loop early too.
                 await active_events.aclose()
                 active_events = None
+                if answer_cut:
+                    # Keep what was already said (unless output rails were holding it back),
+                    # then let the message in and answer again with everything in context.
+                    _llm_memory_saved = True
+                    llm_span = run_context._trace.get(llm_call_id) if llm_call_id else None
+                    partial = _cut_answer(llm_span.output if llm_span is not None else None)
+                    kept = partial is not None and not buffer_stream
+                    if kept:
+                        if stream_scrub:
+                            replace_message_text(partial, _runner.scrub_text(message_text(partial), *_out_stages))
+                        await _append_memory(partial)
+                    current_span.metadata.setdefault("steer_now", []).append(
+                        {"cut": "answer", "kept_chars": len(message_text(partial)) if kept else 0}
+                    )
+                    await asyncio.sleep(NOW_COALESCE_SECS)
+                    async for steer_event in _steer():
+                        yield steer_event
+                    if kept and not steered:
+                        # Nothing came in after all: an assistant-final history would be a prefill.
+                        current_span.memory.pop()
+                        current_span._memory_dump.pop()
+                    if steered_user:
+                        i, max_iter_handled = 0, False
+                    continue
                 if guardrail_retry:
                     continue  # re-generate with the guardrail critique appended
 
@@ -2774,7 +2886,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
                 first_pending: OutputEvent | None = None
-                active_events = self._multiplex_tools(tools, tool_calls)
+                active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
                 async for tool_call, event in active_events:
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     for pending_event in pending_guardrail_events:
@@ -2800,6 +2912,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 i += 1
                 await _check_denials()
                 if steering:
+                    if cut is not None and cut.is_set():
+                        await asyncio.sleep(NOW_COALESCE_SECS)
                     async for steer_event in _steer():
                         yield steer_event
                     if steered_user:
