@@ -60,7 +60,7 @@ When asking Timbal for help, send the message you saw and these log files.
     The service is installed but can't keep a connection to Timbal. Run [`doctor`](#run-doctor) on the server, and check the [network requirements](/connect/network-requirements) from the server itself. The installer checks the network once; a firewall change after installation can still break it.
   </Accordion>
   <Accordion title="The log says: invalid or expired enrollment token">
-    The token is older than its lifetime (24 hours by default), was already used by another installation, or belongs to a different environment than the one selected during setup. Create a new token and run the installer again with it: on a server that already has Timbal Connect, a new token re-enrolls it. See [Re-enroll](/connect/install-windows#re-enroll).
+    The token is older than its lifetime (24 hours by default), was already used by another installation, or belongs to a different environment than the one selected during setup. Create a new token and run the installer again with it: on a server that already has Timbal Connect, a new token re-enrolls it. See [Re-enroll on Windows](/connect/install-windows#re-enroll) or [Re-enroll on Linux and macOS](/connect/install-linux-macos#re-enroll).
   </Accordion>
   <Accordion title="Login failed for user 'CORP\SERVERNAME$'">
     The service runs as `NetworkService`, which reaches SQL Server on another machine as the computer account. Run the service as a domain account and grant it a login: [SQL Server authentication](/connect/connections#sql-server-authentication).
@@ -75,7 +75,7 @@ When asking Timbal for help, send the message you saw and these log files.
 
 ## Run doctor
 
-`doctor` is a read-only check you can run any time on the server. It validates the configuration, checks that the server can reach Timbal, and connects to every database in `connections.json`. It exits with a non-zero code if anything fails.
+`doctor` is a read-only check you can run any time on the server. It validates the configuration, checks that the server can reach Timbal, connects to every database in `connections.json`, and checks each file share in `config.json`. It exits with a non-zero code if anything fails.
 
 <Tabs>
   <Tab title="Windows">
@@ -98,3 +98,14 @@ When asking Timbal for help, send the message you saw and these log files.
 </Tabs>
 
 Add `--connection <name>` to check one connection, and `--connection <name> --table <schema.table>` to list a table's columns.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure connections" icon="database" href="/connect/connections">
+    Databases in `connections.json`, file shares in `config.json`.
+  </Card>
+  <Card title="Network requirements" icon="network-wired" href="/connect/network-requirements">
+    The firewall rule, and how to check each layer.
+  </Card>
+</CardGroup>

@@ -1,9 +1,9 @@
 ---
 title: "Configure connections"
-description: "Tell Timbal Connect which databases it may use, and how to authenticate to them"
+description: "Tell Timbal Connect which databases and file shares it may use"
 ---
 
-The connector only uses databases you list in `connections.json` on the server. Each entry has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, never leaves the server.
+The connector only uses sources you list on the server. Databases go in `connections.json`. Each entry has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, never leaves the server. File shares are separate: see [File shares](#file-shares).
 
 <Note>
 If you're used to the Power BI gateway, this is the main difference: there is no screen in Timbal where you add a data source with its server and password. Connections are defined here, on the gateway server, and appear in Timbal by name once the service restarts.
@@ -119,3 +119,39 @@ By default the service runs as `NT AUTHORITY\NetworkService`, which reaches a SQ
 | `Encrypt=true;TrustServerCertificate=true` | Encrypted, certificate not verified. The usual choice for on-premises servers with self-signed certificates |
 | `Encrypt=true;TrustServerCertificate=false` | Encrypted and verified. The certificate must be trusted and match the `Server=` host name |
 | `Encrypt=false` | Not encrypted. Avoid |
+
+## File shares
+
+Directories the connector may read are listed in `config.json`, under `filesystems`. They are not entries in `connections.json`. The key is the name Timbal uses for that share; the path stays on the server.
+
+| Platform | File |
+| -------- | ---- |
+| Windows | `C:\ProgramData\TimbalConnect\config.json` |
+| Linux / macOS | `/etc/timbal-connect/config.json` |
+
+On Windows and macOS the installer already created this file. Add `filesystems` and leave the other keys alone (the control-plane URL and the enrollment token). On Linux those live in `connector.env` and `config.json` does not exist yet: create it with only the map.
+
+```json
+{
+  "filesystems": {
+    "exports": { "path": "/srv/exports" }
+  }
+}
+```
+
+`path` is the only field. It is a directory on the server: a local folder, or a share already mounted there. In JSON, double Windows backslashes (`"D:\\Shares\\invoices"`). Save as UTF-8 without BOM, same as `connections.json`.
+
+The service account has to be able to read the directory. On Windows that is `NT AUTHORITY\NetworkService` unless you changed the service account. On Linux it is the `timbal-connect` user, and the unit sets `ProtectHome=true`, so a path under `/home` is hidden from the service.
+
+Restart the service as above. `doctor` checks each share and reports whether the directory is readable. If it says a remote local-config override is active, that override replaces this map until you run `timbal-connect local-config clear` and restart.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    When `doctor` or the service log names a failure.
+  </Card>
+  <Card title="Network requirements" icon="network-wired" href="/connect/network-requirements">
+    If the connector stays offline after it starts.
+  </Card>
+</CardGroup>

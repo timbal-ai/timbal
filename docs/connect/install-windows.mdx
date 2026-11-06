@@ -40,7 +40,7 @@ description: "Install Timbal Connect as a Windows service with the setup file, a
     The installer checks the network, downloads and verifies the connector, and registers and starts the `timbal-connect` service. You get a success or failure message either way. On failure, the message names the cause; look it up in [Troubleshooting](/connect/troubleshooting).
   </Step>
   <Step title="Add your connections">
-    Edit `C:\ProgramData\TimbalConnect\connections.json` and restart the service. See [Configure connections](/connect/connections).
+    Edit `C:\ProgramData\TimbalConnect\connections.json` for databases and, for file shares, add `filesystems` to `config.json`. Then restart the service. See [Configure connections](/connect/connections).
   </Step>
 </Steps>
 
@@ -155,7 +155,7 @@ Uninstalling doesn't revoke the connector in Timbal; it just goes offline. Revok
 | Path | Contents |
 | ---- | -------- |
 | `C:\Program Files\TimbalConnect\` | Connector binaries |
-| `C:\ProgramData\TimbalConnect\config.json` | Control-plane URL and enrollment token |
+| `C:\ProgramData\TimbalConnect\config.json` | Control-plane URL, enrollment token, and file shares (`filesystems`) |
 | `C:\ProgramData\TimbalConnect\connections.json` | Your database connections |
 | `C:\ProgramData\TimbalConnect\state.json` | The connector's credential and sync progress |
 | `C:\ProgramData\TimbalConnect\timbal-connect.log` | Service log |
@@ -163,3 +163,14 @@ Uninstalling doesn't revoke the connector in Timbal; it just goes offline. Revok
 | `%TEMP%\timbal-connect-setup.log` | Setup-file log, in the temp folder of the user who ran it |
 
 The service runs as `NT AUTHORITY\NetworkService`. To use Windows-integrated authentication with SQL Server, run it as a domain account instead: see [Configure connections](/connect/connections#sql-server-authentication).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure connections" icon="database" href="/connect/connections">
+    Databases in `connections.json`, file shares in `config.json`.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    Installer messages and what to do about them.
+  </Card>
+</CardGroup>

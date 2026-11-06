@@ -25,7 +25,7 @@ The script detects the OS and architecture, downloads the connector, verifies it
 | `--url <wss://...>` | Control plane, if Timbal gave you a non-default one |
 | `--version <vX.Y.Z>` | Pin a connector version (default `latest`) |
 
-Then add your databases: [Configure connections](/connect/connections).
+Then add your databases and file shares: [Configure connections](/connect/connections).
 
 ### Without the install script
 
@@ -92,6 +92,19 @@ Uninstalling doesn't revoke the connector in Timbal; revoke it too if the server
 | Path | Contents |
 | ---- | -------- |
 | `/opt/timbal-connect/` | Connector binaries |
-| `/etc/timbal-connect/` | Configuration (`connector.env` on Linux, `config.json` on macOS) and `connections.json` |
+| `/etc/timbal-connect/connector.env` | Linux: control-plane URL and enrollment token |
+| `/etc/timbal-connect/config.json` | File shares (`filesystems`). On macOS this file also holds the control-plane URL and enrollment token |
+| `/etc/timbal-connect/connections.json` | Database connections |
 | `/var/lib/timbal-connect/state.json` | The connector's credential and sync progress |
 | journald (Linux), `/Library/Logs/timbal-connect.log` (macOS) | Service log |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configure connections" icon="database" href="/connect/connections">
+    Databases in `connections.json`, file shares in `config.json`.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/connect/troubleshooting">
+    Installer messages and what to do about them.
+  </Card>
+</CardGroup>
