@@ -33,7 +33,15 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors.harmony_leak import LEAKED_TOOL_CALL_UNRECOVERED
-from ..errors import GuardrailBlocked, InterruptError, MaxIterExceeded, PauseRequired, RunCancelled, bail
+from ..errors import (
+    GuardrailBlocked,
+    InterruptError,
+    MaxIterExceeded,
+    ModelOutputTruncated,
+    PauseRequired,
+    RunCancelled,
+    bail,
+)
 from ..guardrails.apply import (
     build_guardrail_events,
     message_text,
@@ -123,11 +131,19 @@ SEARCH_TOOLS_NAME = "search_tools"
 _SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
 # Session key: tools search_tools loaded, per agent path, in load order.
 _LOADED_TOOLS_KEY = "__loaded_tools"
-# Anthropic models with the server-side tool search tool (Claude 4.5 and later).
-_NATIVE_TOOL_SEARCH_MODEL = re.compile(r"^anthropic/claude-(opus|sonnet|haiku)-(4-[5-9]|[5-9])")
+# Models with provider-side tool search: Claude 4.5 and later; OpenAI gpt-5.4 and later (Responses API).
+_NATIVE_TOOL_SEARCH_MODEL = re.compile(
+    r"^(anthropic/claude-(opus|sonnet|haiku)-(4-[5-9]|[5-9])|openai/gpt-(5\.([4-9]|[1-9]\d)|[6-9]))"
+)
 _SEARCH_WORD = re.compile(r"[a-z0-9]+")
 # Searches in one run that find nothing before search_tools tells the model to stop looking.
 _FRUITLESS_SEARCHES = 2
+
+# Stop reasons meaning the model hit its output limit (Anthropic, OpenAI Responses, Chat Completions).
+_TRUNCATED_STOPS = frozenset({"max_tokens", "max_output_tokens", "length"})
+# An empty truncated answer is retried once with this many times the budget, up to the cap.
+_MAX_TOKENS_RETRY_FACTOR = 4
+_MAX_TOKENS_RETRY_CAP = 32_000
 
 # Agent-provided tools that only read (their constructors do not take ``read_only``).
 _READ_ONLY_BUILTINS = frozenset(
@@ -277,14 +293,35 @@ def _record_tool_search(span: Any, mode: str, loaded: list[str], query: str | No
     record["searches"].append({"query": query, "loaded": list(loaded)})
 
 
+def _empty_at_limit(message: Any) -> bool:
+    """A final answer the output limit cut off before any visible text."""
+    return isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
+
+
+def _native_tool_search(model: Any) -> bool:
+    if not isinstance(model, str) or not _NATIVE_TOOL_SEARCH_MODEL.match(model):
+        return False
+    if model.startswith("openai/"):
+        from .llm.registry import TIMBAL_OPENAI_API
+
+        return TIMBAL_OPENAI_API == "responses"
+    return True
+
+
 def _native_search_finds(message: Message) -> list[str]:
-    """Tool names Anthropic's tool search returned in one assistant message."""
+    """Tool names a provider-side tool search returned in one assistant message."""
     names = []
     for content in message.content:
         value = content.value if isinstance(content, CustomContent) else None
-        if isinstance(value, dict) and value.get("type") == "tool_search_tool_result":
+        if not isinstance(value, dict):
+            continue
+        if value.get("type") == "tool_search_tool_result":  # Anthropic
             references = (value.get("content") or {}).get("tool_references") or []
             names.extend(ref.get("tool_name") for ref in references if ref.get("tool_name"))
+        elif value.get("type") == "tool_search_output":  # OpenAI: functions, or namespaces of them
+            for tool in value.get("tools") or []:
+                inner = tool.get("tools") if tool.get("type") == "namespace" else [tool]
+                names.extend(t.get("name") for t in inner or [] if t.get("name"))
     return names
 
 
@@ -1546,7 +1583,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ]
         if self.tool_search == "off" or not deferred:
             return tools, tools, None, set()
-        if self.tool_search == "auto" and isinstance(model, str) and _NATIVE_TOOL_SEARCH_MODEL.match(model):
+        if self.tool_search == "auto" and _native_tool_search(model):
             return tools, tools, [tool.name for tool in deferred], set()
         session = await get_run_context().get_session()
         loaded_names = session.get(_LOADED_TOOLS_KEY, {}).get(self._path, [])
@@ -2275,6 +2312,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         # Set once max_consecutive_denials is reached: the next model call gets no tools.
         withhold_tools = False
+        # Set once a final answer came back empty at the output limit: the larger budget for the retry.
+        max_tokens_retry: int | None = None
+        last_output: Any = None
+        last_output_stored = False
 
         i = 0
         need_retry = False
@@ -2506,7 +2547,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     tools=llm_tools,
                     output_model=self.output_model,
                     **({"deferred_tools": deferred_tools} if deferred_tools else {}),
-                    **kwargs,
+                    **({**kwargs, "max_tokens": max_tokens_retry} if max_tokens_retry else kwargs),
                 )
                 async for event in active_events:
                     if isinstance(event, OutputEvent):
@@ -2676,7 +2717,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             invalidate_message_dump_caches(event.output)
 
                         # Add LLM response to conversation for next iteration
+                        before = len(current_span.memory)
                         await _append_memory(event.output)
+                        last_output, last_output_stored = event.output, len(current_span.memory) > before
                         _llm_memory_saved = True
                         last_llm_usage = event.usage
                         self._record_context_measurement(current_span, event.usage, sent + 1)
@@ -2773,6 +2816,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     found = _native_search_finds(current_span.memory[-1])
                     if found:
                         _record_tool_search(current_span, "native", found)
+
+                if not tool_calls and _empty_at_limit(last_output):
+                    # A reasoning model can spend the whole budget thinking and write nothing.
+                    if last_output_stored:
+                        current_span.memory.pop()
+                        current_span._memory_dump.pop()
+                    budget = kwargs.get("max_tokens") or self.max_tokens
+                    retry_budget = min(budget * _MAX_TOKENS_RETRY_FACTOR, _MAX_TOKENS_RETRY_CAP) if budget else None
+                    if max_tokens_retry is None and retry_budget and retry_budget > budget:
+                        max_tokens_retry = retry_budget
+                        current_span.metadata["max_tokens_retry"] = {"from": budget, "to": retry_budget}
+                        logger.warning(
+                            "Final answer hit max_tokens with no text; retrying with a larger budget.",
+                            path=self._path,
+                            max_tokens=budget,
+                            retry_max_tokens=retry_budget,
+                        )
+                        continue
+                    raise ModelOutputTruncated(max_tokens_retry or budget)
 
                 if not tool_calls:
                     if steering:

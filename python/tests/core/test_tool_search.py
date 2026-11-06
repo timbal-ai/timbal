@@ -292,7 +292,12 @@ class TestNativeAnthropic:
             ("anthropic/claude-sonnet-4-20250514", False),
             ("anthropic/claude-opus-4-1", False),
             ("anthropic/claude-3-7-sonnet-latest", False),
-            ("openai/gpt-5.5", False),
+            ("openai/gpt-5.5", True),
+            ("openai/gpt-5.4", True),
+            ("openai/gpt-6-luna", True),
+            ("openai/gpt-5.3", False),
+            ("openai/gpt-4o-mini", False),
+            ("groq/openai/gpt-oss-120b", False),
         ],
     )
     async def test_model_gating(self, model, native):
@@ -820,3 +825,97 @@ class TestChatSession:
         assert "send_email" not in {t.name for t in first_dispatch}
         assert finished["tool_search"]["loaded"] == ["read_inbox"]
         assert sent == []
+
+
+# -- Native OpenAI (hosted tool_search, Responses API) -----------------------------
+
+
+OPENAI_SEARCH_CALL = {
+    "id": "tsc_1", "status": "completed", "type": "tool_search_call",
+    "arguments": {"paths": ["get_weather"]}, "execution": "server",
+}
+OPENAI_SEARCH_OUTPUT = {
+    "id": "tso_1", "status": "completed", "type": "tool_search_output", "execution": "server",
+    "tools": [{"type": "function", "name": "get_weather", "defer_loading": True, "parameters": {"type": "object"}}],
+}
+
+
+class TestNativeOpenAI:
+    async def test_chat_completions_api_falls_back_to_client(self, monkeypatch):
+        from timbal.core.llm import registry
+
+        monkeypatch.setattr(registry, "TIMBAL_OPENAI_API", "chat_completions")
+        context()
+        a = agent("openai/gpt-6-luna")
+        tools, _ = await a._resolve_tools(0)
+        offered, _, deferred, _ = await a._plan_tool_search(tools, a.model)
+        assert deferred is None and offered[-1].name == SEARCH_TOOLS_NAME
+
+    async def test_request_marks_deferred_and_adds_tool_search(self):
+        from timbal.core.llm.responses import prepare_responses_request
+
+        captured = {}
+
+        async def nothing():
+            return
+            yield
+
+        class Responses:
+            async def create(self, **request):
+                captured.update(request)
+                return nothing()
+
+        create_stream, _ = prepare_responses_request(
+            provider="openai",
+            client=SimpleNamespace(responses=Responses()),
+            model_name="gpt-6-luna",
+            request_headers={},
+            system_prompt=None,
+            messages=[Message.validate({"role": "user", "content": "hi"})],
+            tools=catalog(),
+            max_tokens=100,
+            temperature=None,
+            output_model=None,
+            provider_params={},
+            deferred_tools=["get_weather"],
+        )
+        async for _ in create_stream():
+            pass
+        by_name = {t.get("name", t["type"]): t for t in captured["tools"]}
+        assert by_name["get_weather"]["defer_loading"] is True
+        assert "defer_loading" not in by_name["lookup"] and "defer_loading" not in by_name["create_invoice"]
+        assert captured["tools"][-1] == {"type": "tool_search"}
+
+    def test_replayed_as_top_level_items_and_skipped_elsewhere(self):
+        from timbal.types.content import CustomContent, TextContent
+
+        message = Message(
+            role="assistant",
+            content=[
+                CustomContent(value=OPENAI_SEARCH_CALL),
+                CustomContent(value=OPENAI_SEARCH_OUTPUT),
+                ToolUseContent(id="call_1", name="get_weather", input={"city": "Oslo"}),
+                TextContent(text="Checking."),
+            ],
+        )
+        items = message.to_openai_responses_input()
+        assert [item.get("type") for item in items[:3]] == ["tool_search_call", "tool_search_output", "function_call"]
+        assert items[0] == OPENAI_SEARCH_CALL
+        anthropic = message.to_anthropic_input()
+        assert all(block.get("type") not in CustomContent.OPENAI_ITEMS for block in anthropic["content"])
+        chat = message.to_openai_chat_completions_input()
+        assert "tool_search" not in json.dumps(chat)
+
+    def test_native_finds_read_functions_and_namespaces(self):
+        from timbal.core.agent import _native_search_finds
+        from timbal.types.content import CustomContent
+
+        namespaced = {
+            "type": "tool_search_output",
+            "tools": [
+                {"type": "namespace", "name": "crm", "tools": [{"type": "function", "name": "list_orders"}]},
+                {"type": "function", "name": "get_weather"},
+            ],
+        }
+        message = Message(role="assistant", content=[CustomContent(value=namespaced)])
+        assert _native_search_finds(message) == ["list_orders", "get_weather"]

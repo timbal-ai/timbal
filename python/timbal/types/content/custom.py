@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -18,6 +18,9 @@ class CustomContent(BaseContent):
     # AnthropicCollector.result()). Meaningless to other APIs — skip on
     # cross-provider replay instead of sending an unknown block type.
     _ANTHROPIC_SERVER_BLOCKS = ("web_search_tool_result", "tool_search_tool_result")
+    # OpenAI Responses output items stored verbatim (hosted tool search). Replayed as
+    # top-level input items, never inside a message; other APIs skip them.
+    OPENAI_ITEMS: ClassVar[tuple[str, ...]] = ("tool_search_call", "tool_search_output")
 
     @override
     def to_openai_responses_input(self, role: str, **kwargs: Any) -> dict[str, Any] | None:
@@ -29,11 +32,13 @@ class CustomContent(BaseContent):
     @override
     def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any] | None:
         """See base class."""
-        if self.value.get("type") in self._ANTHROPIC_SERVER_BLOCKS:
+        if self.value.get("type") in self._ANTHROPIC_SERVER_BLOCKS + self.OPENAI_ITEMS:
             return None
         return self.value
 
     @override
-    def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any]:
+    def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any] | None:
         """See base class."""
+        if self.value.get("type") in self.OPENAI_ITEMS:
+            return None
         return self.value

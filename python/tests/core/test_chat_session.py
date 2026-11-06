@@ -1494,6 +1494,26 @@ class TestRobustness:
             session.resume({"x": True})
 
 
+class TestTurnErrors:
+    async def test_a_failed_turn_says_why_and_the_session_keeps_going(self):
+        from timbal.types.content import ThinkingContent
+
+        empty = Message(role="assistant", content=[ThinkingContent(thinking="...")], stop_reason="max_output_tokens")
+
+        def handler(messages):
+            return empty if last_user_text(messages) == "think" else "fine"
+
+        agent = Agent(name="agent", model=TestModel(handler=handler), tracing_provider=InMemoryTracingProvider)
+        async with ChatSession(agent) as session:
+            session.send("think")
+            (failed,) = await records(session, "turn_finished", 1)
+            session.send("hello")
+            finished = await records(session, "turn_finished", 2)
+        assert failed["status"]["code"] == "error"
+        assert failed["error"]["type"] == "ModelOutputTruncated" and "output budget" in failed["error"]["message"]
+        assert finished[1]["status"]["code"] == "success" and "error" not in finished[1]
+
+
 class TestSessionLifecycle:
     async def test_turns_chain_and_history_carries(self):
         async with ChatSession(make_agent(Gate())) as session:
