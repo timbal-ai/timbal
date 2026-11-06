@@ -691,7 +691,7 @@
         ]
       },
       {
-        "tab": "Connect",
+        "tab": "Data Gateway",
         "groups": [
           {
             "group": "Timbal Connect",

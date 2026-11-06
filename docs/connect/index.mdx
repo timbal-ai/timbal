@@ -1,9 +1,9 @@
 ---
 title: "Timbal Connect"
-description: "Connect databases and file shares on your own network to Timbal without opening inbound ports"
+description: "Timbal's on-premises data gateway: use databases and file shares on your own network from Timbal, without opening inbound ports"
 ---
 
-Timbal Connect is a small service you install on a server inside your network, next to the databases or file shares you want to use in Timbal. It opens one outbound, encrypted connection to Timbal and waits for instructions: browse a schema, run a read-only query, sync a table into a knowledge base, or copy files.
+Timbal Connect is Timbal's **on-premises data gateway**: a service you install on a server inside your network that acts as a bridge between your databases and file shares and Timbal. It opens one outbound, encrypted connection to Timbal and waits for instructions: browse a schema, run a read-only query, sync a table into a knowledge base, or copy files.
 
 You never open an inbound port, and **database credentials never leave the server**. Timbal only knows each connection by the name you give it; the connection string lives in a file on the server.
 
@@ -26,6 +26,25 @@ The connector updates itself when Timbal pushes a new version, and rolls back au
 | File shares | Local or mounted directories you list explicitly |
 
 Supported platforms: Windows Server 2016 or newer (x64 and ARM64), Linux (x86_64 and aarch64, any distribution) and macOS (Intel and Apple silicon).
+
+## Coming from the Power BI gateway?
+
+If you've set up Microsoft's on-premises data gateway for Power BI or Fabric, you already know the model: a service on a machine in your network, outbound connections only, cloud queries answered from local data. Most concepts map one to one:
+
+| Power BI on-premises data gateway | Timbal Connect |
+| --------------------------------- | -------------- |
+| Gateway machine | The server running Timbal Connect |
+| Install, sign in with a work account, register the gateway and its recovery key | Install with a single-use [enrollment token](/api-reference/connectors/enrollment-tokens/create) |
+| Data sources and their credentials added in the cloud, under **Manage connections and gateways** | Connections listed in [`connections.json`](/connect/connections) on the server; credentials stay there |
+| **Network ports test** in the gateway app | The installer's network check and [`timbal-connect doctor`](/connect/troubleshooting#run-doctor) |
+| Outbound TCP 443, 5671-5672 and 9350-9354 to several Microsoft domains | Outbound TCP 443 to `api.timbal.ai` only |
+| Service account `NT SERVICE\PBIEgwService`, changed to a domain account or gMSA for Windows authentication | Service account `NT AUTHORITY\NetworkService`, [changed to a domain account or gMSA](/connect/connections#sql-server-authentication) the same way |
+| Monthly releases you install yourself | Updates pushed by Timbal, rolled back automatically if the new version can't connect |
+
+Two differences matter when you set it up:
+
+- **Connections live on the server, not in the cloud.** There is no "add data source" screen in Timbal where you type a server name and password. You list connections in a file on the gateway server, and Timbal refers to them by name. Your database passwords are never stored in Timbal.
+- **Some gateway features aren't available yet.** Timbal Connect can't go through an HTTP proxy: it needs direct outbound access to `api.timbal.ai` (see [Network requirements](/connect/network-requirements)). There are no gateway clusters either: each server is its own connector, and the queries and syncs you assign to a connector run only on that server.
 
 ## Before you start
 

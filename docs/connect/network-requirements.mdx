@@ -14,13 +14,13 @@ Timbal Connect needs exactly one thing from your network: a **direct, outbound, 
 | TLS inspection | Must be **off** for this host |
 | Connection length | Stays open indefinitely. The connector reconnects on its own if it drops |
 
-The installer, the connector binary, its updates and the live connection all use this same host and port, so one firewall rule covers everything.
+The installer, the connector binary, its updates and the live connection all use this same host and port, so one firewall rule covers everything. If you've opened a firewall for Microsoft's on-premises data gateway before, this is a much smaller request: no Azure Relay port ranges, no list of Microsoft domains, one host on port 443.
 
 <Warning>
 **Opening port 443 is often not enough.** Two common firewall features break the connection even when the port is open:
 
 - **TLS inspection** (also called SSL inspection or HTTPS decryption, available on Fortinet, Sophos, Palo Alto, Check Point and Zscaler, among others). The firewall replaces Timbal's certificate with one signed by your company's own certificate authority. Browsers on your network trust that authority; the connector deliberately does not, so the connection fails. `api.timbal.ai` must be excluded from inspection.
-- **Proxies.** The connector doesn't support HTTP proxies for its connection yet. If your servers only reach the internet through a proxy, the server running Timbal Connect needs a direct-egress exception for `api.timbal.ai`. The installer's proxy option only covers its own downloads.
+- **Proxies.** The connector doesn't support HTTP proxies for its connection yet, unlike the Power BI gateway. If your servers only reach the internet through a proxy, the server running Timbal Connect needs a direct-egress exception for `api.timbal.ai`. The installer's proxy option only covers its own downloads.
 </Warning>
 
 ## What to send your IT team

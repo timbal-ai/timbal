@@ -5,6 +5,10 @@ description: "Tell Timbal Connect which databases it may use, and how to authent
 
 The connector only uses databases you list in `connections.json` on the server. Each entry has a name, a driver and a connection string. Timbal refers to the connection by its name only; the connection string, and any password in it, never leaves the server.
 
+<Note>
+If you're used to the Power BI gateway, this is the main difference: there is no screen in Timbal where you add a data source with its server and password. Connections are defined here, on the gateway server, and appear in Timbal by name once the service restarts.
+</Note>
+
 | Platform | File |
 | -------- | ---- |
 | Windows | `C:\ProgramData\TimbalConnect\connections.json` |
