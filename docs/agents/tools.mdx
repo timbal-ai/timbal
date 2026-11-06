@@ -192,6 +192,44 @@ agent = Agent(
 )
 ```
 
+### Snowflake
+
+`SnowflakeQuery`, `SnowflakeExecute`, `SnowflakeListTables`, `SnowflakeDescribeTable`, and `SnowflakeInsertRows` run against Snowflake. `SnowflakeQuery` is read-only (`SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `LIST`). `SnowflakeExecute` runs writes and DDL — prefer `SnowflakeQuery` for reads. `SnowflakeListTables` and `SnowflakeDescribeTable` inspect tables and views. `SnowflakeInsertRows` inserts rows.
+
+```python
+from timbal import Agent
+from timbal.tools import SnowflakeListTables, SnowflakeQuery
+
+agent = Agent(
+    name="warehouse_agent",
+    model="openai/gpt-5-mini",
+    tools=[
+        SnowflakeQuery(database="ANALYTICS", schema_name="PUBLIC"),
+        SnowflakeListTables(database="ANALYTICS"),
+    ],
+)
+```
+
+Each value resolves tool field → `Integration("snowflake")` → env: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PRIVATE_KEY` or `SNOWFLAKE_PRIVATE_KEY_PATH`, `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`, `SNOWFLAKE_TOKEN`, and `SNOWFLAKE_PAT`, plus optional `SNOWFLAKE_HOST` (PrivateLink), `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`, and `SNOWFLAKE_ROLE`. The schema tool field is `schema_name`. Auth precedence is OAuth token → PAT → key pair. Use `?` bindings.
+
+<Warning>
+The Snowflake role is the real permission boundary. `SnowflakeQuery`'s read-only check is only a guardrail. Put write tools (`SnowflakeExecute`, `SnowflakeInsertRows`) behind `requires_approval`. See [Approval gates](/human-in-the-loop/approval-gates).
+</Warning>
+
+To use a [Snowflake-managed MCP server](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp) (Cortex Search, Cortex Analyst, custom tools) with the same credentials, pass `SnowflakeAuth` as the `MCPServer`'s `auth`. It refreshes key-pair tokens before they expire, so long sessions keep working.
+
+```python
+from timbal.core import MCPServer
+from timbal.tools.snowflake import SnowflakeAuth
+
+snowflake_mcp = MCPServer(
+    name="snowflake",
+    transport="http",
+    url="https://myorg-myaccount.snowflakecomputing.com/api/v2/databases/ANALYTICS/schemas/PUBLIC/mcp-servers/ANALYST",
+    auth=SnowflakeAuth(),
+)
+```
+
 ## Agent as a Tool
 
 You can use an Agent as a tool within another Agent, enabling hierarchical agent compositions where specialized agents handle specific tasks.

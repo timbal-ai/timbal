@@ -363,6 +363,15 @@ class MCPServer(ToolSet):
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
+    auth: httpx.Auth | None = Field(default=None, exclude=True)
+    """``httpx.Auth`` applied to every HTTP request, for credentials that rotate during a
+    session (``headers`` are fixed at connect). E.g. ``SnowflakeAuth`` re-mints its
+    key-pair JWT before the one-hour expiry and retries once on 401.
+
+    The auth flow runs in the transport's owner task, which has an empty context (no
+    ``RunContext``). If the object defines ``async prepare()``, it is awaited in the
+    caller's context before every request; resolve anything identity-bound there."""
+
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS
     """Seconds to wait for the server to answer a request on an established session
     (``tools/list``, ``tools/call``). Defaults to ``DEFAULT_TIMEOUT_SECONDS`` (10 minutes);
@@ -439,8 +448,8 @@ class MCPServer(ToolSet):
     @model_validator(mode="after")
     def _validate_transport_fields(self) -> "MCPServer":
         if self.service is not None:
-            if self.transport != "http" or self.url is not None or self.headers:
-                raise ValueError("service='api' requires HTTP transport without url or headers")
+            if self.transport != "http" or self.url is not None or self.headers or self.auth is not None:
+                raise ValueError("service='api' requires HTTP transport without url, headers or auth")
         if self.transport == "stdio":
             if not self.command:
                 raise ValueError("'command' is required for stdio transport")
@@ -520,6 +529,7 @@ class MCPServer(ToolSet):
         assert self.url is not None
         async with httpx.AsyncClient(
             headers=self.headers if self.headers else None,
+            auth=self.auth,
             timeout=self._http_timeout(),
             follow_redirects=True,
         ) as http_client:
@@ -720,6 +730,9 @@ class MCPServer(ToolSet):
         """
         if timeout is _USE_SERVER_TIMEOUT:
             timeout = self.timeout
+        prepare = getattr(self.auth, "prepare", None)
+        if prepare is not None:
+            await prepare()
         for attempt in (1, 2):
             session = await self._connect()
             owner = self._session_task
