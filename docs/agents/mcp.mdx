@@ -119,6 +119,16 @@ MCP tool results are converted so the LLM always receives something useful:
 - **Structured content** is returned as-is when the server sends no text representation
 - **Errors** (`isError`) raise inside the tool call, so the model receives a proper error tool result and can self-correct
 
+## Voice interruption mode
+
+`interruption_mode` is copied onto every tool this server exposes. The default is `allow`. On a voice call, `disable_during_tool` or `disable_during_tool_and_turn` keeps the caller from barging in through those tools. See [Keep a tool from being cut off](/voice/tools#keep-a-tool-from-being-cut-off).
+
+```python
+from timbal.core import MCPServer
+
+MCPServer(name="payments", transport="http", url="https://example.com/mcp", interruption_mode="disable_during_tool")
+```
+
 ## Approval from Annotations
 
 MCP tools carry [`ToolAnnotations`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) such as `readOnlyHint` and `destructiveHint`. `approval=` turns them into a client-side gate that runs through Timbal's normal approval flow — a server cannot skip it:

@@ -28,7 +28,7 @@ from ..types.approval import Cancel
 from ..types.content import FileContent, TextContent
 from ..types.file import File
 from ..types.message import Message
-from .runnable import Runnable
+from .runnable import InterruptionMode, Runnable
 from .tool import Tool
 from .tool_set import ToolSet
 
@@ -408,6 +408,14 @@ class MCPServer(ToolSet):
       (``codegen delete-workforce`` yes, ``codegen get-flow`` no). Same return contract
       as ``Runnable.requires_approval``; may be async.
     - ``None`` (default): no gating.
+    """
+
+    interruption_mode: InterruptionMode = "allow"
+    """Barge-in policy copied onto every tool this server exposes.
+
+    Same values as ``Tool.interruption_mode``. ``allow`` (default) leaves caller
+    barge-in unchanged. A server that must finish a transfer or read back a
+    confirmation sets ``disable_during_tool`` or ``disable_during_tool_and_turn``.
     """
 
     sampling_model: Any = None
@@ -1088,6 +1096,7 @@ class MCPServer(ToolSet):
             input_schema=mcp_tool.inputSchema or {},
             title=title,
             tool_annotations=annotations,
+            interruption_mode=self.interruption_mode,
             requires_approval=approval_policy,
             approval_prompt=f"Run {title or exposed_name}?" if requires_approval else None,
             approval_description=(mcp_tool.description or None) if requires_approval else None,
