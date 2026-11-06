@@ -118,11 +118,15 @@ DEFAULT_STEER_BLOCKED_NOTICE = (
 """Runtime message that stands in for a steered user message an input guardrail blocked."""
 
 SEARCH_TOOLS_NAME = "search_tools"
+# Used when an agent tool already has the name (e.g. an unprefixed MCP server's own search_tools).
+_SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
 # Session key: tools search_tools loaded, per agent path, in load order.
 _LOADED_TOOLS_KEY = "__loaded_tools"
 # Anthropic models with the server-side tool search tool (Claude 4.5 and later).
 _NATIVE_TOOL_SEARCH_MODEL = re.compile(r"^anthropic/claude-(opus|sonnet|haiku)-(4-[5-9]|[5-9])")
 _SEARCH_WORD = re.compile(r"[a-z0-9]+")
+# Searches in one run that find nothing before search_tools tells the model to stop looking.
+_FRUITLESS_SEARCHES = 2
 
 READ_ONLY_POLICY = "read_only"
 # Agent-provided tools that only read (their constructors do not take ``read_only``).
@@ -294,15 +298,25 @@ def _score_tools(tools: list[Any], query: str) -> list[tuple[int, Any]]:
     if not words:
         return []
     query_name = query.strip().lower()
-    scored = []
-    for index, tool in enumerate(tools):
+    indexed = []
+    for tool in tools:
         name = tool.name.lower()
-        params = " ".join((getattr(tool, "params_model_schema", None) or {}).get("properties", {}))
-        fields = (
-            (3, set(_SEARCH_WORD.findall(name))),
-            (2, set(_SEARCH_WORD.findall(params.lower()))),
-            (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
-        )
+        schema = getattr(tool, "input_schema", None) or getattr(tool, "params_model_schema", None) or {}
+        params = " ".join(schema.get("properties", {}))
+        indexed.append((
+            name,
+            (
+                (3, set(_SEARCH_WORD.findall(name))),
+                (2, set(_SEARCH_WORD.findall(params.lower()))),
+                (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
+            ),
+        ))
+    if len(indexed) > 1:
+        # A word every tool has (an MCP server prefix like "timbal__") can't tell them apart.
+        everywhere = set.intersection(*(set().union(*(f for _, f in fields)) for _, fields in indexed))
+        words = (words - everywhere) or words
+    scored = []
+    for index, (tool, (name, fields)) in enumerate(zip(tools, indexed, strict=True)):
         score = sum(weight * len(words & field) for weight, field in fields)
         if name == query_name:
             score += 10
@@ -1544,7 +1558,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         offered = [tool for tool in tools if id(tool) not in deferred_ids] + loaded
         dispatch = list(tools)
         if hidden:
-            search = self._search_tools(hidden)
+            taken = {tool.name for tool in tools}
+            name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
+            search = self._search_tools(hidden, name, restricted=get_run_context()._tool_policy is not None)
             offered.append(search)
             dispatch.append(search)
         return offered, dispatch, None, {tool.name for tool in hidden}
@@ -1556,28 +1572,48 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         loaded.extend(name for name in names if name not in loaded)
         _record_tool_search(span, "client", names, query)
 
-    def _search_tools(self, hidden: list[Tool]) -> Tool:
-        """The ``search_tools`` tool over the deferred tools not loaded yet."""
+    def _search_tools(self, hidden: list[Tool], name: str = SEARCH_TOOLS_NAME, *, restricted: bool = False) -> Tool:
+        """The ``search_tools`` tool over the deferred tools not loaded yet.
+
+        ``restricted``: a tool policy narrowed this turn's tools, so the ones it
+        hid can't be found either — said up front so the model stops looking.
+        """
         names = [tool.name for tool in hidden]
         listing = ", ".join(names[:80]) + (f", and {len(names) - 80} more" if len(names) > 80 else "")
+        scope = (
+            " This turn may only use some of your tools (for example only ones that read); "
+            "the others can't be found, so don't keep searching for them."
+            if restricted
+            else ""
+        )
 
         async def search_tools(query: str, limit: int = 5) -> str:
             """Find tools by what they do; the ones found become callable from your next step."""
             scored = _score_tools(hidden, query)
             # Found tools stay loaded for the session: skip weak matches (one shared word like "create").
             matches = [tool for score, tool in scored if score * 2 >= scored[0][0]][: max(1, min(limit, 20))]
+            agent_span = get_run_context().parent_span()
             if not matches:
-                return f"No tool matched {query!r}. Try other words. Tools not loaded yet: {listing}."
-            await self._load_tools([tool.name for tool in matches], get_run_context().parent_span(), query)
+                record = agent_span.metadata.setdefault("tool_search", {"mode": "client", "loaded": [], "searches": []})
+                record["searches"].append({"query": query, "loaded": []})
+                misses = sum(1 for search in record["searches"] if not search["loaded"])
+                if misses >= _FRUITLESS_SEARCHES:
+                    return (
+                        f"No tool matched {query!r}, and {misses} searches this turn found nothing: what you are "
+                        f"looking for is not available{' in this turn' if restricted else ''}. Stop searching and "
+                        "answer with the tools you have."
+                    )
+                return f"No tool matched {query!r}. Try other words. Tools not loaded yet: {listing}.{scope}"
+            await self._load_tools([tool.name for tool in matches], agent_span, query)
             found = [{"name": tool.name, "description": tool.description or ""} for tool in matches]
             return json.dumps({"loaded": found, "note": "Call these from your next step."})
 
         tool = Tool(
-            name=SEARCH_TOOLS_NAME,
+            name=name,
             description=(
                 f"Load tools that are not loaded yet. {len(names)} more are available: {listing}. "
                 "Search with a few words for what you need (or a tool's name); the matches become callable "
-                "from your next step."
+                f"from your next step.{scope}"
             ),
             handler=search_tools,
             read_only=True,

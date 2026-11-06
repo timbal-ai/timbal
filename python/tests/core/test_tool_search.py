@@ -103,6 +103,18 @@ class TestRanking:
     def test_exact_name_first(self):
         assert rank_tools(catalog()[1:], "list_repos")[0].name == "list_repos"
 
+    def test_a_word_every_tool_shares_does_not_count(self):
+        def noop() -> str:
+            return ""
+
+        tools = [
+            Tool(name=f"timbal__{n}", description=f"Timbal: {d}.", handler=noop)
+            for n, d in [("whoami", "the current user"), ("list_runs", "list runs"), ("get_span", "one span")]
+        ]
+        assert [t.name for t in rank_tools(tools, "timbal whoami")] == ["timbal__whoami"]
+        # Only shared words: keep them rather than match nothing.
+        assert len(rank_tools(tools, "timbal")) == 3
+
     def test_no_match_and_empty_query(self):
         assert rank_tools(catalog(), "zzz") == []
         assert rank_tools(catalog(), "  ") == []
@@ -190,6 +202,33 @@ class TestClientSearch:
         assert "No tool matched" in result and "list_repos" in result
         assert (await offered_per_call(out))[1] == ["lookup", SEARCH_TOOLS_NAME]
 
+    async def test_repeated_misses_tell_the_model_to_stop(self):
+        model = TestModel(
+            responses=[call(SEARCH_TOOLS_NAME, query="spaceship"), call(SEARCH_TOOLS_NAME, "c2", query="rocket"), "ok"]
+        )
+        out = await agent(model)(prompt="x").collect()
+        trace = await trace_of(out)
+        results = [s.output for s in sorted(trace.values(), key=lambda s: s.t0) if s.path.endswith(SEARCH_TOOLS_NAME)]
+        assert "Try other words" in results[0]
+        assert "Stop searching" in results[1] and "2 searches" in results[1]
+        assert out.metadata["tool_search"]["searches"] == [
+            {"query": "spaceship", "loaded": []},
+            {"query": "rocket", "loaded": []},
+        ]
+
+    async def test_restricted_turn_says_hidden_tools_cannot_be_found(self):
+        tools = catalog()
+        tools[1].read_only = True
+        a = agent(TestModel(responses=["ok"]), tools)
+        ctx = context()
+        ctx._tool_policy = "read_only"
+        resolved, _ = await a._resolve_tools(0)
+        offered, *_ = await a._plan_tool_search(resolved, a.model)
+        assert "can't be found" in offered[-1].description
+        ctx._tool_policy = None
+        offered, *_ = await a._plan_tool_search((await a._resolve_tools(0))[0], a.model)
+        assert "can't be found" not in offered[-1].description
+
     async def test_direct_call_of_unloaded_tool_runs_and_loads(self):
         calls = []
         model = TestModel(responses=[call("get_weather", city="Rome"), "sunny"])
@@ -208,6 +247,23 @@ class TestClientSearch:
         assert unloaded == {"get_weather"}
         assert "create_invoice" not in {t.name for t in dispatch}
         assert "create_invoice" not in offered[-1].description
+
+    async def test_search_tool_renamed_when_an_agent_tool_has_its_name(self):
+        def their_search(q: str) -> str:
+            return q
+
+        calls = []
+        tools = [
+            *catalog(calls),
+            Tool(name=SEARCH_TOOLS_NAME, description="The server's own search.", handler=their_search),
+        ]
+        model = TestModel(responses=[call("find_tools", query="weather"), call("get_weather", "c2", city="Bern"), "ok"])
+        out = await agent(model, tools)(prompt="x").collect()
+        assert out.status.code == "success", out.error
+        offered = await offered_per_call(out)
+        assert offered[0] == ["lookup", SEARCH_TOOLS_NAME, "find_tools"]
+        assert offered[1][-1] == "find_tools" and "get_weather" in offered[1]
+        assert calls == [("get_weather", "Bern")]
 
     async def test_off_sends_everything(self):
         context()
