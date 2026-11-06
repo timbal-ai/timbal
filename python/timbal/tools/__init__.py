@@ -872,6 +872,13 @@ if TYPE_CHECKING:
         SlackUpdateChannelPurpose,
         SlackUpdateChannelTopic,
     )
+    from .snowflake import (
+        SnowflakeDescribeTable,
+        SnowflakeExecute,
+        SnowflakeInsertRows,
+        SnowflakeListTables,
+        SnowflakeQuery,
+    )
     from .stripe import (
         CancelOrReversePayout,
         CancelPaymentIntent,
@@ -1717,6 +1724,11 @@ __all__ = [
     "SlackDownloadFile",
     "SlackDeleteFile",
     "SlackSendAndWaitForResponse",
+    "SnowflakeQuery",
+    "SnowflakeExecute",
+    "SnowflakeListTables",
+    "SnowflakeDescribeTable",
+    "SnowflakeInsertRows",
     "LanceDBListTables",
     "LanceDBCreateTable",
     "LanceDBDropTable",
@@ -3007,6 +3019,11 @@ _LAZY_IMPORTS = {
     "SlackDownloadFile": ".slack",
     "SlackDeleteFile": ".slack",
     "SlackSendAndWaitForResponse": ".slack",
+    "SnowflakeQuery": ".snowflake",
+    "SnowflakeExecute": ".snowflake",
+    "SnowflakeListTables": ".snowflake",
+    "SnowflakeDescribeTable": ".snowflake",
+    "SnowflakeInsertRows": ".snowflake",
     "LanceDBListTables": ".lancedb",
     "LanceDBCreateTable": ".lancedb",
     "LanceDBDropTable": ".lancedb",
