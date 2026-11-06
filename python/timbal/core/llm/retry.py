@@ -1,10 +1,12 @@
 """Retry loop for transient provider failures (rate limits, timeouts, 5xx)."""
 
 import asyncio
+import contextlib
 import random
 
 import structlog
 
+from ...errors import ModelStreamStalled
 from ..provider_errors import provider_error_classes
 
 logger = structlog.get_logger("timbal.core.llm")
@@ -12,8 +14,24 @@ logger = structlog.get_logger("timbal.core.llm")
 MAX_RETRY_DELAY = 30.0
 
 
+async def _next_chunk(stream, idle_timeout: float | None, *, after_output: bool):
+    """The stream's next chunk, or ``ModelStreamStalled`` after ``idle_timeout`` seconds of silence."""
+    if idle_timeout is None:
+        return await stream.__anext__()
+    try:
+        async with asyncio.timeout(idle_timeout):
+            return await stream.__anext__()
+    except TimeoutError as e:
+        raise ModelStreamStalled(idle_timeout, after_output=after_output) from e
+
+
 async def _retry_on_error(
-    async_gen_func, max_retries: int, retry_delay: float, context: str, fail_fast_rate_limit: bool = False,
+    async_gen_func,
+    max_retries: int,
+    retry_delay: float,
+    context: str,
+    fail_fast_rate_limit: bool = False,
+    idle_timeout: float | None = None,
 ):
     """Helper to retry an async generator function on transient failures.
 
@@ -44,6 +62,9 @@ async def _retry_on_error(
             FallbackModel for every entry that still has a fallback behind it:
             a rate-limited provider is unavailable for a while by definition,
             so the chain should move on rather than sleep.
+        idle_timeout: Seconds the stream may stay silent between chunks
+            (``None``: forever). A stall before the first chunk is retried
+            like a timeout; one after it raises ``ModelStreamStalled``.
 
     Yields:
         Items from the async generator
@@ -54,13 +75,18 @@ async def _retry_on_error(
     last_error = None
 
     for attempt in range(max_retries + 1):
+        async_gen = None
         try:
             async_gen = async_gen_func()
             # Try to get the first item to detect empty streams
-            first_item = await async_gen.__anext__()
+            first_item = await _next_chunk(async_gen, idle_timeout, after_output=False)
             # Success - yield first item and then all remaining items
             yield first_item
-            async for item in async_gen:
+            while True:
+                try:
+                    item = await _next_chunk(async_gen, idle_timeout, after_output=True)
+                except StopAsyncIteration:
+                    break
                 yield item
             return  # Successfully completed
 
@@ -69,6 +95,17 @@ async def _retry_on_error(
             last_error = e
             error_type = "empty_stream"
             error_msg = "Empty stream"
+
+        except ModelStreamStalled as e:
+            # The abandoned stream still holds its connection.
+            with contextlib.suppress(Exception):
+                await async_gen.aclose()
+            if e.after_output:
+                logger.error("Model stream stalled after output", context=context, idle_timeout=idle_timeout)
+                raise
+            last_error = e
+            error_type = "stream_stalled"
+            error_msg = str(e)
 
         except Exception as e:
             # Check if it's a retryable error

@@ -134,6 +134,9 @@
   .divider .status.park { color: var(--warn); }
   .note { align-self: center; font-size: 0.75rem; color: var(--text-muted); background: var(--surface-2); border: 1px dashed var(--border-strong); border-radius: 999px; padding: 0.2rem 0.7rem; }
   .note.warn { color: var(--warn); border-color: #fcd34d; background: var(--warn-soft); }
+  .note.wake { color: #7c3aed; border-color: #ddd6fe; background: #f5f3ff; }
+  .bubble.silent { color: var(--text-muted); font-style: italic; background: transparent; border-style: dashed; }
+  .wake-opt { margin-left: auto; display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
 
   .tool {
     align-self: flex-start; width: min(78%, 560px); border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -236,10 +239,12 @@
             <button type="button" data-mode="interrupt" title="Cancel the running turn and run this first">Interrupt</button>
           </div>
           <span class="hint" id="mode-hint"></span>
+          <label class="hint wake-opt" title="Wake turns only see read-only tools"><input type="checkbox" id="wake-ro" checked> wake read-only</label>
         </div>
         <div class="input-row">
           <textarea id="input" rows="1" placeholder="Message the agent…" autocomplete="off"></textarea>
           <button class="btn danger" id="btn-stop" type="button" disabled title="Interrupt the running turn (Esc)">Stop</button>
+          <button class="btn" id="btn-wake" type="button" title="Send the text as an application wake-up (a routine or heartbeat), not as the user">Wake</button>
           <button class="btn primary" id="btn-send" type="button">Send</button>
         </div>
       </div>
@@ -372,7 +377,7 @@
   }
   function note(text, cls) { return append(el("div", `note ${cls || ""}`, text)); }
 
-  function segment(callId, itemId, kind) {
+  function segment(runId, callId, itemId, kind) {
     const key = `${callId}:${itemId}:${kind}`;
     let node = S.segs[key];
     if (!node) {
@@ -383,9 +388,15 @@
         row.appendChild(node);
         append(row);
       }
+      node.dataset.run = runId;
       S.segs[key] = node;
     }
     return node;
+  }
+  function markSilent(runId) {
+    document.querySelectorAll(`.bubble[data-run="${runId}"]`).forEach((b) => {
+      if (b.textContent.trim() === "NO_REPLY") { b.textContent = "(stayed silent)"; b.classList.add("silent"); }
+    });
   }
 
   function toolCard(runId, toolUseId, name, input) {
@@ -477,7 +488,8 @@
         const trigger = d.trigger || {};
         S.turns[d.run_id] = { n: S.turnNo, rootCallId: null, eventIds: trigger.event_ids || [] };
         S.busy = true; S.parked = false; S.runId = d.run_id;
-        const why = trigger.kind === "user_message" ? "" : ` · ${String(trigger.kind || "").replace("_", " ")}`;
+        let why = trigger.kind === "user_message" ? "" : ` · ${String(trigger.kind || "").replace("_", " ")}`;
+        if (trigger.kind === "wake" && trigger.tool_policy) why += ` (${pretty(trigger.tool_policy)})`;
         divider(`turn ${S.turnNo}${why}`);
         // Messages this turn started with are delivered now.
         (trigger.event_ids || []).forEach((id) => settleMessage({ event_id: id, state: "delivered", run_id: d.run_id }));
@@ -488,7 +500,8 @@
         const st = d.status || {};
         S.busy = false; S.runId = null; S.parked = !!d.parked;
         let text = st.code, cls = "ok";
-        if (d.parked) { text = st.reason === "approval_required" ? "waiting for approval" : "waiting for input"; cls = "park"; }
+        if (d.silent) { text = "silent"; cls = ""; markSilent(d.run_id); }
+        else if (d.parked) { text = st.reason === "approval_required" ? "waiting for approval" : "waiting for input"; cls = "park"; }
         else if (st.code === "cancelled") { text = st.reason || "cancelled"; cls = "bad"; }
         else if (st.code !== "success") { text = st.reason ? `${st.code} · ${st.reason}` : st.code; cls = "bad"; }
         // A cut turn leaves its running tools without a final OUTPUT.
@@ -504,6 +517,12 @@
       }
       case "interrupt":
         note("✂ interrupted");
+        break;
+      case "wake":
+        note(`⏰ wake queued${d.tool_policy ? " · " + pretty(d.tool_policy) : ""}: ${d.text}`, "wake");
+        break;
+      case "wake_superseded":
+        note("⏰ an older wake with the same key was replaced", "wake");
         break;
       case "closed":
         note("session closed", "warn");
@@ -528,10 +547,10 @@
       S.llmDeltas[d.call_id] = true;
       keepBottom(() => {
         switch (item.type) {
-          case "text_delta": segment(d.call_id, item.id, "text").textContent += item.text_delta; break;
-          case "text": segment(d.call_id, item.id, "text").textContent = item.text; break;
-          case "thinking_delta": segment(d.call_id, item.id, "thinking").textContent += item.thinking_delta; break;
-          case "thinking": segment(d.call_id, item.id, "thinking").textContent = item.thinking; break;
+          case "text_delta": segment(d.run_id, d.call_id, item.id, "text").textContent += item.text_delta; break;
+          case "text": segment(d.run_id, d.call_id, item.id, "text").textContent = item.text; break;
+          case "thinking_delta": segment(d.run_id, d.call_id, item.id, "thinking").textContent += item.thinking_delta; break;
+          case "thinking": segment(d.run_id, d.call_id, item.id, "thinking").textContent = item.thinking; break;
           case "tool_use": {
             const t = toolCard(d.run_id, item.id, item.name, item.input);
             (S.llmTools[d.call_id] = S.llmTools[d.call_id] || []).push(t);
@@ -552,8 +571,8 @@
       const content = message.content || [];
       if (!S.llmDeltas[d.call_id]) {
         content.forEach((c, i) => {
-          if (c.type === "text" && c.text) segment(d.call_id, `out${i}`, "text").textContent = c.text;
-          else if (c.type === "thinking" && c.thinking) segment(d.call_id, `out${i}`, "thinking").textContent = c.thinking;
+          if (c.type === "text" && c.text) segment(d.run_id, d.call_id, `out${i}`, "text").textContent = c.text;
+          else if (c.type === "thinking" && c.thinking) segment(d.run_id, d.call_id, `out${i}`, "thinking").textContent = c.thinking;
         });
       }
       // Streamed tool calls already have cards; providers may id the stream block differently.
@@ -588,6 +607,10 @@
     if (d.type === "APPROVAL") { askCard("approval", d); return; }
     if (d.type === "INTERACTION") { askCard("interaction", d); return; }
     if (d.type === "GUARDRAIL") { note(`🛡 ${d.rail || d.name || "guardrail"} · ${d.action || ""} · ${d.stage || ""}`, "warn"); return; }
+    if (d.type === "OUTPUT" && d.parent_call_id === null && d.metadata && d.metadata.denial_limit) {
+      const hit = d.metadata.denial_limit[d.metadata.denial_limit.length - 1];
+      note(`🛑 stopped after ${hit.denials} refused tool calls in a row`, "warn");
+    }
     if (d.type === "OUTPUT" && d.parent_call_id === null && d.status && d.status.code === "error") {
       note(`turn error: ${d.error ? d.error.message || d.error.type : ""}`.slice(0, 240), "warn");
     }
@@ -699,6 +722,16 @@
     }
   }
 
+  async function wake() {
+    const input = $("input");
+    const text = input.value.trim();
+    if (!text || !S.sessionId) return;
+    input.value = "";
+    autosize();
+    const body = { text, tool_policy: $("wake-ro").checked ? "read_only" : null };
+    await post(`/${S.sessionId}/wake`, body).catch((e) => note(`wake failed: ${e.message}`, "warn"));
+  }
+
   async function stop() {
     if (!S.sessionId || !S.busy) return;
     await post(`/${S.sessionId}/interrupt`).catch((e) => note(`stop failed: ${e.message}`, "warn"));
@@ -720,6 +753,7 @@
   });
   $("btn-send").addEventListener("click", send);
   $("btn-stop").addEventListener("click", stop);
+  $("btn-wake").addEventListener("click", wake);
   $("btn-new").addEventListener("click", () => newSession().catch((e) => note(`could not open a session: ${e.message}`, "warn")));
   $("btn-clear-log").addEventListener("click", () => { $("log").innerHTML = ""; S.logRows = 0; $("log-count").textContent = "0"; });
   $("session-chip").addEventListener("click", () => S.sessionId && navigator.clipboard?.writeText(S.sessionId));
