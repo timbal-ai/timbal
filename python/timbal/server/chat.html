@@ -125,6 +125,7 @@
     align-self: flex-start; max-width: 78%; font-size: 0.8125rem; color: var(--text-muted); white-space: pre-wrap;
     border-left: 2px solid var(--border-strong); padding: 0.1rem 0 0.1rem 0.7rem; font-style: italic;
   }
+  .thinking:empty { display: none; }
   .divider { display: flex; align-items: center; gap: 0.6rem; color: var(--text-muted); font-size: 0.6875rem; margin: 0.4rem 0 0.1rem; }
   .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
   .divider .label { font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -288,6 +289,7 @@
     segs: {},         // `${call_id}:${item_id}` -> element
     llmDeltas: {},    // llm call_id -> true once a delta arrived
     llmTools: {},     // llm call_id -> tool cards its stream created, in order
+    llmServerTools: {}, // llm call_id -> provider-side tool cards (tool/web search), in order
     tools: {},        // tool_use id -> card
     toolQueue: {},    // `${run_id}:${name}` -> [cards waiting for their START]
     toolByCall: {},   // tool call_id -> card
@@ -403,13 +405,14 @@
     });
   }
 
-  function toolCard(runId, toolUseId, name, input) {
+  // server: a provider-side call (Anthropic tool/web search) — it has no span, so no START will claim it.
+  function toolCard(runId, toolUseId, name, input, server = false) {
     if (toolUseId && S.tools[toolUseId]) return S.tools[toolUseId];
     const card = el("div", "tool");
     const head = el("div", "tool-head");
-    head.appendChild(el("span", "", "⚙"));
+    head.appendChild(el("span", "", server ? "🔎" : "⚙"));
     head.appendChild(el("span", "name", name || "tool"));
-    const state = el("span", "state", "called");
+    const state = el("span", server ? "state run" : "state", server ? "provider-side…" : "called");
     head.appendChild(state);
     const body = el("div", "tool-body");
     const args = el("pre", "", pretty(input));
@@ -424,11 +427,31 @@
     card.appendChild(head);
     card.appendChild(body);
     append(card);
-    const entry = { card, state, args, result, resultLabel, name, runId, raw: "" };
+    const entry = { card, state, args, result, resultLabel, name, runId, raw: "", server };
     if (toolUseId) S.tools[toolUseId] = entry;
-    const key = `${runId}:${name}`;
-    (S.toolQueue[key] = S.toolQueue[key] || []).push(entry);
+    if (!server) {
+      const key = `${runId}:${name}`;
+      (S.toolQueue[key] = S.toolQueue[key] || []).push(entry);
+    }
     return entry;
+  }
+
+  // A provider-side result block (tool_search_tool_result, web_search_tool_result) closes its server card.
+  function serverResult(value) {
+    const t = S.tools[value.tool_use_id];
+    if (!t) return;
+    const content = value.content || {};
+    t.resultLabel.hidden = false;
+    if (String(content.type || "").endsWith("_error")) {
+      t.state.className = "state bad";
+      t.state.textContent = content.error_code || "error";
+      t.result.textContent = pretty(content);
+      return;
+    }
+    const found = (content.tool_references || []).map((r) => r.tool_name);
+    t.state.className = "state ok";
+    t.state.textContent = value.type === "tool_search_tool_result" ? `found ${found.length}` : "done";
+    t.result.textContent = found.length ? `loaded: ${found.join(", ")}` : pretty(content);
   }
 
   function askCard(kind, d) {
@@ -523,7 +546,7 @@
         else if (st.code === "cancelled") { text = st.reason || "cancelled"; cls = "bad"; }
         else if (st.code !== "success") { text = st.reason ? `${st.code} · ${st.reason}` : st.code; cls = "bad"; }
         // A cut turn leaves its running tools without a final OUTPUT.
-        Object.values(S.toolByCall).forEach((t) => {
+        [...Object.values(S.toolByCall), ...Object.values(S.tools).filter((t) => t.server)].forEach((t) => {
           if (t.runId === d.run_id && t.state.classList.contains("run")) {
             t.state.className = "state bad";
             t.state.textContent = st.reason === "interrupted" ? "interrupted" : "not finished";
@@ -581,8 +604,10 @@
           case "thinking_delta": segment(d.run_id, d.call_id, item.id, "thinking").textContent += item.thinking_delta; break;
           case "thinking": segment(d.run_id, d.call_id, item.id, "thinking").textContent = item.thinking; break;
           case "tool_use": {
-            const t = toolCard(d.run_id, item.id, item.name, item.input);
-            (S.llmTools[d.call_id] = S.llmTools[d.call_id] || []).push(t);
+            const server = !!item.is_server_tool_use;
+            const t = toolCard(d.run_id, item.id, item.name, item.input, server);
+            const lists = server ? S.llmServerTools : S.llmTools;
+            (lists[d.call_id] = lists[d.call_id] || []).push(t);
             break;
           }
           case "tool_use_delta": {
@@ -610,6 +635,15 @@
         const t = streamed[i] || toolCard(d.run_id, c.id, c.name, c.input);
         S.tools[c.id] = t;
         t.args.textContent = pretty(c.input);
+      });
+      const streamedServer = S.llmServerTools[d.call_id] || [];
+      content.filter((c) => c.type === "tool_use" && c.is_server_tool_use).forEach((c, i) => {
+        const t = streamedServer[i] || toolCard(d.run_id, c.id, c.name, c.input, true);
+        S.tools[c.id] = t;
+        t.args.textContent = pretty(c.input);
+      });
+      content.forEach((c) => {
+        if (c.type === "custom" && c.value && c.value.tool_use_id) serverResult(c.value);
       });
       if (d.status && d.status.code === "error") note(`model error: ${d.error ? d.error.message || "" : ""}`.slice(0, 200), "warn");
       return;
@@ -720,7 +754,7 @@
   function resetView() {
     if (S.es) S.es.close();
     Object.assign(S, {
-      busy: false, parked: false, runId: null, turnNo: 0, turns: {}, messages: {}, segs: {}, llmDeltas: {}, llmTools: {},
+      busy: false, parked: false, runId: null, turnNo: 0, turns: {}, messages: {}, segs: {}, llmDeltas: {}, llmTools: {}, llmServerTools: {},
       tools: {}, toolQueue: {}, toolByCall: {}, asks: {}, queuedAnswers: {}, logRows: 0,
     });
     $("timeline").innerHTML = "";
