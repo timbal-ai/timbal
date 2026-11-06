@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 from types import SimpleNamespace
@@ -54,6 +55,7 @@ _ENV_VARS = (
 @pytest.fixture(autouse=True)
 def _clean(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     sf._JWT_CACHE.clear()
+    sf._KEY_CACHE.clear()
     if request.node.get_closest_marker("integration"):
         return
     for var in _ENV_VARS:
@@ -556,24 +558,70 @@ def _auth_client(auth: SnowflakeAuth, handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), auth=auth)
 
 
+_CALLER = contextvars.ContextVar("caller", default=None)
+
+
 @pytest.mark.asyncio
-async def test_auth_reuses_one_integration_resolve(rsa_key: rsa.RSAPrivateKey) -> None:
+async def test_auth_prepared_in_caller_context_serves_context_free_requests(rsa_key: rsa.RSAPrivateKey) -> None:
+    """MCPServer sends from an owner task with an empty context; the integration must resolve in the caller's."""
+
+    async def resolve() -> dict[str, Any]:
+        assert _CALLER.get() == "run-1", "Integration.resolve ran outside the caller's context"
+        return {"account": "myorg-acct", "user": "svc", "private_key": _pem(rsa_key)}
+
     integration = MagicMock(spec=Integration)
-    integration.resolve = AsyncMock(return_value={"account": "myorg-acct", "user": "svc", "private_key": _pem(rsa_key)})
+    integration.resolve = AsyncMock(side_effect=resolve)
+    auth = SnowflakeAuth(integration)
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(200, json={})
 
-    async with _auth_client(SnowflakeAuth(integration), handler) as client:
-        await client.post("https://myorg-acct.snowflakecomputing.com/api/v2/x/mcp-servers/s", json={})
-        await client.post("https://myorg-acct.snowflakecomputing.com/api/v2/x/mcp-servers/s", json={})
+    async def send_twice() -> None:
+        async with _auth_client(auth, handler) as client:
+            await client.post("https://myorg-acct.snowflakecomputing.com/api/v2/x/mcp-servers/s", json={})
+            await client.post("https://myorg-acct.snowflakecomputing.com/api/v2/x/mcp-servers/s", json={})
+
+    _CALLER.set("run-1")
+    await auth.prepare()
+    await asyncio.get_running_loop().create_task(send_twice(), context=contextvars.Context())
 
     assert integration.resolve.await_count == 1
     assert all(r.headers["X-Snowflake-Authorization-Token-Type"] == "KEYPAIR_JWT" for r in seen)
     claims = jwt.decode(seen[0].headers["Authorization"].split()[1], rsa_key.public_key(), algorithms=["RS256"])
     assert claims["sub"] == "MYORG-ACCT.SVC"
+
+
+@pytest.mark.asyncio
+async def test_unprepared_integration_auth_refuses_without_run_context() -> None:
+    integration = MagicMock(spec=Integration)
+    integration.resolve = AsyncMock(return_value={})
+    async with _auth_client(SnowflakeAuth(integration), lambda _r: httpx.Response(200)) as client:
+        with pytest.raises(RuntimeError, match="caller's run context"):
+            await client.get("https://h/api/v2/a")
+    integration.resolve.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_request_prepares_auth_in_caller_task() -> None:
+    from timbal.core import MCPServer
+
+    class _Auth(httpx.Auth):
+        def __init__(self) -> None:
+            self.prepared_in: list[Any] = []
+
+        async def prepare(self) -> None:
+            self.prepared_in.append(_CALLER.get())
+
+    auth = _Auth()
+    server = MCPServer(transport="http", url="https://h/mcp", auth=auth)
+    session = SimpleNamespace(list_tools=AsyncMock(return_value="tools"))
+    server._connect = AsyncMock(return_value=session)  # type: ignore[method-assign]
+
+    _CALLER.set("run-2")
+    assert await server._request(lambda s: s.list_tools(), what="tools/list") == "tools"
+    assert auth.prepared_in == ["run-2"]
 
 
 @pytest.mark.asyncio

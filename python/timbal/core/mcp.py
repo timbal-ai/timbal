@@ -366,7 +366,11 @@ class MCPServer(ToolSet):
     auth: httpx.Auth | None = Field(default=None, exclude=True)
     """``httpx.Auth`` applied to every HTTP request, for credentials that rotate during a
     session (``headers`` are fixed at connect). E.g. ``SnowflakeAuth`` re-mints its
-    key-pair JWT before the one-hour expiry and retries once on 401."""
+    key-pair JWT before the one-hour expiry and retries once on 401.
+
+    The auth flow runs in the transport's owner task, which has an empty context (no
+    ``RunContext``). If the object defines ``async prepare()``, it is awaited in the
+    caller's context before every request; resolve anything identity-bound there."""
 
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS
     """Seconds to wait for the server to answer a request on an established session
@@ -726,6 +730,9 @@ class MCPServer(ToolSet):
         """
         if timeout is _USE_SERVER_TIMEOUT:
             timeout = self.timeout
+        prepare = getattr(self.auth, "prepare", None)
+        if prepare is not None:
+            await prepare()
         for attempt in (1, 2):
             session = await self._connect()
             owner = self._session_task

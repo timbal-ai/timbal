@@ -68,6 +68,8 @@ _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", 
 
 # (account, user, fingerprint) -> (jwt, expires_at epoch secs)
 _JWT_CACHE: dict[tuple[str, str, str], tuple[str, float]] = {}
+# sha256(pem, passphrase) -> (loaded private key, public key fingerprint)
+_KEY_CACHE: dict[str, tuple[Any, str]] = {}
 
 
 class SnowflakeError(RuntimeError):
@@ -139,7 +141,8 @@ def _parse_account(account: str) -> tuple[str, str]:
     return jwt_account.upper(), f"{host.replace('_', '-')}.snowflakecomputing.com"
 
 
-async def _resolve_connection(tool: Any, *, fresh: bool = False) -> dict[str, Any]:
+async def _resolve_settings(tool: Any) -> dict[str, str | None]:
+    """Gather raw settings. Needs the caller's run context when an Integration is set."""
     creds: dict[str, Any] = {}
     if isinstance(getattr(tool, "integration", None), Integration):
         creds = await tool.integration.resolve() or {}
@@ -175,6 +178,30 @@ async def _resolve_connection(tool: Any, *, fresh: bool = False) -> dict[str, An
     passphrase = pick(
         "private_key_passphrase", ("private_key_passphrase", "passphrase"), ("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE",)
     )
+    return {
+        "account": account,
+        "host": host_override,
+        "user": user,
+        "token": token,
+        "pat": pat,
+        "private_key": private_key,
+        "passphrase": passphrase,
+        "role": pick("role", ("role",), ("SNOWFLAKE_ROLE",)),
+        "warehouse": pick("warehouse", ("warehouse",), ("SNOWFLAKE_WAREHOUSE",)),
+        "database": pick("database", ("database",), ("SNOWFLAKE_DATABASE",)),
+        "schema": pick("schema_name", ("schema", "schema_name"), ("SNOWFLAKE_SCHEMA",)),
+    }
+
+
+def _connection_from_settings(settings: dict[str, str | None], *, fresh: bool = False) -> dict[str, Any]:
+    """Validate settings and pick the auth token. Local only: mints key-pair JWTs, never calls out."""
+    account = settings["account"]
+    host_override = settings["host"]
+    user = settings["user"]
+    token = settings["token"]
+    pat = settings["pat"]
+    private_key = settings["private_key"]
+    passphrase = settings["passphrase"]
 
     if not account and not host_override:
         raise CredentialNotAvailable("Snowflake", missing=["account"], env_vars=["SNOWFLAKE_ACCOUNT"])
@@ -205,11 +232,15 @@ async def _resolve_connection(tool: Any, *, fresh: bool = False) -> dict[str, An
         "host": host,
         "token_type": auth[0],
         "token": auth[1],
-        "role": pick("role", ("role",), ("SNOWFLAKE_ROLE",)),
-        "warehouse": pick("warehouse", ("warehouse",), ("SNOWFLAKE_WAREHOUSE",)),
-        "database": pick("database", ("database",), ("SNOWFLAKE_DATABASE",)),
-        "schema": pick("schema_name", ("schema", "schema_name"), ("SNOWFLAKE_SCHEMA",)),
+        "role": settings["role"],
+        "warehouse": settings["warehouse"],
+        "database": settings["database"],
+        "schema": settings["schema"],
     }
+
+
+async def _resolve_connection(tool: Any, *, fresh: bool = False) -> dict[str, Any]:
+    return _connection_from_settings(await _resolve_settings(tool), fresh=fresh)
 
 
 # ---------------------------------------------------------------------------
@@ -268,8 +299,12 @@ def _public_key_fingerprint(key: Any) -> str:
 def _keypair_jwt(account: str, user: str, private_key: str, passphrase: str | None, *, fresh: bool = False) -> str:
     import jwt
 
-    key = _load_private_key(private_key, passphrase)
-    fingerprint = _public_key_fingerprint(key)
+    # Decrypting an encrypted PEM costs a KDF run; SnowflakeAuth mints per HTTP request.
+    key_id = hashlib.sha256(f"{private_key}\0{passphrase or ''}".encode()).hexdigest()
+    if key_id not in _KEY_CACHE:
+        key = _load_private_key(private_key, passphrase)
+        _KEY_CACHE[key_id] = (key, _public_key_fingerprint(key))
+    key, fingerprint = _KEY_CACHE[key_id]
     qualified_user = f"{account}.{user.upper()}"
     cache_key = (account, user.upper(), fingerprint)
 
@@ -600,9 +635,14 @@ class SnowflakeAuth(httpx.Auth):
             auth=SnowflakeAuth(integration="<org_integration_id>"),
         )
 
-    The resolved connection is reused across requests; key-pair JWTs are re-minted before
-    they expire and any 401 triggers one fresh resolve + retry, so a long MCP session
-    survives token expiry and credential rotation.
+    ``MCPServer`` sends requests from a context-free transport task, so it awaits
+    ``prepare()`` in the caller's run context before each request: that is where an
+    Integration is resolved, under the caller's identity. The auth flow itself only mints
+    key-pair JWTs from the prepared credentials (re-minted before expiry, and once more on
+    401), so a long session survives token expiry without calling the platform.
+
+    One ``MCPServer`` session is shared by its callers and uses the most recently prepared
+    credentials; don't share an instance across tenants.
     """
 
     def __init__(
@@ -633,22 +673,25 @@ class SnowflakeAuth(httpx.Auth):
             database=None,
             schema_name=None,
         )
-        self._conn: dict[str, Any] | None = None
-        self._valid_until = 0.0
-        self._lock: asyncio.Lock | None = None
+        self._settings: dict[str, str | None] | None = None
 
-    async def _connection(self, *, fresh: bool = False) -> dict[str, Any]:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
-            if fresh or self._conn is None or time.time() >= self._valid_until:
-                self._conn = await _resolve_connection(self._source, fresh=fresh)
-                self._valid_until = (
-                    time.time() + _JWT_LIFETIME_SECS - _JWT_REFRESH_MARGIN_SECS
-                    if self._conn["token_type"] == "KEYPAIR_JWT"
-                    else float("inf")
+    async def prepare(self) -> None:
+        """Resolve credentials in the caller's run context. ``MCPServer`` awaits this before every request."""
+        settings = await _resolve_settings(self._source)
+        _connection_from_settings(settings)  # surface bad credentials to the caller, not the transport
+        self._settings = settings
+
+    async def _ensure_prepared(self) -> dict[str, str | None]:
+        if self._settings is None:
+            from ..state import get_run_context
+
+            if isinstance(self._source.integration, Integration) and get_run_context() is None:
+                raise RuntimeError(
+                    "SnowflakeAuth needs its Integration resolved in the caller's run context: "
+                    "use it through MCPServer(auth=...) or await auth.prepare() first."
                 )
-            return self._conn
+            await self.prepare()
+        return self._settings  # type: ignore[return-value]
 
     @staticmethod
     def _apply(request: httpx.Request, conn: dict[str, Any]) -> None:
@@ -660,10 +703,12 @@ class SnowflakeAuth(httpx.Auth):
         raise RuntimeError("SnowflakeAuth only supports httpx.AsyncClient.")
 
     async def async_auth_flow(self, request: httpx.Request):
-        self._apply(request, await self._connection())
+        settings = await self._ensure_prepared()
+        conn = _connection_from_settings(settings)
+        self._apply(request, conn)
         response = yield request
-        if response.status_code == 401:
-            self._apply(request, await self._connection(fresh=True))
+        if response.status_code == 401 and conn["token_type"] == "KEYPAIR_JWT":
+            self._apply(request, _connection_from_settings(settings, fresh=True))
             yield request
 
 
