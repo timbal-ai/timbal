@@ -40,6 +40,9 @@ When asking Timbal for help, send the message you saw and these log files.
   <Accordion title="Unknown argument / needs a value">
     The command line has a typo. Options start with a single dash (`-Token`, not `--token`) and each one except `-SkipNetworkCheck` takes a value. See [Scripted install](/connect/install-windows#scripted-install).
   </Accordion>
+  <Accordion title="Already installed, but the control-plane URL could not be read">
+    The server has an existing Timbal Connect configuration, but its control-plane URL is missing or the file is damaged. The installer stops instead of guessing, because guessing wrong would move the server to another Timbal environment. Run it again with the URL this server should use, for example `-Url wss://api.timbal.ai/v1/connect/channel` (Windows) or `--url wss://api.timbal.ai/v1/connect/channel` (Linux and macOS), or ask Timbal which URL applies.
+  </Accordion>
   <Accordion title="Could not unpack the installer embedded in this file">
     The setup file couldn't write to your temp folder. Check that `%TEMP%` exists and is writable, and that antivirus isn't quarantining files written there.
   </Accordion>
