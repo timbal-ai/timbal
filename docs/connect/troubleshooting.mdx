@@ -8,6 +8,7 @@ Every installer failure stops with a message that names the cause, plus the loca
 | Log | Where |
 | --- | ----- |
 | Setup file (Windows) | `%TEMP%\timbal-connect-setup.log` of the user who ran it |
+| Setup window (Windows) | `%TEMP%\timbal-connect-setup-ui.log`, for failures before the administrator prompt |
 | Installer (Windows) | `C:\ProgramData\TimbalConnect\setup.log` |
 | Service (Windows) | `C:\ProgramData\TimbalConnect\timbal-connect.log` |
 | Service (Linux) | `journalctl -u timbal-connect` |

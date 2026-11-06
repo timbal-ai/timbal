@@ -161,6 +161,7 @@ Uninstalling doesn't revoke the connector in Timbal; it just goes offline. Revok
 | `C:\ProgramData\TimbalConnect\timbal-connect.log` | Service log |
 | `C:\ProgramData\TimbalConnect\setup.log` | Installer log. The enrollment token is recorded only as a fingerprint (`sha256:...`) |
 | `%TEMP%\timbal-connect-setup.log` | Setup-file log, in the temp folder of the user who ran it |
+| `%TEMP%\timbal-connect-setup-ui.log` | Setup-window log, written before the administrator prompt when the setup isn't started as an administrator |
 
 The service runs as `NT AUTHORITY\NetworkService`. To use Windows-integrated authentication with SQL Server, run it as a domain account instead: see [Configure connections](/connect/connections#sql-server-authentication).
 
