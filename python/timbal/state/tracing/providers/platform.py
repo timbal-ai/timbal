@@ -278,13 +278,17 @@ def _observe_snapshot(stored: int) -> None:
 
 
 class _DeltaRun:
-    """Spans of one run the platform acknowledged, by fingerprint, and each span's start index (root = 0)."""
+    """Spans of one run the platform acknowledged, by fingerprint, and each span's start index (root = 0).
 
-    __slots__ = ("acked", "seq")
+    ``root_stored``: the platform acknowledged a full root carrying ``memory`` (see ``_delta_body``).
+    """
+
+    __slots__ = ("acked", "root_stored", "seq")
 
     def __init__(self) -> None:
         self.acked: dict[str, str] = {}
         self.seq: dict[str, int] = {}
+        self.root_stored = False
 
 
 class PlatformTracingProvider(TracingProvider):
@@ -771,8 +775,9 @@ class PlatformTracingProvider(TracingProvider):
         snapshot = _next_snapshot()
         # Serialized before the await: model_dump() shares the agent's live memory list, which keeps growing
         # while the PATCH is in flight. Same encoding httpx applies to json=.
+        root_stored = False
         if delta:
-            body, cache_body, sent = cls._delta_body(run_context, subject.rev, key, snapshot)
+            body, cache_body, sent, root_stored = cls._delta_body(run_context, subject.rev, key, snapshot)
         else:
             payload = {"parent_id": run_context.parent_id, "trace": run_context._trace.model_dump()}
             if subject.rev is not None:
@@ -854,6 +859,8 @@ class PlatformTracingProvider(TracingProvider):
             return
         if sent:
             cls._delta_run(key).acked.update(sent)
+        if root_stored:
+            cls._delta_run(key).root_stored = True
         elif not delta and key in PlatformTracingProvider._delta_runs:
             # A whole trace replaces the platform's span rows: what they acknowledged is gone.
             PlatformTracingProvider._delta_runs[key].acked.clear()
@@ -862,13 +869,17 @@ class PlatformTracingProvider(TracingProvider):
     @classmethod
     def _delta_body(
         cls, run_context: RunContext, rev: str | None, key: str, snapshot: int
-    ) -> tuple[bytes, bytes | None, dict]:
+    ) -> tuple[bytes, bytes | None, dict, bool]:
         """A delta save: the spans the platform has not acknowledged, and the whole trace once the root ended.
 
         While the run goes, finished spans only (they no longer change) and a root header; the root's
         end sends the full root and every span whose content changed since it was acknowledged (a
-        background child's late output). Returns the body, the full-trace body to cache (only once
-        the root ended: that is what the next turn reads back), and the fingerprints sent.
+        background child's late output). Until the platform has acknowledged a full root carrying
+        ``memory``, the running root goes whole instead of as a header: a process that dies mid-turn
+        then still leaves the turn's input, history and session data stored (one copy per run; a root
+        with no memory, like a workflow's, stays small). Returns the body, the full-trace body to
+        cache (only once the root ended: that is what the next turn reads back), the fingerprints
+        sent, and whether this body stores the root whole with its memory.
         """
         run = cls._delta_run(key)
         spans = run_context._trace.as_records()
@@ -896,10 +907,12 @@ class PlatformTracingProvider(TracingProvider):
             out.append({"seq": run.seq[span.call_id], "span": dumped})
             if span.t1 is not None:
                 sent[span.call_id] = fingerprint
+        root_stored = False
         if root is None:
             root_part = None
-        elif ended:
+        elif ended or not run.root_stored:
             root_part = root.model_dump()
+            root_stored = not ended and root_part.get("memory") is not None
         else:
             root_part = {"call_id": root.call_id, "path": root.path, "parent_call_id": None, "t0": root.t0}
         payload = {
@@ -914,7 +927,7 @@ class PlatformTracingProvider(TracingProvider):
         cache_body = None
         if ended:
             cache_body = _encode({"parent_id": run_context.parent_id, "trace": [root_part, *full]})
-        return _encode(payload), cache_body, sent
+        return _encode(payload), cache_body, sent, root_stored
 
 
 def _encode(payload) -> bytes:

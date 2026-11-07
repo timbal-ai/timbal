@@ -82,7 +82,7 @@ class FakePlatform:
                 return self._ok({})
             if run.get("trace") is not None:
                 return self._ok({"trace": run["trace"], "parent_id": run["parent_id"]})
-            rows = [span for _, (_seq, _snap, span) in sorted(run["spans"].items(), key=lambda kv: kv[1][0])]
+            rows = [span for _seq, span in sorted(run["spans"].values(), key=lambda row: row[0])]
             return self._ok({"trace": [run["root"], *rows], "parent_id": run["parent_id"]})
         headers = headers or {}
         if self.fail_next:
@@ -101,23 +101,44 @@ class FakePlatform:
             {"kind": kind, "bytes": len(content), "body": body, "gzip": headers.get("Content-Encoding") == "gzip"}
         )
         run = self.runs.setdefault(run_id, {"spans": {}, "trace": None, "root": None, "parent_id": None, "snapshot": 0})
+        # 0.1: an older snapshot is acked and dropped; an equal one is a retry and applies again.
+        sent = int(headers["X-Timbal-Snapshot"]) if "X-Timbal-Snapshot" in headers else None
+        if sent is not None and sent < run["snapshot"]:
+            return self._ok(stored=run["snapshot"], applied=False)
+        if sent is not None:
+            run["snapshot"] = sent
         run["parent_id"] = body.get("parent_id")
         if kind == "full":  # authoritative: replaces the span rows
-            run.update(trace=body["trace"], spans={}, snapshot=0)
-            return self._ok(stored=int(headers.get("X-Timbal-Snapshot", 0)))
-        if body["snapshot"] <= run["snapshot"]:
-            return self._ok(stored=run["snapshot"], applied=False)  # stale or retried delta: ack, no-op
-        run["snapshot"] = body["snapshot"]
+            run.update(trace=body["trace"], spans={}, root=None)
+            return self._ok(stored=sent)
         for entry in body["spans"]:
             assert set(entry) == {"seq", "span"}, entry
-            run["spans"][entry["span"]["call_id"]] = (entry["seq"], body["snapshot"], entry["span"])
-        run["root"] = body["root"]
+            if entry["seq"] <= 0 or not entry["span"].get("parent_call_id"):
+                raise PlatformError("malformed delta", status_code=400)
+        root = body["root"]
         if body["ended"]:
-            rows = [span for _, (_seq, _snap, span) in sorted(run["spans"].items(), key=lambda kv: kv[1][0])]
-            run["trace"] = [body["root"], *rows]
+            for entry in body["spans"]:
+                run["spans"][entry["span"]["call_id"]] = (entry["seq"], entry["span"])
+            rows = [span for _seq, span in sorted(run["spans"].values(), key=lambda row: row[0])]
+            run.update(trace=[root, *rows], spans={}, root=None)  # assembled: the rows are gone
+        elif run["trace"] is not None and any(s["parent_call_id"] is None and s.get("t1") for s in run["trace"]):
+            # After the end (background children): merged into the stored trace by call_id.
+            by_id = {span["call_id"]: span for span in run["trace"]}
+            for entry in body["spans"]:
+                by_id[entry["span"]["call_id"]] = entry["span"]
+            if root is not None:
+                by_id[root["call_id"]] = {**by_id.get(root["call_id"], {}), **root}
+            run["trace"] = list(by_id.values())
         else:
-            run["trace"] = None  # live again (background work after the end) — assembled on read
-        return self._ok(stored=body["snapshot"])
+            if run["trace"] is not None:  # a whole save mid-run, then deltas: its spans become the rows
+                stored_root = next(s for s in run["trace"] if s["parent_call_id"] is None)
+                run["spans"] = {s["call_id"]: (i + 1, s) for i, s in enumerate(run["trace"]) if s is not stored_root}
+                run.update(trace=None, root=stored_root)
+            for entry in body["spans"]:
+                run["spans"][entry["span"]["call_id"]] = (entry["seq"], entry["span"])
+            if root is not None:  # a header merges into the stored root, never wiping memory, input or session
+                run["root"] = {**(run["root"] or {}), **root}
+        return self._ok(stored=sent)
 
 
 def tool_loop(steps, probe=None):
@@ -282,7 +303,10 @@ class TestDeltas:
         assert next(iter(ctx._trace.values())).parent_call_id is None  # the root is index 0
         assert all(s["seq"] == start_order[s["span"]["call_id"]] for body in deltas for s in body["spans"])
         assert [b["ended"] for b in deltas].count(True) == 1 and deltas[-1]["ended"]
-        assert "memory" not in deltas[0]["root"]
+        # The running root goes whole until it is stored with its memory, then as a header.
+        whole = [i for i, body in enumerate(deltas[:-1]) if "memory" in body["root"]]
+        assert whole and whole == list(range(len(whole))) and deltas[whole[-1]]["root"]["memory"]
+        assert all(set(body["root"]) == {"call_id", "path", "parent_call_id", "t0"} for body in deltas[len(whole) : -1])
         assert deltas[-1]["root"]["memory"]
 
     async def test_a_failed_save_is_resent_by_the_next(self):
@@ -316,6 +340,48 @@ class TestDeltas:
         with patch("timbal.platform.utils._request", server.request):
             await run(agent, provider)
         assert seen[-1].count("agent.step") == 2 and "agent.llm" in seen[-1]  # earlier calls, as a crash leaves them
+
+    async def test_a_run_that_died_keeps_its_prompt_and_history(self):
+        """Mid-run reads (as a crash leaves the run) find the root's input and memory, also after header deltas."""
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        roots = []
+
+        async def probe():
+            ctx = get_run_context()
+            stored = await read_back(PlatformTracingProvider.configured(platform_config=CONFIG), ctx.id)
+            if stored is not None:
+                roots.append(next(s for s in stored.as_records() if s.parent_call_id is None))
+
+        agent, provider = tool_loop(4, probe)
+        with patch("timbal.platform.utils._request", server.request):
+            await run(agent, provider)
+        headers_only = [p for p in server.patches if not p["body"]["ended"] and "memory" not in p["body"]["root"]]
+        assert headers_only  # later saves did go out as headers
+        last = roots[-1]
+        assert last.input["prompt"] == "go"
+        assert [m["role"] if isinstance(m, dict) else m.role for m in last.memory][:1] == ["user"]
+
+    async def test_the_root_goes_whole_again_until_it_is_stored(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        original = server.request
+        dropped = {"n": 0}
+
+        async def request(method, path, headers=None, content=None, **kwargs):
+            body = json.loads(
+                gzip.decompress(content) if (headers or {}).get("Content-Encoding") == "gzip" else content
+            )
+            if method == "PATCH" and "memory" in (body.get("root") or {}) and not body["ended"] and not dropped["n"]:
+                dropped["n"] = 1
+                raise PlatformError("upstream", status_code=503)
+            return await original(method, path, headers=headers, content=content, **kwargs)
+
+        agent, provider = tool_loop(4)
+        with patch("timbal.platform.utils._request", request):
+            await run(agent, provider)
+        mid = [p["body"] for p in server.patches if not p["body"]["ended"]]
+        assert dropped["n"] == 1 and "memory" in mid[0]["root"]  # the failed whole root went again
 
     async def test_a_span_changed_after_the_end_is_resent_alone(self):
         server = FakePlatform()
