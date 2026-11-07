@@ -253,6 +253,52 @@ class TestAnswerCut:
         assert model.call_count == 2
 
 
+class SilentThinker(StreamingTestModel):
+    """Thinks for ``silence`` seconds before its first chunk on the first call (hidden reasoning streams nothing)."""
+
+    __test__ = False
+
+    def __init__(self, scripts, silence=5.0):
+        super().__init__(scripts)
+        self.silence = silence
+        self.thinking = asyncio.Event()
+
+    async def stream(self, messages, **kwargs):
+        if not self.thinking.is_set():  # the first call only, even if it is cut during the silence
+            self.thinking.set()
+            await asyncio.sleep(self.silence)
+        async for chunk in super().stream(messages, **kwargs):
+            yield chunk
+
+
+class TestSilentModel:
+    async def test_now_cuts_a_model_that_streams_nothing_yet(self):
+        # One script: the first call is cut in its silence and never streams (no partial answer is kept).
+        model = SilentThinker([text_stream("Sure: BANANA.")])
+        async with ChatSession(agent(model)) as session:
+            session.send("think hard about this")
+            await asyncio.wait_for(model.thinking.wait(), 2)
+            t0 = asyncio.get_running_loop().time()
+            session.send("never mind, just say BANANA", mode="now")
+            (finished,) = await records(session, "turn_finished", 1)
+            elapsed = asyncio.get_running_loop().time() - t0
+        assert elapsed < 1.0  # not the 5 s of silence
+        assert finished["status"]["code"] == "success"
+        root, memory = await memory_of(session)
+        assert user_texts(memory) == ["think hard about this", "never mind, just say BANANA"]
+        assert root.output.collect_text() == "Sure: BANANA."
+        assert root.metadata["steer_now"] == [{"cut": "answer", "kept_chars": 0}]
+
+    async def test_a_real_cancellation_still_cancels(self):
+        model = SilentThinker([text_stream("never")], silence=5.0)
+        async with ChatSession(agent(model)) as session:
+            session.send("think")
+            await asyncio.wait_for(model.thinking.wait(), 2)
+            session.interrupt()
+            (finished,) = await records(session, "turn_finished", 1)
+        assert finished["status"]["code"] == "cancelled"
+
+
 class TestEdges:
     async def test_now_while_idle_starts_a_turn(self):
         async with ChatSession(agent(batch_model())) as session:
