@@ -1540,6 +1540,23 @@ class Runnable(ABC, BaseModel):
             span._output_dump = await dump(span.output)
             return False, None, validated_input
 
+        # Nobody answered this call yet: the agent's reviewer (if it has one) may, before a person is asked.
+        review = None
+        if approval_resolution is None:
+            review = await self._review_gate(approval_decision, redacted_input, span, run_context)
+            if review is not None:
+                span.metadata["approval"]["review"] = review.record()
+                run_context.update_usage(f"approvals:reviewer_{review.verdict}", 1)
+                if review.verdict != "escalate":
+                    approved = review.verdict == "approve"
+                    approval_resolution = ApprovalResolution(
+                        approved=approved,
+                        reason=review.reason if approved else f"Denied by the approval reviewer: {review.reason}",
+                        approver_id=review.reviewer,
+                        decided_at=int(time.time() * 1000),
+                        metadata={"reviewed": True},
+                    )
+
         if approval_resolution is None:
             # Status/output MUST be set BEFORE the caller yields the event.
             # If the consumer breaks the stream right after seeing the
@@ -1577,7 +1594,12 @@ class Runnable(ABC, BaseModel):
                 ui=approval_decision.ui,
                 grant_key=grant_key,
                 grantable=approval_decision.grantable,
-                metadata=approval_decision.metadata,
+                # An escalating reviewer's reason goes on the card: why a person is asked.
+                metadata=(
+                    {**(approval_decision.metadata or {}), "review": review.record()}
+                    if review is not None
+                    else approval_decision.metadata
+                ),
             )
             run_context.update_usage("approvals:required", 1)
             return False, approval_event, validated_input
@@ -1655,6 +1677,48 @@ class Runnable(ABC, BaseModel):
             span.metadata["approval"]["effective_input"] = span.input
 
         return True, None, validated_input
+
+    async def _review_gate(
+        self, approval_decision: ApprovalPolicyDecision, redacted_input: Any, span: Any, run_context: Any
+    ) -> Any:
+        """The verdict of the nearest calling agent's ``approval_reviewer`` on this gate, or None (no reviewer, or
+        one that does not review this kind of approval)."""
+        from ..types.message import Message
+
+        caller = run_context.parent_of(span)
+        while caller is not None and getattr(caller.runnable, "_approval_reviewer", None) is None:
+            caller = run_context.parent_of(caller)
+        if caller is None:
+            return None
+        reviewer = caller.runnable._approval_reviewer
+        if not reviewer.reviews(approval_decision.kind):
+            return None
+        from .approval_reviewer import ApprovalRequest
+
+        memory = caller.memory if isinstance(caller.memory, list) else []
+        user_messages = [
+            text
+            for message in memory
+            if isinstance(message, Message)
+            and message.role == "user"
+            and not message.is_runtime()
+            and (text := message.collect_text().strip())
+        ][-reviewer.context_messages :]
+        root = run_context.root_span()
+        trigger = (root.metadata or {}).get("trigger") if root is not None else None
+        attended = not isinstance(trigger, dict) or trigger.get("kind") in ("user_message", "resume")
+        request = ApprovalRequest(
+            tool=self.name,
+            arguments=redacted_input,
+            description=getattr(self, "description", None),
+            prompt=approval_decision.prompt,
+            kind=approval_decision.kind,
+            ui=approval_decision.ui,
+            user_messages=user_messages,
+            attended=attended,
+            trigger=trigger if isinstance(trigger, dict) else None,
+        )
+        return await reviewer.decide(request)
 
     @staticmethod
     async def _find_approval_grant(run_context: Any, grant_key: str) -> ApprovalGrant | None:
