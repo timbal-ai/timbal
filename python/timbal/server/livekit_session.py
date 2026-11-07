@@ -1139,6 +1139,11 @@ async def _run_livekit_session(
             rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
         )
         await downlink.start()
+        logger.info(
+            "voice_livekit_session_ready",
+            room=room_name or getattr(room, "name", None),
+            transport="livekit",
+        )
 
         async def _mic_pcm() -> Any:
             # Stay open across caller blips: a rejoin publishes a new track and

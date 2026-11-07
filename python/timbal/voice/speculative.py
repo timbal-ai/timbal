@@ -57,6 +57,7 @@ __all__ = [
     "AudioHold",
     "SpeculativeAttempt",
     "SpeculativeGate",
+    "documented_speculative_preset",
     "install_speculative_gate",
     "reset_speculative_gate",
     "transcripts_equivalent",
@@ -175,3 +176,23 @@ class SpeculativeAttempt:
     prior_context: Any
     prior_head: str | None = None
     settled: bool = False
+
+
+def documented_speculative_preset(model: str):
+    """Opt-in preset for one measured model. Not applied unless you pass it.
+
+    ``openai/gpt-5.4-mini`` is the Flux ship block in
+    ``benchmarks/voice/REPORT-242.md`` (enabled, preemptive TTS). That table is
+    a small sample, not a percentile, and it is not evidence for other OpenAI
+    ids. ``groq/openai/gpt-oss-20b`` in the same report moved silence p90 from
+    3603.2 ms to 4935.1 ms at n=3, which is a reason not to copy the block
+    onto that model, not a ranking of every provider. Every other id,
+    including other OpenAI models, Groq, and Anthropic, stays off.
+    ``VoiceConfig`` still defaults to off.
+    """
+    from .config import SpeculativeGeneration
+
+    key = (model or "").strip().lower()
+    if key == "openai/gpt-5.4-mini":
+        return SpeculativeGeneration(enabled=True, preemptive_tts=True)
+    return SpeculativeGeneration(enabled=False)

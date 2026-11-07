@@ -95,6 +95,49 @@ def normalize_language_tag(code: str | None) -> str | None:
     return tag
 
 
+# Language 2–3, optional script of 4 letters, optional region of 2 letters or 3 digits.
+# Well-formed only. This is not an IANA registry check: ``tlh`` is accepted, ``english`` is not.
+_REPLY_TAG = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?$")
+
+
+def parse_reply_language(value: str | None) -> str | None:
+    """``None`` keeps today's rule. ``"follow"`` or a BCP-47 tag is explicit.
+
+    Empty is ``None``. A non-string raises ``TypeError``. A sentence or a
+    malformed tag raises ``ValueError``. ``language`` on the speech-to-text
+    hint is unchanged by this check.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"reply_language must be a string, got {type(value).__name__}")
+    token = value.strip()
+    if not token:
+        return None
+    if token.lower() == "follow":
+        return "follow"
+    tag = normalize_language_tag(token)
+    if tag is None or _REPLY_TAG.fullmatch(tag) is None:
+        raise ValueError(f"reply_language must be 'follow' or a BCP-47 tag, got {value!r}")
+    return tag
+
+
+def resolve_reply_language(reply_language: str | None, stt_language: str | None) -> str | None:
+    """Tag for the reply instruction. Does not change the STT hint.
+
+    Unset ``reply_language`` uses ``stt_language``, which is what
+    ``VoiceConfig.language`` has always done. ``"follow"`` uses the latest
+    substantive message even when ``stt_language`` is set. A tag pins the
+    reply to that tag alone.
+    """
+    mode = parse_reply_language(reply_language)
+    if mode is None:
+        return normalize_language_tag(stt_language)
+    if mode == "follow":
+        return None
+    return mode
+
+
 def reply_language_instruction(language: str | None) -> str:
     """The reply-language paragraph for one voice turn.
 

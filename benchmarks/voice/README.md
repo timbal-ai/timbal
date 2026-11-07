@@ -46,6 +46,19 @@ the key. The default pytest run skips it (`-m not integration`).
 TIMBAL_VOICE_ACCEPTANCE=1 uv run python benchmarks/voice/accept_duplex.py
 ```
 
+## Dictation end-of-turn
+
+`dictation_eot.py` times speech-end → Flux boundary → first token → first audio
+for a short question, a hesitated phone number, and a spelled name. It repeats
+a small bounded batch and prints min, median, and max. It does not report p90
+or p99 below 20 samples. `entity_patience` off and on are the matched pair.
+A separate call turns speculation on so Flux can emit `EagerEndOfTurn` and
+`TurnResumed`. PCM energy is not a transcript.
+
+```bash
+TIMBAL_VOICE_DICTATION=1 uv run python benchmarks/voice/dictation_eot.py
+```
+
 ## First-token benchmark
 
 `bench_ttft.py` times the first streamed text token of one fixed voice prompt,

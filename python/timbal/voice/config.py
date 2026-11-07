@@ -486,22 +486,33 @@ class VoiceConfig(BaseModel):
     language: str | None = None
     """Conversation language (BCP-47, e.g. ``"en"``, ``"es"``, ``"es-ES"``).
 
-    When set, the speech-to-text adapter receives it as a language hint and
-    the text model is told to reply in that language. ``None`` leaves
-    detection to the provider and tells the model to follow the user's latest
-    substantive message, unless the agent's own prompt already names one
-    reply language. It does not select a TTS voice. Change it on a live call
-    with :meth:`timbal.voice.session.VoiceSession.set_language`.
+    When set, the speech-to-text adapter receives it as a language hint and,
+    unless ``reply_language`` says otherwise, the text model is told to reply
+    in that language. ``None`` leaves detection to the provider and tells the
+    model to follow the user's latest substantive message, unless the agent's
+    own prompt already names one reply language. It does not select a TTS
+    voice. Change it on a live call with
+    :meth:`timbal.voice.session.VoiceSession.set_language`.
+    """
+    reply_language: str | None = None
+    """Reply policy, separate from the speech-to-text hint.
+
+    Unset (the default) keeps the historical rule: the reply pin is
+    ``language``. ``"follow"`` follows the latest substantive message even
+    when ``language`` is set for transcription. A BCP-47 tag pins the reply
+    to that tag and does not change the hint ``language`` sends to
+    speech-to-text. It does not change behavior when left unset.
     """
     sample_rate: int = 16_000
     encoding: str = "pcm_s16le"
     stt_extra: dict[str, Any] = Field(default_factory=_default_stt_extra)
     tts_extra: dict[str, Any] = Field(default_factory=lambda: {"auto_mode": True})
     ignore_backchannels: bool = False
-    """Drop pure English and Spanish acknowledgements while the assistant is
-    speaking and for one second after playback. "yeah" and "vale" do not
-    interrupt; "no", "stop", "para", and "sí, pero…" still do. Server-side
-    only. Off leaves interruptions unchanged."""
+    """Drop pure acknowledgements while the assistant is speaking and for one
+    second after playback. English and Spanish ("yeah", "vale") and Catalan
+    ("d'acord", "entesos", "molt be") do not interrupt. "no", "stop", "para",
+    "espera", and "sí, pero…" still do. Server-side only. Off leaves
+    interruptions unchanged."""
     hold_unfinished_secs: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     """With provider turn detection, wait this long when a commit ends on a
     trailing conjunction, preposition, determiner, or filler, then merge the
@@ -632,6 +643,15 @@ class VoiceConfig(BaseModel):
     string / block → that opener on outbound only. Only a host that knows the
     call direction can apply it (:func:`greeting_for_direction`); the session
     itself never sees a direction."""
+
+    @field_validator("reply_language", mode="before")
+    @classmethod
+    def _reply_language_is_explicit(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        from .language import parse_reply_language
+
+        return parse_reply_language(value)
 
     @field_validator("min_delay_secs", "stop_silence_secs", "first_flush_min_words", mode="before")
     @classmethod
