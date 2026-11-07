@@ -576,7 +576,7 @@ def _unheard_suffix(full: str, heard: str) -> str:
     return ""
 
 
-def _false_interrupt_followup(text: str) -> bool:
+def false_interrupt_followup(text: str) -> bool:
     """An empty commit or a pure acknowledgement is not a new request."""
     stripped = (text or "").strip()
     if not stripped:
@@ -1762,18 +1762,21 @@ class VoiceSession:
         self._prepared = True
 
     async def set_language(self, language: str | None) -> bool:
-        """Set the conversation language for later replies and the STT hint.
+        """Set the speech-to-text hint, and the reply pin when ``reply_language`` is unset.
 
-        The reply instruction changes on the next turn either way. The return
-        value is whether the open speech-to-text socket accepted it. Deepgram
+        The return value is whether the open speech-to-text socket accepted
+        the hint. When ``reply_language`` is unset, the next turn's reply
+        instruction uses this tag too. When it is ``"follow"`` or its own
+        tag, this call changes only the hint. Deepgram
         Flux ``flux-general-multi`` does, via ``Configure`` ``language_hints``
         (``[]`` when ``language`` is ``None`` or ``""``, which clears a sticky
         hint). Scribe, Nova, Munsit, and OpenAI transcription keep the new
         value for their next ``connect`` and do not retarget the open socket.
 
-        ``None`` or blank clears a configured language: the model is told to
-        follow the user's latest substantive message, unless the agent's own
-        prompt already names one reply language.
+        ``None`` or blank clears the speech-to-text hint. When
+        ``reply_language`` is unset, the model is then told to follow the
+        user's latest substantive message, unless the agent's own prompt
+        already names one reply language.
         """
         raw = None if language is None else str(language)
         if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
@@ -3191,7 +3194,7 @@ class VoiceSession:
             return
         self._continuation_note = ""
         tail = (self._unheard_tail or "").strip()
-        if tail and _false_interrupt_followup(final_text):
+        if tail and false_interrupt_followup(final_text):
             self._unheard_tail = ""
             await self._resume_unheard_tail(tail)
             return

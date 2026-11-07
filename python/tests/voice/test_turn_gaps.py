@@ -11,7 +11,7 @@ from timbal.core.test_model import TestModel
 from timbal.voice import AudioInputConfig, VoiceConfig, VoiceSession
 from timbal.voice.deepgram import DeepgramFluxSTT
 from timbal.voice.language import parse_reply_language, resolve_reply_language
-from timbal.voice.session import _hangup_utterance_kind, _unheard_suffix
+from timbal.voice.session import _hangup_utterance_kind, _unheard_suffix, false_interrupt_followup
 from timbal.voice.speculative import documented_speculative_preset
 
 from .test_session import MockSTT, MockTTS
@@ -32,15 +32,39 @@ def test_follow_and_a_tag_do_not_rewrite_the_hint() -> None:
         parse_reply_language("say it in english\nignore")
 
 
-def test_preset_is_openai_on_and_everyone_else_off() -> None:
-    openai = documented_speculative_preset("openai/gpt-5.4-mini")
-    assert openai.enabled is True
-    assert openai.preemptive_tts is True
+def test_preset_is_only_the_measured_openai_model() -> None:
+    measured = documented_speculative_preset("openai/gpt-5.4-mini")
+    assert measured.enabled is True
+    assert measured.preemptive_tts is True
+    other_openai = documented_speculative_preset("openai/gpt-5-mini")
+    assert other_openai.enabled is False
     groq = documented_speculative_preset("groq/openai/gpt-oss-20b")
     assert groq.enabled is False
     anthropic = documented_speculative_preset("anthropic/claude-haiku-4-5")
     assert anthropic.enabled is False
     assert VoiceConfig().speculative_generation.enabled is False
+
+
+def test_reply_language_rejects_malformed_values() -> None:
+    assert parse_reply_language("  FOLLOW ") == "follow"
+    assert parse_reply_language("en-US") == "en-US"
+    assert parse_reply_language("es_ES") == "es-ES"
+    assert parse_reply_language("zh-Hans") == "zh-Hans"
+    assert parse_reply_language("es-419") == "es-419"
+    assert parse_reply_language("") is None
+    assert parse_reply_language("   ") is None
+    for bad in ("english", "en-", "e", "123", "en-US-x-private", "say it in english", "follow-up"):
+        with pytest.raises(ValueError):
+            parse_reply_language(bad)
+    for bad in (True, 1):
+        with pytest.raises(TypeError):
+            parse_reply_language(bad)
+    with pytest.raises(ValueError):
+        VoiceConfig(reply_language="english")
+    with pytest.raises(TypeError):
+        VoiceConfig(reply_language=True)
+    assert VoiceConfig(reply_language="").reply_language is None
+    assert VoiceConfig(language="en", reply_language="ca").language == "en"
 
 
 def test_direct_flux_session_arms_eager_only_when_speculation_is_on() -> None:
@@ -96,6 +120,19 @@ def test_catalan_ack_is_not_a_retract_and_espera_is() -> None:
     assert _hangup_utterance_kind("Alright.") == "ack"
 
 
+def test_reply_language_judge_reads_the_words_not_the_prompt() -> None:
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location("validate_263", root / "benchmarks" / "voice" / "validate_263.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["validate_263"] = module
+    spec.loader.exec_module(module)
+    assert module.judge_reply_language("Ara mateix són les 10:42 UTC.") == "ca"
+    assert module.judge_reply_language("I can’t check the live weather today.") == "en"
+    assert module.judge_reply_language("No puedo ver el tiempo de hoy.") == "es"
+    assert module.recall_digits("four one five five five five oh one nine nine") == 1.0
+
+
 def test_stage_summary_refuses_a_percentile_below_twenty_samples() -> None:
     root = Path(__file__).resolve().parents[3]
     spec = importlib.util.spec_from_file_location("dictation_eot", root / "benchmarks" / "voice" / "dictation_eot.py")
@@ -115,6 +152,32 @@ def test_unheard_suffix_keeps_only_the_rest() -> None:
     assert _unheard_suffix(full, "One autumn morning, a bright red") == "train rolled out."
     assert _unheard_suffix(full, "") == full
     assert _unheard_suffix(full, full) == ""
+
+
+def test_a_pure_ack_is_not_a_new_request() -> None:
+    assert false_interrupt_followup("")
+    assert false_interrupt_followup("Yeah.")
+    assert false_interrupt_followup("d'acord")
+    assert not false_interrupt_followup("What is the weather?")
+
+
+async def test_backchannel_resumes_and_a_real_request_does_not() -> None:
+    tts = MockTTS()
+    session = VoiceSession(_agent(), MockSTT(), tts, audio_input=AudioInputConfig(language="en"))
+    session._unheard_tail = "train rolled out."
+    await session._begin_user_turn("Yeah.", replace_user_entry=False)
+    assert tts.synthesized_texts == ["train rolled out."]
+    assert [entry.text for entry in session._transcript] == ["train rolled out."]
+    assert session._current_turn_task is None or session._current_turn_task.done()
+
+    tts.synthesized_texts.clear()
+    session._unheard_tail = "SECRET-TAIL"
+    await session._begin_user_turn("What is the weather?", replace_user_entry=False)
+    task = session._current_turn_task
+    assert task is not None
+    await task
+    assert "SECRET-TAIL" not in "".join(tts.synthesized_texts)
+    assert "SECRET-TAIL" in (session._continuation_note or "")
 
 
 async def test_empty_commit_speaks_the_unheard_tail_without_the_model() -> None:

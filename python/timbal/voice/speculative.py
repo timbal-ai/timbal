@@ -179,18 +179,20 @@ class SpeculativeAttempt:
 
 
 def documented_speculative_preset(model: str):
-    """Opt-in preset from measured voice runs. Not applied unless you pass it.
+    """Opt-in preset for one measured model. Not applied unless you pass it.
 
-    ``openai/`` matches the Flux ship block in ``benchmarks/voice/REPORT-242.md``
-    (enabled, preemptive TTS). That table is a small sample, not a percentile
-    tail. ``groq/`` stays off: the same report's ``groq/openai/gpt-oss-20b``
-    silence p90 went from 3603.2 ms to 4935.1 ms at n=3. Anthropic and every
-    other provider have no voice latency row here, so they stay off too.
+    ``openai/gpt-5.4-mini`` is the Flux ship block in
+    ``benchmarks/voice/REPORT-242.md`` (enabled, preemptive TTS). That table is
+    a small sample, not a percentile, and it is not evidence for other OpenAI
+    ids. ``groq/openai/gpt-oss-20b`` in the same report moved silence p90 from
+    3603.2 ms to 4935.1 ms at n=3, which is a reason not to copy the block
+    onto that model, not a ranking of every provider. Every other id,
+    including other OpenAI models, Groq, and Anthropic, stays off.
     ``VoiceConfig`` still defaults to off.
     """
     from .config import SpeculativeGeneration
 
     key = (model or "").strip().lower()
-    if key.startswith("openai/"):
+    if key == "openai/gpt-5.4-mini":
         return SpeculativeGeneration(enabled=True, preemptive_tts=True)
     return SpeculativeGeneration(enabled=False)

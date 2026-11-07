@@ -651,7 +651,7 @@ class VoiceConfig(BaseModel):
             return None
         from .language import parse_reply_language
 
-        return parse_reply_language(value if isinstance(value, str) else str(value))
+        return parse_reply_language(value)
 
     @field_validator("min_delay_secs", "stop_silence_secs", "first_flush_min_words", mode="before")
     @classmethod

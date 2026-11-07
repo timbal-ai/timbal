@@ -102,12 +102,18 @@ This assignment replaces the agent's declared config. Keep any greetings or othe
 
 `voice_config["language"]` is the conversation language, not only a transcription hint.
 
-- **Set** (`"en"`, `"es"`, `"es-ES"`, any BCP-47 tag the provider accepts): the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`.
-- **Unset**: the model follows the language of the user's latest substantive message (a full request, question, or correction). Accent, fillers, names, and a single word from another language do not switch the reply. If the agent's own system prompt already names one reply language, that instruction stands.
-- **`reply_language`**: leave it unset to keep the rule above. `"follow"` makes the reply follow the latest substantive message even when `language` is set as a transcription hint. A BCP-47 tag pins the reply to that tag and does not change the hint sent to speech-to-text. `set_language` still updates the hint and, only when `reply_language` is unset, the reply pin.
-- **Explicit switch**: the pin yields when the user asks to use another language. Saying a sentence in another language is not, by itself, that request. Call `set_language` when the conversation language should actually change, so the next turn's instruction and the transcription hint move together.
+- **Set** (`"en"`, `"es"`, `"es-ES"`, any BCP-47 tag the provider accepts): unless `reply_language` is set, the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`.
+- **Unset**: unless `reply_language` is set, the model follows the language of the user's latest substantive message (a full request, question, or correction). Accent, fillers, names, and a single word from another language do not switch the reply. If the agent's own system prompt already names one reply language, that instruction stands.
+- **`reply_language`**: leave it unset to keep the rules above. `"follow"` makes the reply follow the latest substantive message even when `language` is set as a transcription hint. A well-formed BCP-47 tag pins the reply to that tag and does not change the hint. `set_language` still updates the hint, and it moves the next turn's reply instruction only when `reply_language` is unset.
 
-Deepgram Flux applies the new hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. `flux-general-en` does not accept a language hint. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` still changes the reply instruction immediately and stores the tag for the next connection. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
+```python
+voice_config = {"language": "es", "reply_language": "follow"}
+```
+
+`"follow"` is case-insensitive. A blank string is the same as unset. A malformed tag (`english`, a sentence, `en-`) raises `ValueError` when the config is built. A non-string raises `TypeError`. The call is left unchanged because the config never builds. Accepted tags are two or three letters, an optional four-letter script, and an optional region: `en`, `es-ES`, `zh-Hans`, `es-419`.
+- **Explicit switch**: the pin yields when the user asks to use another language. Saying a sentence in another language is not, by itself, that request. Call `set_language` when the conversation language should actually change. Unless `reply_language` is set, that moves the next turn's reply instruction and the transcription hint together. With `reply_language` set, only the hint moves.
+
+Deepgram Flux applies the new hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. `flux-general-en` does not accept a language hint. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` stores the tag for the next connection and does not retarget the open socket. Unless `reply_language` is set, the reply instruction uses that tag on the next turn. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
 
 From a tool on the call, `current_voice_session()` is the live session. The tool is not registered for you. Add it only on agents that should be able to switch.
 
@@ -137,7 +143,7 @@ agent = Agent(
 )
 ```
 
-`set_language` returns true when the open transcriber accepted the hint. The reply instruction changes on the next turn either way. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
+`set_language` returns true when the open transcriber accepted the hint. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
 
 ## Speculative generation
 
