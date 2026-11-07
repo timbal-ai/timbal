@@ -85,7 +85,32 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (parent_id, approval_id)
         )
     """)
+    # Durable chat sessions (timbal.state.chat_store.SqliteChatSessionStore): one mutable row per session.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            session_id  TEXT    PRIMARY KEY,
+            agent       TEXT    NOT NULL,
+            snapshot    TEXT    NOT NULL,
+            version     INTEGER NOT NULL,
+            lease_owner TEXT,
+            lease_until REAL,
+            updated_at  INTEGER NOT NULL
+        )
+    """)
     conn.commit()
+
+
+def database(path: Path | str, synchronous: str = "NORMAL") -> _Database:
+    """The process's one connection to the SQLite file at ``path`` (created with the schema if absent)."""
+    mode = synchronous.upper()
+    if mode not in ("NORMAL", "FULL"):
+        raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {synchronous!r}")
+    key = (str(Path(path).resolve()), mode)
+    with _DATABASES_LOCK:
+        db = _DATABASES.get(key)
+        if db is None or not db.alive():  # the file was deleted under us: don't write to the old inode
+            db = _DATABASES[key] = _Database(Path(path), mode)
+        return db
 
 
 class SqliteTracingProvider(TracingProvider):
@@ -130,15 +155,7 @@ class SqliteTracingProvider(TracingProvider):
                 "SqliteTracingProvider._path is not set. "
                 "Use SqliteTracingProvider.configured(path=Path(...)) to create a configured provider."
             )
-        mode = cls.synchronous.upper()
-        if mode not in ("NORMAL", "FULL"):
-            raise ValueError(f"synchronous must be 'NORMAL' or 'FULL', got {cls.synchronous!r}")
-        key = (str(Path(cls._path).resolve()), mode)
-        with _DATABASES_LOCK:
-            db = _DATABASES.get(key)
-            if db is None or not db.alive():  # the file was deleted under us: don't write to the old inode
-                db = _DATABASES[key] = _Database(Path(cls._path), mode)
-            return db
+        return database(cls._path, cls.synchronous)
 
     @classmethod
     @override

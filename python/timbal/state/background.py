@@ -755,6 +755,20 @@ class SessionEvent:
             await self._settled.wait()
         return self.state
 
+    def to_dict(self) -> dict[str, Any]:
+        """What restores it (:meth:`BackgroundTaskStore.restore_event`): a durable session's pending events."""
+        return {
+            "id": self.id,
+            "text": self.text,
+            "key": self.key,
+            "source": self.source,
+            "announce": self.announce,
+            "task_id": self.task_id,
+            "lane": self.lane,
+            "mode": self.mode,
+            "posted_at": self.posted_at,
+        }
+
     def receipt(self) -> dict[str, Any]:
         receipt = {"event_id": self.id, "key": self.key, "state": self.state, "run_id": self.run_id}
         if self.mode is not None:
@@ -804,6 +818,14 @@ class BackgroundEventLog:
     def cursor_end(self) -> int:
         """Next logical index to pass as ``after`` (total events appended)."""
         return self.forgotten_through + len(self._events)
+
+    def restart_at(self, cursor: int) -> None:
+        """Continue numbering from ``cursor`` with nothing held (a session restored in a new process): a
+        reader with an older cursor gets a gap, then what this log appends."""
+        self._events.clear()
+        self._sizes.clear()
+        self._nbytes = 0
+        self.forgotten_through = cursor
 
     def put_nowait(self, event: Any) -> None:
         if self._closed:
@@ -1517,6 +1539,23 @@ class BackgroundTaskStore:
     def pending_events(self) -> list[SessionEvent]:
         """Peek the events no turn has taken yet."""
         return list(self._events)
+
+    def restore_event(self, data: dict[str, Any]) -> SessionEvent:
+        """Queue an event saved with :meth:`SessionEvent.to_dict` (a durable session coming back after a
+        restart): same id and posting time, so its receipt and its order among the others hold."""
+        event = SessionEvent(
+            data["text"],
+            key=data.get("key"),
+            source=data.get("source", "app"),
+            announce=data.get("announce"),
+            task_id=data.get("task_id"),
+            lane=data.get("lane", "later"),
+            mode=data.get("mode"),
+        )
+        event.id = data["id"]
+        event.posted_at = data.get("posted_at", event.posted_at)
+        self._queue_event(event)
+        return event
 
     def drain_events(
         self,
