@@ -397,7 +397,7 @@ async def _call_summarizer(model: Any, prompt: str, max_summary_tokens: int) -> 
         messages=[prompt_message],
         system_prompt="You are a conversation summarizer. Produce structured, factual summaries. Never invent facts.",
         max_tokens=max_summary_tokens,
-        temperature=0.0,
+        # No temperature: newer models reject it (Claude Haiku 5.5: "`temperature` is deprecated for this model").
     )
 
     # Get first chunk to determine collector type
