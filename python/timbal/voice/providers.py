@@ -53,6 +53,11 @@ class AudioInputConfig(BaseModel):
 
     model: str | None = None
     language: str | None = None
+    """Single transcription hint. Reply language is not this field."""
+    languages: list[str] = Field(default_factory=list)
+    """Expected languages for this connection. Empty means use ``language``."""
+    keyterms: list[str] = Field(default_factory=list)
+    """Copied per session. Replacing this list must not edit another session."""
     sample_rate: int = 16_000
     encoding: str = "pcm_s16le"
     extra: dict[str, Any] = Field(default_factory=dict)
@@ -117,6 +122,14 @@ class SpeechToText(VoiceUsageEmitter, ABC):
 
     @abstractmethod
     async def close(self) -> None: ...
+
+    async def update_keyterms(self, keyterms: list[str]) -> bool:  # noqa: ARG002
+        """Replace the connection's vocabulary. False when this provider cannot.
+
+        Deepgram Flux replaces the whole list. An empty list clears it.
+        Already committed audio is not retranscribed. The default does nothing.
+        """
+        return False
 
     async def update_language(self, language: str | None) -> bool:  # noqa: ARG002
         """Apply ``language`` on an already-open socket.

@@ -1780,6 +1780,12 @@ class VoiceSession:
         ``reply_language`` is unset, the model is then told to follow the
         user's latest substantive message, unless the agent's own prompt
         already names one reply language.
+
+        On Flux multilingual, a tag outside ``en``, ``es``, ``fr``, ``de``,
+        ``hi``, ``ru``, ``pt``, ``ja``, ``it``, and ``nl`` raises
+        ``ValueError`` before the stored hint or the socket changes.
+        ``reply_language`` is left as it was. A closed Flux socket is checked
+        the same way, so the next connect cannot send the rejected hint.
         """
         raw = None if language is None else str(language)
         if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
@@ -1787,6 +1793,15 @@ class VoiceSession:
         tag = normalize_language_tag(raw)
         if tag == normalize_language_tag(self.audio_input.language):
             return False
+        if self._flux_multi_live() and tag:
+            from .config import FLUX_MULTI_LANGUAGES, language_key
+
+            if language_key(tag) not in FLUX_MULTI_LANGUAGES:
+                raise ValueError(
+                    f"{tag} is not a Deepgram Flux transcription language. "
+                    "flux-general-multi accepts en, es, fr, de, hi, ru, pt, ja, it, and nl. "
+                    "The call is unchanged. Set reply_language if only the reply should change."
+                )
         self.audio_input.language = tag
         update = getattr(self.stt, "update_language", None)
         if update is None:
@@ -1801,8 +1816,51 @@ class VoiceSession:
         except Exception as e:  # noqa: BLE001 — a language change must not drop the call
             logger.warning("voice_stt_language_update_failed", language=tag, error=str(e))
             return False
+        if applied:
+            self.audio_input = self.audio_input.model_copy(update={"language": tag, "languages": [tag] if tag else []})
         logger.info("voice_language_set", language=tag, stt_live=applied, reply_language=self.reply_language)
         return applied
+
+    async def set_keyterms(self, keyterms: list[str]) -> bool:
+        """Replace this call's vocabulary. Does not edit the agent's config.
+
+        Deepgram Flux replaces the whole list on the open socket. An empty
+        list clears it. Already committed transcripts stay as they are.
+        Providers that only accept terms at connect time raise ``ValueError``.
+        There is no voice-agent handoff: the next call builds a new session
+        from that agent's own ``keyterms``.
+        """
+        from .config import validate_keyterms
+
+        terms = validate_keyterms(keyterms)
+        update = getattr(self.stt, "update_keyterms", None)
+        if update is None:
+            raise ValueError("This speech provider cannot replace vocabulary on an open connection.")
+        result = update(terms)
+        if not inspect.isawaitable(result):
+            raise ValueError("This speech provider cannot replace vocabulary on an open connection.")
+        applied = bool(await result)
+        if not applied:
+            raise ValueError(
+                "This speech connection cannot replace vocabulary. "
+                "Deepgram Flux can. Nova and Scribe take keyterms only when the socket connects."
+            )
+        self.audio_input = self.audio_input.model_copy(update={"keyterms": list(terms)})
+        logger.info("voice_keyterms_set", count=len(terms))
+        return True
+
+    def _flux_multi_live(self) -> bool:
+        """True when this session's transcriber is Flux multilingual.
+
+        An unopened socket still counts: the next ``connect`` would send the hint.
+        """
+        from .deepgram import DEFAULT_FLUX_MODEL, DeepgramFluxSTT, is_flux_model
+
+        if not isinstance(self.stt, DeepgramFluxSTT):
+            return False
+        model = self.audio_input.model
+        chosen = model if is_flux_model(model) else DEFAULT_FLUX_MODEL
+        return str(chosen).endswith("-multi")
 
     async def _on_empty_commit(self) -> None:
         """An empty STT commit is not a new request.

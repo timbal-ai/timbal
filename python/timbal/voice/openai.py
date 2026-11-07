@@ -135,6 +135,11 @@ class OpenAIRealtimeSTT(SpeechToText):
         self._pending_usage: set[str] = set()
 
     async def connect(self, config: AudioInputConfig) -> None:
+        if config.keyterms or config.languages:
+            raise ValueError(
+                "OpenAI transcription does not accept keyterms or stt_languages. "
+                "Use Deepgram Flux for vocabulary and language hints."
+            )
         await self.close()
         _validate_pcm(config)
         update = build_transcription_session(config)
