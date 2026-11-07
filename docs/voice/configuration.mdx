@@ -94,7 +94,7 @@ agent = Agent(
 
 ## What a client may override
 
-A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `reply_language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. An invalid `reply_language` (a malformed tag or a non-string) is dropped and the server's value is kept. A blank hello value is dropped the same way. `"follow"` and a well-formed tag replace it. A `language` hello that is blank, not a language tag, or outside Flux multilingual's ten (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`) is dropped and the agent's language stays. The call still starts. A hello that switches the transcriber onto a config that cannot keep the agent's `stt_languages` is dropped the same way. A supported tag such as `fr` replaces `language` and does not replace `stt_languages` or `reply_language`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `reply_language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. An invalid `reply_language` (a malformed tag or a non-string) is dropped and the server's value is kept. A blank hello value is dropped the same way. `"follow"` and a well-formed tag replace it. A blank, non-string, or non-tag `language` is dropped for every provider, and the agent's language stays. The call still starts. The ten-language check (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`) applies only when the hello resolves to Flux multilingual: `stt_provider` is `deepgram` or `deepgram-flux`, and the model is not `flux-general-en`, Nova, Scribe, or an OpenAI transcription model. Nova, Scribe, and OpenAI keep a well-formed tag such as `ca`. On Flux multilingual, an unsupported hello `language` is dropped first. If that still cannot keep the agent's own `language` or its `stt_languages`, the hello's `stt_provider` and `stt_model` are both dropped. A Nova agent with `language: "ca"` whose hello selects Flux multilingual stays on Nova with `ca`. A Flux agent with `stt_languages` whose hello selects Nova stays on Flux with that list. A supported tag such as `fr` replaces `language` and does not replace `stt_languages` or `reply_language`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
 Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, `first_flush_min_words`, `keyterms`, and `stt_languages` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
 
@@ -155,7 +155,10 @@ async def set_conversation_language(language: str) -> str:
     session = current_voice_session()
     if session is None:
         return "No active call."
-    await session.set_language(language)
+    try:
+        await session.set_language(language)
+    except ValueError as exc:
+        return str(exc)
     return f"Conversation language is now {language}."
 
 
@@ -170,8 +173,8 @@ async def set_transcription_terms(terms: list[str]) -> str:
         return "No active call."
     try:
         await session.set_keyterms(terms)
-    except ValueError:
-        return "Vocabulary can be replaced only on an open Deepgram Flux connection."
+    except ValueError as exc:
+        return str(exc)
     return "Transcription terms updated."
 
 
@@ -184,7 +187,7 @@ agent = Agent(
 )
 ```
 
-`set_language` returns true when the open transcriber accepted the hint. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. On Flux multilingual, a tag outside `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl` raises `ValueError` the same way, before a `Configure` message is sent. `set_keyterms` replaces the whole list. It raises `ValueError` when the provider cannot replace terms on the open socket (Nova, Scribe, OpenAI, Munsit, or Flux with no connection). The call's previous terms stay. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
+`set_language` returns true when the open transcriber accepted the hint. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. On Flux multilingual, a tag outside `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl` raises `ValueError` the same way, before a `Configure` message is sent. `set_keyterms` replaces the whole list. It raises `ValueError` for a weighted phrase such as `term:0.15`, a blank phrase, more than 100 phrases, or a connection that cannot replace terms (Nova, Scribe, OpenAI, Munsit, or Flux with no open socket). The call's previous terms stay. The tools above return that error text instead of failing the turn. The reply line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
 
 ## Speculative generation
 
