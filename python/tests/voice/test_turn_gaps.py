@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 
 import pytest
 from timbal.core.test_model import TestModel
-from timbal.voice import AudioInputConfig, VoiceConfig, VoiceSession
+from timbal.voice import AudioInputConfig, SessionStarted, TranscriptEvent, VoiceConfig, VoiceSession
 from timbal.voice.deepgram import DeepgramFluxSTT
 from timbal.voice.language import parse_reply_language, resolve_reply_language
 from timbal.voice.session import _hangup_utterance_kind, _unheard_suffix, false_interrupt_followup
 from timbal.voice.speculative import documented_speculative_preset
 
-from .test_session import MockSTT, MockTTS
+from .test_session import DelayedMockSTT, MockSTT, MockTTS
 
 
 def test_reply_language_unset_still_follows_the_stt_hint() -> None:
@@ -272,6 +275,103 @@ async def test_a_second_interruption_still_does_not_script_the_tail() -> None:
     prompt = session.prompt_for_turn("You are a phone agent.").dynamic
     assert "specific event or maybe a mix" not in prompt
     assert "really shapes" not in prompt
+
+
+class _EmptyCommitSTT(DelayedMockSTT):
+    """Yield an empty ``committed`` event. The stock test STT drops blank text."""
+
+    async def events(self) -> AsyncIterator[TranscriptEvent]:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                break
+            yield item
+
+
+async def _until(predicate, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not met")
+        await asyncio.sleep(0.01)
+
+
+async def test_empty_stt_commit_skips_a_cancelled_fragment_and_clears_it() -> None:
+    fragment = "specific event or maybe a mix"
+    stt = _EmptyCommitSTT()
+    tts = MockTTS()
+    session = VoiceSession(_agent(), stt, tts, audio_input=AudioInputConfig(language="en"))
+    seen: list[object] = []
+
+    async def _no_audio() -> AsyncIterator[bytes]:
+        return
+        yield  # noqa: RET504
+
+    async def _drive() -> None:
+        await _until(lambda: any(isinstance(event, SessionStarted) for event in seen))
+        session._unheard_tail = fragment
+        session._unheard_tail_resumable = False
+        await stt.inject(TranscriptEvent(type="committed", text=""))
+        await _until(lambda: session._unheard_tail == "")
+        assert fragment not in tts.synthesized_texts
+        assert session._unheard_tail_resumable is False
+        assert session._continuation_note == ""
+        await stt.inject(TranscriptEvent(type="committed", text="What is the weather?"))
+        await _until(
+            lambda: any(entry.role == "user" and entry.text == "What is the weather?" for entry in session._transcript)
+        )
+        assert fragment not in session.prompt_for_turn("You are a phone agent.").dynamic
+        assert fragment not in "".join(tts.synthesized_texts)
+        await stt.finish()
+
+    async def _go() -> None:
+        driver = asyncio.create_task(_drive())
+        async with aclosing(session.run(_no_audio())) as stream:
+            async for event in stream:
+                seen.append(event)
+        await driver
+
+    await asyncio.wait_for(_go(), timeout=8)
+
+
+async def test_empty_stt_commit_speaks_a_finished_tail_once() -> None:
+    tail = "train rolled out."
+    stt = _EmptyCommitSTT()
+    tts = MockTTS()
+    session = VoiceSession(_agent(), stt, tts, audio_input=AudioInputConfig(language="en"))
+
+    async def _no_audio() -> AsyncIterator[bytes]:
+        return
+        yield  # noqa: RET504
+
+    seen: list[object] = []
+
+    async def _drive() -> None:
+        await _until(lambda: any(isinstance(event, SessionStarted) for event in seen))
+        session._unheard_tail = tail
+        session._unheard_tail_resumable = True
+        await stt.inject(TranscriptEvent(type="committed", text=""))
+        await _until(lambda: tts.synthesized_texts == [tail] and session._unheard_tail == "")
+        await stt.inject(TranscriptEvent(type="committed", text=""))
+        await asyncio.sleep(0.05)
+        assert tts.synthesized_texts == [tail]
+        await stt.inject(TranscriptEvent(type="committed", text="Okay. Let's go. Let's go."))
+        await _until(
+            lambda: any(
+                entry.role == "user" and entry.text == "Okay. Let's go. Let's go." for entry in session._transcript
+            )
+        )
+        assert tail not in session.prompt_for_turn("You are a phone agent.").dynamic
+        await stt.finish()
+
+    async def _go() -> None:
+        driver = asyncio.create_task(_drive())
+        async with aclosing(session.run(_no_audio())) as stream:
+            async for event in stream:
+                seen.append(event)
+        await driver
+
+    await asyncio.wait_for(_go(), timeout=5)
 
 
 def _agent():

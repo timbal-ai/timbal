@@ -1804,6 +1804,21 @@ class VoiceSession:
         logger.info("voice_language_set", language=tag, stt_live=applied, reply_language=self.reply_language)
         return applied
 
+    async def _on_empty_commit(self) -> None:
+        """An empty STT commit is not a new request.
+
+        Speak the unplayed end only when the model had finished that reply.
+        A fragment from a cancelled generation is dropped, so the next real
+        turn cannot recite it.
+        """
+        tail = (self._unheard_tail or "").strip()
+        resumable = bool(tail) and self._unheard_tail_resumable
+        self._unheard_tail = ""
+        self._unheard_tail_resumable = False
+        self._continuation_note = ""
+        if resumable:
+            await self._resume_unheard_tail(tail)
+
     async def _resume_unheard_tail(self, tail: str) -> None:
         """Speak the cut-off remainder. Does not call the model and does not repeat the heard start."""
         text = (tail or "").strip()
@@ -2853,7 +2868,7 @@ class VoiceSession:
                 elif event.type == "committed" and event.text.strip():
                     await self._handle_provider_commit(event.text.strip())
                 elif event.type == "committed":
-                    await self._resume_unheard_tail(self._unheard_tail)
+                    await self._on_empty_commit()
         except asyncio.CancelledError:
             return
         except Exception as e:
