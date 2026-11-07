@@ -24,6 +24,7 @@ try:
 except ImportError:
     from typing_extensions import override
 
+from .. import uploads
 from ..trace import Trace
 from .base import TracingProvider
 
@@ -78,10 +79,24 @@ class _Flight:
     """One run's saves, single-flight: the round to send next, the PATCHes on the wire, the task sending them,
     and how many saves were asked for against how many a successful PATCH carried."""
 
-    __slots__ = ("arrival", "context", "driver", "joins", "key", "landed", "loop", "next", "on_wire", "sent")
+    __slots__ = (
+        "arrival",
+        "context",
+        "driver",
+        "joins",
+        "key",
+        "landed",
+        "loop",
+        "next",
+        "on_wire",
+        "provider",
+        "sent",
+    )
 
     def __init__(self, key: str, loop: asyncio.AbstractEventLoop) -> None:
         self.key = key
+        # The provider class that saved last: a resend must keep its configuration (compress=, deltas=, ...).
+        self.provider: type[PlatformTracingProvider] | None = None
         self.loop = loop
         self.context: RunContext | None = None
         self.next: asyncio.Future[None] | None = None
@@ -115,6 +130,14 @@ def _retrieve(future: asyncio.Future) -> None:
         future.exception()
 
 
+def _owner(run_context: RunContext, default: type[PlatformTracingProvider]) -> type[PlatformTracingProvider]:
+    """The provider class a run saves with (a configured subclass), for resending it from its context alone."""
+    provider = getattr(run_context, "_tracing_provider", None)
+    if isinstance(provider, type) and issubclass(provider, PlatformTracingProvider):
+        return provider
+    return default
+
+
 def _transient(exc: BaseException) -> bool:
     """A failure worth sending the same save again for: 429, 5xx, a timeout or a dropped connection
     (what ``_request`` already retried a few times), not a request the platform turned down."""
@@ -141,7 +164,7 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
                 joined.set_exception(save.exception())
         if not save.cancelled() and _transient(save.exception()) and flight.terminal():
             # No later save of an ended run is coming to carry this one.
-            PlatformTracingProvider._schedule_retry(flight)
+            (flight.provider or PlatformTracingProvider)._schedule_retry(flight)
         return
     flight.landed = max(flight.landed, covers)
     if flight.landed >= flight.joins:
@@ -541,6 +564,7 @@ class PlatformTracingProvider(TracingProvider):
         if flight is None or flight.loop is not loop:
             flight = flights[key] = _Flight(key, loop)
         flight.context = run_context
+        flight.provider = cls
         flight.joins += 1
         unsaved = PlatformTracingProvider._unsaved
         unsaved[key] = run_context
@@ -630,6 +654,8 @@ class PlatformTracingProvider(TracingProvider):
                 context = PlatformTracingProvider._unsaved.get(key)
                 if context is None or PlatformTracingProvider._closing:
                     return  # landed with another save, or a shutdown flush is sending it
+                if uploads.tracked(context):
+                    continue  # buffered uploads hold the run and retry it themselves; check again later
                 try:
                     await cls._store(context)
                     logger.info("platform_trace_retry_landed", run_id=context.id, attempts=attempt + 1)
@@ -673,7 +699,7 @@ class PlatformTracingProvider(TracingProvider):
                 if (flight := flights.get(key)) is None or flight.loop is not loop or flight.driver is None
             ]
             orphans.sort(key=lambda context: not _ended(context))
-            resends = [loop.create_task(cls._store(context)) for context in orphans]
+            resends = [loop.create_task(_owner(context, cls)._store(context)) for context in orphans]
             for task in resends:
                 task.add_done_callback(_retrieve)
             waits = [*resends, *(r for f in flights.values() if f.loop is loop for r in f.waits())]

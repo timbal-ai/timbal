@@ -752,6 +752,49 @@ class TestTransientFailures:
         assert server.runs[ctx.id]["trace"][0]["t1"] == 1
         assert not PlatformTracingProvider._unsaved
 
+    @pytest.mark.parametrize("by", ["background_resend", "shutdown_flush"])
+    async def test_resends_keep_the_configured_provider(self, monkeypatch, by):
+        """``deltas=False`` on a host that advertises deltas: a resend from a run's context must not fall back
+        to the base class's negotiation."""
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01 if by == "background_resend" else 60.0,))
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        kinds = []
+
+        async def request(*_args, headers=None, **_kwargs):
+            kinds.append(headers["Content-Type"])
+            if len(kinds) == 1:
+                raise PlatformError("down", status_code=503)
+            echo = {"X-Timbal-Snapshot": headers["X-Timbal-Snapshot"]}
+            return SimpleNamespace(raise_for_status=lambda: None, headers=echo, json=lambda: {})
+
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, deltas=False)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", request):
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            if by == "shutdown_flush":
+                assert await PlatformTracingProvider.flush(timeout=1) == []
+            await self.until(lambda: not PlatformTracingProvider._retries and len(kinds) > 1)
+        assert kinds == ["application/json", "application/json"]
+
+    async def test_a_buffered_run_whose_end_failed_is_resent_in_the_background(self, monkeypatch):
+        """The end barrier holds the run in buffered uploads while it fails, then lets it go: the background
+        resend must not take "uploads hold it" at that moment as "uploads will retry it"."""
+        from timbal.state.tracing import uploads
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        server = FakePlatform(advertise=False)
+        server.fail_next = 1
+        provider = PlatformTracingProvider.configured(
+            platform_config=CONFIG, durability="buffered", flush_interval_s=0.05
+        )
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request):
+            with pytest.raises(PlatformError):
+                await uploads.write_through(ctx, provider.put)
+            await self.until(lambda: ctx.id in server.runs)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+
     async def test_the_background_resends_give_up_after_the_window(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
         monkeypatch.setattr(PlatformTracingProvider, "_retry_window_s", 0.05)

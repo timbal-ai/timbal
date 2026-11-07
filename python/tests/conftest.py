@@ -94,6 +94,9 @@ def clear_in_memory_tracing_storage():
         PlatformTracingProvider._flights.clear()
         PlatformTracingProvider._unsaved.clear()
         PlatformTracingProvider._own_snapshots.clear()
+        for task in PlatformTracingProvider._retries.values():
+            task.cancel()
+        PlatformTracingProvider._retries.clear()
         PlatformTracingProvider._closing = False
 
     clear()
