@@ -960,6 +960,17 @@ class Runnable(ABC, BaseModel):
 
         return _cancel(task_id)
 
+    def message_background_task(self, task_id: str, message: str) -> dict[str, Any]:
+        """Send a running background agent a message it reads after its current step."""
+        from ..state.background import message_background_task as _message
+
+        return _message(task_id, message, source="parent")
+
+    @property
+    def _takes_task_messages(self) -> bool:
+        """Whether this runnable, detached as a background task, reads messages sent to it (agents do)."""
+        return False
+
     def read_background_transcript(self, task_id: str, after: int = 0) -> dict[str, Any]:
         """Raw events for a background task from cursor ``after``."""
         from ..state.background import read_background_transcript as _read
@@ -1899,6 +1910,7 @@ class Runnable(ABC, BaseModel):
                 if task is not None:
                     task.cancel()
             raise
+        record.steerable, record.call_id = self._takes_task_messages, span.call_id
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}
 
@@ -2022,6 +2034,7 @@ class Runnable(ABC, BaseModel):
                 if task is not None:
                     task.cancel()
             raise
+        record.steerable, record.call_id = self._takes_task_messages, span.call_id
         record_box.append(record)
         return {"task_id": record.task_id, "status": "running"}, start, record
 
