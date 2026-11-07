@@ -35,8 +35,8 @@ production live in that gap.
 
 `accept_duplex.py` is a release gate, not a benchmark row. It paces cached caller
 PCM into a live `VoiceSession` (Deepgram Flux, `openai/gpt-5.4-mini`, ElevenLabs)
-and checks the agent PCM and events. `harness.py` still uses `TestModel`. No
-microphone. PCM energy is measured; the script does not listen.
+and checks the agent events. `harness.py` still uses `TestModel`. No
+microphone. PCM energy is recorded and is not a transcript. The script does not listen.
 
 Off unless `TIMBAL_VOICE_ACCEPTANCE=1`. A set flag with a missing
 `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, or `ELEVENLABS_API_KEY` fails and names

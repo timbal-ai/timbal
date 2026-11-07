@@ -88,7 +88,30 @@ def test_alright_checker_rejects_a_cancelled_hangup_and_a_second_goodbye() -> No
     doubled["audio"] = {"regions": [{"dur_secs": 0.8}, {"dur_secs": 0.7}]}
     problems = accept._check_alright(doubled)
     assert any("farewell count" in item for item in problems)
-    assert any("audible span" in item for item in problems)
+    assert not any("audible span" in item or "energy" in item for item in problems)
+
+
+def test_pcm_energy_does_not_decide_what_was_said() -> None:
+    """Two loud spans are not two goodbyes. The text events are."""
+    report = {
+        "providers": {"stt": "DeepgramFluxSTT", "tts": "ElevenLabsStreamTTS", "llm": accept.LLM_MODEL},
+        "execution": "live_network",
+        "timeouts": [],
+        "errors": [],
+        "ended": True,
+        "ended_t": 6.0,
+        "last_audio_t": 4.0,
+        "playhead_shortfall_secs": 0.0,
+        "schedule_lag_secs": 0.0,
+        "fillers": [],
+        "partials": [],
+        "assistant_spoken": "Goodbye.",
+        "audio": {"regions": [{"dur_secs": 0.4}, {"dur_secs": 0.5}]},
+        "tool_log": [{"tool": "end_call", "phase": "exit", "ok": True, "t": 5.5}],
+        "marks": {},
+    }
+    assert accept._check_alright(report) == []
+    assert report["outcomes"]["energy_regions_are_not_words"] is True
 
 
 def test_hangup_checker_rejects_filler_and_early_disconnect() -> None:
