@@ -44,9 +44,7 @@ def _b64url_decode(part: str) -> bytes:
 
 def _verify(token: str, secret: str) -> tuple[dict, dict]:
     header_b64, payload_b64, sig_b64 = token.split(".")
-    expected = hmac.new(
-        secret.encode(), f"{header_b64}.{payload_b64}".encode(), hashlib.sha256
-    ).digest()
+    expected = hmac.new(secret.encode(), f"{header_b64}.{payload_b64}".encode(), hashlib.sha256).digest()
     assert _b64url_decode(sig_b64) == expected
     header = json.loads(_b64url_decode(header_b64))
     payload = json.loads(_b64url_decode(payload_b64))
@@ -79,9 +77,7 @@ class TestMintLivekitJwt:
 class TestLivekitCreds:
     def test_dotenv_then_env_override(self, tmp_path, monkeypatch) -> None:
         (tmp_path / ".env").write_text(
-            'LIVEKIT_URL="wss://file.example"\n'
-            "LIVEKIT_API_KEY=filekey\n"
-            "LIVEKIT_API_SECRET=filesecret\n",
+            'LIVEKIT_URL="wss://file.example"\nLIVEKIT_API_KEY=filekey\nLIVEKIT_API_SECRET=filesecret\n',
             encoding="utf-8",
         )
         monkeypatch.delenv("TIMBAL_LIVEKIT_URL", raising=False)
@@ -111,9 +107,7 @@ class TestLivekitCreds:
         ):
             monkeypatch.delenv(n, raising=False)
         (tmp_path / ".env").write_text(
-            "TIMBAL_LIVEKIT_URL=wss://from-file\n"
-            "TIMBAL_LIVEKIT_API_KEY=k\n"
-            "TIMBAL_LIVEKIT_API_SECRET=s\n",
+            "TIMBAL_LIVEKIT_URL=wss://from-file\nTIMBAL_LIVEKIT_API_KEY=k\nTIMBAL_LIVEKIT_API_SECRET=s\n",
             encoding="utf-8",
         )
         assert livekit_creds(tmp_path, launch_dir=tmp_path) == ("wss://from-file", "k", "s")
@@ -234,3 +228,13 @@ class TestSpawnLoadsLaunchDotenv:
         assert captured["env"]["TIMBAL_LIVEKIT_URL"] == "wss://lk.timbal.ai"
         assert captured["env"]["TIMBAL_LIVEKIT_TOKEN"]
         assert captured["env"]["TIMBAL_VOICE_TRANSPORT"] == "livekit"
+        cmd = captured["cmd"]
+        assert "--frozen" in cmd
+        assert cmd[cmd.index("--extra") :][:6] == [
+            "--extra",
+            "server",
+            "--extra",
+            "voice",
+            "--extra",
+            "voice-livekit",
+        ]

@@ -1,5 +1,8 @@
 """Local Norte Market support demo. See ``examples/voice_support_demo.md``.
 
+Launch with ``examples/voice_support_demo_livekit.py``. That starts the
+playground, which is the process that mints the LiveKit dial.
+
 The microphone, Flux, ``openai/gpt-5.4-mini``, and ElevenLabs are the live
 providers. The shop is not. Orders, customers, tracking, delivery notes, and
 tickets live in this process, copied per voice session. Nothing is emailed,

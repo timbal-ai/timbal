@@ -1,127 +1,140 @@
 # Norte Market voice demo
 
-A local customer-support call. The microphone, Deepgram Flux, `openai/gpt-5.4-mini`, and ElevenLabs are live. The shop is not. Orders, names, tracking, notes, and tickets are synthetic data in this process. The tools do not send messages, take payment, refund, or call a carrier.
+A local customer-support call on the same LiveKit path the playground uses in production.
 
-Leave the playground on **Server default**. The agent already sets the config.
+The microphone, Deepgram Flux, `openai/gpt-5.4-mini`, and ElevenLabs are live. The room and the audio are a real LiveKit SFU. The shop is not. Orders, names, tracking, notes, and tickets are synthetic data in the agent process. The tools do not send messages, take payment, refund, or call a carrier. This is not a phone call: nothing here dials SIP or the public telephone network.
 
-```python
-voice_config = {
-    "language": "es",              # speech-to-text hint
-    "reply_language": "follow",    # a full English or Catalan request is answered in that language
-    "ignore_backchannels": True,
-    "speculative_generation": {"enabled": True, "preemptive_tts": True},  # only for openai/gpt-5.4-mini
-    "max_tts_pause_secs": 0.2,
-    "filler": {"enabled": True, "soft_timeout_secs": 0.8, "message": "Un momento."},
-    "hangup_grace_secs": 1.2,
-    "entity_patience": True,
-}
+Two processes, both started for you:
+
+1. `python -m timbal.server.playground` mints a room and the caller token.
+2. On Start it spawns `timbal.server`, and that process joins the room with `livekit.rtc`. That spawned server is the worker. There is no separate LiveKit Agents process.
+
+Leave every pipeline control on **Server default**. The agent already sets Spanish transcription, follow-the-caller replies, filler, entity patience, speculation for `openai/gpt-5.4-mini`, and hangup.
+
+Headphones. Allow the microphone. Speaker audio can be heard by the microphone.
+
+## Update an existing checkout
+
+From the demo clone, with only `uv.lock` dirty. Do not stash, reset, or `checkout --force`.
+
+```bash
+cd /Users/dberges/Desktop/timbal-ai/timbal-voice-demo
+git status --short
+git fetch origin cursor/voice-turn-language-143e
+git merge --ff-only origin/cursor/voice-turn-language-143e
+git rev-parse HEAD
 ```
 
-`ignore_backchannels` and `speculative_generation` are server-only. A browser hello cannot turn them off. Another `TIMBAL_VOICE_DEMO_MODEL` turns speculation off. The filler line stays Spanish because it follows the `es` hint, not the language of the latest reply.
+`git status --short` before the merge should show `uv.lock` and nothing else. `--ff-only` refuses the update if it is not a straight fast-forward. Stop if it refuses. The merge does not edit `uv.lock` when the incoming commit does not touch that file, so a dirty lock stays as it is.
 
-Headphones. The page is a browser microphone, not a phone call.
-
-## Clone
-
-Use a new folder. Do not run this inside a checkout you are already using.
+A new clone, in a new folder:
 
 ```bash
 git clone --branch cursor/voice-turn-language-143e --single-branch https://github.com/timbal-ai/timbal.git timbal-voice-demo
 cd timbal-voice-demo
-git rev-parse HEAD
 ```
 
-The commit this file belongs to is the one `git rev-parse HEAD` prints after that clone. Run every later command from `timbal-voice-demo`, the repository root. `uv sync` from `python/` will not see this `pyproject.toml`.
+Every later command is from this directory, the repository root. `uv` from `python/` does not see this `pyproject.toml`. You need `git` and `uv` already on `PATH`.
 
-You need `git` and `uv` already on your `PATH`. This does not install them.
+## Install
+
+`livekit` is the `voice-livekit` extra (`livekit==1.1.14` in `uv.lock`, including the macOS arm64 wheel). It is not installed by a default sync. `--frozen` installs from the lock and does not rewrite it.
 
 ```bash
-uv sync --extra server --extra voice
+uv sync --frozen --extra server --extra voice --extra voice-livekit
 ```
+
+If that command fails, stop. Do not remove `--frozen` and do not run `uv lock`.
+
+Do not set `PYTHONPATH`. Do not pass `--no-sync` on this install command. A later `uv run` without the extras can start a process that cannot import `livekit.rtc`; the launcher below pins `--frozen` and `--no-sync` only after this install.
 
 ## Keys
 
-The server calls `load_dotenv()` in the working directory. By default that does not replace variables already exported in the shell.
+Put the keys in the root `.env` only. The launcher lets a nonempty root `.env` value replace the same name in the shell, so a stale exported `OPENAI_API_KEY` does not win. It does not print values.
 
-Print only missing names. This does not print values.
+Names the LiveKit path reads:
 
-```bash
-python -c 'import os; need=("OPENAI_API_KEY","DEEPGRAM_API_KEY","ELEVENLABS_API_KEY"); missing=[n for n in need if not os.environ.get(n)]; print("\n".join(missing) if missing else "none missing")'
-```
+- `OPENAI_API_KEY`
+- `DEEPGRAM_API_KEY`
+- `ELEVENLABS_API_KEY`
+- `LIVEKIT_API_KEY`
+- `LIVEKIT_API_SECRET`
+- `TIMBAL_LIVEKIT_URL`
 
-If a name is printed, set that one in the shell. The value is not part of the command:
+`LIVEKIT_URL` is an alias and is optional when `TIMBAL_LIVEKIT_URL` is set. `LIVEKIT_INFERENCE_API_KEY` and `LIVEKIT_INFERENCE_API_SECRET` are not read. Leave `ELEVENLABS_VOICE_ID` and `TIMBAL_VOICE_ID` unset unless ElevenLabs reports the library default voice missing; the example does not set a voice id.
+
+The browser needs a `wss://` URL. A `ws://` URL is accepted only for localhost. Port 7880 is not a browser address.
+
+Do not paste a placeholder over a line that already has a value. To add one missing name:
 
 ```bash
 read -r OPENAI_API_KEY
-export OPENAI_API_KEY
+printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY" >> .env
 ```
 
-Repeat for each missing name. Do not write `KEY=...` into a file that already has a real value. If the name is already exported, leave it.
-
-Voice id is optional. If `ELEVENLABS_VOICE_ID` or `TIMBAL_VOICE_ID` is already set, the server uses it. If neither is set, the server uses the library default voice. The example does not set a voice id. Set one of those variables only when ElevenLabs reports that the voice is missing from the account, using the same `read` / `export` pattern.
+Use the missing name. `>>` appends. It does not replace an existing line. If the name is already in `.env`, do nothing.
 
 ## Run
 
-One server, from the clone root:
+Stop the old direct server first if it is still the process on port 4444. That page cannot mint a LiveKit dial. Ctrl-C in the terminal that started it. Do not open `http://127.0.0.1:4444/voice`.
 
 ```bash
-uv run python -m timbal.server --import_spec examples/voice_support_demo.py::agent --port 4444
+uv run --frozen python examples/voice_support_demo_livekit.py
 ```
 
-To keep a local log as well:
+Check without opening the playground:
 
 ```bash
-uv run python -m timbal.server --import_spec examples/voice_support_demo.py::agent --port 4444 2>&1 | tee voice-demo.log
+uv run --frozen python examples/voice_support_demo_livekit.py --check
 ```
 
-`voice-demo.log` will contain transcripts. It matches `*.log*` in `.gitignore`. Do not commit it or paste it into a ticket.
+A ready check prints `ready` and lines such as `livekit_package=ok`, `openai=ok`, `deepgram=ok`, `elevenlabs=ok`, `list_rooms=ok`, and `worker_join=voice_livekit_joined`. It does not print a token or the SFU URL. `list_rooms` is a read. The join creates one empty room named `pg-…`, connects the agent, then deletes that room. It does not publish a microphone, so Flux and ElevenLabs are not opened by the check, and it does not change any other room, dispatch rule, or SIP trunk.
 
-Open http://127.0.0.1:4444/voice and allow the microphone. Connect once. If 4444 is taken, pass another `--port` and use that port in the URL.
+Then the same command without `--check` serves the playground at `http://127.0.0.1:7777/`.
 
-Print the config without a call:
+On that page:
+
+- **Run against:** Local server
+- **Agent:** `examples/voice_support_demo.py::agent` (already filled)
+- **Port:** empty
+- **Transport:** LiveKit (SFU)
+- Pipeline controls, including the voice id: **Server default**
+- Press **Start**
+
+Start mints a new room and returns the dial to the page. The launcher state line should show the spawned server running. In the terminal, `voice_livekit_joined` means the worker is in the room. `voice_livekit_session_ready` means the caller microphone was subscribed and the voice session was built. The joined line contains the SFU URL; do not paste that line.
+
+`voice_livekit_missing_extra` means the sync command above was not the interpreter this process is using.
+
+To keep a local log:
 
 ```bash
-uv run python examples/voice_support_demo.py
+uv run --frozen python examples/voice_support_demo_livekit.py 2>&1 | tee voice-demo.log
 ```
 
-Check the example without providers:
+`voice-demo.log` matches `*.log*` in `.gitignore`. It can contain the transcript and the SFU URL. Do not commit it or paste it.
 
-```bash
-uv run pytest python/tests/voice/test_voice_support_demo.py -q --no-cov -p no:cacheprovider
-```
+## Cases
 
-## What the shop remembers
+| Id | You say | Expect |
+| --- | --- | --- |
+| es-order | Quiero el estado del pedido 1001. | Ana Ruiz, Barcelona, packed. |
+| en-follow | And the shipment for 1003? | English. Marta Soler, delivered. |
+| ca-follow | I el 1002? | Catalan. Jordi Puig, processing. |
+| unknown | Pedido 9999. | Unknown. No write. |
+| slow-filler | Estado del 1002. | "Un momento." during about four seconds, then processing. |
+| retry | Cliente del pedido 4040. | One failure, then Pol Serra. |
+| both | Cliente y envío del 1001. | Both tools, one answer. |
+| stage-yes | Cambia el 1001 a Calle Mallorca 10, Barcelona. Sí. | Saved only after the spoken yes. |
+| stage-no | Cambia el 1001 a Calle Provença 5. No. | Unchanged. |
 
-Each browser connection gets its own copy of the seed orders. A note or ticket saved on this call is not visible on the next connection. Restarting the server drops all of them. There is no file and no external shop.
+One regression call: a phone number with pauses; "Ana Ruiz" spelled with pauses; the slow order and its filler; Stop; "Okay" while the agent is speaking; Spanish then English; "Cuelga. Alright."; then "Espera." followed by "Adiós.", with one audible farewell.
 
-`stage_delivery_change` and `stage_support_ticket` only preview. `apply_pending` writes the preview into that call's copy, and only after it was staged. `cancel_pending` drops a preview. Nothing is saved if you never hear `apply_pending` say it was saved.
+A delivery or ticket change is staged first. It is stored only after a spoken yes. "No" drops it. There is no refund tool.
 
-| Id | Record |
-|---|---|
-| 1001 | Ana Ruiz, Barcelona, packed, tracking NM1001. Fast lookup. |
-| 1002 | Jordi Puig, Girona, processing. Lookup sleeps 4 seconds. |
-| 1003 | Marta Soler, Valencia, delivered. |
-| 4040 | Pol Serra. First lookup in the call fails. The retry returns the order. |
-| 9999 | Unknown. |
+A new browser Start is a new room and a new copy of the shop. Restarting the playground clears every copy. Two calls do not share a bag. Nothing is written to disk or to a CRM.
 
-## Tour
+The filler stays "Un momento." because its language follows the Spanish transcription hint.
 
-Say these. Expected results are what the tools return, not a timing guarantee.
+## What this machine proved
 
-1. **es-order.** "¿Qué sabes del pedido diez cero cero uno?" Status packed, Ana Ruiz, no invented delivery window.
-2. **en-follow.** "What is the status of order one zero zero three?" The reply is English. Marta Soler, delivered.
-3. **ca-follow.** "On és la comanda deu zero zero u?" The reply is Catalan and uses the simulated tracking for 1001.
-4. **unknown.** "Pedido nueve nueve nueve nueve." It says there is no such order.
-5. **slow-filler.** "Mira el pedido diez cero cero dos." After a short wait you hear "Un momento." Then Jordi Puig, processing.
-6. **retry.** "Pedido cuatro cero cuatro cero." The first lookup fails. "Inténtalo otra vez." The second returns Pol Serra.
-7. **both.** "Estado y seguimiento del diez cero cero uno." It calls lookup and tracking. Ana Ruiz and NM1001.
-8. **number.** "Mi número es seis cinco cinco, cero uno dos, tres cuatro." It waits through the pauses and reads the whole number once.
-9. **name.** "El nombre es J, O, N, E, S." It reads every letter.
-10. **stage-yes.** "Cambia la nota del diez cero cero uno a llamar al llegar." It reads the preview and does not say it is saved. "Sí." Then it says it was saved in this call.
-11. **stage-no.** Stage another note. "No." Nothing is saved.
-12. **stop.** Ask for a long explanation, then "Stop" while it speaks. Playback cuts.
-13. **okay.** While it speaks, "Okay" or "Vale". Playback continues.
-14. **alright.** "Cuelga." You hear one goodbye, not "Un momento." During the quiet second, "Alright" or "Vale". The call still ends.
-15. **wait.** "Cuelga." During the goodbye, "Espera, una cosa más." The call stays up. Say goodbye again and stay quiet. One goodbye, then the call ends.
-
-A new connection starts from the seed again, so the note from step 10 is gone.
+The unit tests cover the redacted report, file-over-shell keys, the room-list grant, and a playground spawn whose JSON contains a URL and a token. They do not contact a LiveKit project. A cloud `--check` without `TIMBAL_LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` printed `openai=ok model=listed`, `deepgram=ok`, `elevenlabs=ok`, `livekit_package=ok`, then `blocked=config_package_or_provider`. It did not join a room. Your `--check` is the run that talks to your project.

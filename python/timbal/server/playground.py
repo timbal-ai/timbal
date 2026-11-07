@@ -52,6 +52,7 @@ _HTML_PATH = Path(__file__).parent / "voice.html"
 _LOG_LINES = 400
 _STOP_GRACE_SECS = 5.0
 
+
 def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
         return value[1:-1]
@@ -88,9 +89,25 @@ def mint_livekit_jwt(
     room: str,
     ttl_secs: int = 3600,
     name: str | None = None,
+    video: dict | None = None,
 ) -> str:
-    """HS256 LiveKit access token. Grant keys are camelCase, matching livekit-server."""
+    """HS256 LiveKit access token. Grant keys are camelCase, matching livekit-server.
+
+    ``video`` replaces the room-join grant. A room-list check passes
+    ``{"roomList": True}``. The default grant joins ``room``.
+    """
     now = int(time.time())
+    grant = (
+        video
+        if video is not None
+        else {
+            "roomJoin": True,
+            "room": room,
+            "canPublish": True,
+            "canSubscribe": True,
+            "canPublishData": True,
+        }
+    )
     header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     payload = _b64url(
         json.dumps(
@@ -102,13 +119,7 @@ def mint_livekit_jwt(
                 "iat": now,
                 "exp": now + ttl_secs,
                 "jti": uuid.uuid4().hex,
-                "video": {
-                    "roomJoin": True,
-                    "room": room,
-                    "canPublish": True,
-                    "canSubscribe": True,
-                    "canPublishData": True,
-                },
+                "video": grant,
             },
             separators=(",", ":"),
         ).encode()
@@ -224,19 +235,35 @@ class ChildServer:
         with self._lock:
             self._stop_locked()
             child_port = port or _free_port()
+            # ``--frozen`` keeps a dirty uv.lock untouched. These extras are
+            # outside the default sync set, so a fresh ``uv run`` does not
+            # install livekit.rtc unless named here. ``UV_NO_SYNC`` still wins
+            # when the caller has already synced and must not let this child
+            # rewrite the environment.
             cmd = [
                 "uv",
                 "run",
-                "python",
-                "-m",
-                "timbal.server",
-                "--import_spec",
-                resolved_spec,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(child_port),
+                "--frozen",
+                "--extra",
+                "server",
+                "--extra",
+                "voice",
             ]
+            if kind == "livekit":
+                cmd.extend(["--extra", "voice-livekit"])
+            cmd.extend(
+                [
+                    "python",
+                    "-m",
+                    "timbal.server",
+                    "--import_spec",
+                    resolved_spec,
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(child_port),
+                ]
+            )
             self._logs.clear()
             self._logs.append(f"$ {' '.join(cmd)}  (cwd: {spec_path.parent})")
             # cwd = the agent file's directory: `uv run` walks up from there to
