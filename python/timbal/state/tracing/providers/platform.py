@@ -6,9 +6,11 @@ import contextlib
 import functools
 import gzip
 import hashlib
+import itertools
 import json
 import math
 import os
+import threading
 import time
 from collections import OrderedDict, deque
 from time import time_ns
@@ -113,6 +115,19 @@ def _retrieve(future: asyncio.Future) -> None:
         future.exception()
 
 
+def _transient(exc: BaseException) -> bool:
+    """A failure worth sending the same save again for: 429, 5xx, a timeout or a dropped connection
+    (what ``_request`` already retried a few times), not a request the platform turned down."""
+    import httpx
+
+    from ....errors import PlatformError
+
+    if isinstance(exc, PlatformError):
+        status = exc.status_code
+        return status is None or status == 429 or status >= 500
+    return isinstance(exc, httpx.TransportError | OSError | TimeoutError)
+
+
 def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: asyncio.Task) -> None:
     """A round's save finished. Success also settles earlier rounds still on the wire (a stalled
     PATCH): this one carried their state and newer."""
@@ -124,6 +139,9 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
                 joined.cancel()
             else:
                 joined.set_exception(save.exception())
+        if not save.cancelled() and _transient(save.exception()) and flight.terminal():
+            # No later save of an ended run is coming to carry this one.
+            PlatformTracingProvider._schedule_retry(flight)
         return
     flight.landed = max(flight.landed, covers)
     if flight.landed >= flight.joins:
@@ -163,6 +181,15 @@ def _flush_at_exit() -> None:
 
 DELTA_MEDIA_TYPE = "application/vnd.timbal.trace-delta+json"
 _DELTA_RUNS_MAX = 2048
+_GZIP_INLINE_MAX = 256 * 1024
+
+
+async def _gzip(body: bytes) -> bytes:
+    """Large bodies compress off the event loop: a whole multi-MB trace would block it (a voice turn)
+    for tens of ms. ``body`` is already encoded, so nothing changes under the thread."""
+    if len(body) <= _GZIP_INLINE_MAX:
+        return gzip.compress(body, compresslevel=5)
+    return await asyncio.to_thread(gzip.compress, body, 5)
 
 
 class _HostCaps:
@@ -203,6 +230,8 @@ SNAPSHOT_HEADER = "x-timbal-snapshot"
 APPLIED_HEADER = "x-timbal-snapshot-applied"
 SELECT_HEADER = "x-timbal-select"
 _last_snapshot = 0
+# Event loops in other threads save too: two equal numbers would make the platform drop the second as stale.
+_snapshot_lock = threading.Lock()
 
 
 def _next_snapshot() -> int:
@@ -213,14 +242,16 @@ def _next_snapshot() -> int:
     would restart below what the first process sent.
     """
     global _last_snapshot
-    _last_snapshot = max(_last_snapshot + 1, time_ns())
-    return _last_snapshot
+    with _snapshot_lock:
+        _last_snapshot = max(_last_snapshot + 1, time_ns())
+        return _last_snapshot
 
 
 def _observe_snapshot(stored: int) -> None:
     """The platform said it holds ``stored``: number later saves above it, whatever this clock says."""
     global _last_snapshot
-    _last_snapshot = max(_last_snapshot, stored)
+    with _snapshot_lock:
+        _last_snapshot = max(_last_snapshot, stored)
 
 
 class _DeltaRun:
@@ -302,6 +333,11 @@ class PlatformTracingProvider(TracingProvider):
     _own_snapshots: ClassVar[OrderedDict[str, deque[int]]] = OrderedDict()
     _closing: ClassVar[bool] = False
     _exit_hook: ClassVar[bool] = False
+    # run key -> the background task resending an ended run whose last save failed on a transient error.
+    _retries: ClassVar[dict[str, asyncio.Task]] = {}
+    # Waits between those resends (the last repeats), and how long to keep trying before giving up.
+    _retry_delays_s: ClassVar[tuple[float, ...]] = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0)
+    _retry_window_s: ClassVar[float] = 600.0
     # The PATCH read timeout when the client has none (its default): the platform parses the trace first.
     _patch_read_timeout_s: ClassVar[float] = 120.0
     # How long a read waits for saves of that run already in flight before asking the platform.
@@ -510,7 +546,9 @@ class PlatformTracingProvider(TracingProvider):
         unsaved[key] = run_context
         unsaved.move_to_end(key)
         while len(unsaved) > _UNSAVED_MAX:
-            unsaved.popitem(last=False)
+            _, dropped = unsaved.popitem(last=False)
+            # A shutdown flush can no longer send or report it.
+            logger.error("platform_trace_unsaved_evicted", run_id=dropped.id, max_runs=_UNSAVED_MAX)
         if not PlatformTracingProvider._exit_hook:
             PlatformTracingProvider._exit_hook = True
             atexit.register(_flush_at_exit)
@@ -567,6 +605,48 @@ class PlatformTracingProvider(TracingProvider):
                 del PlatformTracingProvider._flights[flight.key]
 
     @classmethod
+    def _schedule_retry(cls, flight: _Flight) -> None:
+        """Keep resending an ended run whose save failed on a transient error, in the background, until one
+        lands, a shutdown flush takes over, or ``_retry_window_s`` runs out. ``_request``'s own retries span
+        under a second: a platform restart outlasts them, and the run would stay ``running`` until this
+        process exits."""
+        retries = PlatformTracingProvider._retries
+        task = retries.get(flight.key)
+        if (task is not None and not task.done()) or PlatformTracingProvider._closing or flight.loop.is_closed():
+            return
+        retries[flight.key] = flight.loop.create_task(cls._retry(flight.key))
+
+    @classmethod
+    async def _retry(cls, key: str) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + cls._retry_window_s
+        delays = cls._retry_delays_s
+        try:
+            for attempt in itertools.count():
+                delay = delays[min(attempt, len(delays) - 1)]
+                if loop.time() + delay > deadline:
+                    break
+                await asyncio.sleep(delay)
+                context = PlatformTracingProvider._unsaved.get(key)
+                if context is None or PlatformTracingProvider._closing:
+                    return  # landed with another save, or a shutdown flush is sending it
+                try:
+                    await cls._store(context)
+                    logger.info("platform_trace_retry_landed", run_id=context.id, attempts=attempt + 1)
+                    return
+                except Exception as e:
+                    if not _transient(e):
+                        logger.error("platform_trace_retry_rejected", run_id=context.id, error=str(e))
+                        return
+                    logger.warning("platform_trace_retry_failed", run_id=context.id, attempt=attempt + 1, error=str(e))
+            context = PlatformTracingProvider._unsaved.get(key)
+            if context is not None:
+                logger.error("platform_trace_retry_exhausted", run_id=context.id, window_s=cls._retry_window_s)
+        finally:
+            if PlatformTracingProvider._retries.get(key) is asyncio.current_task():
+                del PlatformTracingProvider._retries[key]
+
+    @classmethod
     async def flush(cls, timeout: float | None = None) -> list[str]:
         """Send every save this process still owes the platform, and wait for them (process shutdown).
 
@@ -580,6 +660,9 @@ class PlatformTracingProvider(TracingProvider):
         loop = asyncio.get_running_loop()
         PlatformTracingProvider._closing = True
         try:
+            for task in list(PlatformTracingProvider._retries.values()):
+                if task.get_loop() is loop:
+                    task.cancel()  # the flush sends their runs now, within its bound
             flights = PlatformTracingProvider._flights
             for flight in flights.values():
                 if flight.loop is loop and flight.arrival is not None and not flight.arrival.done():
@@ -678,11 +761,10 @@ class PlatformTracingProvider(TracingProvider):
             "X-Timbal-Snapshot": str(snapshot),
         }
         compressed = not plain and cls._compressing(caps)
-        wire = body
         if compressed:
-            wire = gzip.compress(body, compresslevel=5)
             headers["Content-Encoding"] = "gzip"
         try:
+            wire = await _gzip(body) if compressed else body
             res = await _request(
                 method="PATCH",
                 path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
@@ -716,6 +798,15 @@ class PlatformTracingProvider(TracingProvider):
         caps.learn(getattr(res, "headers", None))  # also lifts the counter above the stored snapshot
         found = _header_items(getattr(res, "headers", None))
         stored = found.get(SNAPSHOT_HEADER, "").strip()
+        if delta and not stored.isdigit():
+            # A server that takes deltas orders saves by snapshot and echoes it. Without the echo the body was
+            # not understood: today's API reads a delta as a PATCH with no `trace` and answers 204, so the
+            # spans did not land. Same handling as a rejected format.
+            cls._remember(key, snapshot, None)
+            await cls._save(run_context, plain=True, resend=resend)
+            caps.delta_rejected = True
+            logger.warning("platform_trace_delta_unconfirmed", host=platform_config.host)
+            return
         if (
             found.get(APPLIED_HEADER, "").strip().lower() == "false"
             and stored.isdigit()
@@ -757,10 +848,14 @@ class PlatformTracingProvider(TracingProvider):
         out: list[dict] = []
         sent: dict[str, str] = {}
         full: list[dict] = []
+        # The root header carries no seq: the platform puts the root at 0, so no other span may take 0, even
+        # when a child precedes the root in the trace or the root is not there yet.
+        if root is not None:
+            run.seq.setdefault(root.call_id, 0)
         for span in spans:
-            run.seq.setdefault(span.call_id, len(run.seq))
             if span is root:
                 continue
+            run.seq.setdefault(span.call_id, len(run.seq) + (root is None or root.call_id not in run.seq))
             if not ended and (span.t1 is None or span.call_id in run.acked):
                 continue
             dumped = span.model_dump()

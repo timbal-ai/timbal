@@ -36,6 +36,7 @@ def clean():
     PlatformTracingProvider._delta_runs.clear()
     PlatformTracingProvider._recent.clear()
     PlatformTracingProvider._flights.clear()
+    PlatformTracingProvider._unsaved.clear()
     set_run_context(None)
     set_call_id(None)
     set_parent_call_id(None)
@@ -43,6 +44,10 @@ def clean():
     PlatformTracingProvider._caps.clear()
     PlatformTracingProvider._delta_runs.clear()
     PlatformTracingProvider._recent.clear()
+    PlatformTracingProvider._unsaved.clear()
+    for task in PlatformTracingProvider._retries.values():
+        task.cancel()
+    PlatformTracingProvider._retries.clear()
 
 
 class FakePlatform:
@@ -62,8 +67,12 @@ class FakePlatform:
             headers["Accept-Patch"] = f"application/json, {DELTA_MEDIA_TYPE}"
         return headers
 
-    def _ok(self, payload=None):
-        return SimpleNamespace(raise_for_status=lambda: None, headers=self._headers(), json=lambda: payload or {})
+    def _ok(self, payload=None, stored=None, applied=True):
+        headers = self._headers()
+        if stored is not None and self.deltas and self.advertise:
+            # A server that takes deltas implements 0.1: it echoes the snapshot it holds.
+            headers = {**headers, "X-Timbal-Snapshot": str(stored), "X-Timbal-Snapshot-Applied": str(applied).lower()}
+        return SimpleNamespace(raise_for_status=lambda: None, headers=headers, json=lambda: payload or {})
 
     async def request(self, method, path, headers=None, content=None, **_):
         run_id = path.rsplit("/", 1)[-1]
@@ -95,9 +104,9 @@ class FakePlatform:
         run["parent_id"] = body.get("parent_id")
         if kind == "full":  # authoritative: replaces the span rows
             run.update(trace=body["trace"], spans={}, snapshot=0)
-            return self._ok()
+            return self._ok(stored=int(headers.get("X-Timbal-Snapshot", 0)))
         if body["snapshot"] <= run["snapshot"]:
-            return self._ok()  # stale or retried delta: ack, no-op
+            return self._ok(stored=run["snapshot"], applied=False)  # stale or retried delta: ack, no-op
         run["snapshot"] = body["snapshot"]
         for entry in body["spans"]:
             assert set(entry) == {"seq", "span"}, entry
@@ -108,7 +117,7 @@ class FakePlatform:
             run["trace"] = [body["root"], *rows]
         else:
             run["trace"] = None  # live again (background work after the end) — assembled on read
-        return self._ok()
+        return self._ok(stored=body["snapshot"])
 
 
 def tool_loop(steps, probe=None):
@@ -712,6 +721,155 @@ asyncio.run(main())
         assert PlatformTracingProvider._patch_timeout().read == PlatformTracingProvider._patch_read_timeout_s
         monkeypatch.setenv("TIMBAL_HTTP_READ_TIMEOUT", "none")
         assert PlatformTracingProvider._patch_timeout().read is None
+
+
+class TestTransientFailures:
+    @staticmethod
+    def context(provider, *, ended=True):
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        root = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        ctx._trace["r"] = {**root, "t1": 1} if ended else root
+        return ctx
+
+    @staticmethod
+    async def until(predicate, steps=200):
+        for _ in range(steps):
+            if predicate():
+                return
+            await asyncio.sleep(0.01)
+
+    async def test_an_ended_run_whose_save_failed_is_resent_in_the_background(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        server = FakePlatform(advertise=False)
+        server.fail_next = 3  # the save, then two background resends: a platform restart
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request):
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            await self.until(lambda: not PlatformTracingProvider._retries)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+        assert not PlatformTracingProvider._unsaved
+
+    async def test_the_background_resends_give_up_after_the_window(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_window_s", 0.05)
+        server = FakePlatform(advertise=False)
+        server.fail_next = 10**6
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request), capture_logs() as logs:
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            await self.until(lambda: not PlatformTracingProvider._retries)
+        assert not PlatformTracingProvider._retries
+        assert any(log["event"] == "platform_trace_retry_exhausted" for log in logs)
+        assert list(PlatformTracingProvider._unsaved.values()) == [ctx]  # still owed: a shutdown flush reports it
+
+    async def test_a_rejected_or_mid_run_save_is_not_resent_in_the_background(self):
+        async def forbidden(*_args, **_kwargs):
+            raise PlatformError("forbidden", status_code=403)
+
+        async def down(*_args, **_kwargs):
+            raise PlatformError("down", status_code=503)
+
+        _, provider = tool_loop(1)
+        with patch("timbal.platform.utils._request", forbidden), pytest.raises(PlatformError):
+            await provider._store(self.context(provider))
+        with patch("timbal.platform.utils._request", down), pytest.raises(PlatformError):
+            await provider._store(self.context(provider, ended=False))  # its next save carries it
+        assert not PlatformTracingProvider._retries
+
+    async def test_a_shutdown_flush_takes_over_the_background_resends(self, monkeypatch):
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (60.0,))
+        server = FakePlatform(advertise=False)
+        server.fail_next = 1
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request):
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            assert PlatformTracingProvider._retries
+            assert await PlatformTracingProvider.flush(timeout=1) == []  # does not wait out the 60 s
+            await asyncio.sleep(0)
+        assert server.runs[ctx.id]["trace"][0]["t1"] == 1
+        assert not PlatformTracingProvider._retries
+
+    async def test_a_delta_the_server_did_not_confirm_is_resent_whole(self):
+        # Today's API reads a delta as a PATCH without `trace` and answers 204, echoing no snapshot.
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        kinds = []
+
+        async def todays_api(*_args, headers=None, **_kwargs):
+            kinds.append(headers["Content-Type"])
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {})
+
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", todays_api):
+            await provider._store(ctx)
+            await provider._store(ctx)
+        assert kinds == [DELTA_MEDIA_TYPE, "application/json", "application/json"]
+        assert PlatformTracingProvider._host_caps(CONFIG.host).delta_rejected
+
+    async def test_no_span_takes_the_roots_seq(self):
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).delta = True
+        _, provider = tool_loop(1)
+        ctx = RunContext(tracing_provider=provider)
+        ctx.platform_config = CONFIG
+        ctx._trace["c"] = {"call_id": "c", "path": "a.x", "t0": 1, "t1": 2, "parent_call_id": "r"}  # before the root
+        ctx._trace["r"] = {"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}
+        with patch("timbal.platform.utils._request", server.request):
+            await provider._store(ctx)
+        assert [s["seq"] for s in server.patches[-1]["body"]["spans"]] == [1]
+
+    async def test_large_bodies_compress_off_the_event_loop(self, monkeypatch):
+        offloaded = []
+        original = asyncio.to_thread
+
+        async def spy(func, *args, **kwargs):
+            offloaded.append(func)
+            return await original(func, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", spy)
+        server = FakePlatform()
+        PlatformTracingProvider._host_caps(CONFIG.host).gzip = True
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        blob = "x" * (512 * 1024)
+        ctx._trace["r"].metadata["blob"] = blob
+        with patch("timbal.platform.utils._request", server.request):
+            await provider._store(ctx)
+        assert offloaded == [gzip.compress]
+        assert server.patches[-1]["gzip"] and server.runs[ctx.id]["trace"][0]["metadata"]["blob"] == blob
+
+    async def test_an_owed_save_pushed_out_of_the_bound_is_logged(self, monkeypatch):
+        from timbal.state.tracing.providers import platform as platform_module
+
+        monkeypatch.setattr(platform_module, "_UNSAVED_MAX", 1)
+
+        async def down(*_args, **_kwargs):
+            raise PlatformError("down", status_code=503)
+
+        _, provider = tool_loop(1)
+        first, second = self.context(provider, ended=False), self.context(provider, ended=False)
+        with patch("timbal.platform.utils._request", down), capture_logs() as logs:
+            for ctx in (first, second):
+                with pytest.raises(PlatformError):
+                    await provider._store(ctx)
+        assert [log["run_id"] for log in logs if log["event"] == "platform_trace_unsaved_evicted"] == [first.id]
+
+    def test_snapshots_are_unique_across_threads(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from timbal.state.tracing.providers.platform import _next_snapshot
+
+        with ThreadPoolExecutor(8) as pool:
+            batches = list(pool.map(lambda _: [_next_snapshot() for _ in range(5000)], range(8)))
+        flat = [snapshot for batch in batches for snapshot in batch]
+        assert len(set(flat)) == len(flat)
 
 
 class TestChatSessionOverDeltas:
