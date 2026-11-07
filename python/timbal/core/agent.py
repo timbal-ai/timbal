@@ -1,6 +1,8 @@
 import asyncio
+import contextlib
 import contextvars
 import difflib
+import hashlib
 import inspect
 import json
 import re
@@ -152,8 +154,7 @@ _READ_ONLY_BUILTINS = frozenset(
 )
 
 DEFAULT_MAX_ITER_STOP_MESSAGE = (
-    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final "
-    "answer was produced.]"
+    "[Stopped: the {max_iter}-step tool-call budget for this turn was exhausted before a final answer was produced.]"
 )
 """Assistant reply returned without an LLM call (``on_max_iter="stop"``)."""
 
@@ -176,6 +177,45 @@ _PAUSE_REASONS = frozenset({"approval_required", "input_required"})
 
 # Consecutive turns that stored no memory (see Agent._previous_memory) a turn reaches back through.
 _MAX_TURNS_WITHOUT_MEMORY = 8
+
+# Session data key: per agent path, the compaction a turn prepared for the next one (memory_compaction_prepare_ratio).
+_PREPARED_KEY = "__prepared_compaction"
+# (run_id, agent path) -> that run's after-turn compaction still running in this process: the next turn waits on it.
+_PREPARING: "dict[tuple[str, str], asyncio.Task]" = {}
+
+
+@dataclass(eq=False)
+class _Prepared:
+    """Compaction running in the background on a prefix of the history: the messages themselves, so a history
+    that changed under it (cut, steered, compacted) is told apart."""
+
+    task: "asyncio.Task"
+    prefix: list
+    utilization: float | None
+
+    def intact(self, memory: list) -> bool:
+        return len(memory) >= len(self.prefix) and all(a is b for a, b in zip(memory, self.prefix, strict=False))
+
+
+def _retrieve_result(task: "asyncio.Task") -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+def _fingerprint(dumped: list) -> str:
+    """The stored form of a history prefix, hashed: the turn after reads it back from the trace and compares."""
+    raw = json.dumps(dumped, sort_keys=True, default=str, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _join(head: list, tail: list) -> list:
+    """``head + tail``, folding two assistant messages at the seam into one (providers want alternation)."""
+    if head and tail and head[-1].role == "assistant" and tail[0].role == "assistant":
+        merged = Message(
+            role="assistant", content=[*head[-1].content, *tail[0].content], stop_reason=tail[0].stop_reason
+        )
+        return [*head[:-1], merged, *tail[1:]]
+    return [*head, *tail]
 
 
 def _is_pause(status: Any) -> bool:
@@ -304,7 +344,9 @@ def _cut_answer(message: Any) -> Message | None:
 
 def _empty_at_limit(message: Any) -> bool:
     """A final answer the output limit cut off before any visible text."""
-    return isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
+    return (
+        isinstance(message, Message) and message.stop_reason in _TRUNCATED_STOPS and not message_text(message).strip()
+    )
 
 
 def _native_tool_search(model: Any) -> bool:
@@ -349,14 +391,16 @@ def _score_tools(tools: list[Any], query: str) -> list[tuple[int, Any]]:
         name = tool.name.lower()
         schema = getattr(tool, "input_schema", None) or getattr(tool, "params_model_schema", None) or {}
         params = " ".join(schema.get("properties", {}))
-        indexed.append((
-            name,
+        indexed.append(
             (
-                (3, set(_SEARCH_WORD.findall(name))),
-                (2, set(_SEARCH_WORD.findall(params.lower()))),
-                (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
-            ),
-        ))
+                name,
+                (
+                    (3, set(_SEARCH_WORD.findall(name))),
+                    (2, set(_SEARCH_WORD.findall(params.lower()))),
+                    (1, set(_SEARCH_WORD.findall((tool.description or "").lower()))),
+                ),
+            )
+        )
     if len(indexed) > 1:
         # A word every tool has (an MCP server prefix like "timbal__") can't tell them apart.
         everywhere = set.intersection(*(set().union(*(f for _, f in fields)) for _, fields in indexed))
@@ -517,6 +561,16 @@ class Agent(Runnable):
     request and output, against the context window (from models.yaml) of the model the run
     calls. Set to 0.0 to always compact, or 1.0 to effectively disable auto-triggering.
     Default: 0.75 (75%)."""
+    memory_compaction_prepare_ratio: float | None = None
+    """Prepare compaction ahead of time, so no turn waits for a summarizer call. Past this
+    utilization (below ``memory_compaction_ratio``) the strategies run in the background on
+    the history so far, while the turn goes on: mid-turn the result is swapped in at the next
+    step, and a turn that ends past it hands the result to the next turn (stored in the run's
+    session data, so it works across processes). A history that changed under it (an
+    interrupt, a steer) discards it and compaction runs inline as before. Reaching
+    ``memory_compaction_ratio`` first waits for the one in progress instead of starting
+    another. Costs a summarizer call earlier than inline compaction would. ``None`` (default):
+    compaction only runs inline."""
     tool_result_limit: SkipValidation[ToolResultLimit | int | None] = None
     """Size limit applied to every tool result when it is produced (before it enters memory).
     An int is shorthand for ToolResultLimit(threshold=int). The default action (Spill) persists
@@ -567,6 +621,12 @@ class Agent(Runnable):
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
         super().model_post_init(__context)
+        prepare = self.memory_compaction_prepare_ratio
+        if prepare is not None and not 0.0 < prepare < self.memory_compaction_ratio:
+            raise ValueError(
+                "memory_compaction_prepare_ratio must be above 0 and below memory_compaction_ratio "
+                f"({self.memory_compaction_ratio}), got {prepare}."
+            )
         # Plain instance attributes (not PrivateAttr) — read on every agent turn.
         self._system_prompt_fn: Callable | None = None
         self._system_prompt_fn_is_async: bool = False
@@ -1000,8 +1060,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if has_followup_after_server_tool_use:
                     continue
                 if model_provider == "anthropic":
-                    kind = "tool_search_tool_result" if content.name.startswith("tool_search_tool") else (
-                        "web_search_tool_result"
+                    kind = (
+                        "tool_search_tool_result"
+                        if content.name.startswith("tool_search_tool")
+                        else ("web_search_tool_result")
                     )
                     memory[-1].content.append(
                         CustomContent(
@@ -1090,6 +1152,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # re-executed by the agent loop (see _find_pending_tool_uses), so we must
         # NOT inject synthetic "tool failed" results for them.
         is_resume = _is_pause(previous_span.status)
+        prepared = None
+        if (
+            self.memory_compaction is not None
+            and self.memory_compaction_prepare_ratio is not None
+            and not is_resume
+            and source is previous_span
+        ):
+            memory, prepared = await self._take_prepared(run_context, source, memory)
         if not is_resume:
             self._synthesize_missing_tool_results(memory)
         # On resume we are continuing the paused turn, not opening a new user turn.
@@ -1124,6 +1194,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # file tokens must not disappear, nor may unmeasured tool results be skipped.
                 # The next measured LLM call replaces this deliberately high estimate.
                 measurement = {"usage": dict(source.usage), "messages": 0}
+            if prepared is not None:
+                # The turn before compacted this history for it: its measurement covers the history before that.
+                measurement = None
+                self._record_compaction(
+                    current_span,
+                    prepared.get("utilization"),
+                    prepared.get("steps") or [],
+                    background=True,
+                    prepared_by=run_context.parent_id,
+                )
             if measurement is not None:
                 # Sanitizing above may drop a message the measurement covered.
                 covered = memory[: measurement["messages"]]
@@ -1413,46 +1493,56 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         should_compact = self.memory_compaction_ratio <= 0.0
         utilization = None
         if not should_compact:
-            context_window = get_context_window(model)
-            if context_window is None:
+            utilization = self._context_utilization(model, messages, measurement)
+            if utilization is None:
                 # Unknown model — context window not in models.yaml.
-                # Estimate token count from message content as a best effort.
-                estimated_tokens = _estimate_tokens_from_memory(messages)
                 logger.warning(
                     "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
                     model=model,
-                    estimated_tokens=estimated_tokens,
+                    estimated_tokens=_estimate_tokens_from_memory(messages),
                 )
                 should_compact = True
-            elif measurement:
-                # Anthropic's input_tokens excludes cached tokens: full context =
-                # input_tokens + cache reads + cache writes (disjoint buckets). The
-                # collector emits cache writes either as the aggregate
-                # `cache_creation_input_tokens` or as the per-TTL `ephemeral_*` units —
-                # never both — so every cache unit is counted exactly once. Pricing-tier
-                # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
-                usage = measurement["usage"]
-                prev_input_tokens = sum(v for k, v in usage.items() if _is_context_input_unit(k))
-                prev_output_tokens = sum(v for k, v in usage.items() if _is_context_output_unit(k))
-                unsent_tokens = _estimate_tokens_from_memory(messages[measurement["messages"] :])
-                utilization = (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
-                should_compact = utilization >= self.memory_compaction_ratio
             else:
-                # Known model but no usage data from previous run.
-                # Estimate utilization from message content.
-                estimated_tokens = _estimate_tokens_from_memory(messages)
-                utilization = estimated_tokens / context_window
-                logger.warning(
-                    "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
-                    model=model,
-                    estimated_tokens=estimated_tokens,
-                    estimated_utilization=round(utilization, 4),
-                )
+                if not measurement:
+                    logger.warning(
+                        "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
+                        model=model,
+                        estimated_tokens=_estimate_tokens_from_memory(messages),
+                        estimated_utilization=round(utilization, 4),
+                    )
                 should_compact = utilization >= self.memory_compaction_ratio
 
         if not should_compact:
             return
 
+        current_span.memory, compaction_steps = await self._run_compactors(current_span.memory, model)
+        self._record_compaction(current_span, utilization, compaction_steps)
+
+    def _context_utilization(self, model: str, messages: list[Message], measurement: dict | None) -> float | None:
+        """The share of ``model``'s context window ``messages`` take (None: the window is unknown).
+
+        With a measurement (the last LLM call that reported context tokens) its usage counts, plus an estimate of
+        the messages after the ones it covered; without one, every message is estimated (1 token ≈ 4 chars).
+        """
+        context_window = get_context_window(model)
+        if context_window is None:
+            return None
+        if measurement:
+            # Anthropic's input_tokens excludes cached tokens: full context =
+            # input_tokens + cache reads + cache writes (disjoint buckets). The
+            # collector emits cache writes either as the aggregate
+            # `cache_creation_input_tokens` or as the per-TTL `ephemeral_*` units —
+            # never both — so every cache unit is counted exactly once. Pricing-tier
+            # suffixes (`_long_context`, `_fast`, `_flex`) are stripped first.
+            usage = measurement["usage"]
+            prev_input_tokens = sum(v for k, v in usage.items() if _is_context_input_unit(k))
+            prev_output_tokens = sum(v for k, v in usage.items() if _is_context_output_unit(k))
+            unsent_tokens = _estimate_tokens_from_memory(messages[measurement["messages"] :])
+            return (prev_input_tokens + prev_output_tokens + unsent_tokens) / context_window
+        return _estimate_tokens_from_memory(messages) / context_window
+
+    async def _run_compactors(self, memory: list[Message], model: str) -> tuple[list[Message], list[dict]]:
+        """Every configured strategy over ``memory``, in order: the compacted memory and a step per strategy."""
         compactors = (
             [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
         )
@@ -1465,27 +1555,195 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 compactor._state["agent_model"] = model
                 if "store" in compactor._state and compactor._state["store"] is None:
                     compactor._state["store"] = getattr(self, "_offload_store", None)
-            before = len(current_span.memory)
+            before = len(memory)
             if asyncio.iscoroutinefunction(compactor):
-                current_span.memory = await compactor(current_span.memory)
+                memory = await compactor(memory)
             else:
-                current_span.memory = compactor(current_span.memory)
+                memory = compactor(memory)
             compaction_steps.append(
                 {
                     "compactor": getattr(compactor, "__name__", repr(compactor)),
                     "before": before,
-                    "after": len(current_span.memory),
+                    "after": len(memory),
                 }
             )
+        return memory, compaction_steps
+
+    @staticmethod
+    def _record_compaction(current_span: Any, utilization: float | None, steps: list[dict], **extra: Any) -> None:
         prior = current_span.metadata.get("compaction")
         passes = (prior.get("passes", 1) + 1) if isinstance(prior, dict) else 1
         current_span.metadata["compaction"] = {
             "triggered": True,
             "utilization": round(utilization, 4) if utilization is not None else None,
-            "steps": compaction_steps,
+            "steps": steps,
             # Number of times compaction fired on this span (turn start + each mid-loop pass).
             "passes": passes,
+            **extra,
         }
+
+    # -- Compaction prepared in the background (memory_compaction_prepare_ratio) -----------------
+
+    def _span_model(self, current_span: Any) -> str:
+        return str(current_span.input.get("model") or self.model)
+
+    def _prepare_compaction(self, current_span: Any, prefix: list[Message], utilization: float) -> "_Prepared":
+        """Run the strategies on ``prefix`` (a copy of the history so far) on a task of its own."""
+        task = asyncio.get_running_loop().create_task(
+            self._run_compactors(list(prefix), self._span_model(current_span))
+        )
+        task.add_done_callback(_retrieve_result)
+        return _Prepared(task=task, prefix=list(prefix), utilization=utilization)
+
+    def _swap_prepared(self, current_span: Any, prepared: "_Prepared", run_context: Any) -> bool:
+        """Put a finished prepared compaction in place of the history it covered, when that is still there."""
+        if prepared.task.cancelled() or prepared.task.exception() is not None:
+            if not prepared.task.cancelled():
+                logger.warning(
+                    "Background compaction failed; compacting inline when needed.",
+                    path=self._path,
+                    error=str(prepared.task.exception()),
+                )
+            return False
+        compacted, steps = prepared.task.result()
+        memory = current_span.memory
+        if not prepared.intact(memory):
+            run_context.update_usage("compaction:prepared_stale", 1)
+            return False
+        if len(compacted) >= len(prepared.prefix):
+            return False  # nothing to gain
+        current_span.memory = _join(compacted, memory[len(prepared.prefix) :])
+        self._record_compaction(current_span, prepared.utilization, steps, background=True)
+        run_context.update_usage("compaction:background", 1)
+        return True
+
+    async def _compaction_boundary(
+        self, current_span: Any, run_context: Any, prepared: "_Prepared | None"
+    ) -> "_Prepared | None":
+        """Between steps of a turn: swap in a prepared compaction that finished, wait for the one in progress once
+        the hard ratio is reached (instead of starting another inline), start one past the prepare ratio."""
+        measurement = current_span.metadata.get("context_measurement")
+        if prepared is not None and prepared.task.done():
+            swapped = self._swap_prepared(current_span, prepared, run_context)
+            prepared = None
+            if swapped:
+                # The measurement predates the swap (an upper bound now): the next call measures again.
+                return None
+        if prepared is not None:
+            model = self._span_model(current_span)
+            utilization = self._context_utilization(model, current_span.memory, measurement)
+            if utilization is None or utilization >= self.memory_compaction_ratio:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(prepared.task)
+                swapped = self._swap_prepared(current_span, prepared, run_context)
+                prepared = None
+                if swapped:
+                    return None
+        compacted_now = False
+        if prepared is None:
+            before = current_span.memory
+            await self._compact_preserving_last_assistant(current_span, measurement=measurement)
+            # The measurement predates it: the history only looks big still. The next boundary measures again.
+            compacted_now = current_span.memory is not before
+        if prepared is None and not compacted_now and self.memory_compaction_prepare_ratio is not None:
+            memory = current_span.memory
+            split = next((i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant"), None)
+            head = memory[:split] if split else []
+            utilization = self._context_utilization(self._span_model(current_span), memory, measurement)
+            if (
+                head
+                and utilization is not None
+                and self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
+            ):
+                prepared = self._prepare_compaction(current_span, head, utilization)
+        return prepared
+
+    def _prepare_for_next_turn(self, current_span: Any, run_context: Any, prepared: "_Prepared | None") -> None:
+        """A turn that ends past the prepare ratio: compact its history in the background and leave the result in
+        the run's session data for the next turn (``_take_prepared``). The run's trace is stored again once it
+        lands, like a background child's late output; the next turn in this process waits for it instead."""
+        memory = current_span.memory
+        if prepared is not None and not prepared.intact(memory):
+            prepared.task.cancel()
+            prepared = None
+        if prepared is None:
+            utilization = self._context_utilization(
+                self._span_model(current_span), memory, current_span.metadata.get("context_measurement")
+            )
+            if (
+                utilization is None
+                or not self.memory_compaction_prepare_ratio <= utilization < self.memory_compaction_ratio
+            ):
+                return
+            prepared = self._prepare_compaction(current_span, memory, utilization)
+        dumped = list(getattr(current_span, "_memory_dump", None) or [])[: len(prepared.prefix)]
+        if len(dumped) != len(prepared.prefix):
+            prepared.task.cancel()
+            return
+        key = (run_context.id, self._path)
+        run_context._live_background += 1
+
+        async def finish() -> dict | None:
+            try:
+                await asyncio.shield(prepared.task)
+                compacted, steps = prepared.task.result()
+                if len(compacted) >= len(prepared.prefix):
+                    return None
+                record = {
+                    "covered": len(prepared.prefix),
+                    "fingerprint": _fingerprint(dumped),
+                    "memory": await dump(compacted),
+                    "steps": steps,
+                    "utilization": round(prepared.utilization, 4),
+                }
+                session = await run_context.get_session()
+                session.setdefault(_PREPARED_KEY, {})[self._path] = record
+                run_context.update_usage("compaction:prepared", 1)
+                return record
+            except Exception as e:
+                logger.warning("Background compaction for the next turn failed.", path=self._path, error=str(e))
+                return None
+            finally:
+                if _PREPARING.get(key) is finishing:
+                    del _PREPARING[key]
+                await run_context._end_background_work()
+
+        finishing = asyncio.get_running_loop().create_task(finish())
+        _PREPARING[key] = finishing
+
+    async def _take_prepared(
+        self, run_context: Any, source: Any, memory: list[Message]
+    ) -> tuple[list[Message], dict | None]:
+        """At a turn's start: the compaction the turn before prepared for this one, if its history is unchanged.
+        Returns the memory to use and the record taken (None: none, or stale).
+
+        Waits for one still running in this process (it started before this turn: waiting costs less than
+        compacting inline again). Taken or not, it is removed from this run's session data.
+        """
+        key = (run_context.parent_id, self._path)
+        record = None
+        finishing = _PREPARING.get(key)
+        if finishing is not None:
+            with contextlib.suppress(Exception):
+                record = await asyncio.shield(finishing)
+        session = await run_context.get_session()
+        stored = session.get(_PREPARED_KEY)
+        if isinstance(stored, dict):
+            record = record or stored.pop(self._path, None)
+            if not stored:
+                session.pop(_PREPARED_KEY, None)
+        if not isinstance(record, dict) or not isinstance(source.memory, list):
+            return memory, None
+        covered = record.get("covered", 0)
+        # In its stored form: a provider that keeps live traces (in-memory) hands back Message objects.
+        if len(source.memory) < covered or _fingerprint(await dump(source.memory[:covered])) != record.get(
+            "fingerprint"
+        ):
+            run_context.update_usage("compaction:prepared_stale", 1)
+            return memory, None
+        compacted = [Message.validate(message) for message in record["memory"]]
+        run_context.update_usage("compaction:background", 1)
+        return _join(compacted, memory[covered:]), record
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
@@ -2337,6 +2595,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Token usage reported by the previous LLM call this turn. None until the first LLM
         # call completes; mid-loop compaction waits for one.
         last_llm_usage: dict | None = None
+        # Compaction running in the background on this turn's history (memory_compaction_prepare_ratio).
+        prepared: _Prepared | None = None
         # Own the active nested iterator explicitly: closing this handler while
         # it is suspended at a yield must finish child cleanup before returning.
         active_events: AsyncGenerator | None = None
@@ -2505,9 +2765,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 # context tokens, plus an estimate of the messages appended after it.
                 if self.memory_compaction is not None and last_llm_usage is not None:
                     mem_before = current_span.memory
-                    await self._compact_preserving_last_assistant(
-                        current_span, measurement=current_span.metadata.get("context_measurement")
-                    )
+                    prepared = await self._compaction_boundary(current_span, run_context, prepared)
                     if current_span.memory is not mem_before:
                         # Compaction rewrote memory out of lockstep with the dump; rebuild it.
                         current_span._memory_dump = await dump(current_span.memory)
@@ -2615,11 +2873,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             await _append_memory(
                                 Message(
                                     role="user",
-                                    content=[TextContent(text=(
-                                        "Your previous response ended before the tool call was issued "
-                                        "(the call was emitted as text, without arguments, and nothing ran). "
-                                        "Issue the tool call now as a proper function call."
-                                    ))],
+                                    content=[
+                                        TextContent(
+                                            text=(
+                                                "Your previous response ended before the tool call was issued "
+                                                "(the call was emitted as text, without arguments, and nothing ran). "
+                                                "Issue the tool call now as a proper function call."
+                                            )
+                                        )
+                                    ],
                                     metadata={"source": "runtime", "kind": "leaked_tool_call_retry"},
                                 )
                             )
@@ -2922,6 +3184,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if steered_user:
                         # A user message is a new request: it gets the full tool budget.
                         i, max_iter_handled = 0, False
+        except BaseException:
+            # A pause, a cut, a failure: the next turn (or the resume) compacts as it finds the history.
+            if prepared is not None:
+                prepared.task.cancel()
+            raise
         finally:
             try:
                 if active_events is not None:
@@ -2929,3 +3196,5 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             finally:
                 if not _llm_memory_saved:
                     self._salvage_interrupted_llm_output(run_context, current_span)
+        if self.memory_compaction is not None and self.memory_compaction_prepare_ratio is not None:
+            self._prepare_for_next_turn(current_span, run_context, prepared)
