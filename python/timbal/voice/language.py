@@ -103,9 +103,9 @@ _REPLY_TAG = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3
 def parse_reply_language(value: str | None) -> str | None:
     """``None`` keeps today's rule. ``"follow"`` or a BCP-47 tag is explicit.
 
-    Empty is ``None``. A non-string, a sentence, or a malformed tag raises
-    ``ValueError``. ``language`` on the speech-to-text hint is unchanged by
-    this check.
+    Empty is ``None``. A non-string raises ``TypeError``. A sentence or a
+    malformed tag raises ``ValueError``. ``language`` on the speech-to-text
+    hint is unchanged by this check.
     """
     if value is None:
         return None
