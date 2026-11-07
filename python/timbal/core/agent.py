@@ -211,6 +211,53 @@ class _Prepared:
         return len(memory) >= len(self.prefix) and all(a is b for a, b in zip(memory, self.prefix, strict=False))
 
 
+_CUT = object()
+"""What :meth:`_CutWatch.next` returns when the cut came before the wait."""
+
+
+class _CutWatch:
+    """Cuts a model call for a ``now`` message even while it streams nothing (hidden reasoning): the cut cancels
+    the task while it waits for the next chunk, and :meth:`absorb` takes that cancellation back.
+
+    The stream stays on the caller's task (its steps set and reset context variables). A cut that lands while the
+    caller handles a chunk is seen before the next wait instead.
+    """
+
+    __slots__ = ("_cancelled", "_task", "_waiting", "_watch")
+
+    def __init__(self, cut: asyncio.Event) -> None:
+        self._task = asyncio.current_task()
+        self._waiting = False
+        self._cancelled = False
+        self._watch = asyncio.ensure_future(cut.wait())
+        self._watch.add_done_callback(self._on_cut)
+
+    def _on_cut(self, _future: "asyncio.Future") -> None:
+        if self._waiting and not self._cancelled and self._task is not None:
+            self._cancelled = True
+            self._task.cancel()
+
+    async def next(self, stream: Any) -> Any:
+        if self._watch.done():
+            return _CUT
+        self._waiting = True
+        try:
+            return await anext(stream)
+        finally:
+            self._waiting = False
+
+    def absorb(self) -> bool:
+        """Whether the cut cancelled the wait; its cancellation is taken back (once)."""
+        if not self._cancelled or self._task is None:
+            return False
+        self._cancelled = False
+        self._task.uncancel()
+        return True
+
+    def close(self) -> None:
+        self._watch.cancel()
+
+
 def _retrieve_result(task: "asyncio.Task") -> None:
     if not task.cancelled():
         task.exception()
@@ -2892,12 +2939,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 )
                 llm_call_id: str | None = None
                 answer_cut = False
-                async for event in active_events:
+                # A 'now' message stops this answer where it is: between chunks, and (the watch) while the
+                # model streams nothing at all, reasoning silently, by cancelling the wait for its next chunk.
+                cut_watch = _CutWatch(cut) if cut is not None else None
+                while True:
+                    try:
+                        event = await (cut_watch.next(active_events) if cut_watch else anext(active_events))
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.CancelledError:
+                        if cut_watch is None or not cut_watch.absorb():
+                            raise
+                        answer_cut = True
+                        break
+                    if event is _CUT or (cut_watch is not None and cut_watch.absorb()):
+                        # Cut before the wait, or during it with the call ending itself on the cancellation.
+                        answer_cut = True
+                        break
                     if llm_call_id is None and event.type == "START":
                         llm_call_id = event.call_id
-                    if cut is not None and cut.is_set() and not isinstance(event, OutputEvent):
-                        answer_cut = True  # a 'now' message: stop this answer where it is
-                        break
                     if isinstance(event, OutputEvent):
                         # If the LLM call fails, we want to propagate the error upwards
                         if event.error is not None:
@@ -3143,6 +3203,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             setattr(event.item, attr, stable)
                     yield event
 
+                if cut_watch is not None:
+                    cut_watch.close()
                 # Output validation/guardrails can break the loop early too.
                 await active_events.aclose()
                 active_events = None
