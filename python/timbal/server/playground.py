@@ -276,6 +276,7 @@ class ChildServer:
             cmd.extend(
                 [
                     "python",
+                    "-u",
                     "-m",
                     "timbal.server",
                     "--import_spec",
@@ -298,7 +299,10 @@ class ChildServer:
             # stack so picking "Smart Turn" on first Start doesn't eat the
             # ONNX/HuggingFace cold path; production servers gate warmup on
             # actual voice intent (see server.voice.voice_warmup_intended).
-            env = {**os.environ, "TIMBAL_VOICE_WARMUP": "1"}
+            # ``-u`` / PYTHONUNBUFFERED: a pipe would otherwise block-buffer
+            # the child's logs until the process exits, so the playground
+            # terminal would stay empty during the call.
+            env = {**os.environ, "TIMBAL_VOICE_WARMUP": "1", "PYTHONUNBUFFERED": "1"}
             for k, v in _read_dotenv(Path.cwd() / ".env").items():
                 env.setdefault(k, v)
             for k in _LIVEKIT_CHILD_ENV_KEYS:

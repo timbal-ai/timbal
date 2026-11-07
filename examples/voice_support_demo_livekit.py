@@ -529,12 +529,10 @@ def launch_playground() -> int:
         return 1
     port = PLAYGROUND_PORT
     if not _port_free(port):
-        status = fetch_launcher_status(port)
-        if status is not None:
-            for line in describe_existing(status, port):
-                print(line)  # noqa: T201
-            return 0
+        # An already-running playground is a different process. Its child
+        # logs are not this terminal. Stop it and run this command again.
         print(f"playground_port={port} in_use", file=sys.stderr)  # noqa: T201
+        print("ctrl_c_that_playground_and_run_this_command_again", file=sys.stderr)  # noqa: T201
         return 1
     print(f"playground={playground_url(port)}")  # noqa: T201
     os.chdir(ROOT)

@@ -6,6 +6,8 @@ import base64
 import hashlib
 import hmac
 import json
+import subprocess
+import sys
 
 from timbal.server.playground import ChildServer, livekit_creds, mint_livekit_jwt
 
@@ -180,10 +182,11 @@ class TestSpawnLoadsLaunchDotenv:
     def _spawn(self, monkeypatch, agent, *, transport: str = "ws") -> dict:
         captured: dict = {}
 
-        def fake_popen(cmd, cwd=None, env=None, **kwargs):  # noqa: ARG001
+        def fake_popen(cmd, cwd=None, env=None, **kwargs):
             captured["env"] = env
             captured["cwd"] = cwd
             captured["cmd"] = cmd
+            captured["stderr"] = kwargs.get("stderr")
             return _FakeProc()
 
         monkeypatch.setattr("timbal.server.playground.shutil.which", lambda _: "/usr/bin/uv")
@@ -238,3 +241,43 @@ class TestSpawnLoadsLaunchDotenv:
             "--extra",
             "voice-livekit",
         ]
+        assert cmd[cmd.index("python") : cmd.index("python") + 3] == ["python", "-u", "-m"]
+        assert captured["env"]["PYTHONUNBUFFERED"] == "1"
+        assert captured["stderr"] is subprocess.STDOUT
+
+
+def test_reader_streams_redacted_events_and_keeps_errors(capsys) -> None:
+    class _Proc:
+        stdout = iter(
+            [
+                "voice_livekit_joined url=wss://secret.example token=eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoicGcifQ.sig\n",
+                "Traceback (most recent call last):\n",
+                "RuntimeError: boom\n",
+                "turn_interruption_truncation heard_chars=12 generated_chars=80\n",
+                "dg_flux_session_started\n",
+            ]
+        )
+
+    ChildServer()._reader(_Proc())  # type: ignore[arg-type]
+    err = capsys.readouterr().err
+    assert "voice_livekit_joined" in err
+    assert "turn_interruption_truncation" in err
+    assert "dg_flux_session_started" in err
+    assert "RuntimeError: boom" in err
+    assert "secret.example" not in err
+    assert "eyJ" not in err
+
+
+def test_python_u_emits_a_line_before_the_process_exits() -> None:
+    proc = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-u", "-c", "import time; print('dg_flux_session_started'); time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        line = proc.stdout.readline() if proc.stdout is not None else ""
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+    assert "dg_flux_session_started" in line

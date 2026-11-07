@@ -336,6 +336,23 @@ def test_join_event_and_redaction_hide_the_dial() -> None:
     )
 
 
+def test_thinking_datetime_tool_is_only_for_a_date_question() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "voice_playground_agents",
+        ROOT / "examples" / "voice_playground_agents.py",
+    )
+    assert spec and spec.loader
+    agents = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(agents)
+    prompt = agents.thinking.system_prompt
+    assert "only when the caller asked for the date or the time" in prompt
+    assert "Do not call it for any other question." in prompt
+    assert [tool.name for tool in agents.thinking.tools] == ["get_datetime"]
+    assert agents.thinking.voice_config["filler"]["model"] == "groq/qwen/qwen3.8-27b"
+    if not os.environ.get("TIMBAL_VOICE_DEMO_MODEL"):
+        assert agents.thinking.model == "groq/qwen/qwen3.8-27b"
+
+
 def test_room_list_grant_is_not_a_join_token() -> None:
     from timbal.server.playground import mint_livekit_jwt
 
