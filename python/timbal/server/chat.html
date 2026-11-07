@@ -511,6 +511,19 @@
       case "message_settled":
         settleMessage(d);
         break;
+      case "restored": {
+        // A new server process took the session over; the turn the old one ran never sent its end.
+        Object.values(S.toolByCall).forEach((t) => {
+          if (t.state.classList.contains("run")) { t.state.className = "state bad"; t.state.textContent = "cut by restart"; }
+        });
+        S.busy = false; S.runId = null;
+        const how = { continued: " · the cut turn is being recovered", requeued: " · the cut turn's messages run again",
+          finished: "", notified: " · the next turn is told about the cut one", dropped: "", resumed_again: " · the answers are sent again",
+          reparked: " · answer the pending approval again" }[d.recovered] || "";
+        note(`↻ server restarted: session restored${how}`, "warn");
+        refreshState();
+        break;
+      }
       case "turn_started": {
         S.turnNo += 1;
         const trigger = d.trigger || {};
@@ -765,7 +778,7 @@
       if (d.type === "SESSION") onSession(d);
       else onRunEvent(d);
     };
-    es.addEventListener("gapped", () => note("the event log dropped older entries", "warn"));
+    es.addEventListener("gapped", () => note("some events are no longer in the log (dropped, or the server restarted)", "warn"));
     refreshState();
     setStatus();
   }

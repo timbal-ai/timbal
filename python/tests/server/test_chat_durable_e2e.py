@@ -75,11 +75,13 @@ def until(predicate, timeout=20.0, what="condition"):
 
 
 class Server:
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, *, workers: int = 1, agent_file: str = "agent.py"):
         self.workdir = workdir
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.proc: subprocess.Popen | None = None
+        self.workers = workers
+        self.agent_file = agent_file
 
     def start(self):
         env = {**os.environ, "E2E_DIR": str(self.workdir), "TIMBAL_LOG_LEVEL": "WARNING"}
@@ -91,9 +93,11 @@ class Server:
                 "-m",
                 "timbal.server",
                 "--import_spec",
-                f"{self.workdir / 'agent.py'}::agent",
+                f"{self.workdir / self.agent_file}::agent",
                 "--port",
                 str(self.port),
+                "--workers",
+                str(self.workers),
             ],
             cwd=self.workdir,
             env=env,
@@ -190,5 +194,112 @@ def test_a_graceful_restart_keeps_queued_messages(workdir):
         ]
         assert any(s["event_id"] == queued and s["state"] == "delivered" for s in settled)
         assert (workdir / "charges.log").read_text().count("charged") == 1
+    finally:
+        server.stop()
+
+
+def test_two_workers_on_one_file_never_run_a_session_twice(workdir):
+    """A request that reaches the worker not serving the session gets a 409 (another live process holds it),
+    never a second copy of the session: one turn per message, whichever worker took it."""
+    server = Server(workdir, workers=2).start()
+    try:
+        session_id = httpx.post(f"{server.url}/chat/sessions", json={}).json()["session_id"]
+        codes = []
+        for i in range(12):
+            codes.append(
+                httpx.post(f"{server.url}/chat/sessions/{session_id}/messages", json={"text": f"m{i}"}).status_code
+            )
+        assert set(codes) <= {202, 409} and 202 in codes
+        accepted = codes.count(202)
+
+        def settled():
+            for _ in range(10):
+                response = httpx.get(f"{server.url}/chat/sessions/{session_id}")
+                if response.status_code == 200:
+                    state = response.json()
+                    return state if state["turns"] == accepted and not state["busy"] and not state["pending"] else None
+            return None
+
+        state = until(settled, what="every accepted message to run once")
+        assert state["turns"] == accepted
+    finally:
+        server.stop()
+
+
+REAL_AGENT = textwrap.dedent(
+    """
+    import asyncio, json, os
+    from pathlib import Path
+    from timbal import Agent, Tool
+    from timbal.state.tracing.providers import SqliteTracingProvider
+
+    DIR = Path(os.environ["E2E_DIR"])
+
+    async def charge(amount_eur: int) -> str:
+        \"\"\"Charge the customer's card.\"\"\"
+        with open(DIR / "charges.log", "a") as f:
+            f.write(json.dumps({"amount_eur": amount_eur}) + "\\n")
+        while (DIR / "hang").exists():
+            await asyncio.sleep(0.05)
+        return f"Charged {amount_eur} EUR."
+
+    def list_charges() -> str:
+        \"\"\"List the charges made to the customer's card so far.\"\"\"
+        (DIR / "checked").touch()
+        path = DIR / "charges.log"
+        return path.read_text() if path.exists() else "No charges."
+
+    agent = Agent(
+        name="agent",
+        model=os.environ["E2E_MODEL"],
+        max_tokens=2048,
+        system_prompt="You are a billing assistant. Charge the customer when they ask you to. Be brief.",
+        tools=[Tool(name="charge", handler=charge), Tool(name="list_charges", handler=list_charges, read_only=True)],
+        tracing_provider=SqliteTracingProvider.configured(_path=DIR / "timbal.db"),
+    )
+    """
+)
+
+
+def turn_texts(server, session_id):
+    log = httpx.get(f"{server.url}/chat/sessions/{session_id}/log", params={"after": 0, "limit": 2000}).json()
+    texts = []
+    for entry in log["events"]:
+        data = entry["data"]
+        if isinstance(data, dict) and data.get("type") == "OUTPUT" and data.get("path") == "agent":
+            output = data.get("output") or {}
+            texts.append(" ".join(c.get("text", "") for c in output.get("content", []) if c.get("type") == "text"))
+    return texts
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("model", ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"])
+def test_a_real_model_recovers_a_charge_cut_by_kill_9(workdir, model, monkeypatch):
+    (workdir / "real_agent.py").write_text(REAL_AGENT)
+    monkeypatch.setenv("E2E_MODEL", model)
+    server = Server(workdir, agent_file="real_agent.py").start()
+    try:
+        session_id = httpx.post(f"{server.url}/chat/sessions", json={}).json()["session_id"]
+        (workdir / "hang").touch()
+        httpx.post(f"{server.url}/chat/sessions/{session_id}/messages", json={"text": "Please charge me 5 euros."})
+        until(lambda: (workdir / "charges.log").exists(), 60, "the model to call charge")
+        server.kill()
+    finally:
+        server.stop()
+    (workdir / "hang").unlink()
+
+    server.start()
+    try:
+        base = f"{server.url}/chat/sessions/{session_id}"
+        until(lambda: (s := httpx.get(base).json()) and s.get("turns") == 2 and not s["busy"], 90, "recovery")
+        recovery = turn_texts(server, session_id)[-1]
+        httpx.post(f"{base}/messages", json={"text": "Did my payment go through? Answer yes, no or not sure."})
+        until(lambda: (s := httpx.get(base).json()) and s.get("turns") == 3 and not s["busy"], 90, "the answer")
+        answer = turn_texts(server, session_id)[-1]
+        print(  # noqa: T201 - the transcript is what a reviewer reads
+            f"\n[{model}] checked charges: {(workdir / 'checked').exists()}\n  recovery: {recovery}\n  answer: {answer}"
+        )
+        assert (workdir / "charges.log").read_text().count("amount_eur") == 1  # never charged twice
+        assert recovery.strip() and answer.strip()
     finally:
         server.stop()
