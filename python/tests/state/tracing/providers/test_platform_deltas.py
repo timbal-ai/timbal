@@ -810,6 +810,25 @@ class TestTransientFailures:
         assert any(log["event"] == "platform_trace_retry_exhausted" for log in logs)
         assert list(PlatformTracingProvider._unsaved.values()) == [ctx]  # still owed: a shutdown flush reports it
 
+    async def test_a_run_buffered_uploads_hold_all_window_is_not_reported_as_given_up(self, monkeypatch):
+        from timbal.state.tracing import uploads
+
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
+        monkeypatch.setattr(PlatformTracingProvider, "_retry_window_s", 0.05)
+        monkeypatch.setattr(uploads, "tracked", lambda _context: True)
+        server = FakePlatform(advertise=False)
+        server.fail_next = 1
+        _, provider = tool_loop(1)
+        ctx = self.context(provider)
+        with patch("timbal.platform.utils._request", server.request), capture_logs() as logs:
+            with pytest.raises(PlatformError):
+                await provider._store(ctx)
+            await self.until(lambda: not PlatformTracingProvider._retries)
+        events = [log["event"] for log in logs]
+        assert "platform_trace_retry_handed_to_uploads" in events
+        assert "platform_trace_retry_exhausted" not in events
+        assert ctx.id not in server.runs  # every turn was left to the uploads
+
     async def test_a_rejected_or_mid_run_save_is_not_resent_in_the_background(self):
         async def forbidden(*_args, **_kwargs):
             raise PlatformError("forbidden", status_code=403)

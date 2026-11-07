@@ -666,7 +666,10 @@ class PlatformTracingProvider(TracingProvider):
                         return
                     logger.warning("platform_trace_retry_failed", run_id=context.id, attempt=attempt + 1, error=str(e))
             context = PlatformTracingProvider._unsaved.get(key)
-            if context is not None:
+            if context is not None and uploads.tracked(context):
+                # Every turn was skipped for buffered uploads: they own the run, nothing was given up.
+                logger.info("platform_trace_retry_handed_to_uploads", run_id=context.id)
+            elif context is not None:
                 logger.error("platform_trace_retry_exhausted", run_id=context.id, window_s=cls._retry_window_s)
         finally:
             if PlatformTracingProvider._retries.get(key) is asyncio.current_task():
