@@ -29,6 +29,22 @@ production live in that gap.
 | `cli.py` | runner, reporting, regression gate |
 | `bench_cpu.py` | concurrency ceiling: sessions per event loop / per CPU (no API keys) |
 | `bench_ttft.py` | model first-token p50/p95 for a fixed ~7k-token voice prompt (needs provider keys) |
+| `accept_duplex.py` | opt-in Flux + `openai/gpt-5.4-mini` + ElevenLabs duplex gate (real LLM, not `TestModel`) |
+
+## Duplex acceptance
+
+`accept_duplex.py` is a release gate, not a benchmark row. It paces cached caller
+PCM into a live `VoiceSession` (Deepgram Flux, `openai/gpt-5.4-mini`, ElevenLabs)
+and checks the agent events. `harness.py` still uses `TestModel`. No
+microphone. PCM energy is recorded and is not a transcript. The script does not listen.
+
+Off unless `TIMBAL_VOICE_ACCEPTANCE=1`. A set flag with a missing
+`OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, or `ELEVENLABS_API_KEY` fails and names
+the key. The default pytest run skips it (`-m not integration`).
+
+```bash
+TIMBAL_VOICE_ACCEPTANCE=1 uv run python benchmarks/voice/accept_duplex.py
+```
 
 ## First-token benchmark
 
