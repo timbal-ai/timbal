@@ -463,6 +463,20 @@ class ChatSession:
         self._ensure_worker()
         return wake.id
 
+    def message_task(self, task_id: str, text: str) -> SessionEvent:
+        """Send one of the session's running background agents a message from the user.
+
+        It reads it after its current step (:meth:`BackgroundTaskStore.message_task`
+        raises for an unknown, finished or non-agent task). Background tasks are
+        in-process: a durable session does not keep the message across a restart.
+        """
+        if self.closed:
+            raise RuntimeError("The chat session is closed.")
+        event = self._store.message_task(task_id, text, source="user")
+        self.last_activity = time.monotonic()
+        self._record("task_message", task_id=task_id, event_id=event.id, text=event.text)
+        return event
+
     def interrupt(self) -> bool:
         """Cut what the session is doing; queued messages then start the next turn.
 

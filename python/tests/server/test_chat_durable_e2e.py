@@ -205,9 +205,12 @@ def test_two_workers_on_one_file_never_run_a_session_twice(workdir):
     try:
         session_id = httpx.post(f"{server.url}/chat/sessions", json={}).json()["session_id"]
         codes = []
-        for i in range(12):
+        # The kernel picks the worker per connection: under load a run of posts can all reach the other one.
+        while len(codes) < 12 or (202 not in codes and len(codes) < 200):
             codes.append(
-                httpx.post(f"{server.url}/chat/sessions/{session_id}/messages", json={"text": f"m{i}"}).status_code
+                httpx.post(
+                    f"{server.url}/chat/sessions/{session_id}/messages", json={"text": f"m{len(codes)}"}
+                ).status_code
             )
         assert set(codes) <= {202, 409} and 202 in codes
         accepted = codes.count(202)

@@ -61,8 +61,10 @@ from ..state.background import (
     DEFAULT_BG_TASK_RETENTION_SECS,
     GET_BACKGROUND_TASK_DESCRIPTION,
     LIST_BACKGROUND_TASKS_DESCRIPTION,
+    MESSAGE_BACKGROUND_TASK_DESCRIPTION,
     READ_BACKGROUND_TRANSCRIPT_DESCRIPTION,
     current_background_store,
+    current_background_task_id,
     format_session_notice,
     format_user_message,
 )
@@ -583,7 +585,9 @@ class Agent(Runnable):
     messages sent with ``mode="steer"`` (``ChatSession.send``). A user message joins as a user
     message (input guardrails screen it, and it restores the ``max_iter`` budget); an event as a
     runtime notice. The turn does not end while one is waiting: it calls the model once more.
-    ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Root agents only."""
+    ``None`` (default): on for runs a ``ChatSession`` starts, off otherwise. Root agents only —
+    except that an agent running as a background task reads the messages sent to that task
+    (``message_background_task``) between its steps unless this is ``False``."""
     stream_idle_timeout: float | None = 300.0
     """Seconds a model stream may send nothing before the call is given up
     (:class:`timbal.errors.ModelStreamStalled`). Before the first chunk the attempt is
@@ -1427,17 +1431,46 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def _steers(self, run_context: Any, current_span: Any) -> bool:
         """Whether this turn takes ``lane="next"`` events between steps (see ``steering``)."""
         if current_span.parent_call_id is not None:
-            return False
+            return self._task_record(current_span) is not None
         if self.steering is not None:
             return self.steering
         return run_context._steering
+
+    @property
+    def _takes_task_messages(self) -> bool:
+        return self.steering is not False
+
+    def _task_record(self, current_span: Any) -> Any | None:
+        """The background task this call is the detached root of, when it reads messages sent to it."""
+        task_id = current_background_task_id()
+        if task_id is None:
+            return None
+        store = current_background_store()
+        record = store.get(task_id) if store is not None else None
+        if record is None or not record.steerable or record.call_id != current_span.call_id:
+            return None
+        return record
 
     def _take_steering(self, run_context: Any, current_span: Any) -> list[Any]:
         """The messages posted for the running turn (``lane="next"``), settled as delivered to it.
 
         A runtime notice for events, then one user message per message the user
-        sent (screened one by one, so blocking one keeps the others).
+        sent (screened one by one, so blocking one keeps the others). A
+        background task takes the messages sent to it instead, as one user
+        message: whoever sent them is who it works for.
         """
+        if current_span.parent_call_id is not None:
+            record = self._task_record(current_span)
+            sent = record.take_messages() if record is not None else []
+            if not sent:
+                return []
+            for message in sent:
+                message._settle("delivered", run_context.id)
+            current_span.metadata.setdefault("task_messages", []).extend(message.id for message in sent)
+            run_context.update_usage("background:messages_delivered", len(sent))
+            steered = format_user_message(sent, steered=True)
+            steered.metadata["sources"] = sorted({message.source for message in sent})
+            return [steered]
         if run_context._cut is not None:
             run_context._cut.clear()  # what is drained now answers the cut; a later 'now' cuts again
         store = current_background_store()
@@ -1858,6 +1891,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 ("list_background_tasks", LIST_BACKGROUND_TASKS_DESCRIPTION, self.list_background_tasks),
                 ("cancel_background_task", CANCEL_BACKGROUND_TASK_DESCRIPTION, self.cancel_background_task),
             ]
+            if store.has_steerable:
+                bg_tools.append(
+                    ("message_background_task", MESSAGE_BACKGROUND_TASK_DESCRIPTION, self.message_background_task)
+                )
             if self.background_transcript_tool:
                 bg_tools.append(
                     (
@@ -2602,7 +2639,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         steering = self._steers(run_context, current_span)
         # Set by ChatSession when a 'now' message arrives: cut the model's answer or the
         # interruptible tools in flight, then steer the message in (see _multiplex_tools).
-        cut: asyncio.Event | None = run_context._cut if steering else None
+        cut: asyncio.Event | None = run_context._cut if steering and current_span.parent_call_id is None else None
         # Set by _steer: whether it added messages, and whether the user wrote one of them.
         steered = steered_user = False
 

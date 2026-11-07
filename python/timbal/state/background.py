@@ -625,6 +625,8 @@ def _completion_notice_text(notifications: list[dict[str, Any]]) -> str:
         summary = note.get("summary")
         if summary:
             lines.append(f"summary: {summary}")
+        for unread in note.get("unread_messages") or ():
+            lines.append(f"finished before reading your message: {unread}")
         blocks.append("<background_task_completed>\n" + "\n".join(lines) + "\n</background_task_completed>")
 
     header = (
@@ -659,7 +661,9 @@ def format_user_message(events: Sequence[SessionEvent], *, steered: bool = False
 MAX_SESSION_EVENT_CHARS = 4_000
 
 SessionEventSource = Literal["app", "client", "user"]
-SessionEventState = Literal["pending", "delivered", "superseded"]
+SessionEventState = Literal["pending", "delivered", "superseded", "undelivered"]
+TaskMessageSource = Literal["parent", "app", "user"]
+"""Who sent a running background agent a message (:meth:`BackgroundTaskStore.message_task`)."""
 SessionEventLane = Literal["next", "later"]
 """When a session event reaches a turn. ``"later"``: at the start of the next one.
 ``"next"``: the running turn takes it after its current tool batch, when it steers
@@ -678,7 +682,8 @@ class SessionEvent:
     event into its memory (``run_id`` names that run once it has started), or
     ``"superseded"`` when a later event with the same ``key`` replaces it while
     still pending. Delivered means the model got it, not that the user saw or
-    heard anything.
+    heard anything. A message to a background task is ``"undelivered"`` when
+    the task finished before it read it.
 
     ``announce`` is the event's own policy (None: the receiving channel's
     default). ``task_id`` marks progress from a still-running background task
@@ -990,6 +995,22 @@ class BackgroundTask:
         self._timeout_handle: asyncio.TimerHandle | None = None
         self._stall_handle: asyncio.TimerHandle | None = None
         self._handler_aclose: Callable[..., Any] | None = None
+        # Set by the spawner: an agent takes messages between its steps (message_task),
+        # read by the frame whose span is ``call_id`` (not by agents nested inside it).
+        self.steerable = False
+        self.call_id: str | None = None
+        self._inbox: list[SessionEvent] = []
+
+    def take_messages(self) -> list[SessionEvent]:
+        """The messages sent to the task since its last step, oldest first."""
+        messages, self._inbox = self._inbox, []
+        return messages
+
+    def _drop_unread(self) -> list[SessionEvent]:
+        unread, self._inbox = self._inbox, []
+        for message in unread:
+            message._settle("undelivered")
+        return unread
 
     def clear_watchdogs(self) -> None:
         self.clear_timeout()
@@ -1154,13 +1175,16 @@ class BackgroundTask:
         return snapshot
 
     def listing(self) -> dict[str, Any]:
-        return {
+        listing = {
             "task_id": self.task_id,
             "name": self.name,
             "status": self.status_code(),
             "started_at": self.started_at,
             "title": self.title,
         }
+        if self.steerable:
+            listing["takes_messages"] = True
+        return listing
 
 
 class BackgroundTaskStore:
@@ -1196,6 +1220,7 @@ class BackgroundTaskStore:
         # Runs the session continued from before it had this store (no map entry leads here
         # from them): a turn chained onto one of them still joins the session while it is owned.
         self._joined_from: set[str] = set()
+        self._had_steerable = False
         # The loop the store's waiters run on; post_event from another thread hops onto it.
         try:
             self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
@@ -1220,6 +1245,13 @@ class BackgroundTaskStore:
 
     def __len__(self) -> int:
         return len(self._tasks)
+
+    @property
+    def has_steerable(self) -> bool:
+        """Whether the session ever ran a task that takes messages: sticky, so the parent's tools stay put."""
+        if not self._had_steerable:
+            self._had_steerable = any(record.steerable for record in self._tasks.values())
+        return self._had_steerable
 
     def __contains__(self, task_id: str) -> bool:
         return task_id in self._tasks
@@ -1372,11 +1404,12 @@ class BackgroundTaskStore:
 
     def _enqueue_completion(self, record: BackgroundTask) -> None:
         """Push a lean notice if this child just became terminal (once)."""
-        if record.task_id in self._completion_notified:
-            return
         # status_code() can report cancelled as soon as cancel is requested,
         # before the asyncio.Task has actually finished — wait for done.
         if not record.task.done():
+            return
+        unread = record._drop_unread()
+        if record.task_id in self._completion_notified:
             return
         status = record.status_code()
         if status not in _TERMINAL_STATUSES:
@@ -1400,6 +1433,8 @@ class BackgroundTaskStore:
             note["result"] = _preview_value(snap["result"])
         if record.announce is not None:
             note["announce"] = record.announce
+        if unread:
+            note["unread_messages"] = [_truncate(message.text, _COMPLETION_SUMMARY_CHARS) for message in unread]
         self._completion_inbox.append(note)
         self._supersede_progress(record.task_id)
 
@@ -1525,6 +1560,43 @@ class BackgroundTaskStore:
                 old._settle("superseded")
         self._events.append(event)
         self._wake_completion_waiter()
+
+    def message_task(self, task_id: str, text: str, *, source: TaskMessageSource = "app") -> SessionEvent:
+        """Send a running background agent a message: it reads it after its current step.
+
+        Returns its receipt (``delivered`` once the task read it, ``undelivered``
+        if it finished first; the completion notice then lists it). Raises
+        ``LookupError`` for an unknown task and ``ValueError`` for one that has
+        finished or is not an agent that takes messages. Safe to call from
+        another thread.
+        """
+        if source not in ("parent", "app", "user"):
+            raise ValueError(f"source must be 'parent', 'app' or 'user', got {source!r}")
+        text = text.strip() if isinstance(text, str) else ""
+        if not text:
+            raise ValueError("A message needs non-empty text.")
+        if len(text) > MAX_SESSION_EVENT_CHARS:
+            raise ValueError(f"A message to a task is limited to {MAX_SESSION_EVENT_CHARS} characters.")
+        record = self._tasks.get(task_id)
+        if record is None:
+            raise LookupError(f"No background task {task_id!r} in this session.")
+        if not record.steerable:
+            raise ValueError(f"Background task {task_id!r} is not an agent: it cannot take messages.")
+        if record.task.done() or record._cancel_requested:
+            raise ValueError(f"Background task {task_id!r} has finished ({record.status_code()}).")
+        message = SessionEvent(text, key=None, source=source, task_id=task_id)  # type: ignore[arg-type]
+        loop = self._loop
+        if loop is not None and not loop.is_closed() and _running_loop() is not loop:
+            loop.call_soon_threadsafe(self._deliver_to_task, record, message)
+        else:
+            self._deliver_to_task(record, message)
+        return message
+
+    def _deliver_to_task(self, record: BackgroundTask, message: SessionEvent) -> None:
+        if record.task.done():
+            message._settle("undelivered")
+            return
+        record._inbox.append(message)
 
     def pending_events(self) -> list[SessionEvent]:
         """Peek the events no turn has taken yet."""
@@ -1868,6 +1940,27 @@ def cancel_background_task(task_id: str) -> dict[str, Any]:
     return store.cancel(task_id)
 
 
+def message_background_task(task_id: str, message: str, *, source: TaskMessageSource = "parent") -> dict[str, Any]:
+    """Send a running background agent a message (:meth:`BackgroundTaskStore.message_task`), as a status dict."""
+    store = current_background_store()
+    if store is None:
+        return {"status": "not_found", "task_id": task_id}
+    try:
+        sent = store.message_task(task_id, message, source=source)
+    except LookupError as exc:
+        return {"status": "not_found", "task_id": task_id, "error": str(exc)}
+    except ValueError as exc:
+        record = store.get(task_id)
+        status = record.status_code() if record is not None else "not_found"
+        return {"status": status if status != "running" else "rejected", "task_id": task_id, "error": str(exc)}
+    return {
+        "status": "sent",
+        "task_id": task_id,
+        "message_id": sent.id,
+        "note": "It reads the message after its current step; its result answers it.",
+    }
+
+
 def read_background_transcript(task_id: str, after: int = 0) -> dict[str, Any]:
     """Raw events for a background task, from logical cursor ``after``.
 
@@ -2072,6 +2165,13 @@ CANCEL_BACKGROUND_TASK_DESCRIPTION = (
     "Cancel a running background tool by task_id (from a previous spawn result "
     "or list_background_tasks). Stops the child's in-flight work. Use when the "
     "user says to stop/cancel a builder or background task."
+)
+
+MESSAGE_BACKGROUND_TASK_DESCRIPTION = (
+    "Send a message to a running background agent by task_id: a correction, more "
+    "context or a change of plan, instead of cancelling and restarting it. It reads "
+    "the message after its current step and carries on with it; its result reflects "
+    "it. Only tasks listed with takes_messages accept messages; a finished task does not."
 )
 
 READ_BACKGROUND_TRANSCRIPT_DESCRIPTION = (
