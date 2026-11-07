@@ -319,6 +319,7 @@ CLIENT_SETTABLE_VOICE_FIELDS = frozenset({
     "tts_model",
     "voice",
     "language",
+    "reply_language",
     "sample_rate",
     "encoding",
     "stt_extra",
@@ -1300,6 +1301,8 @@ def build_voice_session(
         session_kwargs["client_events"] = defaults.events.client_notify
         session_kwargs["on_busy"] = defaults.events.on_busy
     session_kwargs["speculative_generation"] = merged.speculative_generation
+    if merged.reply_language is not None:
+        session_kwargs["reply_language"] = merged.reply_language
 
     # Call recording is read from *server* config only — env (per session,
     # CRIU-safe) under ``runnable.voice_config["recording"]`` (user keys win).

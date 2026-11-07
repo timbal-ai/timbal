@@ -108,7 +108,13 @@ from .events import (
     VoiceSessionEvent,
     VoiceUsageEvent,
 )
-from .language import normalize_language_tag, reply_language_instruction, with_reply_language
+from .language import (
+    normalize_language_tag,
+    parse_reply_language,
+    reply_language_instruction,
+    resolve_reply_language,
+    with_reply_language,
+)
 from .metrics import TurnMetrics, TurnMetricsEvent
 from .playback import BufferedPlaybackTracker, PlaybackTracker, map_played_bytes_to_text
 from .providers import (
@@ -379,6 +385,7 @@ _HANGUP_GOODBYE_EXACT = frozenset(
         "okay bye",
         "alright bye",
         "vale adios",
+        "adeu",
     }
 )
 # Longest first so "good bye" wins over "bye".
@@ -391,6 +398,7 @@ _HANGUP_GOODBYE_TAILS = (
     "see you",
     "see ya",
     "adios",
+    "adeu",
     "chao",
     "chau",
     "bye",
@@ -418,6 +426,10 @@ _HANGUP_ACKS = frozenset(
         "vale",
         "claro",
         "si",
+        "d'acord",
+        "dacord",
+        "entesos",
+        "molt be",
         "aja",
         "mm",
         "mhm",
@@ -551,6 +563,27 @@ def _hangup_farewell_phrase(language: str | None) -> str:
     return _HANGUP_FAREWELL_BY_LANGUAGE.get(language_key(language), "Goodbye.")
 
 
+def _unheard_suffix(full: str, heard: str) -> str:
+    """The generated reply the playhead did not reach. Empty when nothing remains."""
+    full_text = (full or "").strip()
+    heard_text = (heard or "").strip()
+    if not full_text:
+        return ""
+    if not heard_text:
+        return full_text
+    if full_text.startswith(heard_text):
+        return full_text[len(heard_text) :].strip()
+    return ""
+
+
+def _false_interrupt_followup(text: str) -> bool:
+    """An empty commit or a pure acknowledgement is not a new request."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    return _is_pure_backchannel(stripped)
+
+
 def _pending_tts_after_scheduled(scheduled: str, final_assistant: str) -> str:
     """Substring of ``final_assistant`` not yet passed to TTS this turn.
 
@@ -649,6 +682,7 @@ class VoiceSession:
         client_events: bool = False,
         on_busy: OnBusy = "reject",
         speculative_generation: SpeculativeGeneration | bool | None = None,
+        reply_language: str | None = None,
     ):
         self.agent = agent
         self.stt = stt
@@ -781,6 +815,12 @@ class VoiceSession:
         # Flux EagerEndOfTurn confidence required to start a turn early.
         # None → :data:`timbal.voice.predictive_eou.FLUX_COMPLETE` (0.5).
         self.eager_eot_threshold = eager_eot_threshold
+        # Unset keeps the reply pin on ``audio_input.language``. ``"follow"``
+        # or a tag is explicit and does not move the STT hint.
+        self.reply_language = parse_reply_language(reply_language)
+        self._unheard_tail = ""
+        self._continuation_note = ""
+        self._arm_flux_eager_query()
         self._eou_predictor: SpeechEouPredictor | None = None
         # Text of an EagerEndOfTurn turn that EndOfTurn has not confirmed.
         self._eager_unconfirmed: str | None = None
@@ -1462,8 +1502,7 @@ class VoiceSession:
                 # The goodbye started after the window opened. Quiet time
                 # counts from when it finishes, not from the tool call.
                 deadline = time.monotonic() + grace
-                if deadline > give_up:
-                    deadline = give_up
+                deadline = min(deadline, give_up)
             await asyncio.sleep(0.05)
         if self._closed or self._caller_retracted_since(baseline):
             if not self._closed:
@@ -1756,8 +1795,51 @@ class VoiceSession:
         except Exception as e:  # noqa: BLE001 — a language change must not drop the call
             logger.warning("voice_stt_language_update_failed", language=tag, error=str(e))
             return False
-        logger.info("voice_language_set", language=tag, stt_live=applied)
+        logger.info("voice_language_set", language=tag, stt_live=applied, reply_language=self.reply_language)
         return applied
+
+    async def _resume_unheard_tail(self, tail: str) -> None:
+        """Speak the cut-off remainder. Does not call the model and does not repeat the heard start."""
+        text = (tail or "").strip()
+        self._unheard_tail = ""
+        self._continuation_note = ""
+        if not text or self._closed:
+            return
+        logger.info("unheard_tail_resumed", chars=len(text))
+        await self._emit(AgentTextDelta(text=text))
+        await self._speak(text)
+        self._transcript.append(TranscriptEntry(role="assistant", text=text))
+        await self._emit(AgentTextDone(text=text))
+
+    def effective_reply_language(self) -> str | None:
+        """Tag the reply instruction uses. ``set_language`` does not move this when ``reply_language`` is set."""
+        return resolve_reply_language(self.reply_language, self.audio_input.language)
+
+    def _arm_flux_eager_query(self) -> None:
+        """Put ``eager_eot_threshold`` on a Flux socket when speculation or prediction needs it.
+
+        The voice server already does this before constructing the session.
+        A ``VoiceSession`` built directly was leaving speculation enabled and
+        the query param unset, so Flux never emitted ``EagerEndOfTurn``.
+        An explicit ``stt_extra`` value is left alone.
+        """
+        if not self.speculative_generation.enabled and not self._predict_during_speech:
+            return
+        from .deepgram import DeepgramFluxSTT
+
+        if not isinstance(self.stt, DeepgramFluxSTT):
+            return
+        extra = dict(self.audio_input.extra or {})
+        if extra.get("eager_eot_threshold") not in (None, ""):
+            return
+        from .predictive_eou import flux_eager_threshold
+
+        threshold = flux_eager_threshold(extra)
+        extra["eager_eot_threshold"] = str(threshold)
+        self.audio_input = self.audio_input.model_copy(update={"extra": extra})
+        self._flux_eager_eot_threshold = threshold
+        if self.eager_eot_threshold is None:
+            self.eager_eot_threshold = threshold
 
     @property
     def closed(self) -> bool:
@@ -2763,6 +2845,8 @@ class VoiceSession:
                         await self._handle_provider_prediction(event)
                 elif event.type == "committed" and event.text.strip():
                     await self._handle_provider_commit(event.text.strip())
+                elif event.type == "committed":
+                    await self._resume_unheard_tail(self._unheard_tail)
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -3105,6 +3189,18 @@ class VoiceSession:
             # _closed checks and here; never start an agent turn after close().
             logger.debug("stt_turn_dropped_session_closed", text_preview=final_text[:80])
             return
+        self._continuation_note = ""
+        tail = (self._unheard_tail or "").strip()
+        if tail and _false_interrupt_followup(final_text):
+            self._unheard_tail = ""
+            await self._resume_unheard_tail(tail)
+            return
+        if tail:
+            self._continuation_note = (
+                "The previous reply was cut off. The caller heard only its start. "
+                "Do not repeat that start. If it still applies, continue with only this unheard remainder: " + tail
+            )
+            self._unheard_tail = ""
         await self._sync_entity_patience("")
         self._turn_vad_endpointed = vad_endpointed
         self._turn_predictive_endpoint = predictive_endpoint
@@ -5636,7 +5732,7 @@ class VoiceSession:
             )
         out = await self._filler_agent(
             prompt=prompt,
-            system_prompt=with_reply_language(self.filler.system_prompt, self.audio_input.language),
+            system_prompt=with_reply_language(self.filler.system_prompt, self.effective_reply_language()),
         ).collect()
         if out.status.code != "success" or out.output is None:
             logger.debug("filler_generation_failed", status=out.status.code, error=out.error)
@@ -6001,7 +6097,7 @@ class VoiceSession:
         if not instructions:
             return None
         parts = [p for p in (await self._agent_system_prompt(), DEFAULT_USER_IDLE_SYSTEM_PROMPT, instructions) if p]
-        idle_prompt = with_reply_language("\n\n".join(parts), self.audio_input.language)
+        idle_prompt = with_reply_language("\n\n".join(parts), self.effective_reply_language())
         if self._idle_agent is None:
             self._idle_agent = Agent(
                 name="voice_user_idle",
@@ -6234,7 +6330,8 @@ class VoiceSession:
             call_context=self.call_context,
             now=now,
             greeting_note=note,
-            reply_language=reply_language_instruction(self.audio_input.language),
+            continuation_note=self._continuation_note or None,
+            reply_language=reply_language_instruction(self.effective_reply_language()),
         )
 
     async def _generate_greeting(self) -> str | None:
@@ -6257,8 +6354,9 @@ class VoiceSession:
         parts = [p for p in (await self._agent_system_prompt(), DEFAULT_GREETING_SYSTEM_PROMPT, instructions) if p]
         # No user utterance yet, so the unset "match the latest message" policy
         # does not apply. A configured language still pins the opener.
-        if self.audio_input.language:
-            parts.append(reply_language_instruction(self.audio_input.language))
+        reply_tag = self.effective_reply_language()
+        if reply_tag:
+            parts.append(reply_language_instruction(reply_tag))
         # Kept on the session (like ``_filler_agent``) so the assembled prompt is
         # readable after the fact — it is the whole configuration surface of a
         # generated opener, and it runs exactly once per call.
@@ -6839,6 +6937,7 @@ class VoiceSession:
             ):
                 root.output = heard_reply
             rewritten = True
+        self._unheard_tail = _unheard_suffix(self._turn_assistant_text, heard_text)
         return rewritten
 
     @staticmethod

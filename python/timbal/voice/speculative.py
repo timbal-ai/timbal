@@ -57,6 +57,7 @@ __all__ = [
     "AudioHold",
     "SpeculativeAttempt",
     "SpeculativeGate",
+    "documented_speculative_preset",
     "install_speculative_gate",
     "reset_speculative_gate",
     "transcripts_equivalent",
@@ -175,3 +176,21 @@ class SpeculativeAttempt:
     prior_context: Any
     prior_head: str | None = None
     settled: bool = False
+
+
+def documented_speculative_preset(model: str):
+    """Opt-in preset from measured voice runs. Not applied unless you pass it.
+
+    ``openai/`` matches the Flux ship block in ``benchmarks/voice/REPORT-242.md``
+    (enabled, preemptive TTS). That table is a small sample, not a percentile
+    tail. ``groq/`` stays off: the same report's ``groq/openai/gpt-oss-20b``
+    silence p90 went from 3603.2 ms to 4935.1 ms at n=3. Anthropic and every
+    other provider have no voice latency row here, so they stay off too.
+    ``VoiceConfig`` still defaults to off.
+    """
+    from .config import SpeculativeGeneration
+
+    key = (model or "").strip().lower()
+    if key.startswith("openai/"):
+        return SpeculativeGeneration(enabled=True, preemptive_tts=True)
+    return SpeculativeGeneration(enabled=False)

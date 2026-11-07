@@ -530,7 +530,7 @@ def _looks_like_fresh_hold_utterance(text: str) -> bool:
 _CORRECTION_MARKERS = frozenset(
     {"sorry", "no wait", "oh wait", "wait", "actually", "i mean", "scratch that", "my bad", "hold on"}
 )
-_TRAILING_MARKER_RE = re.compile(r"^(?P<head>.*[.!?])\s*(?P<tail>[^.!?]+[.!?]?)$", re.S)
+_TRAILING_MARKER_RE = re.compile(r"^(?P<head>.*[.!?])\s*(?P<tail>[^.!?]+[.!?]?)$", re.DOTALL)
 
 
 def _ends_with_correction_marker(text: str) -> bool:
@@ -610,6 +610,10 @@ _BACKCHANNEL_WORDS = frozenset(
         "aja",
         "claro",
         "si",
+        "d'acord",
+        "dacord",
+        "entesos",
+        "molt be",
     }
 )
 _BACKCHANNEL_PHRASES = frozenset(

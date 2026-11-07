@@ -132,6 +132,8 @@ With `speculative_generation` on Flux, the server sets `eager_eot_threshold` for
 
 Tool calls wait with the audio. The model may choose a function during the pause, but the handler does not run until the turn is confirmed. A held call still emits its start event. If the attempt is dropped, that call ends cancelled without running the handler, its pre-hook, or any approval question. `defer_until_eot=True` marks a tool that books, charges, sends, or hangs up. Every tool is held, flagged or not. An MCP tool annotated destructive still gets that flag, whether or not `approval` gates it. See [Using tools](/voice/tools).
 
+`documented_speculative_preset(model)` returns that ship block for an `openai/` model and leaves every other provider off, including `groq/` and `anthropic/`. It does not change the default. The Groq row in `benchmarks/voice/REPORT-242.md` is why: `groq/openai/gpt-oss-20b` silence p90 went from 3603.2 ms to 4935.1 ms at n=3. Those are not percentiles. A `VoiceSession` built without the server now sets Flux `eager_eot_threshold` when speculation or `predict_during_speech` is on and `stt_extra` did not already set it. Without that query param Flux never emits `EagerEndOfTurn`, and the speculative counters stay at zero.
+
 Each turn's metrics carry `speculative`, plus the call's `speculative_generations_started` and `speculative_generations_discarded` counts. The same totals are usage keys `speculative_generations:started` and `speculative_generations:discarded`. The setting is server-side. A client hello cannot turn it on.
 
 ## Entity and spelling patience

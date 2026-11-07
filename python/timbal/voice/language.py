@@ -95,6 +95,41 @@ def normalize_language_tag(code: str | None) -> str | None:
     return tag
 
 
+def parse_reply_language(value: str | None) -> str | None:
+    """``None`` keeps today's rule. ``"follow"`` or a BCP-47 tag is explicit.
+
+    Empty is ``None``. Anything else that is not ``follow`` or a language tag
+    raises ``ValueError`` so a typo does not silently pin English.
+    """
+    if value is None:
+        return None
+    token = str(value).strip()
+    if not token:
+        return None
+    if token.lower() == "follow":
+        return "follow"
+    tag = normalize_language_tag(token)
+    if tag is None:
+        raise ValueError(f"reply_language must be 'follow' or a BCP-47 tag, got {value!r}")
+    return tag
+
+
+def resolve_reply_language(reply_language: str | None, stt_language: str | None) -> str | None:
+    """Tag for the reply instruction. Does not change the STT hint.
+
+    Unset ``reply_language`` uses ``stt_language``, which is what
+    ``VoiceConfig.language`` has always done. ``"follow"`` uses the latest
+    substantive message even when ``stt_language`` is set. A tag pins the
+    reply to that tag alone.
+    """
+    mode = parse_reply_language(reply_language)
+    if mode is None:
+        return normalize_language_tag(stt_language)
+    if mode == "follow":
+        return None
+    return mode
+
+
 def reply_language_instruction(language: str | None) -> str:
     """The reply-language paragraph for one voice turn.
 
