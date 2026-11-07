@@ -88,20 +88,23 @@ Check without opening the playground:
 uv run --frozen python examples/voice_support_demo_livekit.py --check
 ```
 
-A ready check prints `ready` and lines such as `livekit_package=ok`, `openai=ok`, `deepgram=ok`, `elevenlabs=ok`, `list_rooms=ok`, and `worker_join=voice_livekit_joined`. It does not print a token or the SFU URL. `list_rooms` is a read. The join creates one empty room named `pg-…`, connects the agent, then deletes that room. It does not publish a microphone, so Flux and ElevenLabs are not opened by the check, and it does not change any other room, dispatch rule, or SIP trunk.
+A passing check prints `checks=ok`. It does not print `ready`, a token, or the SFU URL. `list_rooms` is a read. The join creates one empty room named `pg-` plus 12 hex characters, connects the agent, then deletes that room with a `roomCreate` grant. `roomAdmin` is not that permission: LiveKit answers it with HTTP 401. A 404 means the room is already gone. The check does not publish a microphone, so Flux and ElevenLabs are not opened by it, and it does not change any other room, dispatch rule, or SIP trunk. If the delete line is not `delete_room=ok`, the command stops and does not print `checks=ok`.
 
-Then the same command without `--check` serves the playground at `http://127.0.0.1:7777/`.
+Then the same command without `--check` prints:
 
-On that page:
+```text
+playground=http://localhost:7777/?transport=livekit
+```
 
-- **Run against:** Local server
-- **Agent:** `examples/voice_support_demo.py::agent` (already filled)
-- **Port:** empty
-- **Transport:** LiveKit (SFU)
-- Pipeline controls, including the voice id: **Server default**
-- Press **Start**
+Open that URL. The query selects **LiveKit (SFU)** before the browser's saved choice. A saved WebRTC choice is why a tab opened at `http://localhost:7777/` can show WebRTC while this command is healthy. Close that tab. Do not change the dropdown by hand. Pipeline controls, including the voice id, stay on **Server default**. Press **Start**.
 
-Start mints a new room and returns the dial to the page. The launcher state line should show the spawned server running. In the terminal, `voice_livekit_joined` means the worker is in the room. `voice_livekit_session_ready` means the caller microphone was subscribed and the voice session was built. The joined line contains the SFU URL; do not paste that line.
+If port 7777 is already the playground, the command does not start a second one and does not treat HTTP 200 as the browser state. It prints `browser_transport=not_observable` and `child_transport=` whatever the last spawn was. The open tab is still a separate page. Use the printed URL.
+
+The child process cwd is `examples/` because the agent file lives there. `uv` walks up to this repository. Its import of `timbal` from this checkout is the source. The version string on the page is package metadata from the last install. It does not, by itself, mean the source is old.
+
+The child's stdout is a pipe into the playground, not a file. This command's playground also prints each redacted line on its terminal. `voice_livekit_joined` means the worker is in the room. `voice_livekit_session_ready` means the browser microphone was subscribed and the voice session was built. `dg_flux_session_started` means Flux accepted the stream. A launcher started before this commit only keeps those lines in memory (`child_logs=launcher_memory`); they are not in the terminal and not in a `.log`. The joined line's URL is redacted. Do not paste an unredacted log.
+
+`Session ended` / `Click Start for a new session` is the page after Stop. It is not a server log, and it does not say whether Flux started. WebRTC is a different transport: its server line is `voice_rtc_connected`, and that path is not this demo. LiveKit does not fall through to WebRTC or WebSocket when the URL selected it.
 
 `voice_livekit_missing_extra` means the sync command above was not the interpreter this process is using.
 
@@ -137,4 +140,4 @@ The filler stays "Un momento." because its language follows the Spanish transcri
 
 ## What this machine proved
 
-The unit tests cover the redacted report, file-over-shell keys, the room-list grant, and a playground spawn whose JSON contains a URL and a token. They do not contact a LiveKit project. A cloud `--check` without `TIMBAL_LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` printed `openai=ok model=listed`, `deepgram=ok`, `elevenlabs=ok`, `livekit_package=ok`, then `blocked=config_package_or_provider`. It did not join a room. Your `--check` is the run that talks to your project.
+The unit tests cover the redacted report, file-over-shell keys, the room-list grant, a delete that uses `roomCreate` (and the HTTP 401 for `roomAdmin`), a playground spawn whose JSON contains a URL and a token, and the page query that selects LiveKit ahead of a saved choice. They do not contact a LiveKit project. A cloud `--check` without the three LiveKit names printed the provider lines and `livekit_package=ok`, then `blocked=config_package_or_provider`. It did not join a room. Your `--check` is the run that talks to your project.

@@ -39,13 +39,32 @@ class _Body:
         return False
 
 
+_ROOM = "pg-0123456789ab"
+
+
+def _video_grant(req: urllib.request.Request) -> dict:
+    token = (req.get_header("Authorization") or "").split(" ", 1)[-1]
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    import base64
+
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+    video = claims.get("video")
+    return video if isinstance(video, dict) else {}
+
+
 def _ok_opener(req: urllib.request.Request, timeout: float = 0) -> _Body:  # noqa: ARG001
+    """LiveKit's real split: list needs roomList, delete needs roomCreate, else 401."""
     url = req.full_url
     if url.endswith("/twirp/livekit.RoomService/ListRooms"):
-        assert (req.get_header("Authorization") or "").startswith("Bearer ")
+        if _video_grant(req).get("roomList") is not True:
+            raise urllib.error.HTTPError(url, 401, "unauthenticated", hdrs=None, fp=None)
         return _Body(200, b'{"rooms":[{},{"name":"do-not-print"}]}')
     if url.endswith("/twirp/livekit.RoomService/DeleteRoom"):
-        assert b"pg-abc" in (req.data or b"")
+        # roomAdmin is not enough. EnsureCreatePermission requires roomCreate.
+        if _video_grant(req).get("roomCreate") is not True:
+            raise urllib.error.HTTPError(url, 401, "unauthenticated", hdrs=None, fp=None)
+        assert json.loads(req.data or b"{}")["room"] == _ROOM
         return _Body(200, b"{}")
     if url.startswith("https://api.openai.com/"):
         return _Body(200, b'{"data":[{"id":"gpt-5.4-mini"},{"id":"other-model"}]}')
@@ -86,11 +105,12 @@ def test_file_wins_and_report_is_redacted(_env, monkeypatch: pytest.MonkeyPatch)
         dotenv_present=True,
         opener=_ok_opener,
         importable=lambda: True,
-        join=lambda: (True, "worker_join=voice_livekit_joined room=pg-abc", "pg-abc"),
+        join=lambda: (True, f"worker_join=voice_livekit_joined room={_ROOM}", _ROOM),
     )
     text = "\n".join(lines)
     assert code == 0
-    assert "ready" in lines
+    assert "checks=ok" in lines
+    assert "ready" not in lines
     assert "OPENAI_API_KEY both_differ file_wins" in lines
     assert "TIMBAL_LIVEKIT_URL scheme=wss host=present" in lines
     assert "LIVEKIT_URL absent_ok" in lines
@@ -144,7 +164,125 @@ def test_missing_livekit_package_still_checks_providers(_env) -> None:
     assert "livekit_package=missing" in lines
     assert "openai=ok model=listed" in lines
     assert any(line.startswith("run: uv sync --frozen") for line in lines)
+    assert "checks=ok" not in lines
     assert "ready" not in lines
+
+
+def test_room_admin_grant_is_not_delete_permission() -> None:
+    from timbal.server.playground import mint_livekit_jwt
+
+    token = mint_livekit_jwt(
+        api_key="file-lk-key",
+        api_secret="file-lk-secret",
+        identity="timbal-demo-preflight",
+        room=_ROOM,
+        video={"room": _ROOM, "roomAdmin": True},
+    )
+
+    class _Req:
+        full_url = "https://sfu.example/twirp/livekit.RoomService/DeleteRoom"
+        data = json.dumps({"room": _ROOM}).encode()
+
+        def get_header(self, name: str) -> str:  # noqa: ARG002
+            return f"Bearer {token}"
+
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        _ok_opener(_Req())
+    assert raised.value.code == 401
+    assert "file-lk-secret" not in token
+
+
+def test_unrelated_room_is_not_sent(_env) -> None:
+    def opener(req: urllib.request.Request, timeout: float = 0) -> _Body:  # noqa: ARG001
+        raise AssertionError(req.full_url)
+
+    assert live.delete_room("wss://super-secret-host.example", "k", "s", "customer-room", opener) == (
+        "delete_room=refused"
+    )
+    assert "super-secret-host" not in "delete_room=refused"
+
+
+def test_cleanup_auth_failure_is_not_checks_ok(_env) -> None:
+    def opener(req: urllib.request.Request, timeout: float = 0) -> _Body:
+        if req.full_url.endswith("/DeleteRoom"):
+            raise urllib.error.HTTPError(req.full_url, 401, "unauthenticated", hdrs=None, fp=None)
+        return _ok_opener(req, timeout)
+
+    code, lines = live.run_checks(
+        file_env=_file_env(),
+        dotenv_present=True,
+        opener=opener,
+        importable=lambda: True,
+        join=lambda: (True, f"worker_join=voice_livekit_joined room={_ROOM}", _ROOM),
+    )
+    assert code == 1
+    assert "delete_room=auth status=401" in lines
+    assert "blocked=delete_room" in lines
+    assert "checks=ok" not in lines
+    assert "ready" not in lines
+
+
+def test_delete_404_is_already_gone(_env) -> None:
+    def opener(req: urllib.request.Request, timeout: float = 0) -> _Body:
+        if req.full_url.endswith("/DeleteRoom"):
+            assert _video_grant(req).get("roomCreate") is True
+            raise urllib.error.HTTPError(req.full_url, 404, "not found", hdrs=None, fp=None)
+        return _ok_opener(req, timeout)
+
+    code, lines = live.run_checks(
+        file_env=_file_env(),
+        dotenv_present=True,
+        opener=opener,
+        importable=lambda: True,
+        join=lambda: (True, f"worker_join=voice_livekit_joined room={_ROOM}", _ROOM),
+    )
+    assert code == 0
+    assert "delete_room=ok absent" in lines
+    assert "checks=ok" in lines
+
+
+def test_existing_launcher_is_not_a_browser_transport(_env) -> None:
+    status = {
+        "launcher": {"version": "0", "default_import_spec": "examples/voice_support_demo.py::agent"},
+        "child": {
+            "state": "running",
+            "transport": "webrtc",
+            "livekit": {"url": "wss://super-secret-host.example", "token": "eyJhbGciOiJIUzI1NiJ9.e30.sig"},
+            "logs": ["voice_rtc_connected"],
+        },
+    }
+    lines = live.describe_existing(status)
+    text = "\n".join(lines)
+    assert lines[0] == "playground=http://localhost:7777/?transport=livekit existing"
+    assert "browser_transport=not_observable" in lines
+    assert "child_transport=webrtc" in lines
+    assert "child_logs=launcher_memory" in lines
+    assert "super-secret-host" not in text
+    assert "eyJ" not in text
+    assert "voice_rtc_connected" not in text
+    assert "ready" not in lines
+
+
+def test_page_query_beats_saved_transport() -> None:
+    html = (ROOT / "python" / "timbal" / "server" / "voice.html").read_text(encoding="utf-8")
+    query_at = html.index("transportSelect.value = transportFromUrl || storedTransport || 'webrtc'")
+    fallback_at = html.index("transportSelect.value = 'ws'")
+    assert query_at < fallback_at
+    assert "localStorage.setItem(TRANSPORT_STORAGE_KEY, transportFromUrl)" in html
+
+
+def test_child_terminal_line_keeps_the_event_and_hides_the_url() -> None:
+    from timbal.server.playground import playground_page_url, redact_child_log
+
+    raw = (
+        '{"event": "voice_livekit_joined", "url": "wss://super-secret-host.example"} '
+        "eyJhbGciOiJIUzI1NiJ9.eyJyb29tIjoicGcifQ.sig"
+    )
+    text = redact_child_log(raw)
+    assert "voice_livekit_joined" in text
+    assert "super-secret-host" not in text
+    assert "eyJ" not in text
+    assert playground_page_url("127.0.0.1", 7777, "livekit") == "http://localhost:7777/?transport=livekit"
 
 
 def test_room_service_auth_is_not_a_join(_env) -> None:

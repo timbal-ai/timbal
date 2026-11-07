@@ -36,6 +36,7 @@ ENV_PATH = ROOT / ".env"
 IMPORT_SPEC = "examples/voice_support_demo.py::agent"
 PLAYGROUND_PORT = 7777
 JOIN_TIMEOUT_SECS = 45.0
+_OWNED_ROOM = re.compile(r"^pg-[0-9a-f]{12}$")
 HTTP_TIMEOUT_SECS = 10.0
 
 # Read by the playground launcher. LIVEKIT_URL is the alias, not required
@@ -224,15 +225,24 @@ def list_rooms(url: str, api_key: str, api_secret: str, opener: Any = urllib.req
 
 
 def delete_room(url: str, api_key: str, api_secret: str, room: str, opener: Any = urllib.request.urlopen) -> str:
-    """Delete only the preflight room this process created."""
+    """Delete only the ``pg-`` room this process created.
+
+    LiveKit's RoomService.DeleteRoom calls EnsureCreatePermission, which
+    requires ``video.roomCreate``. ``roomAdmin`` is a different grant and
+    comes back as Twirp Unauthenticated, HTTP 401, even when the same API
+    secret just listed rooms and joined. A 404 means the room is already
+    gone. Any other name is refused here and is not sent.
+    """
+    if _OWNED_ROOM.fullmatch(room) is None:
+        return "delete_room=refused"
     from timbal.server.playground import mint_livekit_jwt
 
     token = mint_livekit_jwt(
         api_key=api_key,
         api_secret=api_secret,
         identity="timbal-demo-preflight",
-        room=room,
-        video={"room": room, "roomAdmin": True},
+        room="",
+        video={"roomCreate": True},
     )
     kind, status, _raw = _request(
         http_origin(url) + "/twirp/livekit.RoomService/DeleteRoom",
@@ -242,6 +252,8 @@ def delete_room(url: str, api_key: str, api_secret: str, room: str, opener: Any 
     )
     if kind == "ok":
         return "delete_room=ok"
+    if kind == "http" and status == 404:
+        return "delete_room=ok absent"
     if kind == "auth":
         return f"delete_room=auth status={status}"
     if kind == "http":
@@ -453,12 +465,17 @@ def run_checks(
 
     ok, join_line, room = join()
     lines.append(join_line)
+    cleanup = ""
     if room:
-        lines.append(delete_room(url, chosen["LIVEKIT_API_KEY"], chosen["LIVEKIT_API_SECRET"], room, opener))
-    if not ok:
+        cleanup = delete_room(url, chosen["LIVEKIT_API_KEY"], chosen["LIVEKIT_API_SECRET"], room, opener)
+        lines.append(cleanup)
+    if not ok or not room:
         lines.append("blocked=worker_join")
         return 1, lines
-    lines.append("ready")
+    if not cleanup.startswith("delete_room=ok"):
+        lines.append("blocked=delete_room")
+        return 1, lines
+    lines.append("checks=ok")
     return 0, lines
 
 
@@ -472,16 +489,54 @@ def _port_free(port: int) -> bool:
     return True
 
 
-def launch_playground() -> None:
+def playground_url(port: int = PLAYGROUND_PORT) -> str:
+    """The browser reads ``transport`` before its saved WebRTC choice."""
+    from timbal.server.playground import playground_page_url
+
+    return playground_page_url("127.0.0.1", port, "livekit")
+
+
+def fetch_launcher_status(port: int, opener: Any = urllib.request.urlopen) -> dict[str, Any] | None:
+    """Launcher status, or None. The body can hold a dial token; callers must not print it."""
+    try:
+        with opener(urllib.request.Request(f"http://127.0.0.1:{port}/launcher/status"), timeout=2) as resp:
+            if int(getattr(resp, "status", 0)) != 200:
+                return None
+            data = json.loads(resp.read(2_000_000).decode())
+    except (OSError, json.JSONDecodeError, UnicodeError, urllib.error.URLError, TimeoutError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("launcher"), dict):
+        return data
+    return None
+
+
+def describe_existing(status: dict[str, Any], port: int = PLAYGROUND_PORT) -> list[str]:
+    """An HTTP 200 does not say which transport the open tab selected."""
+    child = status.get("child") if isinstance(status.get("child"), dict) else {}
+    transport = str(child.get("transport") or "") or "none"
+    return [
+        f"playground={playground_url(port)} existing",
+        "browser_transport=not_observable",
+        f"child_transport={transport}",
+        "child_logs=launcher_memory",
+    ]
+
+
+def launch_playground() -> int:
     uv = shutil.which("uv")
     if uv is None:
         print("uv=missing", file=sys.stderr)  # noqa: T201
-        raise SystemExit(1)
+        return 1
     port = PLAYGROUND_PORT
     if not _port_free(port):
+        status = fetch_launcher_status(port)
+        if status is not None:
+            for line in describe_existing(status, port):
+                print(line)  # noqa: T201
+            return 0
         print(f"playground_port={port} in_use", file=sys.stderr)  # noqa: T201
-        raise SystemExit(1)
-    print(f"playground=http://127.0.0.1:{port}/")  # noqa: T201
+        return 1
+    print(f"playground={playground_url(port)}")  # noqa: T201
     os.chdir(ROOT)
     os.execvpe(  # noqa: S606
         uv,
@@ -499,9 +554,12 @@ def launch_playground() -> None:
             str(port),
             "--import_spec",
             IMPORT_SPEC,
+            "--default-transport",
+            "livekit",
         ],
         os.environ,
     )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -512,8 +570,7 @@ def main(argv: list[str] | None = None) -> int:
         print(redact(line, secrets))  # noqa: T201
     if code != 0 or "--check" in args:
         return code
-    launch_playground()
-    return 0
+    return launch_playground()
 
 
 if __name__ == "__main__":

@@ -1513,13 +1513,19 @@ syncCallContext();
 const transportSelect = document.getElementById('transport-select');
 const TRANSPORT_STORAGE_KEY = 'timbal-voice-transport';
 const transportFromUrl = new URLSearchParams(location.search).get('transport');
-transportSelect.value = transportFromUrl || localStorage.getItem(TRANSPORT_STORAGE_KEY) || 'webrtc';
+const storedTransport = localStorage.getItem(TRANSPORT_STORAGE_KEY);
+transportSelect.value = transportFromUrl || storedTransport || 'webrtc';
 if (![...transportSelect.options].some((o) => o.value === transportSelect.value && !o.disabled)) {
   transportSelect.value = 'webrtc';
 }
+// The query beats a saved WebRTC choice. Remember it so a later reload of
+// this origin does not snap back. LiveKit never uses the WebRTC→WS fallback.
+if (transportFromUrl && transportSelect.value === transportFromUrl) {
+  localStorage.setItem(TRANSPORT_STORAGE_KEY, transportFromUrl);
+}
 // Only the *default* WebRTC silently falls back to WS when the server lacks
 // the voice extra (501) — an explicit user/URL choice surfaces the error.
-let transportExplicit = !!(transportFromUrl || localStorage.getItem(TRANSPORT_STORAGE_KEY));
+let transportExplicit = !!(transportFromUrl || storedTransport);
 function isRtcLikeTransport() {
   return transportSelect.value === 'webrtc' || transportSelect.value === 'livekit';
 }

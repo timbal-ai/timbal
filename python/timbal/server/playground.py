@@ -33,9 +33,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -51,6 +53,22 @@ _HTML_PATH = Path(__file__).parent / "voice.html"
 
 _LOG_LINES = 400
 _STOP_GRACE_SECS = 5.0
+_JWT_IN_LOG = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+_URL_IN_LOG = re.compile(r"wss?://\S+")
+
+
+def redact_child_log(line: str) -> str:
+    """Child stdout for the terminal. Event names stay; URLs and tokens do not."""
+    return _URL_IN_LOG.sub("[redacted-url]", _JWT_IN_LOG.sub("[redacted]", line))
+
+
+def playground_page_url(host: str, port: int, transport: str = "") -> str:
+    """Page URL. ``transport`` is the query the browser reads before its saved choice."""
+    shown = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
+    base = f"http://{shown}:{port}/"
+    if transport:
+        return f"{base}?transport={transport}"
+    return base
 
 
 def _unquote(value: str) -> str:
@@ -203,7 +221,11 @@ class ChildServer:
     def _reader(self, proc: subprocess.Popen) -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
-            self._logs.append(line.rstrip("\n"))
+            text = line.rstrip("\n")
+            self._logs.append(text)
+            # The pipe is the only copy of the child log. The terminal otherwise
+            # stays empty, which is not a missing STT session.
+            print(redact_child_log(text), file=sys.stderr, flush=True)  # noqa: T201
 
     def spawn(self, import_spec: str, port: int | None = None, transport: str = "ws") -> dict:
         spec = import_spec.strip()
@@ -477,12 +499,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Default import spec prefilled in the page's spawn field (path/to/agent.py::object).",
     )
     parser.add_argument("--no-open", action="store_true", help="Don't open the browser automatically.")
+    parser.add_argument(
+        "--default-transport",
+        default="",
+        choices=("", "ws", "webrtc", "livekit"),
+        help="Open the page with ?transport= so the browser selects it ahead of a saved choice.",
+    )
     args = parser.parse_args(argv)
 
     child = ChildServer()
     handler = _make_handler(child, args.import_spec)
     httpd = ThreadingHTTPServer((args.host, args.port), handler)
-    url = f"http://{'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host}:{args.port}/"
+    url = playground_page_url(args.host, args.port, args.default_transport)
     print(f"Voice playground at {url}")  # noqa: T201
     if not args.no_open:
         webbrowser.open(url)
