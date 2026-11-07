@@ -86,6 +86,25 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return min(hi, max(lo, value))
 
 
+def flux_language_hints(config: AudioInputConfig, model: str) -> list[str]:
+    """Hints for this Flux model.
+
+    ``languages`` is the explicit list and is an error on English-only Flux.
+    A single ``language`` on that model is omitted, which is the historical
+    connect behavior, because that model rejects ``language_hint``.
+    """
+    multi = str(model).endswith("-multi")
+    if config.languages:
+        if not multi:
+            raise ValueError(
+                "flux-general-en does not accept language hints. Use flux-general-multi, or leave stt_languages unset."
+            )
+        return list(config.languages)
+    if config.language and multi:
+        return [config.language]
+    return []
+
+
 def _encoding_param(config: AudioInputConfig) -> str:
     """Timbal speaks PCM16LE mono end-to-end; Deepgram calls that ``linear16``."""
     if config.encoding in ("pcm_s16le", "linear16", ""):
@@ -134,6 +153,7 @@ class _DeepgramSTTBase(SpeechToText):
         self.on_eager_end_of_turn: Any = None
         self.patient_thresholds_live = False
         self._patient_pending = False
+        self._patience_configure = False
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -300,6 +320,9 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
     def _build_uri(self, config: AudioInputConfig) -> str:
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", _DG_HOST))
+        if config.keyterms:
+            extra.pop("keyterm", None)
+            extra.pop("keyterms", None)
         # Ignore foreign model ids (e.g. env default scribe_v2_realtime left in
         # place when only TIMBAL_STT_PROVIDER was switched).
         model = config.model if is_flux_model(config.model) else DEFAULT_FLUX_MODEL
@@ -309,9 +332,11 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
             ("encoding", _encoding_param(config)),
             ("sample_rate", str(config.sample_rate)),
         ]
-        # Flux rejects `language`; multi accepts language_hint (repeatable).
-        if config.language and model.endswith("-multi"):
-            params.append(("language_hint", config.language))
+        # Flux rejects `language`. Multi accepts repeated language_hint.
+        for hint in flux_language_hints(config, model):
+            params.append(("language_hint", hint))
+        for term in config.keyterms:
+            params.append(("keyterm", term))
         # Default 5s leaves stranded Update partials hanging in the UI until
         # the session sweeper synthesizes a commit. Prefer Flux's own
         # EndOfTurn; keep this under the session stale window (2.5s).
@@ -337,6 +362,23 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
 
     async def commit(self) -> None:
         """No-op: Flux's turn machine owns endpointing (no force-commit API)."""
+
+    async def update_keyterms(self, keyterms: list[str]) -> bool:
+        """Replace the Flux vocabulary. The list is not merged with the old one.
+
+        Already transcribed audio is left as it was. An empty list clears the
+        terms. ``flux-general-en`` and ``flux-general-multi`` both accept this.
+        """
+        from .config import validate_keyterms
+
+        terms = validate_keyterms(keyterms)
+        config = self._input_config
+        if config is None or self._ws is None or self._stop.is_set():
+            return False
+        self._patience_configure = False
+        await self._send_json({"type": "Configure", "keyterms": terms})
+        self._input_config = config.model_copy(update={"keyterms": list(terms)})
+        return True
 
     async def update_language(self, language: str | None) -> bool:
         """Replace ``language_hints`` on the open Flux socket.
@@ -392,6 +434,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         if not thresholds:
             return
         self._patient_pending = patient
+        self._patience_configure = True
         await self._send_json({"type": "Configure", "thresholds": thresholds})
 
     async def _handle_message(self, msg: dict[str, Any]) -> None:
@@ -443,7 +486,8 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 await self._queue.put(TranscriptEvent(type="resumed", text=text, confidence=confidence))
             return
         if mt == "ConfigureSuccess":
-            self.patient_thresholds_live = self._patient_pending
+            if self._patience_configure:
+                self.patient_thresholds_live = self._patient_pending
             logger.info("dg_flux_configure_ok", patient=self.patient_thresholds_live)
             return
         if mt == "ConfigureFailure":
@@ -480,6 +524,10 @@ class DeepgramNovaSTT(_DeepgramSTTBase):
     def _build_uri(self, config: AudioInputConfig) -> str:
         extra = dict(config.extra)
         host = str(extra.pop("stt_host", _DG_HOST))
+        if config.keyterms:
+            extra.pop("keyterm", None)
+            extra.pop("keyterms", None)
+            extra.pop("keywords", None)
 
         model = config.model or ""
         if not model or is_flux_model(model) or model.startswith(("scribe", "eleven")):
@@ -499,7 +547,18 @@ class DeepgramNovaSTT(_DeepgramSTTBase):
         for k, v in extra.items():
             if v is not None and not k.startswith("_"):
                 params[k] = str(v).lower() if isinstance(v, bool) else str(v)
-        return f"wss://{host}/v1/listen?{urlencode(params)}"
+        pairs: list[tuple[str, str]] = []
+        for key, value in params.items():
+            if isinstance(value, (list, tuple)):
+                pairs.extend((key, str(item)) for item in value)
+            else:
+                pairs.append((key, str(value)))
+        chosen = model
+        if config.keyterms:
+            if not str(chosen).startswith("nova-3"):
+                raise ValueError("Nova-2 does not accept keyterms. Use nova-3.")
+            pairs.extend(("keyterm", term) for term in config.keyterms)
+        return f"wss://{host}/v1/listen?{urlencode(pairs)}"
 
     async def connect(self, config: AudioInputConfig) -> None:
         await super().connect(config)

@@ -151,6 +151,12 @@ class ElevenLabsRealtimeSTT(SpeechToText):
         }
         if config.language:
             params["language_code"] = config.language
+        if config.keyterms:
+            extra.pop("keyterms", None)
+            extra.pop("keyterm", None)
+            params["keyterms"] = list(config.keyterms)
+        elif config.languages:
+            raise ValueError("ElevenLabs Scribe takes one language_code. stt_languages is only for flux-general-multi.")
         for k, v in extra.items():
             if v is None or k.startswith("_"):
                 continue

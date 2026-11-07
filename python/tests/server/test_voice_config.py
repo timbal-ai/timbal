@@ -642,7 +642,7 @@ class TestCreateAppVoiceIntegration:
     ) -> None:
         mod = tmp_path / "app.py"
         mod.write_text(
-            'class R:\n    voice_config = {"language": "sv"}\nx = R()\n',
+            'class R:\n    voice_config = {"language": "es"}\nx = R()\n',
         )
         monkeypatch.setenv("TIMBAL_RUNNABLE", f"{mod.resolve()}::x")
         for k in VOICE_ENV_KEYS:
@@ -652,7 +652,7 @@ class TestCreateAppVoiceIntegration:
         with TestClient(app) as client:
             r = client.get("/healthcheck")
             assert r.status_code == 204
-            assert app.state.voice_config.language == "sv"
+            assert app.state.voice_config.language == "es"
 
     def test_voice_page_injects_runnable_meta(
         self,
@@ -759,10 +759,10 @@ class TestDeclaredVoiceConfig:
 
     def test_voice_config_instance_only_reports_fields_the_agent_set(self):
         class R:
-            voice_config = VoiceConfig(language="ca", greeting="Bon dia")
+            voice_config = VoiceConfig(language="es", greeting="Bon dia")
 
         out = voice_routes.declared_voice_config(R())
-        assert out["language"] == "ca"
+        assert out["language"] == "es"
         assert out["greeting"] == {"text": "Bon dia"}
         # Defaults the agent never touched are not "declared".
         assert "stt_provider" not in out and "voice" not in out and "sample_rate" not in out

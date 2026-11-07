@@ -11,6 +11,7 @@ provider SDKs stay behind ``timbal.voice``'s lazy ``__getattr__``.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -56,6 +57,87 @@ DEFAULT_FILLER_SYSTEM_PROMPT = (
     "Do not answer the question and do not mention "
     'tool or function names — just signal you are on it (like "One sec, let me check that.").'
 )
+
+
+# Flux multilingual accepts these primaries. Locale subtags (``es-ES``) map
+# to the primary. Catalan is not in the set. ``flux-general-en`` rejects hints.
+FLUX_MULTI_LANGUAGES = frozenset({"en", "es", "fr", "de", "hi", "ru", "pt", "ja", "it", "nl"})
+KEYTERMS_MAX = 100
+_KEYTERM_WEIGHT = re.compile(r".+:-?\d+(?:\.\d+)?\s*$")
+
+
+def validate_keyterms(value: Any) -> list[str]:
+    """Plain phrases for speech recognition. No weights, at most 100."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raise TypeError("keyterms must be a list of phrases, not one string")
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("keyterms must be a list of phrases")
+    if len(value) > KEYTERMS_MAX:
+        raise ValueError(f"keyterms accepts at most {KEYTERMS_MAX} phrases")
+    terms: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError("each keyterm must be a string")
+        text = item.strip()
+        if not text:
+            raise ValueError("keyterms cannot contain a blank phrase")
+        if _KEYTERM_WEIGHT.fullmatch(text):
+            raise ValueError(f"keyterms are plain phrases, not weighted keywords: {text!r}")
+        terms.append(text)
+    return terms
+
+
+def validate_stt_languages(value: Any) -> list[str]:
+    """Expected Flux multilingual hints. Does not set the reply language."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raise TypeError("stt_languages must be a list of BCP-47 tags, not one string")
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("stt_languages must be a list of BCP-47 tags")
+    from .language import normalize_language_tag
+
+    tags: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError("each stt_languages entry must be a string")
+        tag = normalize_language_tag(item)
+        if tag is None:
+            raise ValueError(f"stt_languages entries must be BCP-47 tags, got {item!r}")
+        primary = language_key(tag)
+        if primary not in FLUX_MULTI_LANGUAGES:
+            raise ValueError(
+                f"{tag} is not a Deepgram Flux transcription language. "
+                "Flux multilingual accepts en, es, fr, de, hi, ru, pt, ja, it, and nl. "
+                "Catalan is not among them. Set reply_language separately if the reply should use another language."
+            )
+        tags.append(tag)
+    return tags
+
+
+def _flux_multi(provider: str, model: str) -> bool:
+    if provider not in ("deepgram", "deepgram-flux"):
+        return False
+    chosen = (model or "flux-general-multi").strip()
+    if chosen.startswith("flux-general-en"):
+        return False
+    if chosen.startswith("nova") or chosen.startswith("scribe") or chosen.startswith("gpt-"):
+        return False
+    return True
+
+
+def _accepts_keyterms(provider: str, model: str) -> bool:
+    if provider in ("deepgram", "deepgram-flux"):
+        chosen = (model or "").strip()
+        return not chosen.startswith("nova-2")
+    if provider == "deepgram-nova":
+        chosen = (model or "nova-3").strip()
+        return chosen.startswith("nova-3") or chosen == ""
+    if provider == "elevenlabs":
+        return True
+    return False
 
 
 def language_key(code: str | None) -> str:
@@ -494,6 +576,25 @@ class VoiceConfig(BaseModel):
     voice. Change it on a live call with
     :meth:`timbal.voice.session.VoiceSession.set_language`.
     """
+    keyterms: list[str] = Field(default_factory=list)
+    """Phrases the speech provider should prefer: names, brands, acronyms.
+
+    Plain strings, at most 100, with no Nova keyword weights (``term:0.15``).
+    Set on the agent. A caller hello cannot set it, and it is not taken from
+    the caller's words or from an unheard reply. Deepgram Flux and Nova-3
+    and ElevenLabs Scribe accept them when the socket connects. Flux can
+    replace the whole list on the open socket. Empty leaves recognition
+    unchanged. This does not rewrite a transcript and does not promise the
+    words will be recognized.
+    """
+    stt_languages: list[str] | None = None
+    """Expected transcription languages for Deepgram ``flux-general-multi``.
+
+    Unset keeps today's single ``language`` hint. A list replaces that hint
+    for speech-to-text only. ``reply_language`` is unchanged. Catalan and
+    any other language outside Flux's ten are rejected. ``flux-general-en``
+    cannot take a hint.
+    """
     reply_language: str | None = None
     """Reply policy, separate from the speech-to-text hint.
 
@@ -643,6 +744,48 @@ class VoiceConfig(BaseModel):
     string / block → that opener on outbound only. Only a host that knows the
     call direction can apply it (:func:`greeting_for_direction`); the session
     itself never sees a direction."""
+
+    @field_validator("keyterms", mode="before")
+    @classmethod
+    def _keyterms_are_phrases(cls, value: Any) -> Any:
+        return validate_keyterms(value)
+
+    @field_validator("stt_languages", mode="before")
+    @classmethod
+    def _stt_languages_are_tags(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        return validate_stt_languages(value)
+
+    @model_validator(mode="after")
+    def _transcription_matches_provider(self) -> VoiceConfig:
+        provider = (self.stt_provider or "").strip()
+        model = (self.stt_model or "").strip()
+        extra = self.stt_extra if isinstance(self.stt_extra, dict) else {}
+        if self.keyterms and any(key in extra for key in ("keyterm", "keyterms", "keywords", "hotwords")):
+            raise ValueError(
+                "Set vocabulary on keyterms. Do not also set keyterm, keyterms, keywords, or hotwords in stt_extra."
+            )
+        if self.keyterms and model.startswith("nova-2"):
+            raise ValueError("Nova-2 does not accept keyterms. Use nova-3, or leave keyterms unset.")
+        if self.keyterms and not _accepts_keyterms(provider, model):
+            raise ValueError(
+                f"{provider or 'this speech provider'} {model or ''}".strip()
+                + " does not accept keyterms. Use Deepgram Flux, Nova-3, or ElevenLabs Scribe."
+            )
+        if self.stt_languages is not None and not _flux_multi(provider, model):
+            raise ValueError("stt_languages is only supported on Deepgram flux-general-multi.")
+        if _flux_multi(provider, model) and self.language:
+            from .language import normalize_language_tag
+
+            tag = normalize_language_tag(self.language)
+            if tag is not None and language_key(tag) not in FLUX_MULTI_LANGUAGES:
+                raise ValueError(
+                    f"{tag} is not a Deepgram Flux transcription language. "
+                    "Use a supported hint (en, es, fr, de, hi, ru, pt, ja, it, nl) "
+                    "and set reply_language if the reply should be in another language."
+                )
+        return self
 
     @field_validator("reply_language", mode="before")
     @classmethod

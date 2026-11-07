@@ -397,8 +397,6 @@ CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset({
     "smart_format",
     "punctuate",
     "interim_results",
-    "keyterm",
-    "keywords",
     # ElevenLabs Scribe + local VAD knobs (build_voice_session pops these for native-EOU providers)
     "commit_strategy",
     "audio_format",
@@ -407,7 +405,6 @@ CLIENT_TUNING_STT_EXTRA = _OPENAI_STT_EXTRA | frozenset({
     "vad_threshold",
     # Munsit
     "smart_turn",
-    "hotwords",
     "channels",
 })
 CLIENT_TUNING_TTS_EXTRA = _OPENAI_TTS_EXTRA | frozenset({
@@ -1180,9 +1177,12 @@ def build_voice_session(
 
             eager_eot_threshold = flux_eager_threshold(stt_extra)
             stt_extra["eager_eot_threshold"] = str(eager_eot_threshold)
+    # Copy the agent's phrases. Later set_keyterms edits this session only.
     audio_in = AudioInputConfig(
         model=stt_model,
         language=merged.language,
+        languages=list(merged.stt_languages or []),
+        keyterms=list(merged.keyterms or []),
         sample_rate=merged.sample_rate,
         encoding=merged.encoding,
         extra=stt_extra,

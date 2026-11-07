@@ -1801,8 +1801,38 @@ class VoiceSession:
         except Exception as e:  # noqa: BLE001 — a language change must not drop the call
             logger.warning("voice_stt_language_update_failed", language=tag, error=str(e))
             return False
+        if applied:
+            self.audio_input = self.audio_input.model_copy(update={"language": tag, "languages": [tag] if tag else []})
         logger.info("voice_language_set", language=tag, stt_live=applied, reply_language=self.reply_language)
         return applied
+
+    async def set_keyterms(self, keyterms: list[str]) -> bool:
+        """Replace this call's vocabulary. Does not edit the agent's config.
+
+        Deepgram Flux replaces the whole list on the open socket. An empty
+        list clears it. Already committed transcripts stay as they are.
+        Providers that only accept terms at connect time raise ``ValueError``.
+        There is no voice-agent handoff: the next call builds a new session
+        from that agent's own ``keyterms``.
+        """
+        from .config import validate_keyterms
+
+        terms = validate_keyterms(keyterms)
+        update = getattr(self.stt, "update_keyterms", None)
+        if update is None:
+            raise ValueError("This speech provider cannot replace vocabulary on an open connection.")
+        result = update(terms)
+        if not inspect.isawaitable(result):
+            raise ValueError("This speech provider cannot replace vocabulary on an open connection.")
+        applied = bool(await result)
+        if not applied:
+            raise ValueError(
+                "This speech connection cannot replace vocabulary. "
+                "Deepgram Flux can. Nova and Scribe take keyterms only when the socket connects."
+            )
+        self.audio_input = self.audio_input.model_copy(update={"keyterms": list(terms)})
+        logger.info("voice_keyterms_set", count=len(terms))
+        return True
 
     async def _on_empty_commit(self) -> None:
         """An empty STT commit is not a new request.

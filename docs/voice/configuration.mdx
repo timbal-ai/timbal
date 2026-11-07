@@ -17,7 +17,26 @@ Set `stt_provider` and optionally `stt_model`. These are adapter IDs and speech 
 - **`munsit`**: defaults to `munsit-en-ar`; requires `MUNSIT_API_KEY`. Reports native utterance boundaries.
 - **`openai`**: defaults to `gpt-transcribe`; requires `OPENAI_API_KEY`. Uses a transcription-only Realtime session with server VAD. It does not report native end-of-turn, so the session uses local turn detection when `timbal[voice]` is installed and lexical detection otherwise. Flux and Munsit are the adapters that force `provider` mode.
 
-Set `language` to the conversation language. It hints transcription and, when set, tells the model to reply in that language. Omit it to follow the user's latest substantive message. See [Reply language](#reply-language). Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable.
+Set `language` to the conversation language. It hints transcription and, when set, tells the model to reply in that language. Omit it to follow the user's latest substantive message. See [Reply language](#reply-language). `keyterms` and `stt_languages` are transcription only. They do not change `reply_language`.
+
+```python
+agent = Agent(
+    name="norte_market",
+    model="openai/gpt-5.4-mini",
+    voice_config={
+        "language": "es",
+        "reply_language": "follow",
+        "stt_languages": ["es", "en"],
+        "keyterms": ["Norte Market", "NM1001"],
+    },
+)
+```
+
+`keyterms` is a list of at most 100 plain phrases (a name, a brand, an acronym). Do not append a Nova weight such as `term:0.15`. Deepgram Flux and Nova-3, and ElevenLabs Scribe, send them when the socket connects. Flux can replace the whole list on that socket with `VoiceSession.set_keyterms`; an empty list clears it. The new list does not merge with the old one, and audio already transcribed is not rewritten. Nova and Scribe cannot replace terms after connect. OpenAI and Munsit reject `keyterms` at configuration time. A caller hello cannot set them. Each call copies the agent's list, so one session cannot change another's, and there is no voice handoff that would carry terms across agents.
+
+`stt_languages` is only for `flux-general-multi`. It replaces the single `language` hint for speech-to-text. Flux accepts English, Spanish, French, German, Hindi, Russian, Portuguese, Japanese, Italian, and Dutch, including regional subtags of those. Catalan is rejected. `flux-general-en` rejects hints. `set_language` still replaces the live hint list with one tag. These settings do not promise that a word will be recognized.
+
+Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable. Do not also put `keyterm` in `stt_extra` when `keyterms` is set.
 
 ## Speech providers
 
@@ -71,7 +90,7 @@ agent = Agent(
 
 A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `reply_language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. An invalid `reply_language` (a malformed tag or a non-string) is dropped and the server's value is kept. A blank hello value is dropped the same way. `"follow"` and a well-formed tag replace it. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
-Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, and `first_flush_min_words` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
+Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, `first_flush_min_words`, `keyterms`, and `stt_languages` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
 
 ## Mix providers
 
