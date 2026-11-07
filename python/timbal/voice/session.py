@@ -1780,6 +1780,12 @@ class VoiceSession:
         ``reply_language`` is unset, the model is then told to follow the
         user's latest substantive message, unless the agent's own prompt
         already names one reply language.
+
+        On Flux multilingual, a tag outside ``en``, ``es``, ``fr``, ``de``,
+        ``hi``, ``ru``, ``pt``, ``ja``, ``it``, and ``nl`` raises
+        ``ValueError`` before the stored hint or the socket changes.
+        ``reply_language`` is left as it was. A closed Flux socket is checked
+        the same way, so the next connect cannot send the rejected hint.
         """
         raw = None if language is None else str(language)
         if raw is not None and raw.strip() and normalize_language_tag(raw) is None:
@@ -1787,6 +1793,15 @@ class VoiceSession:
         tag = normalize_language_tag(raw)
         if tag == normalize_language_tag(self.audio_input.language):
             return False
+        if self._flux_multi_live() and tag:
+            from .config import FLUX_MULTI_LANGUAGES, language_key
+
+            if language_key(tag) not in FLUX_MULTI_LANGUAGES:
+                raise ValueError(
+                    f"{tag} is not a Deepgram Flux transcription language. "
+                    "flux-general-multi accepts en, es, fr, de, hi, ru, pt, ja, it, and nl. "
+                    "The call is unchanged. Set reply_language if only the reply should change."
+                )
         self.audio_input.language = tag
         update = getattr(self.stt, "update_language", None)
         if update is None:
@@ -1833,6 +1848,19 @@ class VoiceSession:
         self.audio_input = self.audio_input.model_copy(update={"keyterms": list(terms)})
         logger.info("voice_keyterms_set", count=len(terms))
         return True
+
+    def _flux_multi_live(self) -> bool:
+        """True when this session's transcriber is Flux multilingual.
+
+        An unopened socket still counts: the next ``connect`` would send the hint.
+        """
+        from .deepgram import DEFAULT_FLUX_MODEL, DeepgramFluxSTT, is_flux_model
+
+        if not isinstance(self.stt, DeepgramFluxSTT):
+            return False
+        model = self.audio_input.model
+        chosen = model if is_flux_model(model) else DEFAULT_FLUX_MODEL
+        return str(chosen).endswith("-multi")
 
     async def _on_empty_commit(self) -> None:
         """An empty STT commit is not a new request.

@@ -34,9 +34,15 @@ agent = Agent(
 
 `keyterms` is a list of at most 100 plain phrases (a name, a brand, an acronym). Do not append a Nova weight such as `term:0.15`. Deepgram Flux and Nova-3, and ElevenLabs Scribe, send them when the socket connects. Flux can replace the whole list on that socket with `VoiceSession.set_keyterms`; an empty list clears it. The new list does not merge with the old one, and audio already transcribed is not rewritten. Nova and Scribe cannot replace terms after connect. OpenAI and Munsit reject `keyterms` at configuration time. A caller hello cannot set them. Each call copies the agent's list, so one session cannot change another's, and there is no voice handoff that would carry terms across agents.
 
-`stt_languages` is only for `flux-general-multi`. It replaces the single `language` hint for speech-to-text. Flux accepts English, Spanish, French, German, Hindi, Russian, Portuguese, Japanese, Italian, and Dutch, including regional subtags of those. Catalan is rejected. `flux-general-en` rejects hints. `set_language` still replaces the live hint list with one tag. These settings do not promise that a word will be recognized.
+`language` and `stt_languages` on `flux-general-multi` accept only English, Spanish, French, German, Hindi, Russian, Portuguese, Japanese, Italian, and Dutch (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`), including regional subtags such as `es-ES`. Catalan, Arabic, Chinese, and any other tag are rejected when the agent config is built. That is a startup check: a Flux agent that used to set `language` to `ca`, `ar`, or `zh` now fails to load instead of opening a socket Flux would reject. `stt_languages` replaces the single `language` hint for speech-to-text and is only for `flux-general-multi`. `flux-general-en` rejects a hint list. `set_language` still replaces the live hint list with one supported tag. These settings do not promise that a word will be recognized, and they do not make Flux recognize Catalan.
 
-Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable. Do not also put `keyterm` in `stt_extra` when `keyterms` is set.
+`reply_language` is separate. This replies in Catalan and still transcribes with a Spanish Flux hint. Flux does not recognize Catalan. Use another speech provider that accepts `ca` when the transcript itself must be Catalan.
+
+```python
+voice_config={"language": "es", "reply_language": "ca", "stt_provider": "deepgram"}
+```
+
+Provider-specific transcription options belong in `stt_extra`. Each adapter supports its own options; switching providers does not make an option portable. A non-empty `keyterms` list cannot also set `keyterm`, `keyterms`, `keywords`, or `hotwords` in `stt_extra`. The agent fails to build if any of those keys is present, including when the value is `None`, `""`, or `[]`. Omit the key. An empty `keyterms` (left unset, `None`, or `[]`) does not conflict, and a `keyterm` that exists only in `stt_extra` is still passed through.
 
 ## Speech providers
 
@@ -88,7 +94,7 @@ agent = Agent(
 
 ## What a client may override
 
-A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `reply_language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. An invalid `reply_language` (a malformed tag or a non-string) is dropped and the server's value is kept. A blank hello value is dropped the same way. `"follow"` and a well-formed tag replace it. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
+A browser or phone hello may set `stt_provider`, `stt_model`, `tts_provider`, `tts_model`, `voice`, `language`, `reply_language`, `sample_rate`, `encoding`, `stt_extra`, `tts_extra`, `vad_endpointing`, `predict_during_speech`, `model`, `tool_beat_secs`, `max_tts_pause_secs`, `tts_quiet_dbfs`, `tts_tempo`, `hangup_grace_secs`, `turn_timeout_secs`, `turn_timeout_fallback`, `filler`, `greeting`, `outbound_greeting`, `user_idle`, `entity_patience`, and `entity_patience_secs`. `max_tts_pause_secs` must be 0 or greater and `tts_tempo` must be greater than 0; an invalid value for either is dropped and the server's value is kept. `hangup_grace_secs` is 0 to 30 seconds. An invalid `reply_language` (a malformed tag or a non-string) is dropped and the server's value is kept. A blank hello value is dropped the same way. `"follow"` and a well-formed tag replace it. A `language` hello that is blank, not a language tag, or outside Flux multilingual's ten (`en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, `nl`) is dropped and the agent's language stays. The call still starts. A hello that switches the transcriber onto a config that cannot keep the agent's `stt_languages` is dropped the same way. A supported tag such as `fr` replaces `language` and does not replace `stt_languages` or `reply_language`. It may also send transport keys `turn_detector` (a mode name), `parent_id` (continue a text run), `direction`, and `call_context`. `call_context` is ignored unless the server sets `TIMBAL_VOICE_ALLOW_CLIENT_CALL_CONTEXT=1`.
 
 Recording, ambient audio, `events`, `speculative_generation`, `hello_wait_secs`, `sip_hello_wait_secs`, `ignore_backchannels`, `hold_unfinished_secs`, `min_delay_secs`, `stop_silence_secs`, `first_flush_min_words`, `keyterms`, and `stt_languages` are server-only. Unknown `VoiceConfig` keys fail at startup (`extra` is forbidden). Empty optional blocks (`greeting`, `filler`, `user_idle`, `ambient`, `recording`, `events`, `speculative_generation`) are treated as unset so they do not wipe an inherited value.
 
@@ -121,7 +127,7 @@ This assignment replaces the agent's declared config. Keep any greetings or othe
 
 `voice_config["language"]` is the conversation language, not only a transcription hint.
 
-- **Set** (`"en"`, `"es"`, `"es-ES"`, any BCP-47 tag the provider accepts): unless `reply_language` is set, the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`.
+- **Set** (`"en"`, `"es"`, `"es-ES"`): unless `reply_language` is set, the model is told to reply in that language, including short replies and waiting phrases. A Spanish-first agent keeps `"es"`. The tag is also sent to speech-to-text (`language_hint` on Deepgram Flux multi, `language_code` on ElevenLabs Scribe, `language` on Deepgram Nova). Default OpenAI `gpt-transcribe` sends `languages: [tag]`; other OpenAI transcription models send a single `language`. On `flux-general-multi`, `language` and `stt_languages` accept only `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl`. `ca`, `ar`, and `zh` fail when that Flux config is built. A supported hint plus `reply_language: "ca"` changes the spoken reply only. Flux still does not recognize Catalan. Point `stt_provider` at a provider that accepts Catalan when the transcript must be Catalan.
 - **Unset**: unless `reply_language` is set, the model follows the language of the user's latest substantive message (a full request, question, or correction). Accent, fillers, names, and a single word from another language do not switch the reply. If the agent's own system prompt already names one reply language, that instruction stands.
 - **`reply_language`**: leave it unset to keep the rules above. `"follow"` makes the reply follow the latest substantive message even when `language` is set as a transcription hint. A well-formed BCP-47 tag pins the reply to that tag and does not change the hint. `set_language` still updates the hint, and it moves the next turn's reply instruction only when `reply_language` is unset.
 - **Explicit switch**: the pin yields when the user asks to use another language. Saying a sentence in another language is not, by itself, that request. Call `set_language` when the conversation language should actually change. Unless `reply_language` is set, that moves the next turn's reply instruction and the transcription hint together. With `reply_language` set, only the hint moves.
@@ -130,9 +136,9 @@ This assignment replaces the agent's declared config. Keep any greetings or othe
 voice_config = {"language": "es", "reply_language": "follow"}
 ```
 
-`"follow"` is case-insensitive. On an agent config, a blank string is the same as unset. A malformed tag (`english`, a sentence, `en-`) raises `ValueError` when that config is built. A non-string raises `TypeError`. Accepted tags are two or three letters, an optional four-letter script, and an optional region: `en`, `es-ES`, `zh-Hans`, `es-419`. A caller hello that sends a bad or blank `reply_language` does not raise: the value is dropped and the server's `reply_language` stays.
+`"follow"` is case-insensitive. On an agent config, a blank string is the same as unset. A malformed tag (`english`, a sentence, `en-`) raises `ValueError` when that config is built. A non-string raises `TypeError`. Accepted `reply_language` tags are two or three letters, an optional four-letter script, and an optional region: `en`, `es-ES`, `zh-Hans`, `es-419`, `ca`. That is the reply pin, not the Flux transcription list. A caller hello that sends a bad or blank `reply_language` does not raise: the value is dropped and the server's `reply_language` stays.
 
-Deepgram Flux applies the new hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. `flux-general-en` does not accept a language hint. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` stores the tag for the next connection and does not retarget the open socket. Unless `reply_language` is set, the reply instruction uses that tag on the next turn. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
+Deepgram Flux applies a supported hint on the open socket. A `Configure` message with `language_hints: ["en"]` replaces a sticky hint; `language_hints: []` clears it and Flux goes back to auto-detect. Audio already transcribed is not reprocessed. On `flux-general-multi`, `set_language("ca")` raises `ValueError` before the socket or the stored hint changes. The previous hint, including an `stt_languages` list, stays. `reply_language` is not changed. `flux-general-en` does not accept a language hint: `set_language` does not retarget that socket, and the reply pin can still move when `reply_language` is unset. ElevenLabs Scribe, Deepgram Nova, and OpenAI transcription read the hint when the socket opens: `set_language` stores the tag for the next connection and does not retarget the open socket. Unless `reply_language` is set, the reply instruction uses that tag on the next turn. Munsit only sends `language=ar` (`ar` and a tag such as `ar-AE` both become `ar`). Any other tag is dropped (`munsit_stt_language_dropped`) and is not sent on the next connection.
 
 From a tool on the call, `current_voice_session()` is the live session. The tool is not registered for you. Add it only on agents that should be able to switch.
 
@@ -153,16 +159,32 @@ async def set_conversation_language(language: str) -> str:
     return f"Conversation language is now {language}."
 
 
+async def set_transcription_terms(terms: list[str]) -> str:
+    """Replace the names and product terms for this call.
+
+    Pass plain phrases, such as ["Norte Market", "NM1001"].
+    Pass [] to clear them.
+    """
+    session = current_voice_session()
+    if session is None:
+        return "No active call."
+    try:
+        await session.set_keyterms(terms)
+    except ValueError:
+        return "Vocabulary can be replaced only on an open Deepgram Flux connection."
+    return "Transcription terms updated."
+
+
 agent = Agent(
     name="voice_assistant",
     model="openai/gpt-5-mini",
     system_prompt="Reply in one or two short spoken sentences.",
-    tools=[set_conversation_language],
+    tools=[set_conversation_language, set_transcription_terms],
     voice_config={"language": "es"},
 )
 ```
 
-`set_language` returns true when the open transcriber accepted the hint. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
+`set_language` returns true when the open transcriber accepted the hint. Unless `reply_language` is set, the reply instruction uses the new tag on the next turn. A tag that is not BCP-47 raises `ValueError` and leaves the call as it was. On Flux multilingual, a tag outside `en`, `es`, `fr`, `de`, `hi`, `ru`, `pt`, `ja`, `it`, and `nl` raises `ValueError` the same way, before a `Configure` message is sent. `set_keyterms` replaces the whole list. It raises `ValueError` when the provider cannot replace terms on the open socket (Nova, Scribe, OpenAI, Munsit, or Flux with no connection). The call's previous terms stay. The line is appended after the agent's own prompt, past the greeting note, so a soft "match the caller" earlier in the prompt does not outrank it.
 
 ## Speculative generation
 

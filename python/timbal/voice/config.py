@@ -117,6 +117,59 @@ def validate_stt_languages(value: Any) -> list[str]:
     return tags
 
 
+_VOCAB_EXTRA_KEYS = ("keyterm", "keyterms", "keywords", "hotwords")
+
+
+def keyterms_extra_conflict(keyterms: list[str] | None, extra: dict[str, Any] | None) -> bool:
+    """A non-empty ``keyterms`` list conflicts with any of the legacy extra keys.
+
+    The extra value is not inspected. ``None``, ``""``, and ``[]`` still
+    conflict when the key is present. An empty ``keyterms`` (omitted, ``None``,
+    or ``[]``) does not, so a ``keyterm`` that lives only in ``stt_extra``
+    keeps the older passthrough.
+    """
+    if not keyterms:
+        return False
+    if not isinstance(extra, dict):
+        return False
+    return any(key in extra for key in _VOCAB_EXTRA_KEYS)
+
+
+def flux_transcription_error(
+    *,
+    provider: str,
+    model: str,
+    language: str | None,
+    stt_languages: list[str] | None,
+) -> str | None:
+    """Why this provider cannot take the hint, or ``None`` when it can.
+
+    ``flux-general-multi`` accepts ``en``, ``es``, ``fr``, ``de``, ``hi``,
+    ``ru``, ``pt``, ``ja``, ``it``, and ``nl``, including regional subtags.
+    Clearing the hint (``None`` or blank) is allowed. Other providers do not
+    use this list. ``reply_language`` is not an argument: a Catalan reply does
+    not make Flux recognize Catalan.
+    """
+    if stt_languages is not None and not _flux_multi(provider, model):
+        return "stt_languages is only supported on Deepgram flux-general-multi."
+    if not _flux_multi(provider, model) or not language or not str(language).strip():
+        return None
+    from .language import normalize_language_tag
+
+    tag = normalize_language_tag(language)
+    # A value that is not a tag is not a Flux language either, but construction
+    # has always left that to the provider. Only a real tag outside the ten
+    # fails here. A hello drops non-tags before this runs.
+    if tag is None or language_key(tag) in FLUX_MULTI_LANGUAGES:
+        return None
+    return (
+        f"{tag} is not a Deepgram Flux transcription language. "
+        "flux-general-multi accepts en, es, fr, de, hi, ru, pt, ja, it, and nl. "
+        "Catalan is not among them. Set reply_language if the reply should use another language. "
+        "Flux will not recognize that language."
+    )
+
+
 def _flux_multi(provider: str, model: str) -> bool:
     if provider not in ("deepgram", "deepgram-flux"):
         return False
@@ -762,7 +815,7 @@ class VoiceConfig(BaseModel):
         provider = (self.stt_provider or "").strip()
         model = (self.stt_model or "").strip()
         extra = self.stt_extra if isinstance(self.stt_extra, dict) else {}
-        if self.keyterms and any(key in extra for key in ("keyterm", "keyterms", "keywords", "hotwords")):
+        if keyterms_extra_conflict(self.keyterms, extra):
             raise ValueError(
                 "Set vocabulary on keyterms. Do not also set keyterm, keyterms, keywords, or hotwords in stt_extra."
             )
@@ -773,18 +826,14 @@ class VoiceConfig(BaseModel):
                 f"{provider or 'this speech provider'} {model or ''}".strip()
                 + " does not accept keyterms. Use Deepgram Flux, Nova-3, or ElevenLabs Scribe."
             )
-        if self.stt_languages is not None and not _flux_multi(provider, model):
-            raise ValueError("stt_languages is only supported on Deepgram flux-general-multi.")
-        if _flux_multi(provider, model) and self.language:
-            from .language import normalize_language_tag
-
-            tag = normalize_language_tag(self.language)
-            if tag is not None and language_key(tag) not in FLUX_MULTI_LANGUAGES:
-                raise ValueError(
-                    f"{tag} is not a Deepgram Flux transcription language. "
-                    "Use a supported hint (en, es, fr, de, hi, ru, pt, ja, it, nl) "
-                    "and set reply_language if the reply should be in another language."
-                )
+        error = flux_transcription_error(
+            provider=provider,
+            model=model,
+            language=self.language,
+            stt_languages=self.stt_languages,
+        )
+        if error is not None:
+            raise ValueError(error)
         return self
 
     @field_validator("reply_language", mode="before")

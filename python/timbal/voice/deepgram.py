@@ -397,6 +397,14 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         if not str(model).endswith("-multi"):
             return False
         hint = (language or "").strip()
+        if hint:
+            from .config import FLUX_MULTI_LANGUAGES, language_key
+            from .language import normalize_language_tag
+
+            tag = normalize_language_tag(hint)
+            if tag is None or language_key(tag) not in FLUX_MULTI_LANGUAGES:
+                return False
+            hint = tag
         await self._send_json({"type": "Configure", "language_hints": [hint] if hint else []})
         return True
 

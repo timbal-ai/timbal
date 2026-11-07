@@ -13,7 +13,7 @@ from timbal.voice.elevenlabs import ElevenLabsRealtimeSTT
 from timbal.voice.munsit import MunsitStreamSTT
 from timbal.voice.session import VoiceSession
 
-from .test_session import MockTTS
+from .test_session import MockSTT, MockTTS
 
 
 def _flux_query(config: AudioInputConfig) -> dict[str, list[str]]:
@@ -167,6 +167,154 @@ async def test_session_set_keyterms_copies_and_rejects_scribe() -> None:
     scribe = VoiceSession(_agent(), ElevenLabsRealtimeSTT(), MockTTS())
     with pytest.raises(ValueError, match="cannot replace"):
         await scribe.set_keyterms(["Acme"])
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("keyterm", "Acme"),
+        ("keyterms", ["Acme"]),
+        ("keywords", "Acme:2"),
+        ("hotwords", "Acme"),
+        ("keyterm", None),
+        ("keyterm", ""),
+        ("keyterm", []),
+    ],
+)
+def test_nonempty_keyterms_conflict_even_when_the_extra_value_is_empty(key: str, value: object) -> None:
+    with pytest.raises(ValueError, match="stt_extra"):
+        VoiceConfig(keyterms=["Acme"], stt_extra={key: value})
+
+
+@pytest.mark.parametrize("terms", [None, []])
+def test_empty_keyterms_keep_a_legacy_extra_term(terms: list[str] | None) -> None:
+    cfg = VoiceConfig(keyterms=terms, stt_extra={"keyterm": "Acme"})
+    assert cfg.keyterms == []
+    query = _flux_query(AudioInputConfig(extra={"keyterm": ["Acme"]}))
+    assert query["keyterm"] == ["Acme"]
+
+
+def test_reply_language_catalan_does_not_change_the_flux_hint() -> None:
+    cfg = VoiceConfig(language="es", reply_language="ca")
+    assert cfg.language == "es"
+    assert cfg.reply_language == "ca"
+    for blocked in ("ca", "ar", "zh"):
+        with pytest.raises(ValueError, match="not a Deepgram Flux"):
+            VoiceConfig(language=blocked)
+
+
+def test_hello_keeps_a_valid_flux_hint_and_a_supported_update_does_not_replace_stt_languages() -> None:
+    from timbal.server.voice import merge_client_voice_overrides
+
+    base = VoiceConfig(language="es", reply_language="ca", stt_languages=["es", "en"], keyterms=["Norte Market"])
+    blocked = merge_client_voice_overrides(base, {"language": "ca"})
+    assert blocked.language == "es"
+    assert blocked.reply_language == "ca"
+    assert blocked.stt_languages == ["es", "en"]
+    assert blocked.keyterms == ["Norte Market"]
+    hints = _flux_query(
+        AudioInputConfig(
+            language=blocked.language, languages=list(blocked.stt_languages), keyterms=list(blocked.keyterms)
+        )
+    )
+    assert hints["language_hint"] == ["es", "en"]
+
+    updated = merge_client_voice_overrides(base, {"language": "fr"})
+    assert updated.language == "fr"
+    assert updated.reply_language == "ca"
+    assert updated.stt_languages == ["es", "en"]
+    kept = _flux_query(AudioInputConfig(language=updated.language, languages=list(updated.stt_languages)))
+    assert kept["language_hint"] == ["es", "en"]
+
+    for bad in ("", "   ", "english", "en-", "zh", "ar", 42):
+        assert merge_client_voice_overrides(base, {"language": bad}).language == "es"
+
+
+def test_hello_can_select_catalan_on_scribe_but_not_by_abandoning_flux_hints() -> None:
+    from timbal.server.voice import merge_client_voice_overrides
+
+    scribe = merge_client_voice_overrides(VoiceConfig(stt_provider="elevenlabs", language="en"), {"language": "ca"})
+    assert scribe.stt_provider == "elevenlabs"
+    assert scribe.language == "ca"
+
+    moved = merge_client_voice_overrides(VoiceConfig(language="es"), {"stt_provider": "elevenlabs", "language": "ca"})
+    assert moved.stt_provider == "elevenlabs"
+    assert moved.language == "ca"
+
+    kept = merge_client_voice_overrides(
+        VoiceConfig(language="es", stt_languages=["es", "en"]),
+        {"stt_provider": "elevenlabs", "stt_model": "scribe_v2_realtime", "language": "ca"},
+    )
+    assert kept.stt_provider == "deepgram"
+    assert kept.stt_model == "flux-general-multi"
+    assert kept.language == "es"
+    assert kept.stt_languages == ["es", "en"]
+
+    english_only = merge_client_voice_overrides(
+        VoiceConfig(language="es", stt_languages=["es", "en"]),
+        {"stt_model": "flux-general-en"},
+    )
+    assert english_only.stt_model == "flux-general-multi"
+    assert english_only.stt_languages == ["es", "en"]
+
+
+async def test_set_language_rejects_catalan_on_flux_before_any_change() -> None:
+    config = AudioInputConfig(model="flux-general-multi", language="es", languages=["es", "en"])
+    stt = DeepgramFluxSTT()
+    stt._ws = _Ws()
+    stt._input_config = config
+    session = VoiceSession(_agent(), stt, MockTTS(), reply_language="ca")
+    session.audio_input = config
+
+    with pytest.raises(ValueError, match="not a Deepgram Flux"):
+        await session.set_language("ca")
+
+    assert session.audio_input.language == "es"
+    assert session.audio_input.languages == ["es", "en"]
+    assert session.reply_language == "ca"
+    assert stt._ws.sent == []
+    assert await stt.update_language("zh") is False
+    assert stt._ws.sent == []
+
+    assert await session.set_language("fr") is True
+    assert session.audio_input.language == "fr"
+    assert session.audio_input.languages == ["fr"]
+    assert session.reply_language == "ca"
+    assert json.loads(stt._ws.sent[-1]) == {"type": "Configure", "language_hints": ["fr"]}
+    assert _flux_query(session.audio_input)["language_hint"] == ["fr"]
+
+
+async def test_closed_flux_socket_does_not_store_an_unsupported_hint_or_terms() -> None:
+    stt = DeepgramFluxSTT()
+    session = VoiceSession(_agent(), stt, MockTTS(), reply_language="ca")
+    session.audio_input = AudioInputConfig(
+        model="flux-general-multi", language="es", languages=["es"], keyterms=["old"]
+    )
+    with pytest.raises(ValueError, match="not a Deepgram Flux"):
+        await session.set_language("ar")
+    assert session.audio_input.language == "es"
+    assert session.audio_input.languages == ["es"]
+    with pytest.raises(ValueError, match="cannot replace"):
+        await session.set_keyterms(["new"])
+    assert session.audio_input.keyterms == ["old"]
+
+
+async def test_other_providers_still_accept_catalan_as_a_reply_hint() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), reply_language="follow")
+    session.audio_input = AudioInputConfig(language="en")
+    assert await session.set_language("ca") is False
+    assert session.audio_input.language == "ca"
+    assert session.reply_language == "follow"
+
+    english_only = AudioInputConfig(model="flux-general-en", language="en")
+    stt = DeepgramFluxSTT()
+    stt._ws = _Ws()
+    stt._input_config = english_only
+    pinned = VoiceSession(_agent(), stt, MockTTS())
+    pinned.audio_input = english_only
+    assert await pinned.set_language("ca") is False
+    assert pinned.audio_input.language == "ca"
+    assert stt._ws.sent == []
 
 
 def _agent():
