@@ -23,7 +23,7 @@ from timbal.voice import (
 )
 from timbal.voice.session import _hangup_farewell_phrase, _hangup_utterance_kind
 
-from .test_session import FakePlaybackTracker, _FakeEndpointer
+from .test_session import FakePlaybackTracker, MockTTS, _FakeEndpointer
 from .test_voice_events import _Model, _session, _texts, _until
 
 GOODBYE = "Perfecto, hasta luego."
@@ -662,6 +662,17 @@ class TestHangupUtterance:
         assert _hangup_farewell_phrase("es-ES") == "Adiós."
         assert _hangup_farewell_phrase(None) == "Goodbye."
 
+    @pytest.mark.parametrize("text", ["Al", "All", "Alri", "Oka", "By", "B", "va", "ye"])
+    def test_unfinished_ack_partial_is_pending(self, text: str) -> None:
+        assert _hangup_utterance_kind(text) == "pending"
+
+    @pytest.mark.parametrize(
+        "text",
+        ["Wa", "Wait", "Act", "Actually", "one", "whats the status", "Alright, wait", "no"],
+    )
+    def test_retract_partial_is_not_pending(self, text: str) -> None:
+        assert _hangup_utterance_kind(text) == "retract"
+
 
 class TestHangupFillerAndRearm:
     async def test_ack_partial_does_not_cancel_commit(self) -> None:
@@ -846,3 +857,117 @@ class TestHangupFillerAndRearm:
         await _until(lambda: "Goodbye." in _texts(events))
         await asyncio.wait_for(call, timeout=3.0)
         assert session.closed
+
+    async def test_evolving_ack_partials_do_not_cancel(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.45)
+        session._last_commit_at = time.monotonic()
+
+        async def partials() -> None:
+            await asyncio.sleep(0.02)
+            for piece in ("Al", "All", "Alri", "Alright.", "Oka", "Okay.", "By", "Bye bye"):
+                session._latest_partial_text = piece
+                session._last_partial_at = time.monotonic()
+                await asyncio.sleep(0.03)
+
+        asyncio.create_task(partials())
+        assert await session.commit_hangup() is True
+        assert session._end_call_task is not None
+
+    async def test_ack_partial_that_turns_into_a_retract_cancels(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.8)
+        session._last_commit_at = time.monotonic()
+        started = time.monotonic()
+
+        async def partials() -> None:
+            await asyncio.sleep(0.02)
+            for piece in ("Al", "Alright", "Alright, wait, one more thing"):
+                session._latest_partial_text = piece
+                session._last_partial_at = time.monotonic()
+                await asyncio.sleep(0.03)
+
+        asyncio.create_task(partials())
+        assert await session.commit_hangup() is False
+        assert time.monotonic() - started < 0.5
+        assert session._end_call_task is None
+
+    async def test_retract_partial_cancels_before_the_commit(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=1.0)
+        session._last_commit_at = time.monotonic()
+        started = time.monotonic()
+
+        async def partials() -> None:
+            await asyncio.sleep(0.04)
+            session._latest_partial_text = "Act"
+            session._last_partial_at = time.monotonic()
+
+        asyncio.create_task(partials())
+        assert await session.commit_hangup() is False
+        assert time.monotonic() - started < 0.4
+
+    async def test_post_tool_goodbye_is_not_spoken_again(self) -> None:
+        class _SlowAfterFirst(MockTTS):
+            async def synthesize(self, text: str):
+                self.synthesized_texts.append(text)
+                if len(self.synthesized_texts) > 1:
+                    await asyncio.sleep(3.0)
+                yield self._chunk
+
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            if not await session.commit_hangup():
+                return "The caller spoke again. Do not hang up. Keep helping."
+            return "Ending the call."
+
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(_tool_only(), "Goodbye."),
+            tools=[end_call],
+            tts=_SlowAfterFirst(),
+            tracker=tracker,
+            hangup_grace_secs=0.12,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await asyncio.wait_for(call, timeout=1.5)
+        assert session.closed
+        assert tts.synthesized_texts.count("Goodbye.") == 1
+        assert sum(1 for entry in session.transcript if entry.role == "assistant" and "Goodbye" in entry.text) == 1
+
+    async def test_later_goodbye_rearms_without_calling_the_tool_again(self) -> None:
+        used = 0
+
+        async def end_call() -> str:
+            nonlocal used
+            used += 1
+            session = current_voice_session()
+            assert session is not None
+            if not await session.commit_hangup():
+                return "The caller spoke again. Do not hang up. Keep helping."
+            return "Ending the call."
+
+        # The bye turn is text only. The tool must not run again.
+        model = _Model(_tool_only(), "Sure, what else?", "Goodbye.")
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            model,
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0.35,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await _until(lambda: session._hangup_open)
+        await stt.inject(TranscriptEvent(type="committed", text="Wait. One more thing."))
+        await _until(lambda: "Sure, what else?" in _texts(events))
+        assert used == 1
+        assert not session.closed
+
+        await stt.inject(TranscriptEvent(type="committed", text="Bye."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert used == 1
+        bye_users = [m.collect_text() for m in model.calls[-1] if m.role == "user"]
+        assert any("Bye" in text for text in bye_users)

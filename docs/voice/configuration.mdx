@@ -144,7 +144,7 @@ See [Turn-taking and interruptions](/voice/turn-taking#speculative-generation). 
 
 ## Ending the call
 
-`hangup_grace_secs` is the quiet window after a goodbye, from 0 to 30 seconds. Unset hangs up once that audio has played. When it is set, the hangup tool should await `session.commit_hangup()` so the window is spent before teardown. A short acknowledgement during that wait does not cancel it; "wait" and any other request do. Bare `session.end_call()` still requests teardown immediately and then opens this window. See [Let the caller end the call](/voice/tools#let-the-caller-end-the-call).
+`hangup_grace_secs` is the quiet window after a goodbye, from 0 to 30 seconds. Unset hangs up once that audio has played. When it is set, the hangup tool should await `session.commit_hangup()` so the window is spent before teardown. Inside that wait, a short acknowledgement does not cancel it; "wait" and any other request do. Bare `session.end_call()` does not use that split: any new caller speech cancels its close. It still requests teardown immediately and then opens this window. See [Let the caller end the call](/voice/tools#let-the-caller-end-the-call).
 
 ## Turn detection
 
