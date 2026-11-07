@@ -139,7 +139,9 @@ def user_batch(events: list[SessionEvent]) -> list[SessionEvent]:
     return batch
 
 
-def take_followup(store: BackgroundTaskStore, *, urgent: bool = False) -> Followup | None:
+def take_followup(
+    store: BackgroundTaskStore, *, urgent: bool = False, users: bool = True, others: bool = True
+) -> Followup | None:
     """Take every pending notice and event for a turn the session starts itself, or None.
 
     User messages come first: the turn starts with :func:`user_batch` as its
@@ -147,14 +149,19 @@ def take_followup(store: BackgroundTaskStore, *, urgent: bool = False) -> Follow
     for the turns after it). Taking is the commitment: start the turn before
     anything else can take a turn in the session, then call
     :meth:`Followup.started`, or :meth:`Followup.release` if it never runs.
+    ``users`` / ``others``: whether user messages / everything else are this
+    channel's to take (a call leaves typed messages to the chat it borrowed
+    the session from, which answers nothing else meanwhile).
     """
-    batch = user_batch(store.pending_events())
+    batch = user_batch(store.pending_events()) if users else []
     if batch:
         taken = {id(event) for event in batch}
         events = store.drain_events(settle=False, where=lambda event: id(event) in taken)
         return Followup(prompt=format_user_message(events), store=store, completions=[], events=events, urgent=urgent)
+    if not others:
+        return None
     completions = store.drain_completions()
-    events = store.drain_events(settle=False)
+    events = store.drain_events(settle=False, where=None if users else lambda event: event.source != "user")
     if not completions and not events:
         return None
     return Followup(
@@ -179,6 +186,12 @@ class SessionScheduler:
     goes ahead of turns still queued. ``on_work`` runs whenever the store
     gains something (a finished task, an event), for a channel that has no
     waiter running at the time.
+
+    ``lends`` (a chat) / ``borrows`` (a call): a call joining a session a chat
+    owns takes it over while it is live (see :meth:`take_over`), and gives it
+    back when it ends; meanwhile the chat only answers user messages, its
+    turns queue behind the call's, and the call (``user_messages=False``)
+    answers everything but them.
     """
 
     def __init__(
@@ -191,6 +204,9 @@ class SessionScheduler:
         on_preempt: Callable[[], None] | None = None,
         can_interrupt: bool = False,
         on_work: Callable[[], None] | None = None,
+        lends: bool = False,
+        borrows: bool = False,
+        user_messages: bool = True,
     ) -> None:
         _check_announce(completions)
         _check_announce(events)
@@ -220,6 +236,10 @@ class SessionScheduler:
         # The head is another channel's run that ended parked on its caller (see is_parked).
         self.head_parked = False
         self._changed: asyncio.Future[None] | None = None
+        self.lends, self.borrows, self.user_messages = lends, borrows, user_messages
+        # The call the session is lent to (while live), or waits to be lent to once this channel is idle.
+        self._lent_to: weakref.ref[SessionScheduler] | None = None
+        self._borrower: weakref.ref[SessionScheduler] | None = None
 
     @property
     def channel(self) -> Any:
@@ -236,6 +256,7 @@ class SessionScheduler:
                 raise RuntimeError(_OWNED_ELSEWHERE) from None
         self._releasing.discard(store)
         self._successors.pop(store, None)
+        self._lent_to = self._borrower = None
         self.store = store
 
     def take_over(self, store: BackgroundTaskStore) -> None:
@@ -243,13 +264,72 @@ class SessionScheduler:
 
         Until that channel's admitted and queued turns end, it still decides
         for the session; then the store passes here, with its head, and
-        :meth:`work_arrived` runs. Raises when another channel keeps it.
+        :meth:`work_arrived` runs. A call (``borrows``) joining a channel that
+        ``lends`` is lent the session as soon as that channel is idle (its
+        turns until then are admitted there), and it goes back when the call
+        releases it. Raises when another channel keeps it.
         """
         owner = store.continuation_owner()
-        if isinstance(owner, SessionScheduler) and owner is not self and owner.releasing(store):
+        if isinstance(owner, SessionScheduler) and owner is not self:
+            if owner.releasing(store):
+                owner._successors[store] = weakref.ref(self)
+                return
+            if self.borrows and owner.lends:
+                owner._borrower = weakref.ref(self)
+                owner._maybe_lend()
+                return
+        self.bind(store)
+
+    def join(self, store: BackgroundTaskStore) -> None:
+        """Own ``store``; a channel that ``lends``, opened on a live call's session, starts lent to the call."""
+        owner = store.continuation_owner()
+        if self.lends and isinstance(owner, SessionScheduler) and owner is not self and owner.borrows:
+            self.store = store
+            self._lent_to = weakref.ref(owner)
             owner._successors[store] = weakref.ref(self)
             return
         self.bind(store)
+
+    @property
+    def lent(self) -> bool:
+        """The session is lent to a live call: only user messages are this channel's to answer."""
+        store = self.store
+        return self._lent_to is not None and store is not None and store.continuation_owner() is not self
+
+    def _maybe_lend(self) -> None:
+        """Hand the session to the call waiting for it, once nothing of this channel's is in flight."""
+        borrower = self._borrower() if self._borrower is not None else None
+        store = self.store
+        if borrower is None or store is None or self._occupied or self._others_waiting:
+            return
+        if store.continuation_owner() is not self:
+            self._borrower = None
+            return
+        self._borrower = None
+        store.release_continuation(self)
+        borrower.bind(store)
+        borrower._successors[store] = weakref.ref(self)
+        if self.head is not None:
+            borrower.head, borrower.head_parked = self.head, self.head_parked
+        self._lent_to = weakref.ref(borrower)
+        self._notify()
+        borrower.work_arrived()
+
+    def _lender_of(self, run_context: Any) -> bool:
+        """``run_context`` is a run of the channel this one borrowed the session from."""
+        marker = getattr(run_context, "_continuation_owner", None)
+        owner = marker() if marker is not None else None
+        return owner is not None and any(ref() is owner and owner.lends for ref in self._successors.values())
+
+    def _hand_back(self, store: BackgroundTaskStore) -> None:
+        """Pass a released store to the channel waiting for it (the chat that lent it), with the head."""
+        successor = self._successors.pop(store, None)
+        successor = successor() if successor is not None else None
+        if successor is not None and store.continuation_owner() is None:
+            successor._succeed(self, store)
+        else:
+            # The channel's own forget ran while this still owned the store.
+            forget_idle_background_store(store)
 
     def release(self, *stores: BackgroundTaskStore | None) -> None:
         """Stop owning the bound store and ``stores`` (a store a spawn created joins the owner unbound).
@@ -270,7 +350,10 @@ class SessionScheduler:
             self._releasing |= targets
         else:
             for store in targets:
+                owned = store.continuation_owner() is self
                 store.release_continuation(self)
+                if owned and store in self._successors:
+                    self._hand_back(store)
         self._notify()
 
     def releasing(self, store: BackgroundTaskStore) -> bool:
@@ -288,13 +371,7 @@ class SessionScheduler:
         released, self._releasing = self._releasing, set()
         for store in released:
             store.release_continuation(self)
-            successor = self._successors.pop(store, None)
-            successor = successor() if successor is not None else None
-            if successor is not None and store.continuation_owner() is None:
-                successor._succeed(self, store)
-            else:
-                # The channel's own forget ran while this still owned the store.
-                forget_idle_background_store(store)
+            self._hand_back(store)
 
     def _succeed(self, previous: "SessionScheduler", store: BackgroundTaskStore) -> None:
         """Take ``store`` over from ``previous``, which decided for the session until now."""
@@ -320,6 +397,7 @@ class SessionScheduler:
     def turn_finished(self) -> None:
         self.busy = False
         self._notify()
+        self._maybe_lend()
 
     def note_run(self, run_id: str) -> None:
         """One of the owner's runs started: it is the session's head now."""
@@ -370,6 +448,13 @@ class SessionScheduler:
         self._notify()
         if self._on_work is not None:
             self._on_work()
+        # The chat this call borrowed the session from still answers the user messages arriving in it.
+        for ref in list(self._successors.values()):
+            lender = ref()
+            if lender is not None and lender.lent:
+                lender._notify()
+                if lender._on_work is not None:
+                    lender._on_work()
 
     # -- Everyone else's turns ---------------------------------------------------
 
@@ -382,7 +467,8 @@ class SessionScheduler:
         anything reads its history or session data.
         """
         if self._occupied:
-            if self.on_busy == "reject":
+            # The chat that lent the session queues its turns: they are what its user typed.
+            if self.on_busy == "reject" and not self._lender_of(run_context):
                 raise SessionBusyError(
                     "A turn of this session is in flight; wait for its OUTPUT before starting another turn."
                 )
@@ -447,6 +533,7 @@ class SessionScheduler:
             self.head_parked = is_parked(status)
         self._release_deferred()
         self._notify()
+        self._maybe_lend()
 
     # -- Turns the session starts itself -----------------------------------------
 
@@ -461,8 +548,9 @@ class SessionScheduler:
         if store is None:
             return None
         store.reconcile_completions()
-        policies = {self.announce_of(note) for note in store.pending_completions()}
-        policies.update(self.announce_of(event) for event in store.pending_events())
+        lent = self.lent
+        policies = set() if lent else {self.announce_of(note) for note in store.pending_completions()}
+        policies.update(self.announce_of(event) for event in store.pending_events() if self._answers(event, lent))
         if "interrupt" in policies:
             return "interrupt"
         if "when_idle" in policies:
@@ -474,8 +562,10 @@ class SessionScheduler:
         if self.pending_turn() is not None:
             return True
         store = self.store
-        return store is not None and any(
-            (record.announce or self.completions) != "silent" for record in store.running_tasks()
+        return (
+            store is not None
+            and not self.lent
+            and any((record.announce or self.completions) != "silent" for record in store.running_tasks())
         )
 
     async def wait_ready(self, admit: Callable[[], Awaitable[Any] | Any] | None = None) -> Urgency | None:
@@ -514,7 +604,11 @@ class SessionScheduler:
         urgency = self.pending_turn()
         if urgency is None or self.other_turn_first(urgency):
             return None
-        return take_followup(self.store, urgent=urgency == "interrupt")
+        return take_followup(self.store, urgent=urgency == "interrupt", users=self.user_messages, others=not self.lent)
+
+    def _answers(self, event: SessionEvent, lent: bool) -> bool:
+        """Whether ``event`` is this channel's to answer: user messages unless it is a call, the rest unless lent."""
+        return self.user_messages if event.source == "user" else not lent
 
     # -- Internals ------------------------------------------------------------------
 

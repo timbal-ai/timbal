@@ -359,9 +359,9 @@ class ChatSession:
         store = store_for_run(parent_id) if parent_id is not None else None
         self._store = store if store is not None else BackgroundTaskStore()
         self._scheduler = SessionScheduler(
-            channel=self, on_busy="enqueue", can_interrupt=True, on_work=self._work_arrived
+            channel=self, on_busy="enqueue", can_interrupt=True, on_work=self._work_arrived, lends=True
         )
-        self._scheduler.bind(self._store)
+        self._scheduler.join(self._store)
         self._scheduler.head = parent_id
         self._work = asyncio.Event()
         self._resume: dict[str, Any] | None = None
