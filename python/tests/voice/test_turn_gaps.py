@@ -147,6 +147,22 @@ def test_stage_summary_refuses_a_percentile_below_twenty_samples() -> None:
     assert small["median"] == 200.0
 
 
+def test_truncation_marks_only_a_finished_reply_resumable() -> None:
+    session = VoiceSession(_agent(), MockSTT(), MockTTS(), audio_input=AudioInputConfig(language="en"))
+    full = "Close! But C knows. specific event or maybe a mix"
+    session._turn_assistant_text = full
+    session._turn_tts_segment_records = [(full, 1000)]
+    session._turn_heard_bytes = 400
+    session._turn_played_baseline = 0
+    session._turn_finalized_ok = False
+    session._apply_interruption_truncation(None)
+    assert session._unheard_tail
+    assert session._unheard_tail_resumable is False
+    session._turn_finalized_ok = True
+    session._apply_interruption_truncation(None)
+    assert session._unheard_tail_resumable is True
+
+
 def test_unheard_suffix_keeps_only_the_rest() -> None:
     full = "One autumn morning, a bright red train rolled out."
     assert _unheard_suffix(full, "One autumn morning, a bright red") == "train rolled out."
@@ -165,6 +181,7 @@ async def test_backchannel_resumes_and_a_real_request_does_not() -> None:
     tts = MockTTS()
     session = VoiceSession(_agent(), MockSTT(), tts, audio_input=AudioInputConfig(language="en"))
     session._unheard_tail = "train rolled out."
+    session._unheard_tail_resumable = True
     await session._begin_user_turn("Yeah.", replace_user_entry=False)
     assert tts.synthesized_texts == ["train rolled out."]
     assert [entry.text for entry in session._transcript] == ["train rolled out."]
@@ -172,12 +189,16 @@ async def test_backchannel_resumes_and_a_real_request_does_not() -> None:
 
     tts.synthesized_texts.clear()
     session._unheard_tail = "SECRET-TAIL"
+    session._unheard_tail_resumable = True
     await session._begin_user_turn("What is the weather?", replace_user_entry=False)
     task = session._current_turn_task
     assert task is not None
     await task
     assert "SECRET-TAIL" not in "".join(tts.synthesized_texts)
-    assert "SECRET-TAIL" in (session._continuation_note or "")
+    assert session._continuation_note == ""
+    prompt = session.prompt_for_turn("You are a phone agent.").dynamic
+    assert "SECRET-TAIL" not in prompt
+    assert any(entry.role == "user" and entry.text == "What is the weather?" for entry in session._transcript)
 
 
 async def test_empty_commit_speaks_the_unheard_tail_without_the_model() -> None:
@@ -191,20 +212,66 @@ async def test_empty_commit_speaks_the_unheard_tail_without_the_model() -> None:
     assert not any(isinstance(item, str) and item == "One autumn morning" for item in tts.synthesized_texts)
 
 
-def test_continuation_note_names_the_remainder_and_stays_before_the_pin() -> None:
-    session = VoiceSession(
-        _agent(),
-        MockSTT(),
-        MockTTS(),
-        audio_input=AudioInputConfig(language="en"),
+async def test_logged_requests_leave_the_tail_out_of_the_prompt() -> None:
+    from timbal.voice.session import TranscriptEntry
+
+    heard = "The Western Empire lasted from around 27 BCE"
+    cases = (
+        ("Okay. Let's go. Let's go.", "really shapes the next topic."),
+        ("Oh, physical.", "specific event or maybe a mix"),
+        ("no", "really shapes the next topic."),
+        ("stop", "really shapes the next topic."),
     )
-    session._continuation_note = (
-        "The previous reply was cut off. The caller heard only its start. "
-        "Do not repeat that start. If it still applies, continue with only this unheard remainder: train rolled out."
-    )
-    text = session.prompt_for_turn("You are a phone agent.").dynamic
-    assert "train rolled out." in text
-    assert text.index("train rolled out.") < text.index("Reply in English")
+    for text, remainder in cases:
+        tts = MockTTS()
+        session = VoiceSession(_agent(), MockSTT(), tts, audio_input=AudioInputConfig(language="en"))
+        session._transcript.append(TranscriptEntry(role="assistant", text=heard))
+        session._unheard_tail = remainder
+        session._unheard_tail_resumable = True
+        await session._begin_user_turn(text, replace_user_entry=False)
+        task = session._current_turn_task
+        assert task is not None
+        await task
+        prompt = session.prompt_for_turn("You are a phone agent.").dynamic
+        assert remainder not in prompt
+        assert session._continuation_note == ""
+        assert remainder not in "".join(tts.synthesized_texts)
+        assert session._transcript[0].text == heard
+        assert any(entry.role == "user" and entry.text == text for entry in session._transcript)
+
+
+async def test_a_cancelled_generation_is_not_spoken_on_a_backchannel() -> None:
+    """A model stop that never finished is not a remainder to recite."""
+    tts = MockTTS()
+    session = VoiceSession(_agent(), MockSTT(), tts, audio_input=AudioInputConfig(language="en"))
+    session._unheard_tail = "specific event or maybe a mix"
+    session._unheard_tail_resumable = False
+    await session._begin_user_turn("Yeah.", replace_user_entry=False)
+    assert "specific event or maybe a mix" not in "".join(tts.synthesized_texts)
+    assert session._continuation_note == ""
+    task = session._current_turn_task
+    assert task is not None
+    await task
+
+
+async def test_a_second_interruption_still_does_not_script_the_tail() -> None:
+    tts = MockTTS()
+    session = VoiceSession(_agent(), MockSTT(), tts, audio_input=AudioInputConfig(language="en"))
+    session._unheard_tail = "really shapes the next topic."
+    session._unheard_tail_resumable = True
+    await session._begin_user_turn("Okay. Let's go. Let's go.", replace_user_entry=False)
+    task = session._current_turn_task
+    assert task is not None
+    await task
+    session._unheard_tail = "specific event or maybe a mix"
+    session._unheard_tail_resumable = True
+    await session._begin_user_turn("Oh, physical.", replace_user_entry=False)
+    task = session._current_turn_task
+    assert task is not None
+    await task
+    prompt = session.prompt_for_turn("You are a phone agent.").dynamic
+    assert "specific event or maybe a mix" not in prompt
+    assert "really shapes" not in prompt
 
 
 def _agent():

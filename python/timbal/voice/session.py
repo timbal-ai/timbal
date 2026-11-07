@@ -819,6 +819,9 @@ class VoiceSession:
         # or a tag is explicit and does not move the STT hint.
         self.reply_language = parse_reply_language(reply_language)
         self._unheard_tail = ""
+        # True only when the tail is the unplayed end of a reply the model
+        # finished. A cancel mid-generation is a fragment, not a script.
+        self._unheard_tail_resumable = False
         self._continuation_note = ""
         self._arm_flux_eager_query()
         self._eou_predictor: SpeechEouPredictor | None = None
@@ -1805,6 +1808,7 @@ class VoiceSession:
         """Speak the cut-off remainder. Does not call the model and does not repeat the heard start."""
         text = (tail or "").strip()
         self._unheard_tail = ""
+        self._unheard_tail_resumable = False
         self._continuation_note = ""
         if not text or self._closed:
             return
@@ -3194,16 +3198,16 @@ class VoiceSession:
             return
         self._continuation_note = ""
         tail = (self._unheard_tail or "").strip()
-        if tail and false_interrupt_followup(final_text):
-            self._unheard_tail = ""
+        resumable = bool(tail) and self._unheard_tail_resumable
+        self._unheard_tail = ""
+        self._unheard_tail_resumable = False
+        # A pure acknowledgement did not ask for anything new, so the unplayed
+        # end of a finished reply is spoken as audio. Any other commit is the
+        # request: the heard prefix is already the history entry, and the
+        # leftover text is not put in the prompt.
+        if resumable and false_interrupt_followup(final_text):
             await self._resume_unheard_tail(tail)
             return
-        if tail:
-            self._continuation_note = (
-                "The previous reply was cut off. The caller heard only its start. "
-                "Do not repeat that start. If it still applies, continue with only this unheard remainder: " + tail
-            )
-            self._unheard_tail = ""
         await self._sync_entity_patience("")
         self._turn_vad_endpointed = vad_endpointed
         self._turn_predictive_endpoint = predictive_endpoint
@@ -6858,6 +6862,11 @@ class VoiceSession:
             replace_last=replace_last,
             **_trace_debug_fields(),
         )
+        suffix = _unheard_suffix(self._turn_assistant_text, heard_text)
+        self._unheard_tail = suffix
+        # ``_turn_finalized_ok`` is still this turn's value: True after
+        # AgentTextDone, False when generation was cancelled first.
+        self._unheard_tail_resumable = bool(suffix) and self._turn_finalized_ok
 
         if replace_last and self._transcript and self._transcript[-1].role == "assistant":
             if heard_text:
@@ -6940,7 +6949,6 @@ class VoiceSession:
             ):
                 root.output = heard_reply
             rewritten = True
-        self._unheard_tail = _unheard_suffix(self._turn_assistant_text, heard_text)
         return rewritten
 
     @staticmethod
