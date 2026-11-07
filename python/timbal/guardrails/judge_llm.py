@@ -21,7 +21,8 @@ async def call_judge(
     prompt: str,
     max_tokens: int = 256,
 ) -> str | None:
-    """Run one deterministic (temperature 0) LLM call and return its text, or None.
+    """Run one LLM call and return its text, or None. No temperature is sent: newer models reject one
+    (Claude Haiku 5.5: "`temperature` is deprecated for this model").
 
     Callers must treat ``None`` as "no usable answer" and fail open/closed per their
     own ``strict`` policy — this helper never raises for empty output.
@@ -38,7 +39,6 @@ async def call_judge(
         messages=[prompt_message],
         system_prompt=system_prompt,
         max_tokens=max_tokens,
-        temperature=0.0,
     )
 
     start = time.perf_counter()
