@@ -530,6 +530,24 @@ def merge_client_voice_overrides(server_defaults: VoiceConfig, client: dict[str,
         except (ValueError, TypeError):
             logger.info("voice_client_hangup_grace_invalid")
             del updates["hangup_grace_secs"]
+    if "reply_language" in updates:
+        # model_copy skips the field validator. A hello of "english" would
+        # otherwise reach VoiceSession and raise before the call starts.
+        # Blank is unset and must not wipe a server pin. Null never arrives
+        # here (None is omitted above).
+        from ..voice.language import parse_reply_language
+
+        raw_reply = updates["reply_language"]
+        try:
+            parsed_reply = parse_reply_language(raw_reply)
+        except (TypeError, ValueError):
+            logger.info("voice_client_reply_language_invalid")
+            del updates["reply_language"]
+        else:
+            if parsed_reply is None:
+                del updates["reply_language"]
+            else:
+                updates["reply_language"] = parsed_reply
     if "voice" in updates:
         voice = updates["voice"]
         if isinstance(voice, str) and voice.strip():
