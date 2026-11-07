@@ -148,6 +148,8 @@ NOW_COALESCE_SECS = 0.25
 SEARCH_TOOLS_NAME = "search_tools"
 # Used when an agent tool already has the name (e.g. an unprefixed MCP server's own search_tools).
 _SEARCH_TOOLS_FALLBACKS = ("find_tools", "load_tools", "search_deferred_tools")
+CALL_TOOL_NAME = "call_tool"
+_CALL_TOOL_FALLBACKS = ("call_found_tool", "call_deferred_tool")
 # Session key: tools search_tools loaded, per agent path, in load order.
 _LOADED_TOOLS_KEY = "__loaded_tools"
 # Models with provider-side tool search: Claude 4.5 and later; OpenAI gpt-5.4 and later (Responses API).
@@ -215,6 +217,37 @@ class _Prepared:
 
 _CUT = object()
 """What :meth:`_CutWatch.next` returns when the cut came before the wait."""
+
+
+class _CallTool(Tool):
+    """``call_tool`` (``tool_search="dispatch"``): runs a deferred tool by name.
+
+    The agent rewrites a call to it into the call itself before dispatch
+    (:meth:`Agent._dispatched`), so its own handler only answers a call it
+    could not rewrite.
+    """
+
+    @classmethod
+    def build(cls, tool_name: str, search_name: str, path: str) -> "_CallTool":
+        def call_tool(name: str, arguments: dict[str, Any] | None = None) -> str:  # noqa: ARG001
+            """Run a tool found with the search tool.
+
+            Args:
+                name: The tool's name, as the search returned it.
+                arguments: The tool's input, matching the input schema the search returned.
+            """
+            raise ValueError(f"No tool named {name!r} can be run here. Find one with {search_name} first.")
+
+        tool = cls(
+            name=tool_name,
+            description=(
+                f"Run a tool you found with {search_name}: pass its name and its arguments as the input "
+                "schema the search returned describes."
+            ),
+            handler=call_tool,
+        )
+        tool.nest(path)
+        return tool
 
 
 class _CutWatch:
@@ -602,13 +635,16 @@ class Agent(Runnable):
     retried like a timeout (``max_retries``); after it, the call fails, since another
     attempt would repeat what was already sent. ``None`` waits forever. Raise it for
     models that think for minutes without streaming anything."""
-    tool_search: Literal["auto", "client", "off"] = "auto"
+    tool_search: Literal["auto", "client", "dispatch", "off"] = "auto"
     """How the model finds tools marked ``defer_loading`` (``Tool.defer_loading``,
     ``MCPServer(defer_loading=True)``) without carrying all their schemas on every call.
     ``"auto"``: Claude 4.5 and later use Anthropic's tool search (it runs server-side within the
     same response, and found tools load without changing the cached prompt prefix); other models
     get a ``search_tools`` tool whose finds stay loaded for the session, after the other tools.
-    ``"client"``: always ``search_tools``. ``"off"``: nothing is deferred."""
+    ``"client"``: always ``search_tools``. ``"dispatch"``: the tools offered never change, so the
+    cached prefix survives every search: ``search_tools`` returns the schemas it finds and the
+    model runs one with ``call_tool(name, arguments)``, which runs as a direct call would
+    (approval, guardrails, spans under the tool's own name). ``"off"``: nothing is deferred."""
     max_consecutive_denials: int | None = 3
     """Tool calls in a row that may be denied (approval) or blocked (``tool_args``
     guardrail) before the agent stops trying: it is told not to route around the
@@ -1923,18 +1959,28 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return tools, tools, None, set()
         if self.tool_search == "auto" and _native_tool_search(model):
             return tools, tools, [tool.name for tool in deferred], set()
+        restricted = get_run_context()._tool_policy is not None
+        deferred_ids = {id(tool) for tool in deferred}
+        if self.tool_search == "dispatch":
+            taken = {tool.name for tool in tools}
+            search_name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
+            call_name = next(n for n in (CALL_TOOL_NAME, *_CALL_TOOL_FALLBACKS) if n not in taken)
+            added = [
+                self._search_tools(deferred, search_name, restricted=restricted, dispatch=call_name),
+                _CallTool.build(call_name, search_name, self._path),
+            ]
+            return [tool for tool in tools if id(tool) not in deferred_ids] + added, [*tools, *added], None, set()
         session = await get_run_context().get_session()
         loaded_names = session.get(_LOADED_TOOLS_KEY, {}).get(self._path, [])
         by_name = {tool.name: tool for tool in deferred}
         loaded = [by_name[name] for name in loaded_names if name in by_name]
         hidden = [tool for tool in deferred if tool.name not in set(loaded_names)]
-        deferred_ids = {id(tool) for tool in deferred}
         offered = [tool for tool in tools if id(tool) not in deferred_ids] + loaded
         dispatch = list(tools)
         if hidden:
             taken = {tool.name for tool in tools}
             name = next(n for n in (SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS) if n not in taken)
-            search = self._search_tools(hidden, name, restricted=get_run_context()._tool_policy is not None)
+            search = self._search_tools(hidden, name, restricted=restricted)
             offered.append(search)
             dispatch.append(search)
         return offered, dispatch, None, {tool.name for tool in hidden}
@@ -1946,11 +1992,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         loaded.extend(name for name in names if name not in loaded)
         _record_tool_search(span, "client", names, query)
 
-    def _search_tools(self, hidden: list[Tool], name: str = SEARCH_TOOLS_NAME, *, restricted: bool = False) -> Tool:
+    def _search_tools(
+        self,
+        hidden: list[Tool],
+        name: str = SEARCH_TOOLS_NAME,
+        *,
+        restricted: bool = False,
+        dispatch: str | None = None,
+    ) -> Tool:
         """The ``search_tools`` tool over the deferred tools not loaded yet.
 
         ``restricted``: a tool policy narrowed this turn's tools, so the ones it
         hid can't be found either — said up front so the model stops looking.
+        ``dispatch``: the name of the ``call_tool`` dispatcher (``tool_search="dispatch"``):
+        finds return their schemas instead of loading, and the description never
+        changes, so neither does the cached prefix.
         """
         names = [tool.name for tool in hidden]
         listing = ", ".join(names[:80]) + (f", and {len(names) - 80} more" if len(names) > 80 else "")
@@ -1967,8 +2023,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # Found tools stay loaded for the session: skip weak matches (one shared word like "create").
             matches = [tool for score, tool in scored if score * 2 >= scored[0][0]][: max(1, min(limit, 20))]
             agent_span = get_run_context().parent_span()
+            mode = "client" if dispatch is None else "dispatch"
             if not matches:
-                record = agent_span.metadata.setdefault("tool_search", {"mode": "client", "loaded": [], "searches": []})
+                record = agent_span.metadata.setdefault("tool_search", {"mode": mode, "loaded": [], "searches": []})
                 record["searches"].append({"query": query, "loaded": []})
                 misses = sum(1 for search in record["searches"] if not search["loaded"])
                 if misses >= _FRUITLESS_SEARCHES:
@@ -1978,20 +2035,29 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         "answer with the tools you have."
                     )
                 return f"No tool matched {query!r}. Try other words. Tools not loaded yet: {listing}.{scope}"
+            if dispatch is not None:
+                _record_tool_search(agent_span, mode, [tool.name for tool in matches], query)
+                found = [tool.anthropic_schema for tool in matches]
+                return json.dumps(
+                    {"found": found, "note": f'Run one with {dispatch}(name="<tool name>", arguments={{...}}).'}
+                )
             await self._load_tools([tool.name for tool in matches], agent_span, query)
             found = [{"name": tool.name, "description": tool.description or ""} for tool in matches]
             return json.dumps({"loaded": found, "note": "Call these from your next step."})
 
-        tool = Tool(
-            name=name,
-            description=(
+        if dispatch is None:
+            description = (
                 f"Load tools that are not loaded yet. {len(names)} more are available: {listing}. "
                 "Search with a few words for what you need (or a tool's name); the matches become callable "
                 f"from your next step.{scope}"
-            ),
-            handler=search_tools,
-            read_only=True,
-        )
+            )
+        else:
+            description = (
+                f"Find more tools: {len(names)} are available through {dispatch}: {listing}. Search with a few "
+                "words for what you need (or a tool's name); you get each match's input schema, then run it "
+                f"with {dispatch}.{scope}"
+            )
+        tool = Tool(name=name, description=description, handler=search_tools, read_only=True)
         tool.nest(self._path)
         return tool
 
@@ -2159,6 +2225,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             },
         )
 
+    @staticmethod
+    def _dispatched(tools: list[Tool], tool_call: ToolUseContent) -> ToolUseContent:
+        """A ``call_tool`` call as the call it stands for (same id, so its result answers it); else unchanged."""
+        dispatcher = next((t for t in tools if isinstance(t, _CallTool) and t.name == tool_call.name), None)
+        if dispatcher is None or not isinstance(tool_call.input, dict):
+            return tool_call
+        name, arguments = tool_call.input.get("name"), tool_call.input.get("arguments") or {}
+        if isinstance(arguments, str):
+            with contextlib.suppress(ValueError):
+                arguments = json.loads(arguments)
+        target = next((t for t in tools if t.name == name and not isinstance(t, _CallTool)), None)
+        if target is None or not isinstance(arguments, dict):
+            return tool_call
+        return ToolUseContent(id=tool_call.id, name=target.name, input=arguments)
+
     def _resolve_tool_for_call(self, tools: list[Tool], tool_call: ToolUseContent) -> Tool | None:
         """Find the tool for a call, logging when the LLM asked for an unknown one."""
         tool = next((t for t in tools if t.name == tool_call.name), None)
@@ -2240,6 +2321,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         ``cut``: set by a 'now' message. The interruptible calls still running are
         cancelled (each gets a ``steered`` result); the others run to the end.
         """
+        tool_calls = [self._dispatched(tools, tool_call) for tool_call in tool_calls]
         # Fast path: a single tool call needs no queue/task fan-in — iterate the
         # tool directly, exactly like Workflow consumes its steps. This is the
         # common case for most agent iterations. A cuttable batch needs the tasks.
