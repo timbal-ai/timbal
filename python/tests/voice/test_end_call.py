@@ -971,3 +971,254 @@ class TestHangupFillerAndRearm:
         assert used == 1
         bye_users = [m.collect_text() for m in model.calls[-1] if m.role == "user"]
         assert any("Bye" in text for text in bye_users)
+
+
+class TestHangupEventSequences:
+    """Provider-shaped sequences. Partials arrive on the STT queue, not by poking fields.
+
+    The 870c51aa tests that Albert's Flux run falsified only ever applied the
+    finished word "Alright." (or a single already-complete partial). TestModel
+    also returns a whole message, so a second "Goodbye." was either absent or
+    only checked with ``in``, which stays true when the line is spoken twice.
+    """
+
+    async def test_flux_partials_during_grace_then_alright_commit_still_hangs_up(self) -> None:
+        results: list[bool] = []
+
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            ok = await session.commit_hangup()
+            results.append(ok)
+            return "Ending the call." if ok else "The caller spoke again. Do not hang up. Keep helping."
+
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(_tool_only(), "Still here."),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.2,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        started = time.monotonic()
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await _until(lambda: "Goodbye." in tts.synthesized_texts and session._hangup_open)
+        # Past the 0.4s trailing-crumb window, still inside the 1.2s grace.
+        await asyncio.sleep(0.55)
+        for piece in ("Al", "All", "Alri", "Alright"):
+            await stt.inject(TranscriptEvent(type="partial", text=piece))
+            await asyncio.sleep(0.05)
+        await stt.inject(TranscriptEvent(type="committed", text="Alright."))
+        await asyncio.wait_for(call, timeout=3.0)
+        elapsed = time.monotonic() - started
+        assert results == [True], results
+        assert session.closed
+        assert not session._hangup_retracted
+        assert tts.synthesized_texts.count("Goodbye.") == 1
+        assert "Still here." not in tts.synthesized_texts
+        assert elapsed < 3.0
+
+    async def test_ack_partials_during_farewell_playback_do_not_cancel(self) -> None:
+        results: list[bool] = []
+
+        class _HoldDrain(MockTTS):
+            async def synthesize(self, text: str):
+                self.synthesized_texts.append(text)
+                tracker.playing = True
+                yield self._chunk
+
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            ok = await session.commit_hangup()
+            results.append(ok)
+            return "Ending the call." if ok else "cancelled"
+
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(_tool_only()),
+            tools=[end_call],
+            tts=_HoldDrain(),
+            tracker=tracker,
+            hangup_grace_secs=0.3,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await _until(lambda: tracker.playing and session._hangup_open)
+        for piece in ("Al", "All", "Alri"):
+            await stt.inject(TranscriptEvent(type="partial", text=piece))
+            await asyncio.sleep(0.04)
+        await asyncio.sleep(0.15)
+        assert results == []
+        assert not session._hangup_retracted
+        tracker.playing = False
+        await asyncio.wait_for(call, timeout=3.0)
+        assert results == [True]
+        assert session.closed
+        assert tts.synthesized_texts == ["Goodbye."]
+
+    async def test_retract_partial_during_farewell_drain_cancels_immediately(self) -> None:
+        results: list[bool] = []
+
+        class _HoldDrain(MockTTS):
+            async def synthesize(self, text: str):
+                self.synthesized_texts.append(text)
+                tracker.playing = True
+                yield self._chunk
+
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            ok = await session.commit_hangup()
+            results.append(ok)
+            return "Ending the call." if ok else "The caller spoke again. Do not hang up. Keep helping."
+
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(_tool_only(), "Sure, go ahead."),
+            tools=[end_call],
+            tts=_HoldDrain(),
+            tracker=tracker,
+            hangup_grace_secs=1.0,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await _until(lambda: tracker.playing and session._hangup_open)
+        marked = time.monotonic()
+        await stt.inject(TranscriptEvent(type="partial", text="Wait"))
+        await _until(lambda: results == [False] or "Sure, go ahead." in _texts(events))
+        assert time.monotonic() - marked < 0.5
+        assert results == [False]
+        tracker.playing = False
+        await _until(lambda: "Sure, go ahead." in _texts(events))
+        assert not session.closed
+        assert "Goodbye." in tts.synthesized_texts
+        assert tts.synthesized_texts.count("Goodbye.") == 1
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_grace_expires_on_an_unfinished_ack_partial(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.28)
+        session._last_commit_at = time.monotonic()
+        started = time.monotonic()
+
+        async def hold_prefix() -> None:
+            while time.monotonic() - started < 0.45:
+                session._latest_partial_text = "Al"
+                session._last_partial_at = time.monotonic()
+                await asyncio.sleep(0.02)
+
+        asyncio.create_task(hold_prefix())
+        assert await session.commit_hangup() is True
+        elapsed = time.monotonic() - started
+        assert 0.2 < elapsed < 0.7
+
+    async def test_retract_in_the_last_moment_of_grace_still_cancels(self) -> None:
+        session, _stt, _tts = _session(_Model(), hangup_grace_secs=0.3)
+        session._last_commit_at = time.monotonic()
+        started = time.monotonic()
+
+        async def late_retract() -> None:
+            await asyncio.sleep(0.22)
+            session._latest_partial_text = "Wait"
+            session._last_partial_at = time.monotonic()
+
+        asyncio.create_task(late_retract())
+        assert await session.commit_hangup() is False
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.4
+
+    async def test_streamed_second_goodbye_does_not_play_or_delay_disconnect(self) -> None:
+        from timbal.types.events.delta import DeltaEvent, TextDelta
+        from timbal.types.events.output import OutputEvent
+
+        async def end_call() -> str:
+            session = current_voice_session()
+            assert session is not None
+            if not await session.commit_hangup():
+                return "The caller spoke again. Do not hang up. Keep helping."
+            return "Ending the call."
+
+        tracker = FakePlaybackTracker()
+        session, stt, tts = _session(
+            _Model(_tool_only(), "Goodbye."),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=0.12,
+        )
+        inner = session.agent
+
+        class _StreamLateGoodbye:
+            def __getattr__(self, name: str):
+                return getattr(inner, name)
+
+            def __call__(self, **kwargs):
+                source = inner(**kwargs)
+
+                async def events():
+                    saw_tool = False
+                    async with aclosing(source):
+                        async for event in source:
+                            content = getattr(getattr(event, "output", None), "content", None)
+                            is_tool = bool(content) and any(isinstance(block, ToolUseContent) for block in content)
+                            if is_tool:
+                                saw_tool = True
+                            text = ""
+                            if (
+                                saw_tool
+                                and not is_tool
+                                and isinstance(event, OutputEvent)
+                                and getattr(event, "output", None) is not None
+                                and hasattr(event.output, "collect_text")
+                            ):
+                                text = event.output.collect_text() or ""
+                            if text.strip():
+                                await asyncio.sleep(2.0)
+                                for piece in (text[:4], text[4:]):
+                                    if piece:
+                                        yield DeltaEvent(
+                                            run_id=event.run_id,
+                                            path=event.path,
+                                            call_id=event.call_id,
+                                            item=TextDelta(id="g", text_delta=piece),
+                                        )
+                            yield event
+
+                return events()
+
+        session.agent = _StreamLateGoodbye()
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        started = time.monotonic()
+        await stt.inject(TranscriptEvent(type="committed", text="Please hang up."))
+        await asyncio.wait_for(call, timeout=1.8)
+        elapsed = time.monotonic() - started
+        assert session.closed
+        assert elapsed < 1.5, elapsed
+        assert tts.synthesized_texts.count("Goodbye.") == 1
+
+    async def test_bare_end_call_still_cancels_when_the_caller_says_alright(self) -> None:
+        tracker = FakePlaybackTracker()
+        session, stt, _tts = _session(
+            _hangs_up_with(GOODBYE, "Dime."),
+            tools=[end_call],
+            tracker=tracker,
+            hangup_grace_secs=1.0,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        tracker.playing = True
+        await stt.inject(TranscriptEvent(type="committed", text="Vale, vamos a terminar."))
+        await _until(lambda: GOODBYE in _texts(events))
+        tracker.playing = False
+        await asyncio.sleep(session.END_CALL_TAIL_SECS + 0.25)
+        assert not session.closed
+        await stt.inject(TranscriptEvent(type="committed", text="Alright."))
+        await _until(lambda: "Dime." in _texts(events))
+        await asyncio.sleep(0.4)
+        assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
