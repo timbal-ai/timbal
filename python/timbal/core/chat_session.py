@@ -816,7 +816,10 @@ class ChatSession:
                 # resume, or any newer head, lets the session go on; messages stay pending until then.
                 await self._until_scheduler_or_work()
                 continue
-            if self._wakes and scheduler.pending_turn() is None and not scheduler.other_turn_first():
+            # A recovery turn goes before anything queued: it is about the turn the user saw cut, and the turns
+            # after it must find it settled. Other wakes wait for the user.
+            recovering = bool(self._wakes) and self._wakes[0].kind == RECOVERY_KIND
+            if self._wakes and (recovering or scheduler.pending_turn() is None) and not scheduler.other_turn_first():
                 wake = self._wakes.pop(0)
                 scheduler.turn_started()
                 await self._run_turn(wake=wake)
@@ -962,6 +965,9 @@ class ChatSession:
                 "events": [event.to_dict() for event in followup.events] if followup is not None else [],
                 "wake": wake.to_dict() if wake is not None else None,
             }
+            if resume is not None:
+                in_flight["resume"] = _dump_resume(resume)
+                in_flight["approved"] = self._approved_calls(resume)
             turn = asyncio.get_running_loop().create_task(self._pump(context, kwargs, followup, trigger, in_flight))
             self._turn, self._turn_context = turn, context
             try:
@@ -1034,6 +1040,7 @@ class ChatSession:
                         started = True
                         self._scheduler.note_run(context.id)
                         self.turns += 1
+                        self.parked = False  # a resume took the answers: what is stored now is this turn
                         self._in_flight = in_flight
                         self._record("turn_started", run_id=context.id, parent_id=context.parent_id, trigger=trigger)
                         if followup is not None:
@@ -1203,6 +1210,51 @@ class ChatSession:
         except Exception as e:
             logger.error("chat_session_close_store_failed", session_id=self.id, error=str(e))
 
+    def _approved_calls(self, values: dict[str, Any]) -> list[str]:
+        """The gated calls a resume lets run, as the recovery notice names them."""
+        if self._last_context is None:
+            return []
+        calls = []
+        for approval in self._last_context.pending_approvals():
+            value = values.get(approval["approval_id"])
+            approved = value is True or (isinstance(value, dict) and value.get("approved", True) is not False)
+            if approved:
+                name = approval.get("path", "?").rsplit(".", 1)[-1]
+                calls.append(f"{name}({_brief(approval.get('input'), 80)})")
+        return calls
+
+    def _recover_resume(self, in_flight: dict[str, Any], run_id: str) -> str:
+        """A resume that died before storing anything: the parked turn is answered again. The approvals it
+        claimed stay claimed (``TracingProvider.claim_approval``), so the gated calls that may have started are
+        not run twice; a recovery turn after it says they may have run. A provider without claims could
+        run them again: the session parks instead, and the user answers again."""
+        from ..state.tracing.providers.base import TracingProvider
+
+        provider = self._agent.tracing_provider
+        claims = isinstance(provider, type) and provider.claim_approval.__func__ is not (
+            TracingProvider.claim_approval.__func__
+        )
+        self.parked = True
+        if not claims:
+            logger.warning("chat_session_resume_reparked", session_id=self.id, dead_run_id=run_id)
+            return "reparked"
+        self._resume = _load_resume(in_flight["resume"])
+        approved = in_flight.get("approved") or []
+        if approved and self.on_dead_turn != "drop":
+            notice = _recovery_notice([], approved)
+            self._wakes.insert(
+                0,
+                _Wake(
+                    text=notice,
+                    key=RECOVERY_KIND,
+                    tool_policy="read_only",
+                    silent_ok=True,
+                    kind=RECOVERY_KIND,
+                    trigger={"kind": RECOVERY_KIND, "dead_run_id": run_id, "cut": in_flight.get("cut") or "crash"},
+                ),
+            )
+        return "resumed_again"
+
     def _restore_events(self, stored: list[dict[str, Any]]) -> None:
         # Restored in the same process (an idle session let go), the run's task store may still hold them.
         held = {event.id for event in self._store.pending_events()}
@@ -1245,6 +1297,8 @@ class ChatSession:
             self._restore_events(in_flight.get("events") or [])
             if in_flight.get("wake") is not None:
                 self._wakes.insert(0, _Wake.from_dict(in_flight["wake"]))
+            if in_flight.get("resume") is not None:
+                return self._recover_resume(in_flight, run_id)
             return "requeued"
         self._scheduler.head = run_id
         self.parked = False

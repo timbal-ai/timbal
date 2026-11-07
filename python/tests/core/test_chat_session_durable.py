@@ -155,6 +155,252 @@ async def crash(session):
     forget_idle_background_store(session._store)
 
 
+class Charge:
+    """An approval-gated tool that waits until released (a test crashes the process mid-charge)."""
+
+    def __init__(self, *, released=False):
+        self.gate = Gate(released=released)
+
+    async def charge(self) -> str:
+        await self.gate.work()
+        return "charged"
+
+
+def gated_agent(provider, charge, *, extra_tools=(), model_handler=handler):
+    return Agent(
+        name="agent",
+        model=TestModel(handler=model_handler),
+        tools=[
+            Tool(name="work", handler=Gate(released=True).work),
+            Tool(name="charge", handler=charge.charge, requires_approval=True),
+            *extra_tools,
+        ],
+        tracing_provider=provider,
+    )
+
+
+async def parked(provider, store, charge):
+    session = ChatSession(gated_agent(provider, charge), session_store=store)
+    session.send("pay")
+    await records(session, "turn_finished", 1)
+    approval = next(e for e in session.log.peek()[0] if isinstance(e, ApprovalEvent))
+    return session, approval
+
+
+def after_restore(session):
+    return session.log.forgotten_through
+
+
+class TestEdges:
+    async def test_a_queued_message_waits_for_the_recovery_turn(self, db):
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        session.send("also this", mode="followup")
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert [s["trigger"]["kind"] for s in started] == ["recovery", "user_message"]
+        assert [o.output.collect_text() for o in root_outputs(restored)] == ["recovered", "echo: also this"]
+        await restored.close()
+
+    async def test_answers_stored_before_the_crash_resume_the_parked_turn(self, db):
+        provider, store = db
+        session, approval = await parked(provider, store, Charge(released=True))
+        await session.close(keep=True)
+        snapshot = await store.load(session.id)
+        snapshot.resume = {approval.approval_id: True}  # resume() was stored, the turn never started
+        await store.save(snapshot, expect_version=snapshot.version)
+
+        charge = Charge(released=True)
+        restored = await ChatSession.restore(gated_agent(provider, charge), store, session.id)
+        (finished,) = await records(restored, "turn_finished", 1, after=after_restore(restored))
+        assert finished["status"]["code"] == "success" and not restored.parked
+        assert charge.gate.calls == 1
+        await restored.close()
+
+    async def test_a_crash_during_a_resumed_approval_turn_is_recovered_without_charging_again(self, db):
+        provider, store = db
+        first = Charge()
+        session, approval = await parked(provider, store, first)
+        session.resume({approval.approval_id: True})
+        await asyncio.wait_for(first.gate.entered.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+
+        again = Charge(released=True)
+        restored = await ChatSession.restore(gated_agent(provider, again), store, session.id)
+        started = await records(restored, "turn_started", 2, after=after_restore(restored))
+        await records(restored, "turn_finished", 2, after=after_restore(restored))
+        # The stored answers go again, but the approval stays claimed by the dead run: no second charge.
+        assert [s["trigger"]["kind"] for s in started] == ["resume", "recovery"]
+        text = Message.validate(root_outputs(restored)[1].input["prompt"]).collect_text()
+        assert "Started but not confirmed" in text and "charge(" in text
+        assert first.gate.calls == 1 and again.gate.calls == 0
+        assert not restored.parked
+        await restored.close()
+
+    async def test_without_approval_claims_a_dead_resume_parks_again(self, tmp_path):
+        from timbal.state.tracing.providers.base import TracingProvider
+
+        class NoClaims(CrashableSqlite):
+            claim_approval = TracingProvider.claim_approval
+
+        provider = NoClaims.configured(_path=tmp_path / "timbal.db", crashed=False)
+        store = SqliteChatSessionStore(tmp_path / "timbal.db")
+        first = Charge()
+        session, approval = await parked(provider, store, first)
+        session.resume({approval.approval_id: True})
+        await asyncio.wait_for(first.gate.entered.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+
+        again = Charge(released=True)
+        restored = await ChatSession.restore(gated_agent(provider, again), store, session.id)
+        await asyncio.sleep(0.1)
+        assert restored.parked and restored._resume is None and again.gate.calls == 0
+        assert restored.state()["pending_approvals"][0]["approval_id"] == approval.approval_id
+        await restored.close()
+
+    async def test_a_second_crash_during_the_recovery_turn(self, db):
+        provider, store = db
+        checking = Gate()
+
+        def recovering(messages):
+            text = last_user_text(messages)
+            if "cut off by a server restart" in text:
+                return "recovered" if messages[-1].role == "tool" else tool_call("check", f"check-{len(messages)}")
+            return handler(messages)
+
+        def agent(gate, check_gate):
+            return Agent(
+                name="agent",
+                model=TestModel(handler=recovering),
+                tools=[
+                    Tool(name="work", handler=gate.work),
+                    Tool(name="check", handler=check_gate.work, read_only=True),
+                ],
+                tracing_provider=provider,
+            )
+
+        gate = Gate()
+        session = ChatSession(agent(gate, checking), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        await crash(session)
+        provider.crashed = False
+
+        second = await ChatSession.restore(agent(Gate(), checking), store, session.id)
+        await asyncio.wait_for(checking.entered.wait(), 3)  # the recovery turn is checking: crash again
+        recovery_run = second.run_id
+        await crash(second)
+        provider.crashed = False
+
+        third = await ChatSession.restore(agent(Gate(), Gate(released=True)), store, session.id)
+        (started,) = await records(third, "turn_started", 1, after=after_restore(third))
+        await records(third, "turn_finished", 1, after=after_restore(third))
+        assert started["trigger"]["dead_run_id"] == recovery_run
+        text = Message.validate(root_outputs(third)[0].input["prompt"]).collect_text()
+        assert "check(" in text
+        assert root_outputs(third)[0].output.collect_text() == "recovered"
+        await third.close()
+
+    async def test_wakes_survive_with_their_tool_policies(self, db):
+        provider, store = db
+        gate = Gate()
+        session = ChatSession(make_agent(provider, gate), session_store=store)
+        session.send("start")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        session.wake("routine", key="r", tool_policy=["work"])
+        session.wake("custom", key="c", tool_policy=lambda _tool: True)
+        await crash(session)
+        provider.crashed = False
+
+        restored = await ChatSession.restore(make_agent(provider, Gate(released=True)), store, session.id)
+        wakes = [(w.kind, w.key, w.tool_policy) for w in restored._wakes]
+        assert wakes == [
+            ("recovery", "recovery", "read_only"),
+            ("wake", "r", frozenset({"work"})),
+            ("wake", "c", "read_only"),  # a callable cannot be stored: the safe policy comes back
+        ]
+        await records(restored, "turn_finished", 3, after=after_restore(restored))
+        await restored.close()
+
+    async def test_interrupting_a_restored_parked_session_abandons_the_approval(self, db):
+        provider, store = db
+        charge = Charge(released=True)
+        session, _ = await parked(provider, store, charge)
+        await session.close(keep=True)
+
+        restored = await ChatSession.restore(gated_agent(provider, charge), store, session.id)
+        restored.send("never mind", mode="interrupt")
+        finished = await records(restored, "turn_finished", 2, after=after_restore(restored))
+        assert finished[0]["status"]["code"] == "cancelled"
+        assert root_outputs(restored)[-1].output.collect_text() == "echo: never mind"
+        assert charge.gate.calls == 0
+        await restored.close()
+
+    async def test_losing_the_lease_stops_the_session_without_writing(self, db):
+        provider, store = db
+        store.lease_ttl_s = 0.15
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_finished", 1)
+        await session.flush()
+        session._lease_task.cancel()  # this process stalls past its lease...
+        await asyncio.sleep(0.2)
+        await store.acquire_lease(session.id, "elsewhere:1:x")  # ...and another host takes the session
+        version = (await store.load(session.id)).version
+        session._lease_task = asyncio.get_running_loop().create_task(session._renew_lease())
+        for _ in range(50):
+            if session.closed:
+                break
+            await asyncio.sleep(0.02)
+        assert session.closed and session.state()["durable"] is False
+        assert (await store.load(session.id)).version == version  # not written over
+
+    async def test_a_newer_snapshot_from_another_owner_stops_the_session(self, db):
+        provider, store = db
+        session = ChatSession(make_agent(provider, Gate(released=True)), session_store=store)
+        session.send("hi")
+        await records(session, "turn_finished", 1)
+        await session.flush()
+        foreign = await store.load(session.id)
+        foreign.turns = 99
+        await store.save(foreign, expect_version=foreign.version)
+        session.wake("ping", key="p")
+        for _ in range(50):
+            if session.closed:
+                break
+            await asyncio.sleep(0.02)
+        assert session.closed
+        assert (await store.load(session.id)).turns == 99
+
+    async def test_a_failing_store_does_not_hang_and_the_next_change_retries(self, db, monkeypatch):
+        provider, store = db
+        real_save, failures = store.save, []
+
+        async def flaky(snapshot, *, expect_version):
+            if not failures:
+                failures.append(1)
+                raise OSError("disk full")
+            return await real_save(snapshot, expect_version=expect_version)
+
+        monkeypatch.setattr(store, "save", flaky)
+        async with ChatSession(make_agent(provider, Gate(released=True)), session_store=store) as session:
+            session.send("hi")
+            await asyncio.wait_for(session.flush(), 1)
+            await records(session, "turn_finished", 1)
+            await session.flush()
+            snapshot = await store.load(session.id)
+            assert failures and snapshot is not None and snapshot.turns == 1
+
+
 class TestStores:
     @pytest.fixture(params=["memory", "sqlite"])
     def store(self, request, tmp_path):
