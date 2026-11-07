@@ -1013,6 +1013,10 @@ class ChatSession:
                         self._record("turn_started", run_id=context.id, parent_id=context.parent_id, trigger=trigger)
                         if followup is not None:
                             followup.started(context)
+                        elif (root := context.root_span()) is not None:
+                            # Wakes, recovery turns and resumes too: who started the turn is in its trace
+                            # (an approval reviewer reads it: nobody is there to ask on a wake).
+                            root.metadata["trigger"] = trigger
                     self.log.put_nowait(event)
                     if isinstance(event, OutputEvent) and event.run_id == context.id and event.parent_call_id is None:
                         output = event

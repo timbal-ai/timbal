@@ -122,6 +122,16 @@ DEFAULT_DENIAL_NOTICE = (
 )
 """User message injected once ``max_consecutive_denials`` is reached, before a tool-less LLM call."""
 
+DEFAULT_DENIAL_WINDOW_NOTICE = (
+    "[System notice] {count} of your last {calls} tool calls were denied or blocked, so no tools are available "
+    "for this reply. Do not look for another way to do the same thing. Tell the user what you were trying to "
+    "do, what was refused, and what you need from them."
+)
+"""User message injected once ``max_denials_window`` is reached, before a tool-less LLM call."""
+
+# Session data key: per agent path, its last tool call outcomes for max_denials_window.
+_DENIAL_WINDOW_KEY = "__denial_window"
+
 DEFAULT_STEER_BLOCKED_NOTICE = (
     "[System notice] A message the user sent during this turn was blocked by the '{rail}' guardrail and is "
     "not shown. Do not guess what it said. Carry on, and mention briefly that one message could not be accepted."
@@ -553,6 +563,16 @@ class Agent(Runnable):
     guardrail) before the agent stops trying: it is told not to route around the
     refusals, and its next model call gets no tools, so it answers the user. A tool call
     that succeeds resets the count. ``None`` turns the breaker off."""
+    max_denials_window: tuple[int, int] | None = None
+    """``(denied, calls)``: the same stop once ``denied`` of the agent's last ``calls`` tool calls were denied
+    or blocked, in a row or not (e.g. ``(10, 50)``). Counted across the session's turns (kept in its session
+    data), so a bot that keeps probing refused actions over many wakes is stopped too. ``None`` (default): off."""
+    approval_reviewer: SkipValidation[Any] = None
+    """Decides approval gates of this agent's tool calls before a person is asked: an
+    :class:`~timbal.core.approval_reviewer.ApprovalReviewer`, a model string (a cheap one), or a function
+    ``(ApprovalRequest) -> "approve" | "deny" | "escalate"``. ``escalate`` (and any failure) asks a person as
+    before, with the reviewer's reason on the card; a denial reaches the model like a person's. Covers
+    subagents without a reviewer of their own. Grants and resume values are honored first. ``None``: off."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
     memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
@@ -629,6 +649,12 @@ class Agent(Runnable):
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
         super().model_post_init(__context)
+        from .approval_reviewer import ApprovalReviewer
+
+        self._approval_reviewer = ApprovalReviewer.coerce(self.approval_reviewer)
+        window = self.max_denials_window
+        if window is not None and not (isinstance(window, tuple) and len(window) == 2 and 0 < window[0] <= window[1]):
+            raise ValueError(f"max_denials_window must be (denied, calls) with 0 < denied <= calls, got {window!r}")
         prepare = self.memory_compaction_prepare_ratio
         if prepare is not None and not 0.0 < prepare < self.memory_compaction_ratio:
             raise ValueError(
@@ -1606,54 +1632,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         session = await run_context.get_session()
         session.setdefault(_DENIAL_STREAK_KEY, {})[self._path] = {"run_id": run_context.id, "count": denials}
 
-    async def _stop_after_denials(self, current_span: Any, denials: int, append_memory: Any) -> None:
-        """After a tool batch past the denial limit: tell the model to stop routing around refusals (the caller
-        takes its tools away for the next call)."""
-        logger.warning("Agent reached max_consecutive_denials.", path=self._path, denials=denials)
-        current_span.metadata.setdefault("denial_limit", []).append({"denials": denials})
-        await append_memory(
-            Message(
-                role="user",
-                content=[TextContent(text=DEFAULT_DENIAL_NOTICE.format(count=denials))],
-                metadata={"source": "runtime", "kind": "denial_limit"},
-            )
-        )
-
-    # -- Compaction prepared in the background (memory_compaction_prepare_ratio) -----------------
-
-    def _span_model(self, current_span: Any) -> str:
-        return str(current_span.input.get("model") or self.model)
-
-    def _prepare_compaction(self, current_span: Any, prefix: list[Message], utilization: float) -> "_Prepared":
-        """Run the strategies on ``prefix`` (a copy of the history so far) on a task of its own."""
-        task = asyncio.get_running_loop().create_task(
-            self._run_compactors(list(prefix), self._span_model(current_span))
-        )
-        task.add_done_callback(_retrieve_result)
-        return _Prepared(task=task, prefix=list(prefix), utilization=utilization)
-
-    def _swap_prepared(self, current_span: Any, prepared: "_Prepared", run_context: Any) -> bool:
-        """Put a finished prepared compaction in place of the history it covered, when that is still there."""
-        if prepared.task.cancelled() or prepared.task.exception() is not None:
-            if not prepared.task.cancelled():
-                logger.warning(
-                    "Background compaction failed; compacting inline when needed.",
-                    path=self._path,
-                    error=str(prepared.task.exception()),
-                )
-            return False
-        compacted, steps = prepared.task.result()
-        memory = current_span.memory
-        if not prepared.intact(memory):
-            run_context.update_usage("compaction:prepared_stale", 1)
-            return False
-        if len(compacted) >= len(prepared.prefix):
-            return False  # nothing to gain
-        current_span.memory = _join(compacted, memory[len(prepared.prefix) :])
-        self._record_compaction(current_span, prepared.utilization, steps, background=True)
-        run_context.update_usage("compaction:background", 1)
-        return True
-
     async def _compaction_boundary(
         self, current_span: Any, run_context: Any, prepared: "_Prepared | None"
     ) -> "_Prepared | None":
@@ -2466,6 +2444,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         consecutive_denials = 0
         denials_resumed = False
 
+        async def _denial_window() -> list[int]:
+            """The agent's last tool call outcomes (1: denied or blocked), kept across turns in session data."""
+            session = await run_context.get_session()
+            return session.setdefault(_DENIAL_WINDOW_KEY, {}).setdefault(self._path, [])
+
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
             nonlocal consecutive_denials
@@ -2522,6 +2505,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 consecutive_denials += 1
             elif consecutive_denials:
                 consecutive_denials = 0
+            if self.max_denials_window is not None:
+                window = await _denial_window()
+                window.append(1 if denied else 0)
+                del window[: -self.max_denials_window[1]]
             # Pin the result when the originating tool opted in (e.g. read_skill), so memory
             # compaction never strips this durable context. The tool name is the final path
             # segment of its OutputEvent.
@@ -2599,6 +2586,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         steering = self._steers(run_context, current_span)
         # Fixed for the turn; checked after every tool batch.
+        denial_window_on = self.max_denials_window is not None
         denial_limit = self.max_consecutive_denials
         if denial_limit is None:
             denial_limit = math.inf
@@ -2654,6 +2642,37 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         max_tokens_retry: int | None = None
         last_output: Any = None
         last_output_stored = False
+
+        async def _check_denials() -> None:
+            """After a tool batch: past a denial limit (in a row, or in the window), tell the model to stop and
+            take its tools away."""
+            nonlocal consecutive_denials, withhold_tools
+            limit = self.max_consecutive_denials
+            notice = record = None
+            if limit is not None and consecutive_denials >= limit:
+                notice = DEFAULT_DENIAL_NOTICE.format(count=consecutive_denials)
+                record = {"denials": consecutive_denials}
+            elif self.max_denials_window is not None:
+                denied_needed, calls = self.max_denials_window
+                window = (await _denial_window())[-calls:]
+                if sum(window) >= denied_needed:
+                    notice = DEFAULT_DENIAL_WINDOW_NOTICE.format(count=sum(window), calls=len(window))
+                    record = {"denials": sum(window), "window": len(window)}
+            if notice is None:
+                return
+            logger.warning("Agent reached a denial limit.", path=self._path, **record)
+            current_span.metadata.setdefault("denial_limit", []).append(record)
+            await _append_memory(
+                Message(
+                    role="user",
+                    content=[TextContent(text=notice)],
+                    metadata={"source": "runtime", "kind": "denial_limit"},
+                )
+            )
+            consecutive_denials = 0
+            if self.max_denials_window is not None:
+                (await _denial_window()).clear()  # stopped once: the count starts again
+            withhold_tools = True
 
         i = 0
         need_retry = False
@@ -2819,9 +2838,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         await self._save_denials(run_context, consecutive_denials)
                         raise PauseRequired(first_pending)
                     i += 1
-                    if consecutive_denials >= denial_limit:
-                        await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
-                        consecutive_denials, withhold_tools = 0, True
+                    if denial_window_on or consecutive_denials >= denial_limit:
+                        await _check_denials()
                     if steering:
                         if cut is not None and cut.is_set():
                             await asyncio.sleep(NOW_COALESCE_SECS)
@@ -3255,9 +3273,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     await self._save_denials(run_context, consecutive_denials)
                     raise PauseRequired(first_pending)
                 i += 1
-                if consecutive_denials >= denial_limit:
-                    await self._stop_after_denials(current_span, consecutive_denials, _append_memory)
-                    consecutive_denials, withhold_tools = 0, True
+                if denial_window_on or consecutive_denials >= denial_limit:
+                    await _check_denials()
                 if steering:
                     if cut is not None and cut.is_set():
                         await asyncio.sleep(NOW_COALESCE_SECS)
