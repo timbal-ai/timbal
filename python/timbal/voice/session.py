@@ -509,6 +509,9 @@ class VoiceSession:
             can_interrupt=True,
             # Work posted between turns (report_progress, post_session_event) has no notify() to start the watcher.
             on_work=self._watch_for_event_turns,
+            # A chat open on the conversation lends it to the call while it is live, and answers what is typed.
+            borrows=True,
+            user_messages=False,
         )
         self._event_task: asyncio.Task[None] | None = None
         # The in-flight turn's run, from its first event until the turn ends.
