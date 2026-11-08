@@ -30,6 +30,7 @@ production live in that gap.
 | `bench_cpu.py` | concurrency ceiling: sessions per event loop / per CPU (no API keys) |
 | `bench_ttft.py` | model first-token p50/p95 for a fixed ~7k-token voice prompt (needs provider keys) |
 | `accept_duplex.py` | opt-in Flux + `openai/gpt-5.4-mini` + ElevenLabs duplex gate (real LLM, not `TestModel`) |
+| `simulate_support.py` | Spanish caller calls against `examples/voice_support_demo.py::agent` built by `build_voice_session`; optional room noise and speaker echo; stereo `call.wav` per scenario (needs provider keys) |
 
 ## Duplex acceptance
 
