@@ -215,6 +215,12 @@ class TracingProvider(ABC):
     """Buffered mode: how old a run's oldest unsaved change may get before its saves are awaited again
     (uploads failing or falling behind). ``None`` reads ``TIMBAL_TRACE_MAX_LAG_S``, else 30 s."""
 
+    store_before_acting: bool = False
+    """Buffered mode: an agent stores the run before running a tool batch that is not all read-only, so a
+    crash between a call and its effects never leaves the effects with no record of the call (crash
+    recovery reads it). One awaited save per such batch. ``ChatSession`` turns it on for the buffered
+    providers it configures."""
+
     @classmethod
     def configured(cls, **kwargs: Any) -> type["TracingProvider"]:
         """Return a configured subclass with the given class-level attributes.
@@ -287,9 +293,7 @@ class TracingProvider(ABC):
                          keyed by ``run_context.id``.
         """
         if cls._trace_redactor is not None:
-            run_context = _RedactedRunContextView(
-                run_context, _redacted_trace(run_context._trace, cls._trace_redactor)
-            )
+            run_context = _RedactedRunContextView(run_context, _redacted_trace(run_context._trace, cls._trace_redactor))
         await cls._store(run_context)
         for exporter in cls._exporters:
             try:

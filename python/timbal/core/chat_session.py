@@ -962,7 +962,7 @@ class ChatSession:
         try:
             kwargs, trigger, options = self._turn_inputs(followup, resume, wake)
             context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
-            context._tracing_provider = self._turn_provider(context._tracing_provider, context.platform_config)
+            context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
@@ -1073,14 +1073,16 @@ class ChatSession:
 
     # -- Log ----------------------------------------------------------------------
 
-    def _turn_provider(self, provider: Any, platform_config: Any = None) -> Any:
-        """The provider a turn saves with: ``durability`` when given; else platform saves are buffered
-        unless the host takes span deltas.
+    def _turn_provider(self, provider: Any) -> Any:
+        """The provider a turn saves with: ``durability`` when given; else platform saves are buffered.
 
         A whole-trace save uploads the run's history again, so a turn that saved on every finished span
-        would upload it dozens of times; buffered, it saves at most once per flush interval and waits only
-        at the turn's end. With deltas a save is one or two spans, and ``sync`` keeps every finished span
-        for crash recovery. A provider or ``TIMBAL_TRACE_DURABILITY`` that already chose a mode keeps it.
+        would upload it dozens of times. With deltas a save is small, but each still costs a round trip the
+        turn would wait for (about two per tool step). Buffered, mid-run saves go out at most once per
+        flush interval without the turn waiting; with ``store_before_acting`` (set on the buffered
+        providers configured here) the agent still stores a tool batch that is not read-only before
+        running it, so recovery never misses a call whose effects may have happened.
+        A provider or ``TIMBAL_TRACE_DURABILITY`` that already chose a mode keeps it.
         """
         from ..state.tracing import uploads
         from ..state.tracing.providers import PlatformTracingProvider
@@ -1092,12 +1094,14 @@ class ChatSession:
             chosen = provider.durability is not None or os.environ.get(uploads.DURABILITY_ENV)
             if not issubclass(provider, PlatformTracingProvider) or chosen:
                 return provider
-            want = "sync" if provider.takes_deltas(platform_config) else "buffered"
-        if uploads.durability(provider) == want:
+            want = "buffered"
+        acting = want == "buffered"
+        if uploads.durability(provider) == want and (not acting or getattr(provider, "store_before_acting", False)):
             return provider
         configured = self._providers.get((provider, want))
         if configured is None:
-            configured = self._providers[(provider, want)] = provider.configured(durability=want)
+            extra = {"store_before_acting": True} if acting else {}
+            configured = self._providers[(provider, want)] = provider.configured(durability=want, **extra)
         return configured
 
     def _record(self, kind: str, **fields: Any) -> None:
