@@ -23,7 +23,7 @@ from mcp.shared.exceptions import McpError
 from pydantic import Field, PrivateAttr, computed_field, model_validator
 
 from ..errors import RunCancelled
-from ..state import _suspension_id_for, get_run_context, suspend
+from ..state import _suspension_id_for, get_call_id, get_run_context, suspend
 from ..types.approval import Cancel
 from ..types.content import FileContent, TextContent
 from ..types.file import File
@@ -36,6 +36,9 @@ logger = structlog.get_logger("timbal.core.mcp")
 
 
 ELICITATION_KIND = "mcp_elicitation"
+# ``tools/call`` ``_meta`` keys naming the calling run and the tool's span (``MCPServer.provenance``).
+PROVENANCE_RUN_KEY = "timbal.ai/run_id"
+PROVENANCE_CALL_KEY = "timbal.ai/call_id"
 """``InteractionEvent.kind`` used when an MCP server elicits input mid tool call."""
 
 _ELICIT_ACTIONS = frozenset({"accept", "decline", "cancel"})
@@ -414,6 +417,13 @@ class MCPServer(ToolSet):
     """Mark every tool of this server ``defer_loading``: the model finds them through tool
     search (``Agent.tool_search``) instead of carrying all their schemas on every call."""
 
+    provenance: bool | None = None
+    """Send the calling run's id and the tool span's call id in each ``tools/call``'s ``_meta``
+    (``timbal.ai/run_id``, ``timbal.ai/call_id``), so the server can attribute what the call did
+    to the exact span (monolith#565). Per-call ids cannot ride on HTTP headers: those are fixed
+    per connection, which runs share. ``None`` (default): on for ``service="api"`` (the platform's
+    own server) only, so third-party servers never see run ids."""
+
     sampling_model: Any = None
     """Timbal model string (e.g. ``"anthropic/claude-haiku-4-5"``) or a ``TestModel`` used
     to answer the server's ``sampling/createMessage`` requests. ``None`` leaves sampling
@@ -479,6 +489,7 @@ class MCPServer(ToolSet):
             connect_timeout=self.connect_timeout,
             elicitation=self.elicitation,
             sampling_model=self.sampling_model,
+            provenance=self._sends_provenance(),
         )
         try:
             yield server
@@ -1023,6 +1034,22 @@ class MCPServer(ToolSet):
 
         return _per_call
 
+    def _sends_provenance(self) -> bool:
+        return self.provenance if self.provenance is not None else self.service == "api"
+
+    def _provenance_meta(self) -> dict[str, str] | None:
+        """``tools/call`` ``_meta`` naming the calling run and the tool's span, when enabled (see ``provenance``)."""
+        if not self._sends_provenance():
+            return None
+        run_context = get_run_context()
+        if run_context is None:
+            return None
+        meta = {PROVENANCE_RUN_KEY: run_context.id}
+        call_id = get_call_id()
+        if call_id:
+            meta[PROVENANCE_CALL_KEY] = call_id
+        return meta
+
     def _make_tool(self, mcp_tool: mcp_types.Tool) -> MCPTool:
         # Bare name for the wire call; qualified name for the agent registry.
         bare_name = mcp_tool.name
@@ -1042,10 +1069,12 @@ class MCPServer(ToolSet):
                     # Approval lives on this public tool; invoke the bound
                     # handler directly so it is not requested a second time.
                     return await server._make_tool(mcp_tool).handler(**kwargs)
+            # Taken here, in the calling task: the session's owner task does not see the caller's context.
+            meta = self._provenance_meta()
             call = self._begin_call(bare_name)
             try:
                 result = await self._request(
-                    lambda session: session.call_tool(bare_name, arguments=kwargs),
+                    lambda session: session.call_tool(bare_name, arguments=kwargs, meta=meta),
                     what=f"tools/call {bare_name}",
                     abort=call.abort,
                     timeout=self._tool_timeout(bare_name),

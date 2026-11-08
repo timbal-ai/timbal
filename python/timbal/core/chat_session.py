@@ -817,6 +817,7 @@ class ChatSession:
         key: str | None = None,
         tool_policy: ToolPolicy | None = "read_only",
         silent_ok: bool = True,
+        trigger: dict[str, Any] | None = None,
     ) -> str:
         """Start a turn for the application (a routine, a heartbeat): returns the wake's id.
 
@@ -827,6 +828,9 @@ class ChatSession:
         (and ``allow_silence``) it may answer :data:`SILENT_REPLY` to say
         nothing. A pending wake with the same ``key`` is replaced. The text is
         trusted application text: input guardrails do not screen it.
+        ``trigger`` is merged over the turn's root ``metadata.trigger``
+        (``{kind: "wake", wake_id, key, tool_policy}``); a routine fire passes
+        ``{"kind": "routine", "routine_id": ..., "fire_id": ..., "scheduled_at": ...}``.
         """
         if self.closed:
             raise RuntimeError("The chat session is closed.")
@@ -837,6 +841,8 @@ class ChatSession:
             raise TypeError("key must be a string or None")
         policy = _check_tool_policy(tool_policy)
         key = (key or "").strip() or None
+        if trigger is not None and not isinstance(trigger, dict):
+            raise TypeError("trigger must be a dict")
         replaced = [wake for wake in self._wakes if wake.key == key] if key is not None else []
         for old in replaced:
             self._wakes.remove(old)
@@ -846,9 +852,19 @@ class ChatSession:
             # so the last stored wake of the key survives however many replacements of it fail.
             self._record("wake_superseded", wake_id=old.id, key=key)
         wake = _Wake(text=text, key=key, tool_policy=policy, silent_ok=bool(silent_ok), replaced=replaced)
+        if trigger:
+            wake.trigger = {
+                "kind": WAKE_KIND,
+                "wake_id": wake.id,
+                "key": key,
+                "tool_policy": _describe_policy(policy),
+                **trigger,
+            }
         self._wakes.append(wake)
         self.last_activity = time.monotonic()
-        self._record("wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy))
+        self._record(
+            "wake", wake_id=wake.id, text=text, key=key, tool_policy=_describe_policy(policy), trigger=wake.trigger
+        )
         wake.mark = self._changes
         self._work.set()
         self._ensure_worker()
