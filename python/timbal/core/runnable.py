@@ -2188,6 +2188,8 @@ class Runnable(ABC, BaseModel):
         metadata = {**self.metadata}  # Shallow copy
         if _new_parent_call_id is None and run_context._invoked_by is not None:
             metadata["invoked_by"] = run_context._invoked_by
+        if _new_parent_call_id is None and isinstance(run_context.trigger, dict) and "trigger" not in metadata:
+            metadata["trigger"] = dict(run_context.trigger)
         span = Span(
             path=self._path,
             call_id=_new_call_id,

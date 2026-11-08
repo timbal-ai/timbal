@@ -153,6 +153,7 @@ DEFAULT_DELIVERY_NOTE = (
     "If nothing needs saying, send nothing: never send a message only to say there is nothing to report."
 )
 """Appended to a root agent's system prompt with ``delivery="tool"``."""
+MARK_SALIENT_NAME = "mark_salient"
 # Session key: a root agent's pinned prompt sections, per agent path.
 _SECTIONS_KEY = "__prompt_sections"
 PROMPT_UPDATE_KIND = "prompt_update"
@@ -689,6 +690,10 @@ class Agent(Runnable):
     """When True, register ``read_background_transcript`` for the LLM once this
     session has background tasks. Default off — summaries via
     ``get_background_task`` are enough for most agents."""
+    salience_tool: bool = False
+    """Give a root agent a ``mark_salient(why)`` tool: it appends ``why`` to its turn span's
+    ``metadata.memory.salient`` (``timbal.state.mark_salient``), for memory consolidation to read
+    first (monolith#565). Writes no memory and costs no model call."""
     delivery: Literal["text", "tool"] = "text"
     """How a root agent's replies reach the user. ``"text"`` (default): its final answer.
     ``"tool"``: only what it sends with ``send_message(text, end_turn=False)``, each message the
@@ -2261,6 +2266,40 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._send_tools[name] = tool
         return tool
 
+    def _mark_salient_tool(self) -> Tool:
+        """The ``mark_salient`` tool of ``salience_tool=True``: marks the agent's turn for memory consolidation."""
+        tool = self._send_tools.get(MARK_SALIENT_NAME)
+        if tool is not None:
+            return tool
+
+        def mark_salient(why: str) -> str:
+            """Mark this moment as worth remembering later, with a short reason.
+
+            Args:
+                why: What is worth remembering and why, in one sentence.
+            """
+            from ..state import mark_salient as _mark
+
+            run_context = get_run_context()
+            if not _mark(why, span=run_context.parent_span()):
+                raise ValueError("Nothing was marked: give a reason.")
+            return "Marked."
+
+        taken = {t.name for t in self.tools if not isinstance(t, ToolSet)}
+        name = MARK_SALIENT_NAME if MARK_SALIENT_NAME not in taken else "mark_memorable"
+        tool = Tool(
+            name=name,
+            description=(
+                "Mark this moment as worth remembering for future sessions (a correction, a stated preference, a "
+                "decision, a surprising failure), with a short reason. It costs nothing and changes nothing now."
+            ),
+            handler=mark_salient,
+            read_only=True,
+        )
+        tool.nest(self._path)
+        self._send_tools[MARK_SALIENT_NAME] = tool
+        return tool
+
     def _delivered(self, current_span: Any) -> OutputEvent | None:
         """The turn's output with ``delivery="tool"``: what it sent, as one assistant message (None if nothing)."""
         sent = current_span.metadata.get("messages_sent")
@@ -3049,8 +3088,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 tools, commands = await self._resolve_tools(i)
                 if withhold_tools:
                     tools, commands, withhold_tools = [], {}, False
-                elif delivering and i < self.max_iter:
-                    tools = [*tools, self._send_message_tool()]
+                elif i < self.max_iter:
+                    if delivering:
+                        tools = [*tools, self._send_message_tool()]
+                    if self.salience_tool and current_span.parent_call_id is None:
+                        tools = [*tools, self._mark_salient_tool()]
                 # `tools` stays what the model may call: a deferred tool called by name runs (and loads).
                 llm_tools, tools, deferred_tools, unloaded_tools = await self._plan_tool_search(tools, model)
                 if i >= self.max_iter and not max_iter_handled:

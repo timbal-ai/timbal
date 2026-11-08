@@ -292,11 +292,12 @@ async def send_message(request: Request, session_id: str) -> JSONResponse:
 
 @router.post("/sessions/{session_id}/wake")
 async def wake_session(request: Request, session_id: str) -> JSONResponse:
-    """Start a turn for the application: ``{"text", "key"?, "tool_policy"?, "silent_ok"?}``.
+    """Start a turn for the application: ``{"text", "key"?, "tool_policy"?, "silent_ok"?, "trigger"?}``.
 
     ``tool_policy`` defaults to ``"read_only"``; ``null`` gives the turn every
     tool, a list of names only those. The wake runs once the user has nothing
-    pending, as a turn of its own, and may stay silent.
+    pending, as a turn of its own, and may stay silent. ``trigger`` (an object)
+    is merged into the turn's root ``metadata.trigger`` (a routine fire's ids).
     """
     session = await _session(request, session_id)
     body = await _body(request)
@@ -306,9 +307,16 @@ async def wake_session(request: Request, session_id: str) -> JSONResponse:
     policy = body.get("tool_policy", "read_only")
     if policy is not None and not (policy == "read_only" or isinstance(policy, list)):
         raise HTTPException(status_code=400, detail="'tool_policy' must be 'read_only', a list of tool names, or null.")
+    trigger = body.get("trigger")
+    if trigger is not None and not isinstance(trigger, dict):
+        raise HTTPException(status_code=400, detail="'trigger' must be an object.")
     try:
         wake_id = session.wake(
-            text, key=body.get("key"), tool_policy=policy, silent_ok=bool(body.get("silent_ok", True))
+            text,
+            key=body.get("key"),
+            tool_policy=policy,
+            silent_ok=bool(body.get("silent_ok", True)),
+            trigger=trigger,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
