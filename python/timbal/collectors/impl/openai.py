@@ -174,6 +174,24 @@ def _delta_reasoning_content(delta: Any) -> str | None:
     return None
 
 
+def _is_first_output_event(event: Any) -> bool:
+    """A Responses event that carries model output: text, reasoning, or a tool call."""
+    if isinstance(
+        event,
+        ResponseTextDeltaEvent
+        | ResponseReasoningSummaryTextDeltaEvent
+        | ResponseReasoningTextDeltaEvent
+        | ResponseFunctionCallArgumentsDeltaEvent
+        | ResponseCustomToolCallInputDeltaEvent,
+    ):
+        return bool(event.delta)
+    if isinstance(event, ResponseOutputItemAddedEvent):
+        return isinstance(event.item, ResponseFunctionToolCall | ResponseFunctionWebSearch | ResponseCustomToolCall)
+    if isinstance(event, ResponseContentPartAddedEvent):
+        return isinstance(event.part, ResponseOutputText) and bool(event.part.text)
+    return False
+
+
 @register_collector
 class ChatCompletionCollector(BaseCollector):
     """Collector for OpenAI chat completions streaming events."""
@@ -532,7 +550,10 @@ class ResponseCollector(BaseCollector):
     @override
     def process(self, event: ResponseEvent) -> Any:
         """Processes OpenAI responses streaming events."""
-        if self._first_token is None:
+        # ``response.created`` arrives with the HTTP headers, before the model has
+        # produced anything. TTFT is the first visible / reasoning / tool token, as
+        # in ChatCompletionCollector.
+        if self._first_token is None and _is_first_output_event(event):
             self._first_token = time.perf_counter()
         if isinstance(event, ResponseCreatedEvent):
             return self._handle_created(event)
@@ -898,10 +919,11 @@ class ResponseCollector(BaseCollector):
     def result(self) -> Message:
         """Returns structured OpenAI response."""
         span = get_run_context().current_span()
-        ttft = self._first_token - self._start
-        span.metadata["ttft"] = ttft
-        tps = self._output_tokens / (time.perf_counter() - self._first_token)
-        span.metadata["tps"] = tps
+        # A response with no output delta never set _first_token — keep metrics defined.
+        first = self._first_token if self._first_token is not None else time.perf_counter()
+        span.metadata["ttft"] = first - self._start
+        elapsed = time.perf_counter() - first
+        span.metadata["tps"] = self._output_tokens / elapsed if elapsed > 0 else 0.0
 
         content = []
         # Leaked tool calls are recovered only when the response produced no structured

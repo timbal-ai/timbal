@@ -732,6 +732,60 @@ class TestResponseCollectorReasoning:
         assert item.thinking_delta == "reasoning step"
 
 
+class TestResponseCollectorTTFT:
+    """``ttft`` is the first output token, not ``response.created`` (sent with the HTTP headers)."""
+
+    def _start(self) -> tuple[RunContext, ResponseCollector, float]:
+        ctx = _make_context()
+        start = time.perf_counter()
+        collector = ResponseCollector(async_gen=_empty_gen(), start=start)
+        collector.process(ResponseCreatedEvent(
+            type="response.created", response=_make_response(), sequence_number=0,
+        ))
+        collector.process(ResponseInProgressEvent(
+            type="response.in_progress", response=_make_response(), sequence_number=1,
+        ))
+        # Hidden reasoning: the item opens at once, then nothing streams until it is done.
+        collector.process(ResponseOutputItemAddedEvent(
+            type="response.output_item.added", output_index=0, sequence_number=2,
+            item=ResponseReasoningItem(type="reasoning", id="r1", status="in_progress", summary=[]),
+        ))
+        return ctx, collector, start
+
+    def test_hidden_reasoning_is_not_the_first_token(self):
+        ctx, collector, start = self._start()
+        assert collector._first_token is None
+        collector.process(ResponseContentPartAddedEvent(
+            type="response.content_part.added", item_id="m1", output_index=1, content_index=0,
+            part=ResponseOutputText(type="output_text", text="", annotations=[]), sequence_number=3,
+        ))
+        assert collector._first_token is None
+        before_text = time.perf_counter()
+        collector.process(ResponseTextDeltaEvent(
+            type="response.output_text.delta", item_id="m1", output_index=1, content_index=0,
+            delta="Hasta", logprobs=[], sequence_number=4,
+        ))
+        assert collector._first_token is not None and collector._first_token >= before_text
+        collector.result()
+        assert ctx.current_span().metadata["ttft"] == pytest.approx(collector._first_token - start)
+
+    def test_a_tool_call_is_the_first_token(self):
+        _ctx, collector, _start = self._start()
+        collector.process(ResponseOutputItemAddedEvent(
+            type="response.output_item.added", output_index=1, sequence_number=3,
+            item=ResponseFunctionToolCall(
+                type="function_call", id="fc1", call_id="call_1", name="end_call", arguments="", status="in_progress",
+            ),
+        ))
+        assert collector._first_token is not None
+
+    def test_a_response_with_no_output_still_records_metrics(self):
+        ctx, collector, _start = self._start()
+        collector.result()
+        assert ctx.current_span().metadata["ttft"] >= 0
+        assert ctx.current_span().metadata["tps"] >= 0
+
+
 # ---------------------------------------------------------------------------
 # New tests to cover remaining gaps
 # ---------------------------------------------------------------------------
