@@ -97,6 +97,15 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             updated_at  INTEGER NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_session_inbox (
+            id         TEXT    PRIMARY KEY,
+            session_id TEXT    NOT NULL,
+            item       TEXT    NOT NULL,
+            posted_at  REAL    NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS chat_session_inbox_session ON chat_session_inbox (session_id, posted_at)")
     conn.commit()
 
 
