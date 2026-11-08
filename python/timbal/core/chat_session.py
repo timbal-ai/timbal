@@ -948,6 +948,7 @@ class ChatSession:
             context = RunContext(parent_id=scheduler.head, tracing_provider=self._agent.tracing_provider)
             context._tracing_provider = self._turn_provider(context._tracing_provider)
             context._steering = options.steer
+            context._session_id = self.id
             context._tool_policy = options.tool_policy
             context._silence_token = SILENT_REPLY if options.silence else None
             context._cut = asyncio.Event()
