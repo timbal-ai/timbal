@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 from timbal import Agent
-from timbal.core.mcp import MCPServer, MCPTool, _convert_call_tool_result
+from timbal.core.mcp import (
+    PROVENANCE_PARENT_KEY,
+    PROVENANCE_RUN_KEY,
+    MCPServer,
+    MCPTool,
+    _convert_call_tool_result,
+)
 from timbal.types.content import FileContent, TextContent, ToolUseContent
 from timbal.types.message import Message
 
@@ -155,7 +161,7 @@ class TestProvenance:
         import json
 
         from timbal.core.chat_session import ChatSession
-        from timbal.core.mcp import PROVENANCE_SESSION_KEY, PROVENANCE_TOKEN_KEY
+        from timbal.core.mcp import PROVENANCE_SESSION_KEY
         from timbal.core.test_model import TestModel
         from timbal.state import set_call_id, set_parent_call_id, set_run_context
 
@@ -187,29 +193,28 @@ class TestProvenance:
             await server.close()
         meta = json.loads(seen[0])
         assert meta[PROVENANCE_SESSION_KEY] == "chat-123"
-        assert PROVENANCE_TOKEN_KEY not in meta  # credentials go to the platform's own server only
+        assert meta[PROVENANCE_RUN_KEY] == "chat-123"  # a new thread's first turn runs under the session id
+        assert PROVENANCE_PARENT_KEY not in meta  # the root has no parent
+        assert not any("token" in key for key in meta)  # identity is the request's credential, never _meta
 
-    def test_the_turn_token_goes_to_the_platform_server_only(self):
-        from timbal.core.mcp import PROVENANCE_TOKEN_KEY
+    def test_a_chained_run_names_its_parent_and_no_credential(self):
         from timbal.state import set_run_context
         from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
         from timbal.state.context import RunContext
 
-        ctx = RunContext()
+        ctx = RunContext(parent_id="run-parent")
         ctx.platform_config = PlatformConfig(
             host="api.example.test",
-            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="turn-token-abc"),
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="secret-credential"),
             subject=PlatformSubject(org_id="1", app_id="2"),
         )
         set_run_context(ctx)
         try:
-            platform = MCPServer(transport="http", url="https://api.example.test/mcp", provenance=True)
-            platform._platform = True
-            assert platform._provenance_meta()[PROVENANCE_TOKEN_KEY] == "turn-token-abc"
-            other = MCPServer(transport="http", url="https://example.com/mcp", provenance=True)
-            assert PROVENANCE_TOKEN_KEY not in other._provenance_meta()
+            meta = MCPServer(transport="http", url="https://api.example.test/mcp", provenance=True)._provenance_meta()
         finally:
             set_run_context(None)
+        assert meta[PROVENANCE_PARENT_KEY] == "run-parent" and meta[PROVENANCE_RUN_KEY] == ctx.id
+        assert "secret-credential" not in str(meta)
 
     def test_on_by_default_only_for_the_platform_server(self):
         assert MCPServer(transport="http", service="api")._sends_provenance()
