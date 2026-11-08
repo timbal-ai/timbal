@@ -219,6 +219,16 @@ _CUT = object()
 """What :meth:`_CutWatch.next` returns when the cut came before the wait."""
 
 
+def _stores_before_acting(run_context: Any) -> bool:
+    """Whether the run's provider buffers mid-run saves and asks for the run stored before acting tools run."""
+    provider = run_context._tracing_provider
+    if provider is None or not getattr(provider, "store_before_acting", False):
+        return False
+    from ..state.tracing import uploads
+
+    return uploads.durability(provider) == "buffered"
+
+
 class _CallTool(Tool):
     """``call_tool`` (``tool_search="dispatch"``): runs a deferred tool by name.
 
@@ -2226,6 +2236,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         )
 
     @staticmethod
+    def _acts(tools: list[Tool], tool_calls: list[ToolUseContent]) -> bool:
+        """Whether a batch calls any tool that is not declared read-only (unknown names count as acting)."""
+        by_name = {tool.name: tool for tool in tools}
+        return any(not getattr(by_name.get(call.name), "read_only", False) for call in tool_calls)
+
+    @staticmethod
     def _dispatched(tools: list[Tool], tool_call: ToolUseContent) -> ToolUseContent:
         """A ``call_tool`` call as the call it stands for (same id, so its result answers it); else unchanged."""
         dispatcher = next((t for t in tools if isinstance(t, _CallTool) and t.name == tool_call.name), None)
@@ -3428,6 +3444,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 called_unloaded = [call.name for call in tool_calls if call.name in unloaded_tools]
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
+                if _stores_before_acting(run_context) and self._acts(tools, tool_calls):
+                    # Buffered saves lag the run: store the calls before what they do, so a crash between the
+                    # two can never leave a tool's effects with no record of the call (recovery reads it).
+                    await run_context._save_trace(barrier=True)
                 first_pending: OutputEvent | None = None
                 active_events = self._multiplex_tools(tools, tool_calls, cut=cut)
                 async for tool_call, event in active_events:
