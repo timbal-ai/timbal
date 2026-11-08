@@ -145,8 +145,12 @@ async def test_flux_replaces_keyterms_and_does_not_touch_another_session() -> No
     assert agent_terms == ["Norte Market"]
     assert stt.patient_thresholds_live is True
     assert await stt.update_keyterms([])
-    assert json.loads(stt._ws.sent[-1]) == {"type": "Configure", "keyterms": []}
+    # Flux takes one Configure at a time: the clear goes out after the ack.
+    assert len(stt._ws.sent) == 1
     assert stt._input_config.keyterms == []
+    await stt._handle_message({"type": "ConfigureSuccess"})
+    assert stt.patient_thresholds_live is True
+    assert json.loads(stt._ws.sent[-1]) == {"type": "Configure", "keyterms": []}
 
 
 async def test_session_set_keyterms_copies_and_rejects_scribe() -> None:

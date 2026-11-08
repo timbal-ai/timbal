@@ -173,6 +173,30 @@ class TestFluxEventMapping:
         await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
         assert stt.patient_thresholds_live is False
 
+    async def test_a_configure_waits_for_the_ack_of_the_one_in_flight(self) -> None:
+        # Flux rejects a second Configure before the first is acked. Live, the
+        # rejected one was the restore, and the socket stayed patient.
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        stt._input_config = AudioInputConfig(model="flux-general-multi")
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await stt.configure_turn(eot_threshold=0.9, eot_timeout_ms=2200, patient=True)
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000, patient=False)
+        await stt.update_keyterms(["Norte Market"])
+        assert len(stt._ws.sent) == 1
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is True
+        sent = [json.loads(raw) for raw in stt._ws.sent]
+        assert len(sent) == 2
+        assert sent[1]["thresholds"] == {"eot_threshold": 0.8, "eot_timeout_ms": 2000}
+        await stt._handle_message({"type": "ConfigureSuccess"})
+        assert stt.patient_thresholds_live is False
+        sent = [json.loads(raw) for raw in stt._ws.sent]
+        assert sent[2] == {"type": "Configure", "keyterms": ["Norte Market"]}
+        await stt._handle_message({"type": "ConfigureFailure", "description": "nope"})
+        assert stt.patient_thresholds_live is False
+        assert len(stt._ws.sent) == 3
+
     async def test_empty_transcripts_skipped(self) -> None:
         stt = DeepgramFluxSTT()
         await stt._handle_message(_flux_turn_info("Update", ""))

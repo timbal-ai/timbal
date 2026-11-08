@@ -152,8 +152,13 @@ class _DeepgramSTTBase(SpeechToText):
         self.eager_suppressed_count = 0
         self.on_eager_end_of_turn: Any = None
         self.patient_thresholds_live = False
-        self._patient_pending = False
-        self._patience_configure = False
+        # Flux processes one ``Configure`` at a time and rejects another sent
+        # before the ack ("Too many pending `Configure` messages"), so a rejected
+        # restore would leave patient thresholds on the socket.
+        # ``(kind, patient)`` of the message awaiting its ack, and the latest
+        # waiting message per kind (each kind replaces its own value).
+        self._configure_inflight: tuple[str, bool] | None = None
+        self._configure_waiting: dict[str, tuple[dict[str, Any], bool]] = {}
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -161,6 +166,8 @@ class _DeepgramSTTBase(SpeechToText):
     async def connect(self, config: AudioInputConfig) -> None:
         self._api_key = _resolve_api_key(self._api_key_explicit)
         self._input_config = config
+        self._configure_inflight = None
+        self._configure_waiting.clear()
         uri = self._build_uri(config)
         logger.debug("dg_stt_connecting", uri=uri[:160])
         self._ws = await ws_connect(
@@ -269,6 +276,23 @@ class _DeepgramSTTBase(SpeechToText):
             with contextlib.suppress(Exception):
                 await self._ws.send(json.dumps(payload))
 
+    async def _configure(self, kind: str, body: dict[str, Any], *, patient: bool = False) -> None:
+        """Send one ``Configure``, or hold it until the one in flight is acked."""
+        if self._configure_inflight is not None:
+            self._configure_waiting[kind] = (body, patient)
+            return
+        self._configure_inflight = (kind, patient)
+        await self._send_json({"type": "Configure", **body})
+
+    async def _configure_acked(self, ok: bool) -> None:
+        inflight, self._configure_inflight = self._configure_inflight, None
+        if inflight is not None and inflight[0] == "thresholds":
+            self.patient_thresholds_live = ok and inflight[1]
+        if self._configure_waiting:
+            kind = next(iter(self._configure_waiting))
+            body, patient = self._configure_waiting.pop(kind)
+            await self._configure(kind, body, patient=patient)
+
     async def close(self) -> None:
         self._stop.set()
         if self._flusher and not self._flusher.done():
@@ -375,8 +399,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         config = self._input_config
         if config is None or self._ws is None or self._stop.is_set():
             return False
-        self._patience_configure = False
-        await self._send_json({"type": "Configure", "keyterms": terms})
+        await self._configure("keyterms", {"keyterms": terms})
         self._input_config = config.model_copy(update={"keyterms": list(terms)})
         return True
 
@@ -405,7 +428,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
             if tag is None or language_key(tag) not in FLUX_MULTI_LANGUAGES:
                 return False
             hint = tag
-        await self._send_json({"type": "Configure", "language_hints": [hint] if hint else []})
+        await self._configure("language_hints", {"language_hints": [hint] if hint else []})
         return True
 
     async def configure_turn(
@@ -422,8 +445,10 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
         docs. Omitted keys are left unchanged on the socket. Values are
         clamped to the documented ranges (``eot_threshold`` 0.5–1.0,
         ``eager_eot_threshold`` 0.3–0.9 and ≤ ``eot_threshold`` when both are
-        sent, ``eot_timeout_ms`` 500–60000). ``patient`` is local: the matching
-        ``ConfigureSuccess`` sets :attr:`patient_thresholds_live`.
+        sent,         ``eot_timeout_ms`` 500–60000). ``patient`` is local: the matching
+        ``ConfigureSuccess`` sets :attr:`patient_thresholds_live`. Sent after
+        the ack of any ``Configure`` still in flight; a newer call replaces one
+        that is still waiting.
 
         https://developers.deepgram.com/docs/flux/configure
         """
@@ -441,9 +466,7 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 thresholds["eager_eot_threshold"] = eager
         if not thresholds:
             return
-        self._patient_pending = patient
-        self._patience_configure = True
-        await self._send_json({"type": "Configure", "thresholds": thresholds})
+        await self._configure("thresholds", {"thresholds": thresholds}, patient=patient)
 
     async def _handle_message(self, msg: dict[str, Any]) -> None:
         mt = msg.get("type", "")
@@ -494,12 +517,11 @@ class DeepgramFluxSTT(_DeepgramSTTBase):
                 await self._queue.put(TranscriptEvent(type="resumed", text=text, confidence=confidence))
             return
         if mt == "ConfigureSuccess":
-            if self._patience_configure:
-                self.patient_thresholds_live = self._patient_pending
+            await self._configure_acked(True)
             logger.info("dg_flux_configure_ok", patient=self.patient_thresholds_live)
             return
         if mt == "ConfigureFailure":
-            self.patient_thresholds_live = False
+            await self._configure_acked(False)
             logger.warning(
                 "dg_flux_configure_failed",
                 description=msg.get("description") or msg.get("message") or msg.get("error"),
