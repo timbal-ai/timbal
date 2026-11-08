@@ -1037,6 +1037,31 @@ def _native_tool_search(model: Any) -> bool:
     return True
 
 
+def _schemas_found(memory: list[Message]) -> set[str]:
+    """Tools whose schema a ``search_tools`` result in ``memory`` showed the model (``tool_search="dispatch"``)."""
+    search_names = {SEARCH_TOOLS_NAME, *_SEARCH_TOOLS_FALLBACKS}
+    search_ids = {
+        c.id
+        for m in memory
+        if m.role == "assistant"
+        for c in m.content
+        if isinstance(c, ToolUseContent) and c.name in search_names
+    }
+    found: set[str] = set()
+    for m in memory:
+        if m.role != "tool":
+            continue
+        for c in m.content:
+            if not isinstance(c, ToolResultContent) or c.id not in search_ids:
+                continue
+            try:
+                result = json.loads("".join(t.text for t in c.content if isinstance(t, TextContent)))
+            except ValueError:
+                continue
+            found.update(t["name"] for t in result.get("found") or () if isinstance(t, dict) and "name" in t)
+    return found
+
+
 def _native_search_finds(message: Message) -> list[str]:
     """Tool names a provider-side tool search returned in one assistant message."""
     names = []
@@ -4831,6 +4856,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Names of tools (resolved for the current iteration) whose results must be pinned
         # against memory compaction. Updated each iteration from the resolved tool list.
         pinned_tool_names: set[str] = set()
+        # Deferred tools this batch calls without the model having seen their schema (called by name or through
+        # call_tool before a search): a validation error of theirs carries the schema, for the retry.
+        schemaless_calls: dict[str, Tool] = {}
         # Per-tool result limits resolved for the current iteration (None = exempt).
         tool_result_limits: dict[str, ToolResultLimit | None] = {}
         # Per-tool guardrail runners (agent-level + tool-local rails) for tool_result checks.
@@ -4910,6 +4938,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 denied = True
             elif event.error is not None:
                 content = event.error
+                unseen = schemaless_calls.get(event.path.rsplit(".", 1)[-1])
+                if unseen is not None and isinstance(content, dict) and content.get("type") == "ValidationError":
+                    content = {
+                        **content,
+                        "hint": "You called this tool without its schema: call it again with these parameters.",
+                        "parameters": unseen.format_params_model_schema(),
+                    }
             elif isinstance(event.output, Message):
                 content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
@@ -6028,6 +6063,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 called_unloaded = (
                     [call.name for call in tool_calls if call.name in unloaded_tools] if unloaded_tools else []
                 )
+                # Deferred tools this batch calls without the model having seen their schema (schemaless_calls).
+                # Worked out only where one can be: something unloaded (client), or a dispatch turn with deferrals.
+                if called_unloaded:
+                    schemaless_calls = {t.name: t for t in tools if t.name in called_unloaded}
+                elif may_defer and self.tool_search == "dispatch":
+                    # Dispatch never loads: a deferred tool's schema is only ever in a search result.
+                    called = {self._dispatched(tools, call).name for call in tool_calls}
+                    deferred = [t for t in tools if t.name in called and getattr(t, "defer_loading", False)]
+                    shown = _schemas_found(current_span.memory) if deferred else _NO_NAMES
+                    schemaless_calls = {t.name: t for t in deferred if t.name not in shown}
+                elif schemaless_calls:
+                    schemaless_calls = {}
                 if called_unloaded:
                     await self._load_tools(called_unloaded, current_span)
                 if stores_first and self._acts(
