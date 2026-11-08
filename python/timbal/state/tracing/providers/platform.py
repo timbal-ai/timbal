@@ -592,7 +592,9 @@ class PlatformTracingProvider(TracingProvider):
         trace = res_json.get("trace")
         if not trace:
             return None
-        return Trace(trace, parent_id=res_json.get("parent_id"))
+        # `parent_id` is the parent's row id; `parent_idempotency_key` (newer hosts) is the run id this SDK
+        # chained with, which its caches and in-flight saves are keyed by. A GET by either works.
+        return Trace(trace, parent_id=res_json.get("parent_idempotency_key") or res_json.get("parent_id"))
 
     @classmethod
     @override

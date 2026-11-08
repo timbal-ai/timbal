@@ -561,6 +561,24 @@ class TestSingleFlight:
                 await read_back(provider, "some-run")
         assert calls == [None, {"select": "resume"}]
 
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ({"parent_id": "4270383", "parent_idempotency_key": "run-a"}, "run-a"),  # newer hosts: the run id
+            ({"parent_id": "4270383"}, "4270383"),  # older hosts: the row id, which a GET also resolves
+            ({"parent_id": None, "parent_idempotency_key": None}, None),  # a thread root
+        ],
+    )
+    async def test_the_parent_is_read_as_a_run_id_when_the_host_gives_one(self, body, expected):
+        async def request(*_args, **_):
+            trace = [{"call_id": "r", "path": "a", "t0": 0, "parent_call_id": None}]
+            return SimpleNamespace(raise_for_status=lambda: None, headers={}, json=lambda: {"trace": trace, **body})
+
+        _, provider = tool_loop(1)
+        with patch("timbal.platform.utils._request", request):
+            stored = await read_back(provider, "some-run")
+        assert stored.parent_id == expected
+
     async def test_every_agent_span_is_in_the_resume_projection(self):
         """The platform keeps the root and every span with a ``memory`` key: a nested agent cut before it
         assembled its memory must still be there, or the next turn loses the conversation."""
