@@ -8,6 +8,7 @@ decompression, `Accept-Encoding` / `Accept-Patch` advertisement, span upserts or
 import asyncio
 import gzip
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -919,11 +920,14 @@ class TestTransientFailures:
         return ctx
 
     @staticmethod
-    async def until(predicate, steps=200):
-        for _ in range(steps):
+    async def until(predicate, timeout=5.0):
+        # A real time bound, and sleeps longer than a clock tick: on Windows before 3.13 asyncio's clock moves
+        # in 15.6 ms steps, so sleep(0.01) can come back at once and a step count passes in no time at all.
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
             if predicate():
                 return
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.02)
 
     async def test_an_ended_run_whose_save_failed_is_resent_in_the_background(self, monkeypatch):
         monkeypatch.setattr(PlatformTracingProvider, "_retry_delays_s", (0.01,))
