@@ -8,7 +8,8 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 
 import pytest
-from timbal.types.content import TextContent, ToolUseContent
+from timbal.core.tool import Tool
+from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.message import Message
 from timbal.voice import (
     CommitAction,
@@ -1249,5 +1250,104 @@ class TestHangupEventSequences:
         await _until(lambda: "Dime." in _texts(events))
         await asyncio.sleep(0.4)
         assert not session.closed
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+
+async def _committing_end_call() -> str:
+    session = current_voice_session()
+    assert session is not None
+    if not await session.commit_hangup():
+        return "Do not hang up. Keep helping."
+    return "Ending the call."
+
+
+def _tool_results(messages: list[Message]) -> dict[str, str]:
+    return {
+        block.id: " ".join(c.text for c in block.content if isinstance(c, TextContent))
+        for message in messages
+        for block in message.content
+        if isinstance(block, ToolResultContent)
+    }
+
+
+class TestCommittedHangupEndsTheTurn:
+    """Once ``commit_hangup`` is True the model is not asked for another step."""
+
+    async def test_no_llm_call_after_the_hangup_tool_returns(self) -> None:
+        model = _Model(_tool_only(), "Goodbye.")
+        session, stt, tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert len(model.calls) == 1
+        assert tts.synthesized_texts.count("Goodbye.") == 1
+
+    async def test_a_refused_hangup_still_asks_the_model(self) -> None:
+        model = _Model(_tool_only(), "Claro, dígame.")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Vamos, vámonos."))
+        await _until(lambda: "Claro, dígame." in _texts(events))
+        assert not session.closed
+        assert len(model.calls) == 2
+        assert _tool_results(model.calls[1]) == {"c1": "Do not hang up. Keep helping."}
+        await stt.finish()
+        await asyncio.wait_for(call, timeout=3.0)
+
+    async def test_a_parallel_tool_finishes_before_the_turn_stops(self) -> None:
+        saved: list[str] = []
+
+        async def apply_pending() -> str:
+            await asyncio.sleep(0.25)
+            saved.append("ticket")
+            return "Saved."
+
+        both = Message(
+            role="assistant",
+            content=[
+                ToolUseContent(id="c1", name="end_call", input={}),
+                ToolUseContent(id="c2", name="apply_pending", input={}),
+            ],
+            stop_reason="tool_use",
+        )
+        model = _Model(both, "Goodbye.")
+        session, stt, _tts = _session(
+            model,
+            tools=[Tool(name="end_call", handler=_committing_end_call), apply_pending],
+            hangup_grace_secs=0.05,
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Adiós."))
+        await asyncio.wait_for(call, timeout=3.0)
+        assert session.closed
+        assert saved == ["ticket"]
+        assert len(model.calls) == 1
+
+    async def test_a_retract_after_the_commit_continues_from_the_tool_result(self) -> None:
+        model = _Model(_tool_only(), "Sure, what else?")
+        session, stt, _tts = _session(
+            model, tools=[Tool(name="end_call", handler=_committing_end_call)], hangup_grace_secs=0.05
+        )
+        events: list[VoiceSessionEvent] = []
+        call = await _call(session, events)
+        await stt.inject(TranscriptEvent(type="committed", text="Bye."))
+        await _until(lambda: session._end_call_task is not None)
+        await stt.inject(TranscriptEvent(type="committed", text="Wait. One more thing."))
+        await _until(lambda: "Sure, what else?" in _texts(events))
+        await asyncio.sleep(0.6)
+        assert not session.closed
+        assert len(model.calls) == 2
+        history = model.calls[1]
+        assert _tool_results(history) == {"c1": "Ending the call."}
+        assert history[-1].role == "user" and "One more thing" in history[-1].collect_text()
         await stt.finish()
         await asyncio.wait_for(call, timeout=3.0)

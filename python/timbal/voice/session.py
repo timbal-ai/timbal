@@ -5069,6 +5069,18 @@ class VoiceSession:
                 elif isinstance(event, OutputEvent):
                     paused = event.status.code == "cancelled" and event.status.reason in _PAUSE_OUTPUT_REASONS
                     self._note_tool_output(event.path, paused=paused)
+                    if (
+                        self._hangup_committed
+                        and self._turn_tool_batch_inflight == 0
+                        and self._direct_tool_name(event.path) is not None
+                    ):
+                        # The farewell played and teardown is requested. The next
+                        # pull would start an LLM call whose text is never spoken.
+                        # The tool result is already in memory, so a hangup the
+                        # caller still cancels continues from a complete history.
+                        turn_phase = "hangup_committed"
+                        logger.info("turn_agent_loop_break", reason="hangup_committed", **_trace_debug_fields())
+                        break
                     # Outer Agent OUTPUT mirrors the LLM message; handling both would
                     # double-run reconcile / optional suffix TTS. A nested agent's
                     # LLM output is skipped for the reason its deltas are.
