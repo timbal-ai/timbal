@@ -156,6 +156,12 @@ def _settle(flight: _Flight, joined: asyncio.Future[None], covers: int, save: as
     """A round's save finished. Success also settles earlier rounds still on the wire (a stalled
     PATCH): this one carried their state and newer."""
     flight.on_wire.pop(save, None)
+    if joined not in flight.sent:
+        # A newer round landed while this (stalled) one was still on the wire, and settled it: it carried this
+        # state and newer, so how this one ended changes nothing.
+        if not save.cancelled():
+            save.exception()  # retrieved: nobody waits on it any more
+        return
     if save.cancelled() or save.exception() is not None:
         flight.sent.remove(joined)
         if not joined.done():
@@ -297,6 +303,23 @@ def _header_items(headers) -> dict[str, str]:
 
 
 _TRACE_POOLS: dict[asyncio.AbstractEventLoop, object] = {}
+
+
+@contextlib.contextmanager
+def _as_run(run_context: RunContext):
+    """Make ``run_context`` the current run for one request: ``_request`` takes host and credentials from the
+    current run, and a save can be sent from outside its run (a shutdown flush, a resend at exit)."""
+    from ... import get_run_context, set_run_context
+
+    previous = get_run_context()
+    if previous is run_context:
+        yield
+        return
+    set_run_context(run_context)
+    try:
+        yield
+    finally:
+        set_run_context(previous)
 
 
 @contextlib.contextmanager
@@ -637,7 +660,7 @@ class PlatformTracingProvider(TracingProvider):
         if recalled is not None:
             return recalled
         caps = cls._host_caps(platform_config.host)
-        with _pooled():
+        with _pooled(), _as_run(run_context):
             res = await _request(
                 method="GET",
                 path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
@@ -950,7 +973,7 @@ class PlatformTracingProvider(TracingProvider):
             headers["Content-Encoding"] = "gzip"
         try:
             wire = await _gzip(body) if compressed else body
-            with _pooled():
+            with _pooled(), _as_run(run_context):
                 res = await _request(
                     method="PATCH",
                     path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
