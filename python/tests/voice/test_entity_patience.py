@@ -21,7 +21,7 @@ from timbal.voice import (
     VoiceSession,
     VoiceSessionEvent,
 )
-from timbal.voice.entity_patience import apply_entity_patience, entity_capture
+from timbal.voice.entity_patience import apply_entity_patience, entity_capture, entity_capture_partial
 
 from .test_session import DelayedMockSTT, MockTTS
 from .test_turn_detection import _state
@@ -79,6 +79,25 @@ from .test_turn_detection import _state
 )
 def test_entity_capture(text: str, kind: str | None) -> None:
     assert entity_capture(text) == kind
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        # A word still being captioned, from live Flux partials.
+        ("Hi. What's the status of order t", None),
+        ("Change the delivery note for ten o", None),
+        ("Vámonos, v", None),
+        # Dictation still opens patience before the commit.
+        ("R U I", "spelling"),
+        ("Mi apellido es Ruiz, R, U", "spelling"),
+        ("apellido J.", "spelling"),
+        ("415 555", "digits"),
+        ("A B C one two", "code"),
+    ],
+)
+def test_entity_capture_partial(text: str, kind: str | None) -> None:
+    assert entity_capture_partial(text) == kind
 
 
 # ---------------------------------------------------------------------------

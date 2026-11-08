@@ -88,6 +88,7 @@ from .entity_patience import (
     FLUX_PATIENCE_EOT_THRESHOLD,
     apply_entity_patience,
     entity_capture,
+    entity_capture_partial,
 )
 from .events import (
     AgentApproval,
@@ -3007,7 +3008,7 @@ class VoiceSession:
                             # the same fact; this covers Smart Turn, where the
                             # next partial is the only signal.
                             await self._discard_speculative(reason="speech_resumed")
-                        await self._sync_entity_patience(text)
+                        await self._sync_entity_patience(text, partial=True)
                     decision = await self.turn_detector.on_partial(text, self._turn_state())
                     if decision is PartialDecision.BARGE_IN and self._vad_vetoes_barge_in(text):
                         # Hallucinated multi-word partials during TTS (no mic
@@ -3146,7 +3147,7 @@ class VoiceSession:
         if eager_eot_threshold is not None:
             self._flux_eager_dirty = False
 
-    async def _sync_entity_patience(self, text: str) -> None:
+    async def _sync_entity_patience(self, text: str, *, partial: bool = False) -> None:
         """Track an open entity and match Flux / the VAD floor to it.
 
         No-op when ``entity_patience`` is off, so partials and commits are
@@ -3154,7 +3155,8 @@ class VoiceSession:
         """
         if not self.entity_patience:
             return
-        kind = entity_capture(text) if text else None
+        capture = entity_capture_partial if partial else entity_capture
+        kind = capture(text) if text else None
         self._entity_kind = kind
         if self._endpointer is not None:
             self._endpointer.patience_floor_secs = self.entity_patience_secs if kind else None
