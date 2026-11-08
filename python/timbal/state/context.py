@@ -335,31 +335,33 @@ class RunContext(BaseModel):
         from .background import bind_background_store
         from .config_loader import resolve_platform_config
 
-        # Plain instance attributes (see NOTE above).
-        self._base_path: Path | None = None
-        self._session_data: dict[str, Any] | None = None
-        # Captured once per run so off-loop emit() can marshal onto it.
-        # None until the first Runnable._stream on this context.
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._resume_values: dict[str, Any] = {}
-        self._used_resume_ids: set[str] = set()
-        self._invoked_by: dict[str, str] | None = None
-        self._live_background = 0
-        self._trace = Trace()
-        self._continuation_owner = None
-        self._foreign_turn_of = None
-        self._steering = False
-        # The ChatSession this run belongs to (its id), for MCP provenance (``timbal.ai/session_id``).
-        self._session_id: str | None = None
-        # The run's place among agents that message each other (core/peers.py): the session's directory
-        # membership (offers send_to_agent), and the deepest reply chain of the agent messages it received.
-        self._peer = None
-        self._peer_hops: int | None = None
-        # Called once the run's root has ended and its end is stored (``on_end``); None until one is added.
-        self._end_hooks: list[Callable[[], Any]] | None = None
-        self._tool_policy = None
-        self._silence_token = None
-        self._cut = None
+        # Plain instance attributes (see NOTE above), set in one go: BaseModel.__setattr__ costs ~1 µs each.
+        self.__dict__.update(
+            _base_path=None,
+            _session_data=None,
+            # Captured once per run so off-loop emit() can marshal onto it.
+            # None until the first Runnable._stream on this context.
+            _loop=None,
+            _resume_values={},
+            _used_resume_ids=set(),
+            _invoked_by=None,
+            _live_background=0,
+            _trace=Trace(),
+            _continuation_owner=None,
+            _foreign_turn_of=None,
+            _steering=False,
+            # The ChatSession this run belongs to (its id), for MCP provenance (``timbal.ai/session_id``).
+            _session_id=None,
+            # The run's place among agents that message each other (core/peers.py): the session's directory
+            # membership (offers send_to_agent), and the deepest reply chain of the agent messages it received.
+            _peer=None,
+            _peer_hops=None,
+            # Called once the run's root has ended and its end is stored (``on_end``); None until one is added.
+            _end_hooks=None,
+            _tool_policy=None,
+            _silence_token=None,
+            _cut=None,
+        )
         # Inherit the parent session's background-task bag (usually None) so a
         # finished parent turn can still list/peek/cancel running builders.
         # Allocates nothing unless this session actually has children.
@@ -380,7 +382,7 @@ class RunContext(BaseModel):
             if self.platform_config is None and self.tracing_provider is not None:
                 self.platform_config = getattr(self.tracing_provider, "platform_config", None)
             self.platform_config = resolve_platform_config(self.platform_config)
-            self._tracing_provider = self.tracing_provider
+            self.__dict__["_tracing_provider"] = self.tracing_provider
             return
 
         # Platform credentials are also used by model proxies and tools, even
@@ -396,7 +398,7 @@ class RunContext(BaseModel):
                     event_name="tracing_setup",
                     run_id=self.id,
                 )
-                self._tracing_provider = PlatformTracingProvider
+                self.__dict__["_tracing_provider"] = PlatformTracingProvider
                 return
             if self.platform_config.sync_traces_enabled is False:
                 _get_logger().info(
@@ -416,7 +418,7 @@ class RunContext(BaseModel):
             event_name="tracing_setup",
             run_id=self.id,
         )
-        self._tracing_provider = InMemoryTracingProvider
+        self.__dict__["_tracing_provider"] = InMemoryTracingProvider
 
     async def _get_parent_trace(self, run_id: str | None = None) -> Trace | None:
         """Load the trace data for the parent run, or for ``run_id`` further up the chain.
@@ -537,7 +539,7 @@ class RunContext(BaseModel):
         """
         requested = self.parent_id
         self.parent_id = run_id
-        self._session_data = None
+        self.__dict__["_session_data"] = None
         await self.get_session()
         root = self.root_span()
         if root is not None:
@@ -546,7 +548,7 @@ class RunContext(BaseModel):
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
         if self._session_data is None:
-            self._session_data = {}
+            self.__dict__["_session_data"] = {}
             if self.parent_id and self._tracing_provider is not None:
                 try:
                     trace = await self._tracing_provider.get(self)

@@ -2154,9 +2154,11 @@ class Runnable(ABC, BaseModel):
             _call_id = None
         previous_handoff_control = getattr(run_context, "_background_handoff_control", None)
         if _background_handoff_control is not None:
-            run_context._background_handoff_control = _background_handoff_control
-        previous_resume_values = dict(run_context._resume_values)
-        run_context._resume_values.update(resume_values)
+            run_context.__dict__["_background_handoff_control"] = _background_handoff_control
+        # Never mutated in place (readers only look values up), so a call without resume values shares the dict.
+        previous_resume_values = run_context._resume_values
+        if resume_values:
+            run_context.__dict__["_resume_values"] = {**previous_resume_values, **resume_values}
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
@@ -2203,7 +2205,7 @@ class Runnable(ABC, BaseModel):
         # it. The per-call sink itself is allocated lazily on first emit() —
         # benches never emit, so this is a pointer compare, not an object.
         if run_context._loop is None:
-            run_context._loop = asyncio.get_running_loop()
+            run_context.__dict__["_loop"] = asyncio.get_running_loop()
 
         def _restore_context():
             """Restore this invocation's context vars.
@@ -2767,7 +2769,8 @@ class Runnable(ABC, BaseModel):
                         unused_resume_ids=unused,
                         runnable_path=self._path,
                     )
-            run_context._resume_values = previous_resume_values
+            # Every call ends here: a plain attribute (see RunContext's NOTE), so skip BaseModel.__setattr__.
+            run_context.__dict__["_resume_values"] = previous_resume_values
             if _background_handoff_control is not None:
                 _background_handoff_control.close()
                 if previous_handoff_control is None:
