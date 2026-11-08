@@ -188,7 +188,7 @@ class TestEventTurn:
         async def drive(events: list[VoiceSessionEvent]) -> None:
             await session.notify(NOTE)
             await _until(lambda: REPLY in _texts(events))
-            await _until(lambda: session._current_turn_task.done())
+            await _until(lambda: session._current_turn_task.done() and not session.playback.is_playing)
             await stt.inject(TranscriptEvent(type="committed", text="Sí, resúmemelo."))
             await _until(lambda: len(_done(events)) == 2)
 
