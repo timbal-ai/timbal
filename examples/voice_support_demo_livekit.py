@@ -10,8 +10,10 @@ Run from the repository root, with no ``PYTHONPATH``::
 
     uv sync --frozen --extra server --extra voice --extra voice-livekit
     uv run --frozen python examples/voice_support_demo_livekit.py
+    uv run --frozen python examples/voice_support_demo_livekit.py --en
 
-``--frozen`` does not rewrite ``uv.lock``. A root ``.env`` value wins
+``--en`` opens the playground on the English agent in
+``voice_support_demo_en.py``. ``--frozen`` does not rewrite ``uv.lock``. A root ``.env`` value wins
 over a same-named shell export. The report prints names and statuses,
 never values, URLs, or tokens.
 """
@@ -34,6 +36,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 IMPORT_SPEC = "examples/voice_support_demo.py::agent"
+IMPORT_SPEC_EN = "examples/voice_support_demo_en.py::agent"
 PLAYGROUND_PORT = 7777
 JOIN_TIMEOUT_SECS = 45.0
 _OWNED_ROOM = re.compile(r"^pg-[0-9a-f]{12}$")
@@ -522,7 +525,7 @@ def describe_existing(status: dict[str, Any], port: int = PLAYGROUND_PORT) -> li
     ]
 
 
-def launch_playground() -> int:
+def launch_playground(import_spec: str = IMPORT_SPEC) -> int:
     uv = shutil.which("uv")
     if uv is None:
         print("uv=missing", file=sys.stderr)  # noqa: T201
@@ -551,7 +554,7 @@ def launch_playground() -> int:
             "--port",
             str(port),
             "--import_spec",
-            IMPORT_SPEC,
+            import_spec,
             "--default-transport",
             "livekit",
         ],
@@ -568,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
         print(redact(line, secrets))  # noqa: T201
     if code != 0 or "--check" in args:
         return code
-    return launch_playground()
+    return launch_playground(IMPORT_SPEC_EN if "--en" in args else IMPORT_SPEC)
 
 
 if __name__ == "__main__":

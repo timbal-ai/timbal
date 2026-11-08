@@ -45,6 +45,31 @@ def test_a_long_first_sentence_can_start_at_the_comma() -> None:
     assert _flush_segment(whole, first_segment=True, first_flush_min_words=None) == whole
 
 
+def test_english_agent_pins_english_on_the_same_voice_block() -> None:
+    spec = importlib.util.spec_from_file_location("voice_support_demo_en", ROOT / "examples" / "voice_support_demo_en.py")
+    assert spec and spec.loader
+    en = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(en)
+    cfg = en.voice_config
+    assert cfg["language"] == "en"
+    assert "reply_language" not in cfg
+    assert cfg["filler"]["message"] == "One moment."
+    spanish = demo.demo_voice_config()
+    for key in (
+        "speculative_generation",
+        "ignore_backchannels",
+        "max_tts_pause_secs",
+        "first_flush_min_words",
+        "hangup_grace_secs",
+        "entity_patience",
+    ):
+        assert cfg[key] == spanish[key], key
+    assert [tool.name for tool in en.agent.tools] == [tool.name for tool in demo.agent.tools]
+    assert all(tool.description for tool in en.agent.tools)
+    assert "# Guardrails" in en.agent.system_prompt
+    assert "Do not say goodbye unless you are calling end_call." in en.agent.system_prompt
+
+
 def test_config_is_spanish_hint_and_follow_reply() -> None:
     cfg = demo.demo_voice_config("openai/gpt-5.4-mini")
     assert cfg["language"] == "es"
