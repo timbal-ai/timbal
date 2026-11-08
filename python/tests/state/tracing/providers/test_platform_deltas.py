@@ -1087,3 +1087,100 @@ class TestChatSessionOverDeltas:
         users = [m for m in root["memory"] if m["role"] == "user"]
         assert len(users) == 2  # the first turn's prompt came back from the platform
         assert all(p["kind"] == "delta" for p in server.patches)
+
+
+def long_tool(provider, seconds, marks):
+    """One tool call that takes ``seconds``; ``marks`` records how many PATCHes had landed as it started and ended."""
+
+    async def wait(server):
+        marks.append(len(server.patches))
+        await asyncio.sleep(seconds)
+        marks.append(len(server.patches))
+
+    def handler(messages):
+        if any(m.role == "tool" for m in messages):
+            return "done"
+        return Message(
+            role="assistant", content=[ToolUseContent(id="c0", name="wait", input={})], stop_reason="tool_use"
+        )
+
+    def agent(server):
+        async def wait_tool() -> str:
+            await wait(server)
+            return "waited"
+
+        return Agent(
+            name="agent",
+            model=TestModel(handler=handler),
+            tools=[Tool(name="wait", handler=wait_tool)],
+            tracing_provider=provider,
+        )
+
+    return agent
+
+
+class TestKeepAlive:
+    @pytest.fixture(autouse=True)
+    def no_timers(self):
+        yield
+        for entry in PlatformTracingProvider._keepalives.values():
+            entry.cancel()
+        PlatformTracingProvider._keepalives.clear()
+
+    async def test_a_long_tool_keeps_the_run_saving_with_root_headers_only(self):
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.05)
+        with patch("timbal.platform.utils._request", server.request):
+            ctx, _ = await run(long_tool(provider, 0.4, marks)(server), provider)
+            # The model step's own save may land as the tool starts; the rest are keep-alives.
+            during = [p for p in server.patches[marks[0] : marks[1]] if p["body"].get("spans") == []]
+            assert len(during) >= 4  # every ~50 ms of a 400 ms tool
+            assert all(p["kind"] == "delta" and not p["body"]["ended"] for p in during)
+            assert all(set(p["body"]["root"]) == {"call_id", "parent_call_id", "path", "t0"} for p in during)
+            ended = len(server.patches)
+            await asyncio.sleep(0.2)
+            assert len(server.patches) == ended  # nothing after the end
+            assert not any(entry.context is ctx for entry in PlatformTracingProvider._keepalives.values())
+            same_trace(await read_back(provider, ctx.id), ctx, server)
+
+    async def test_off_and_end_only_runs_do_not_keep_alive(self, monkeypatch):
+        for provider in (
+            PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0),
+            PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.05, durability="end"),
+        ):
+            server, marks = FakePlatform(), []
+            with patch("timbal.platform.utils._request", server.request):
+                await run(long_tool(provider, 0.3, marks)(server), provider)
+            assert marks[1] == marks[0], provider.durability
+        monkeypatch.setenv("TIMBAL_TRACE_KEEPALIVE_SECS", "0")
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG)
+        with patch("timbal.platform.utils._request", server.request):
+            await run(long_tool(provider, 0.3, marks)(server), provider)
+        assert marks[1] == marks[0]
+
+    async def test_a_run_that_stopped_saving_for_itself_stops_keeping_alive(self, monkeypatch):
+        monkeypatch.setenv("TIMBAL_TRACE_KEEPALIVE_MAX_SECS", "0.12")
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.03)
+        with patch("timbal.platform.utils._request", server.request), capture_logs() as logs:
+            await run(long_tool(provider, 0.5, marks)(server), provider)
+        during = marks[1] - marks[0]
+        assert 2 <= during <= 5  # ~120 ms of keep-alives, then nothing until the tool ends
+        assert [log for log in logs if log["event"] == "platform_trace_keepalive_stopped"]
+
+    async def test_a_failed_keep_alive_is_logged_and_the_next_one_tries_again(self):
+        server, marks = FakePlatform(), []
+        provider = PlatformTracingProvider.configured(platform_config=CONFIG, keepalive_s=0.05)
+
+        async def flaky(method, path, **kwargs):
+            if method == "PATCH" and marks and len(marks) == 1 and not flaky.failed:
+                flaky.failed = True
+                raise PlatformError("upstream", status_code=503)
+            return await server.request(method, path, **kwargs)
+
+        flaky.failed = False
+        with patch("timbal.platform.utils._request", flaky), capture_logs() as logs:
+            await run(long_tool(provider, 0.35, marks)(server), provider)
+        assert flaky.failed and marks[1] - marks[0] >= 2
+        assert [log for log in logs if log["event"] == "platform_trace_keepalive_failed"]

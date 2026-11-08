@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import contextvars
 import functools
 import gzip
 import hashlib
@@ -186,6 +187,52 @@ def _flush_timeout() -> float:
         logger.warning("invalid_trace_flush_timeout", value=raw, default=5.0)
         value = 5.0
     return value
+
+
+def _env_seconds(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError
+    except ValueError:
+        logger.warning("invalid_trace_setting", name=name, value=raw, default=default)
+        return default
+    return value
+
+
+# Set in the task a keep-alive save runs in: it is no progress of the run's own.
+_KEEPALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar("timbal_trace_keepalive", default=False)
+_KEEPALIVES_MAX = 2048
+
+
+class _KeepAlive:
+    """A run in flight: when it last saved for itself, and the timer for its next keep-alive save."""
+
+    __slots__ = ("context", "handle", "loop", "progress", "provider")
+
+    def __init__(self, context: RunContext, provider: type, loop: asyncio.AbstractEventLoop, progress: float):
+        self.context = context
+        self.provider = provider
+        self.loop = loop
+        self.progress = progress
+        self.handle: asyncio.TimerHandle | None = None
+
+    def cancel(self) -> None:
+        if self.handle is not None:
+            self.handle.cancel()
+            self.handle = None
+
+
+def _keepalive_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        # The next save of the run, or the next keep-alive (the timer was re-armed when it started), tries again.
+        logger.warning("platform_trace_keepalive_failed", error=str(error))
 
 
 def _flush_at_exit() -> None:
@@ -377,8 +424,19 @@ class PlatformTracingProvider(TracingProvider):
     rejects either format (400/415/422) while it takes the same save without it falls back to whole
     uncompressed traces for good, forced or not."""
 
+    keepalive_s: float | None = None
+    """While a run is in flight and has not saved for this long (a long tool call, a slow model), it saves
+    again, so the platform never takes it for dead: past ``RUN_TIMEOUT_MINUTES`` (30 on the platform) without
+    a save, a running run reads ``timeout``. With deltas the save is the root header alone. ``None``:
+    ``TIMBAL_TRACE_KEEPALIVE_SECS``, default 300; 0 turns it off. Runs that save only at their end
+    (``durability="end"``) never keep alive. Keep-alive saves are not the run's progress: one that has not
+    saved for itself in ``TIMBAL_TRACE_KEEPALIVE_MAX_SECS`` (default 4 h; a hung tool) stops, and reads
+    ``timeout`` again."""
+
     _caps: ClassVar[dict[str, _HostCaps]] = {}
     _delta_runs: ClassVar[OrderedDict[str, _DeltaRun]] = OrderedDict()
+    # run key -> its keep-alive timer, while the run is in flight and has saved at least once.
+    _keepalives: ClassVar[OrderedDict[str, _KeepAlive]] = OrderedDict()
 
     # run key -> (monotonic time of the last successful save, the exact PATCH body sent)
     _recent: ClassVar[OrderedDict[str, tuple[float, bytes]]] = OrderedDict()
@@ -605,6 +663,7 @@ class PlatformTracingProvider(TracingProvider):
         cancel the save."""
         _, _, key = cls._target(run_context)
         loop = asyncio.get_running_loop()
+        cls._arm_keepalive(key, run_context, loop)
         flights = PlatformTracingProvider._flights
         flight = flights.get(key)
         if flight is None or flight.loop is not loop:
@@ -631,6 +690,49 @@ class PlatformTracingProvider(TracingProvider):
         if flight.driver is None:
             flight.driver = loop.create_task(cls._drive(flight))
         await asyncio.shield(joined)
+
+    @classmethod
+    def _keepalive_interval(cls) -> float:
+        if cls.keepalive_s is not None:
+            return cls.keepalive_s
+        return _env_seconds("TIMBAL_TRACE_KEEPALIVE_SECS", 300.0)
+
+    @classmethod
+    def _arm_keepalive(cls, key: str, run_context: RunContext, loop: asyncio.AbstractEventLoop) -> None:
+        """(Re)start the run's keep-alive timer from this save; an ended run, or one hung too long, drops it."""
+        keepalives = PlatformTracingProvider._keepalives
+        entry = keepalives.pop(key, None)
+        if entry is not None:
+            entry.cancel()
+        interval = cls._keepalive_interval()
+        if not interval or _ended(run_context) or PlatformTracingProvider._closing:
+            return
+        now = loop.time()
+        progress = now
+        if _KEEPALIVE.get() and entry is not None:
+            progress = entry.progress
+            if now - progress >= _env_seconds("TIMBAL_TRACE_KEEPALIVE_MAX_SECS", 4 * 3600.0):
+                logger.warning("platform_trace_keepalive_stopped", run_id=run_context.id, idle_s=round(now - progress))
+                return
+        entry = keepalives[key] = _KeepAlive(run_context, cls, loop, progress)
+        entry.handle = loop.call_later(interval, PlatformTracingProvider._keep_alive, key)
+        while len(keepalives) > _KEEPALIVES_MAX:
+            _, dropped = keepalives.popitem(last=False)
+            dropped.cancel()
+
+    @staticmethod
+    def _keep_alive(key: str) -> None:
+        entry = PlatformTracingProvider._keepalives.get(key)
+        if entry is None or PlatformTracingProvider._closing or entry.loop.is_closed():
+            return
+        entry.handle = None
+        if _ended(entry.context):
+            PlatformTracingProvider._keepalives.pop(key, None)  # its end is being saved, or was
+            return
+        context = contextvars.copy_context()
+        context.run(_KEEPALIVE.set, True)
+        task = entry.loop.create_task(entry.provider._store(entry.context), context=context)
+        task.add_done_callback(_keepalive_done)
 
     @classmethod
     def _send_in(cls, flight: _Flight, now: float) -> float:
@@ -734,6 +836,9 @@ class PlatformTracingProvider(TracingProvider):
             timeout = _flush_timeout()
         loop = asyncio.get_running_loop()
         PlatformTracingProvider._closing = True
+        keepalives = PlatformTracingProvider._keepalives
+        for key in [key for key, entry in keepalives.items() if entry.loop is loop or entry.loop.is_closed()]:
+            keepalives.pop(key).cancel()
         try:
             for task in list(PlatformTracingProvider._retries.values()):
                 if task.get_loop() is loop:
