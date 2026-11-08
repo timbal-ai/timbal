@@ -86,6 +86,33 @@ class _PendingConfigure:
     attempts: int = 0
 
 
+def _configure_matches(message: _PendingConfigure, msg: dict[str, Any]) -> bool:
+    """A ``ConfigureSuccess`` does not contradict ``message``.
+
+    Flux reports the active config in its answer. A field it does not report
+    cannot rule the message out.
+    """
+    for key, sent in message.body.items():
+        got = msg.get(key)
+        if got is None:
+            continue
+        if isinstance(sent, dict):
+            if not isinstance(got, dict):
+                return False
+            for name, value in sent.items():
+                if name in got and not _same_value(got[name], value):
+                    return False
+        elif not _same_value(got, sent):
+            return False
+    return True
+
+
+def _same_value(got: Any, sent: Any) -> bool:
+    if isinstance(got, (int, float)) and isinstance(sent, (int, float)):
+        return abs(float(got) - float(sent)) < 1e-6
+    return got == sent
+
+
 # Query params Flux accepts (used to filter stt_extra passthrough).
 _FLUX_QUERY_KEYS = frozenset(
     {
@@ -193,6 +220,8 @@ class _DeepgramSTTBase(SpeechToText):
         self._configure_timeout: asyncio.Task[None] | None = None
         # Configures sent and not answered yet, including ones whose wait timed out.
         self._configure_unanswered = 0
+        # Answers no longer counted because their wait ran out; one may still arrive.
+        self._configure_abandoned = 0
 
     def _build_uri(self, config: AudioInputConfig) -> str:
         raise NotImplementedError
@@ -359,11 +388,13 @@ class _DeepgramSTTBase(SpeechToText):
         )
         if message is None:
             # Waiting only on answers to earlier messages. Stop waiting for them.
+            self._configure_abandoned += self._configure_unanswered
             self._configure_unanswered = 0
         else:
             # Only this message can still answer late. Its answer stays counted,
             # so it is not taken for the next message's; if Flux still has it
             # pending, the next message is refused as busy and requeued.
+            self._configure_abandoned += max(0, self._configure_unanswered - 1)
             self._configure_unanswered = min(self._configure_unanswered, 1)
         self._configure_inflight = None
         await self._send_next_configure(force=True)
@@ -403,6 +434,21 @@ class _DeepgramSTTBase(SpeechToText):
                 self._cancel_configure_timeout()
                 await self._send_next_configure()
             return
+        if message is not None and self._configure_abandoned:
+            # It may answer a message we stopped waiting for instead.
+            if ok and not _configure_matches(message, msg):
+                # A success reporting another config: the current message is still pending.
+                self._configure_abandoned -= 1
+                return
+            if not ok:
+                # A refusal says nothing about which message it was. Send the
+                # current one again after its own answer has had its window;
+                # repeating an update is harmless, losing one is not.
+                self._configure_abandoned -= 1
+                self._configure_inflight = None
+                self._requeue_configure(message)
+                self._arm_configure_timeout()
+                return
         self._configure_unanswered = max(0, self._configure_unanswered - 1)
         self._configure_inflight = None
         self._cancel_configure_timeout()
@@ -451,6 +497,7 @@ class _DeepgramSTTBase(SpeechToText):
         self._cancel_configure_timeout()
         self._configure_inflight = None
         self._configure_unanswered = 0
+        self._configure_abandoned = 0
         self._configure_waiting.clear()
 
     async def close(self) -> None:

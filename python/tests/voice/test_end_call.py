@@ -657,6 +657,13 @@ class TestCommitHangup:
             ("¿Puedes colgar, por favor?", "", True),
             ("Sí.", "Perfecto. ¿Quiere que cuelgue?", True),
             ("Yes.", "Anything else? Shall I hang up?", True),
+            # An accented "sí" in the question is not the conditional "si".
+            ("Sí.", "¿Cuelgo, sí?", True),
+            ("Sí.", "¿Sí? ¿Quiere que cuelgue?", True),
+            ("Sí.", "Vols que pengi, si us plau?", True),
+            ("Sí, por favor.", "¿Quiere que cuelgue?", True),
+            ("Please.", "Shall I hang up?", True),
+            ("Sí.", "¿Quiere que cuelgue después de confirmar?", False),
         ],
     )
     async def test_a_hangup_request_is_not_only_a_goodbye_phrase(self, text: str, asked: str, hangs_up: bool) -> None:

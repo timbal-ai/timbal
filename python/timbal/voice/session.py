@@ -665,7 +665,7 @@ _HANGUP_REQUEST_POLITE = (" please ", " por favor ", " si us plau ")
 # negation, a condition ("if you're done"), or an alternative ("or").
 _HANGUP_NEGATIONS = frozenset(
     {"don't", "dont", "not", "no", "never", "nunca", "won't", "wont", "can't", "cant", "cannot"}
-    | {"if", "si", "when", "cuando", "once", "unless", "until", "hasta", "after", "before", "antes", "despues"}
+    | {"if", "si", "when", "cuando", "once", "unless", "until", "hasta", "after", "before", "antes", "después"}
     | {"or", "o"}
 )
 _HANGUP_ASK_MARKERS = (
@@ -677,6 +677,7 @@ _HANGUP_ASK_MARKERS = (
     "colgar",
     "termine la llamada",
     "penjo",
+    "pengi",
 )
 _HANGUP_AFFIRMATIVES = frozenset(
     {
@@ -703,11 +704,7 @@ _HANGUP_AFFIRMATIVES = frozenset(
 
 def _asks_for_hangup(norm: str) -> bool:
     """The caller's whole turn is a request to end the call ("Yes, please hang up.")."""
-    padded = f" {norm} "
-    for polite in _HANGUP_REQUEST_POLITE:
-        while polite in padded:
-            padded = padded.replace(polite, " ")
-    words = padded.split()
+    words = _drop_hangup_politeness(norm).split()
     while words and (words[0] in _HANGUP_REQUEST_LEAD or _is_ack_only(words[0])):
         words = words[1:]
     for form in _HANGUP_REQUEST_FORMS:
@@ -723,10 +720,21 @@ def _asked_whether_to_hang_up(assistant: str) -> bool:
     if not text.endswith("?"):
         return False
     last = re.split(r"(?<=[.!?])\s+", text)[-1]
-    norm = _normalize_spoken(last)
-    if any(word in _HANGUP_NEGATIONS for word in norm.split()):
+    # Accents kept: "¿Cuelgo, sí?" is not the conditional "si".
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", unicodedata.normalize("NFC", last.lower().replace("’", "'")))
+    plain = _drop_hangup_politeness(" ".join(words)).split()
+    if any(word in _HANGUP_NEGATIONS for word in plain):
         return False
+    norm = _normalize_spoken(last)
     return any(_hangup_marker_in(norm, marker) for marker in _HANGUP_ASK_MARKERS)
+
+
+def _drop_hangup_politeness(text: str) -> str:
+    padded = f" {text} "
+    for polite in _HANGUP_REQUEST_POLITE:
+        while polite in padded:
+            padded = padded.replace(polite, " ")
+    return " ".join(padded.split())
 
 
 def _caller_ends_call(text: str, last_assistant: str = "") -> bool:
@@ -749,7 +757,7 @@ def _caller_ends_call(text: str, last_assistant: str = "") -> bool:
             rest = " ".join(f" {norm} ".replace(f" {tail} ", " ", 1).split())
             if not rest or _is_ack_only(rest):
                 return True
-    words = norm.split()
+    words = _drop_hangup_politeness(norm).split() or norm.split()
     return (
         bool(words)
         and all(word in _HANGUP_AFFIRMATIVES for word in words)
@@ -1992,8 +2000,10 @@ class VoiceSession:
     async def set_language(self, language: str | None) -> bool:
         """Set the speech-to-text hint, and the reply pin when ``reply_language`` is unset.
 
-        The return value is whether the open speech-to-text socket accepted
-        the hint. When ``reply_language`` is unset, the next turn's reply
+        The return value is whether the open speech-to-text socket took the
+        hint. On Flux that means the ``Configure`` was sent or queued, not
+        that Flux confirmed it: a rejection is only logged
+        (``dg_flux_configure_failed``). When ``reply_language`` is unset, the next turn's reply
         instruction uses this tag too. When it is ``"follow"`` or its own
         tag, this call changes only the hint. Deepgram
         Flux ``flux-general-multi`` does, via ``Configure`` ``language_hints``
@@ -2052,7 +2062,8 @@ class VoiceSession:
         Deepgram Flux replaces the whole list on the open socket. An empty
         list clears it. Already committed transcripts stay as they are.
         Providers that only accept terms at connect time raise ``ValueError``.
-        There is no voice-agent handoff: the next call builds a new session
+        On Flux, True means the ``Configure`` was sent or queued, not that
+        Flux confirmed it. There is no voice-agent handoff: the next call builds a new session
         from that agent's own ``keyterms``.
         """
         from .config import validate_keyterms

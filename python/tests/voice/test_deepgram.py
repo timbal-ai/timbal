@@ -275,6 +275,40 @@ class TestFluxEventMapping:
         assert json.loads(stt._ws.sent[-1])["thresholds"]["eot_threshold"] == 0.9
         await stt.close()
 
+    async def _given_up_then_new_update(self, monkeypatch) -> DeepgramFluxSTT:
+        from timbal.voice import deepgram
+
+        monkeypatch.setattr(deepgram, "_CONFIGURE_ACK_TIMEOUT_SECS", 0.05)
+        stt = DeepgramFluxSTT()
+        stt._ws = _FakeWs()
+        await stt.configure_turn(eot_threshold=1.0, eot_timeout_ms=2500, patient=True)
+        await asyncio.sleep(0.13)
+        assert stt._configure_unanswered == 0
+        await stt.configure_turn(eot_threshold=0.8, eot_timeout_ms=2000)
+        assert len(stt._ws.sent) == 2
+        return stt
+
+    async def test_an_answer_after_both_windows_is_told_apart_by_its_config(self, monkeypatch) -> None:
+        # Reproduction from review: the old success arrives while a newer update is in flight.
+        stt = await self._given_up_then_new_update(monkeypatch)
+        current = stt._configure_inflight
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 1.0}})
+        assert stt._configure_inflight is current
+        assert stt._configure_timeout is not None
+        await stt._handle_message({"type": "ConfigureSuccess", "thresholds": {"eot_threshold": 0.8}})
+        assert stt._configure_inflight is None
+        assert stt.patient_thresholds_live is False
+        await stt.close()
+
+    async def test_a_refusal_after_both_windows_sends_the_update_again(self, monkeypatch) -> None:
+        # Reproduction from review: the old failure must not drop the newer update.
+        stt = await self._given_up_then_new_update(monkeypatch)
+        await stt._handle_message({"type": "ConfigureFailure", "description": "invalid"})
+        await asyncio.sleep(0.07)
+        assert len(stt._ws.sent) == 3
+        assert json.loads(stt._ws.sent[-1])["thresholds"]["eot_threshold"] == 0.8
+        await stt.close()
+
     async def test_a_refusal_while_another_is_pending_is_sent_again_after_it(self, monkeypatch) -> None:
         from timbal.voice import deepgram
 
