@@ -1100,6 +1100,11 @@ class VoiceSession:
         self._stale_partial_commit_secs = 2.5
         self._stale_partial_poll_secs = 0.5
         self._stale_commit_sent_at = 0.0
+        # Words of a commit we already handled (ignored ack, noise). The
+        # stranded-partial watchdog must not turn that same caption into a
+        # later turn. Cleared when a different utterance arrives.
+        self._consumed_utterance = ""
+        self._consumed_utterance_at = 0.0
 
         # Serial TTS runs off the agent ``async for`` critical path so we keep pulling
         # LLM/Agent events (and emit trace OUTPUT) while audio still synthesizes.
@@ -2649,6 +2654,50 @@ class VoiceSession:
             logger.error("audio_forward_error", error=str(e), exc_info=True)
             await self._emit(SessionError(message=f"Audio input error: {e}"))
 
+    def _settle_consumed_commit(self, text: str) -> None:
+        """This commit was handled. Do not synthesize it again later.
+
+        The stranded-partial watchdog treats a caption newer than the last
+        commit as speech the provider forgot. An ignored acknowledgement is
+        such a caption: Flux already committed it, and a few seconds later the
+        watchdog would commit it again, after the backchannel window closed.
+
+        The words are not remembered past the stale window. A later partial
+        that is not this utterance, or a later provider commit of the same
+        words, is a new turn.
+        """
+        now = time.monotonic()
+        self._consumed_utterance = (text or "").strip()
+        self._consumed_utterance_at = now
+        self._stale_commit_sent_at = max(self._stale_commit_sent_at, now)
+        self._last_commit_at = max(self._last_commit_at, now)
+
+    def _is_replay_of_consumed(self, text: str) -> bool:
+        """Same utterance as a commit we already handled, still inside its window.
+
+        A provider commit of those words after the window, or after a different
+        partial, is a new turn. The match is not permanent.
+        """
+        consumed = self._consumed_utterance
+        if not consumed or not (text or "").strip():
+            return False
+        if time.monotonic() - self._consumed_utterance_at > 3.0:
+            return False
+        return _is_same_user_utterance_refinement(consumed, text) or _is_same_user_utterance_refinement(
+            text, consumed
+        )
+
+    def _partial_extends_consumed(self, text: str) -> bool:
+        """A trailing caption of a commit we already handled, not new speech."""
+        consumed = self._consumed_utterance
+        if not consumed or not text.strip():
+            return False
+        if time.monotonic() - self._consumed_utterance_at > self._stale_partial_commit_secs:
+            return False
+        return _is_same_user_utterance_refinement(consumed, text) or _is_same_user_utterance_refinement(
+            text, consumed
+        )
+
     async def _sweep_stale_partials(self) -> None:
         """Watchdog: force-commit transcripts the provider never commits.
 
@@ -2926,8 +2975,15 @@ class VoiceSession:
                             stranded_preview=self._latest_partial_text[:80],
                         )
                     elif text:
-                        self._last_partial_at = time.monotonic()
-                        self._latest_partial_text = text
+                        if self._partial_extends_consumed(text):
+                            # Keep the caption, but do not re-arm the watchdog.
+                            # That is how an ignored "Yeah. Okay." came back
+                            # as its own turn two seconds later.
+                            self._latest_partial_text = text
+                        else:
+                            self._consumed_utterance = ""
+                            self._last_partial_at = time.monotonic()
+                            self._latest_partial_text = text
                         if self._eou_predictor is not None:
                             self._eou_predictor.note_partial(text)
                         if self._partials_since_last_commit == 1:
@@ -3978,6 +4034,11 @@ class VoiceSession:
                 text_preview=text[:160],
             )
             self._partials_since_last_commit = 0
+            self._settle_consumed_commit(text)
+            return
+        if self._is_replay_of_consumed(text):
+            logger.info("stt_commit_ignored", reason="consumed_replay", text_preview=text[:160])
+            self._partials_since_last_commit = 0
             return
         state = self._turn_state()
         # Captured before the detector await. A resume can discard the attempt
@@ -4109,6 +4170,8 @@ class VoiceSession:
                     if self._hold_armed_timeout_secs is not None
                     else self.hold_timeout_secs,
                 )
+            else:
+                self._settle_consumed_commit(text)
             return
 
         final_text = decision.text or text
@@ -4187,14 +4250,18 @@ class VoiceSession:
                 action=decision.action.value,
                 text_preview=final_text[:160],
             )
+            self._settle_consumed_commit(final_text)
             return
 
         # A pure "Yeah." / "Yeah. Okay." while the reply or its resumed tail is
         # still in the ear does not start a new model call. A real request still
         # does. The first ack after playback has already stopped resumes a
-        # finished tail below.
+        # finished tail below. Settling the commit stops the stale-partial
+        # watchdog from speaking that acknowledgement again once the window
+        # has closed.
         if false_interrupt_followup(final_text) and self._pure_ack_keeps_the_reply(final_text):
             logger.info("stt_backchannel_ignored", text_preview=final_text[:80])
+            self._settle_consumed_commit(final_text)
             return
 
         # A real accept cancels any pending HOLD, then interrupts so truncation
